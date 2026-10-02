@@ -69,7 +69,9 @@ Agent，不只刷新父进程缓存。既有 channel worker 和独立 channel AC
 的名称筛选语义，serve 不新增独立筛选选项。
 
 管理 CLI、daemon 状态和既有扩展 UI 显示来源及 manifest 版本。API 增加可选的
-`extensionSource` 判别字段，保留已有表示 URL 的 `source`。核心操作拒绝部署管理卸载、
+`extensionSource` 判别字段，保留已有表示 URL 的 `source`。`extensionSource` 描述条目
+所表示包的来源，不表示保留的 managed 策略或变更许可；该策略保留期间，即使是 `user`
+条目也可能以 `extension_managed_read_only` 拒绝变更。核心操作拒绝部署管理卸载、
 更新和替换，不依赖权限或 UI。update-all 清楚报告跳过部署管理并继续更新用户包。配置及
 启用状态只写用户状态。Web UI 隐藏部署管理包路径及不支持的包管理菜单，context 文件
 显示相对名称；保留启用/禁用控件。CLI/API 继续保留路径供诊断。

@@ -97,7 +97,10 @@ a separate filter option.
 
 Management CLI, daemon status, and existing extension UI expose source and manifest
 version. The API adds an optional `extensionSource` discriminator while retaining
-its existing `source` URL field. Core operations reject managed uninstall, update,
+its existing `source` URL field. `extensionSource` describes the represented
+package's source, not retained managed policy or permission to mutate; even a
+`user` entry can be refused with `extension_managed_read_only` while that policy
+is retained. Core operations reject managed uninstall, update,
 and replacement independently of permissions/UI. Update-all skips managed with a
 clear result and continues user updates. Configuration and activation still write
 only user state. The Web UI hides managed package paths and the unsupported

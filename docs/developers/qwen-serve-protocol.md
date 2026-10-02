@@ -399,7 +399,11 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
 
-Catalog and workspace extension entries may include `extensionSource: "managed" | "user"`; older daemons may omit it. This identifies package ownership and is separate from the existing `source` install-URL field. Managed entries are included in the manifest-only catalog with the same identities and same-name precedence as a full refresh. Clients may change their activation and resource preferences, but must not offer update, uninstall or replacement actions for managed packages.
+Catalog and workspace extension entries may include `extensionSource: "managed" | "user"`; older daemons may omit it. This describes the source of the package represented by the entry and is separate from the existing `source` install-URL field. It does not report the retained managed policy or authorize package mutations.
+
+A `"user"` value, or an omitted field, does not guarantee that update, uninstall or replacement is allowed. A retained managed policy can still cause a request to be rejected, or an asynchronous operation to fail, with `extension_managed_read_only`. Catalog and status reads do not release that policy. After verified withdrawal, an eligible explicit release or normal runtime refresh can complete the ownership transition; an unavailable root does not prove withdrawal.
+
+Managed entries are included in the manifest-only catalog with the same identities and same-name precedence as a full refresh. For entries with `extensionSource: "managed"`, clients may change activation and resource preferences, but must not offer update, uninstall or replacement actions.
 
 #### Workspace resource state
 
