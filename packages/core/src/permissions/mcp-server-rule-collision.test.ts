@@ -2055,3 +2055,72 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
     ).toBe('deny');
   });
 });
+
+describe('restrictive rules retain exact truncated legacy spellings (R15-1)', () => {
+  it.each([
+    ['s'.repeat(22), 't'.repeat(40)],
+    ['s'.repeat(24), 't'.repeat(40)],
+    ['weather-forecast-server-premium', 'get_extended_forecast_for_next_week'],
+    ['a__very_long_server_key_name_alpha', 't'.repeat(40)],
+    ['a__very_long_server_key_name_beta', 't'.repeat(40)],
+  ])('keeps deny/ask without widening allow for %s', async (server, name) => {
+    const tool = prodTool(server, name);
+    const legacy = generateLegacyMcpToolName(`mcp__${server}__${name}`);
+    expect(tool.permissionAliases).not.toContain(legacy);
+    const ctx = {
+      toolName: tool.name,
+      toolAliases: tool.permissionAliases,
+      mcpIdentity: {
+        serverName: tool.serverName,
+        serverToolName: tool.serverToolName,
+      },
+    };
+    const deny = new PermissionManager(
+      makeConfig({ permissionsDeny: [legacy] }),
+    );
+    deny.initialize();
+    expect(await deny.evaluate(ctx)).toBe('deny');
+    expect(deny.findMatchingDenyRule(ctx)).toBe(legacy);
+    expect(deny.hasRelevantRules(ctx)).toBe(true);
+    expect(
+      await deny.isToolEnabled(
+        tool.name,
+        tool.permissionAliases,
+        ctx.mcpIdentity,
+      ),
+    ).toBe(false);
+    expect(
+      matchesToolPattern(
+        legacy,
+        tool.name,
+        tool.permissionAliases,
+        ctx.mcpIdentity,
+      ),
+    ).toBe(true);
+
+    const ask = new PermissionManager(
+      makeConfig({ permissionsAsk: [legacy], permissionsAllow: [tool.name] }),
+    );
+    ask.initialize();
+    expect(await ask.evaluate(ctx)).toBe('ask');
+    expect(ask.hasMatchingAskRule(ctx)).toBe(true);
+
+    const allow = new PermissionManager(
+      makeConfig({ permissionsAllow: [legacy] }),
+    );
+    allow.initialize();
+    expect(await allow.evaluate(ctx)).toBe('default');
+    expect(allow.hasRelevantRules(ctx)).toBe(false);
+    const unrelated = prodTool('unrelated', name);
+    expect(
+      await deny.evaluate({
+        toolName: unrelated.name,
+        toolAliases: unrelated.permissionAliases,
+        mcpIdentity: {
+          serverName: unrelated.serverName,
+          serverToolName: unrelated.serverToolName,
+        },
+      }),
+    ).toBe('default');
+  });
+});

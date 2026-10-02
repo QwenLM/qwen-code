@@ -1985,6 +1985,21 @@ function matchesAdvertisedExactName(
   return legacySpelling !== undefined && pattern === legacySpelling;
 }
 
+// A lossy legacy name may identify several tools. Restrictive exact rules
+// must keep covering all of them; this fallback must never grant permission.
+function matchesRestrictiveMcpName(
+  pattern: string,
+  identity: McpToolIdentity | undefined,
+): boolean {
+  return (
+    identity !== undefined &&
+    pattern ===
+      generateLegacyMcpToolName(
+        `mcp__${identity.serverName}__${identity.serverToolName}`,
+      )
+  );
+}
+
 /**
  * Whether a deny entry covers a tool name, as a subagent's tool filter judges
  * it: an MCP tool matches server-level, wildcard and exact MCP patterns (see
@@ -2018,7 +2033,9 @@ export function matchesToolPattern(
       rawMcpToolName,
       toolAliases,
       mcpIdentity,
-    ) || matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName)
+    ) ||
+    matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName) ||
+    matchesRestrictiveMcpName(pattern, mcpIdentity)
   );
 }
 
@@ -2075,6 +2092,7 @@ export function matchesRule(
   toolAliases?: readonly string[],
   pathMatchMode: 'lexical' | 'canonical' = 'lexical',
   mcpIdentity?: McpToolIdentity,
+  restrictive = false,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -2100,7 +2118,10 @@ export function matchesRule(
         toolAliases,
         mcpIdentity,
       ) ||
-      matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName);
+      matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName) ||
+      (restrictive &&
+        canonicalCtxToolName.startsWith('mcp__') &&
+        matchesRestrictiveMcpName(rule.toolName, mcpIdentity));
     if (!matchesMcpName) {
       return false;
     }

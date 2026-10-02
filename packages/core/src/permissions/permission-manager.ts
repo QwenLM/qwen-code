@@ -494,7 +494,7 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity))
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
           return 'deny';
       }
       // Priority 2: ask rules
@@ -502,7 +502,7 @@ export class PermissionManager {
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity))
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
           return 'ask';
       }
       // Priority 3: allow rules
@@ -1087,7 +1087,7 @@ export class PermissionManager {
     ] as const;
 
     for (const rule of denyRules) {
-      if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity)) {
+      if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true)) {
         return rule.raw;
       }
     }
@@ -1265,7 +1265,7 @@ export class PermissionManager {
 
     return (
       restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity),
+        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
       ) ||
       allowRules.some((rule) =>
         matchesRule(rule, ...matchArgs, undefined, mcpIdentity),
@@ -1366,7 +1366,7 @@ export class PermissionManager {
     ] as const;
 
     return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity),
+      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
     );
   }
 
