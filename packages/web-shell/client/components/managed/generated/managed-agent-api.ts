@@ -209,6 +209,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. */
         post: operations["closeWebShellSession"];
         delete?: never;
         options?: never;
@@ -478,6 +479,11 @@ export interface components {
             actions: boolean;
             tasks: boolean;
             artifacts: boolean;
+            /**
+             * @description Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session.
+             * @default false
+             */
+            sessionClose?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -662,7 +668,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown);
@@ -1310,7 +1316,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
-            /** @description Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved). */
+            /** @description Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check. */
             409: components["responses"]["Conflict"];
         };
     };

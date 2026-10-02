@@ -302,7 +302,10 @@ W0e (#12839) took V16 first, so this migration is V17, the next free version
 on `main`. The O2 publication migrations follow as V18 and V19. An open pull
 request that takes V17 or a later version must renumber past it; a gap left
 instead would make Flyway refuse to start a database that already applied the
-later version. Upgrade tests apply the ordered sequence before service startup.
+later version. Upgrade tests apply the ordered sequence before service
+startup. Uniqueness across both migration locations is enforced without a
+database by `scripts/check-flyway-migrations.js`, which runs in the SDK Java
+workflow on every pull request and push (#12940).
 
 ## 5. Tests
 
