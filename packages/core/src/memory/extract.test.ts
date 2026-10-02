@@ -782,6 +782,64 @@ describe('auto-memory extraction', () => {
       });
     });
 
+    it('suspends only the selected failed window and permits fresh-bootstrap recovery', async () => {
+      const failure = new Error('provider unavailable');
+      vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValue(failure);
+      const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+      const cursorBefore = await fs.readFile(cursorPath, 'utf-8');
+      let blockedWindow = '';
+      const canExtractWindow = vi.fn(
+        (window: string) => window !== blockedWindow,
+      );
+      const history = longTurn();
+      const input = { ...params(), history, canExtractWindow };
+
+      await expect(runAutoMemoryExtract(input)).rejects.toBe(failure);
+      expect(canExtractWindow).toHaveBeenCalledOnce();
+      blockedWindow = canExtractWindow.mock.calls[0][0];
+      const skipped = await runAutoMemoryExtract(input);
+      expect(skipped).toEqual({
+        touchedTopics: [],
+        skippedReason: 'failure_limit',
+        cursor: JSON.parse(cursorBefore),
+      });
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+      expect(await fs.readFile(cursorPath, 'utf-8')).toBe(cursorBefore);
+
+      const laterUser: Content = {
+        role: 'user',
+        parts: [{ text: 'Remember: use isolated workspaces.' }],
+      };
+      await expect(
+        runAutoMemoryExtract({ ...input, history: [...history, laterUser] }),
+      ).rejects.toBe(failure);
+      expect(canExtractWindow.mock.calls[2][0]).not.toBe(blockedWindow);
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+        mockConfig,
+        projectRoot,
+        [laterUser],
+        undefined,
+      );
+      expect(await fs.readFile(cursorPath, 'utf-8')).toBe(cursorBefore);
+    });
+
+    it('keeps the window gate out of the default and no-user paths', async () => {
+      const canExtractWindow = vi.fn().mockReturnValue(false);
+      await runAutoMemoryExtract({
+        ...params(),
+        history: [{ role: 'user', parts: [{ text: 'Remember: use pnpm.' }] }],
+        preserveUnprocessedHistory: false,
+        canExtractWindow,
+      });
+      await runAutoMemoryExtract({
+        ...params(),
+        history: [],
+        canExtractWindow,
+      });
+      expect(canExtractWindow).not.toHaveBeenCalled();
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+    });
+
     it('bootstraps a legal new session at its current user turn, not inherited history', async () => {
       const inherited = longTurn();
       await runAutoMemoryExtract({

@@ -51,7 +51,8 @@ export interface AutoMemoryExtractResult {
     | 'memory_tool'
     | 'memory_pressure'
     | 'session_mismatch'
-    | 'cooldown';
+    | 'cooldown'
+    | 'failure_limit';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
   /**
@@ -204,6 +205,7 @@ export async function runAutoMemoryExtract(params: {
   now?: Date;
   config?: Config;
   preserveUnprocessedHistory?: boolean;
+  canExtractWindow?: (windowIdentity: string) => boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -346,6 +348,20 @@ export async function runAutoMemoryExtract(params: {
     now,
   );
   if (lateMismatch) return lateMismatch;
+
+  if (
+    startHistoryHash &&
+    endHistoryHash &&
+    params.canExtractWindow?.(
+      JSON.stringify([startHistoryHash, endHistoryHash]),
+    ) === false
+  ) {
+    return {
+      touchedTopics: [],
+      skippedReason: 'failure_limit',
+      cursor: currentCursor,
+    };
+  }
 
   let extractionFailure: AutoMemoryExtractionError | undefined;
   const agentResult = await runAutoMemoryExtractionByAgent(

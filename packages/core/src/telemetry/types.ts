@@ -1658,7 +1658,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'memory_tool'
     | 'memory_pressure'
     | 'session_mismatch'
-    | 'cooldown';
+    | 'cooldown'
+    | 'failure_limit';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1672,7 +1673,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'memory_tool'
       | 'memory_pressure'
       | 'session_mismatch'
-      | 'cooldown';
+      | 'cooldown'
+      | 'failure_limit';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;

@@ -1690,6 +1690,149 @@ describe('MemoryManager', () => {
       }
     });
 
+    describe('consecutive window failures', () => {
+      const failure = new Error('provider unavailable');
+      let window: string;
+      let attempts: number;
+      let succeed: boolean;
+      let holdThird: ReturnType<typeof deferred<void>> | undefined;
+      const params = (projectRoot = tmp.projectRoot, sessionId = 'sess') =>
+        extractParams(
+          projectRoot,
+          sessionId,
+          'Remember: preserve tenant boundaries.',
+          makeMockConfig({ getSessionId: () => sessionId }),
+        );
+
+      beforeEach(() => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        window = 'selected-window';
+        attempts = 0;
+        succeed = false;
+        holdThird = undefined;
+        vi.mocked(runAutoMemoryExtract).mockImplementation(async (p) => {
+          if (p.canExtractWindow?.(window) === false) {
+            return {
+              ...extractResult(p.sessionId),
+              skippedReason: 'failure_limit',
+            };
+          }
+          attempts++;
+          if (attempts === 3 && holdThird) await holdThird.promise;
+          if (succeed) {
+            return { ...extractResult(p.sessionId), extractorRan: true };
+          }
+          throw failure;
+        });
+      });
+
+      afterEach(() => {
+        delete process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV];
+      });
+
+      it('suspends a genuinely queued fourth attempt after the third failure', async () => {
+        const mgr = new MemoryManager();
+        for (let i = 0; i < 2; i++) {
+          await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        }
+        holdThird = deferred<void>();
+        const third = mgr
+          .scheduleExtract(params())
+          .catch((error: unknown) => error);
+        expect(attempts).toBe(3);
+        expect((await mgr.scheduleExtract(params())).skippedReason).toBe(
+          'queued',
+        );
+        holdThird.resolve();
+        expect(await third).toBe(failure);
+        expect(await mgr.drain()).toBe(true);
+        expect(attempts).toBe(3);
+        const tasks = mgr.listTasksByType('extract');
+        expect(tasks).toHaveLength(4);
+        expect(tasks.filter((t) => t.status === 'failed')).toHaveLength(3);
+        expect(tasks).toContainEqual(
+          expect.objectContaining({
+            status: 'skipped',
+            metadata: expect.objectContaining({
+              skippedReason: 'failure_limit',
+            }),
+          }),
+        );
+        expect(telemetryMocks.logMemoryExtract).toHaveBeenLastCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            status: 'skipped',
+            skipped_reason: 'failure_limit',
+          }),
+        );
+        expect((await mgr.scheduleExtract(params())).skippedReason).toBe(
+          'failure_limit',
+        );
+        expect(attempts).toBe(3);
+      });
+
+      it('permits a changed selection and resets its streak after success', async () => {
+        const mgr = new MemoryManager();
+        for (let i = 0; i < 3; i++) {
+          await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        }
+        expect((await mgr.scheduleExtract(params())).skippedReason).toBe(
+          'failure_limit',
+        );
+        window = 'new-selected-window';
+        await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        succeed = true;
+        await mgr.scheduleExtract(params());
+        succeed = false;
+        for (let i = 0; i < 3; i++) {
+          await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        }
+        expect((await mgr.scheduleExtract(params())).skippedReason).toBe(
+          'failure_limit',
+        );
+        expect(attempts).toBe(8);
+      });
+
+      it.each(['project', 'session'])(
+        'keeps another %s success from clearing the bound',
+        async (scope) => {
+          const mgr = new MemoryManager();
+          for (let i = 0; i < 3; i++) {
+            await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+          }
+          succeed = true;
+          await mgr.scheduleExtract(
+            params(
+              scope === 'project'
+                ? path.join(tmp.tempDir, 'other')
+                : tmp.projectRoot,
+              scope === 'session' ? 'other-session' : 'sess',
+            ),
+          );
+          succeed = false;
+          expect((await mgr.scheduleExtract(params())).skippedReason).toBe(
+            'failure_limit',
+          );
+          expect(attempts).toBe(4);
+        },
+      );
+
+      it('keeps default-off retries unchanged and clears the old experiment streak', async () => {
+        const mgr = new MemoryManager();
+        for (let i = 0; i < 3; i++) {
+          await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        }
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '0';
+        await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        expect(
+          vi.mocked(runAutoMemoryExtract).mock.lastCall?.[0],
+        ).not.toHaveProperty('canExtractWindow');
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        await expect(mgr.scheduleExtract(params())).rejects.toBe(failure);
+        expect(attempts).toBe(5);
+      });
+    });
+
     describe('no-op cooldown (#13004)', () => {
       const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
       const completedNoop = (sessionId = 'sess-1') => ({

@@ -714,6 +714,11 @@ export class MemoryManager {
     string,
     { sessionId: string; remaining: number; armedAtHistoryLength: number }
   >();
+  // ponytail: process-local suspension; durable recovery needs a separate backlog budget.
+  private readonly extractFailures = new Map<
+    string,
+    { windowIdentity: string; count: number }
+  >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1409,6 +1414,10 @@ export class MemoryManager {
     });
 
     const t0 = Date.now();
+    const preserveUnprocessedHistory = resolveExtractNoopCooldownTurns() > 0;
+    const failureKey = JSON.stringify([params.projectRoot, params.sessionId]);
+    let selectedWindow: string | undefined;
+    if (!preserveUnprocessedHistory) this.extractFailures.delete(failureKey);
     try {
       // Memory-pressure gate. Checked inside try so the finally block
       // always runs — extractRunning/extractCurrentTaskId are cleaned up
@@ -1444,10 +1453,23 @@ export class MemoryManager {
       }
 
       const result = await runAutoMemoryExtract(
-        resolveExtractNoopCooldownTurns() > 0
-          ? { ...params, preserveUnprocessedHistory: true }
+        preserveUnprocessedHistory
+          ? {
+              ...params,
+              preserveUnprocessedHistory: true,
+              canExtractWindow: (windowIdentity) => {
+                selectedWindow = windowIdentity;
+                const failure = this.extractFailures.get(failureKey);
+                return (
+                  !failure ||
+                  failure.windowIdentity !== windowIdentity ||
+                  failure.count < 3
+                );
+              },
+            }
           : params,
       );
+      if (!result.skippedReason) this.extractFailures.delete(failureKey);
       this.updateExtractCooldown(params, result);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
@@ -1489,7 +1511,16 @@ export class MemoryManager {
       }
       return result;
     } catch (error) {
-      // A failed, aborted or MAX_TURNS run throws; the next turn retries.
+      if (selectedWindow !== undefined) {
+        const previous = this.extractFailures.get(failureKey);
+        this.extractFailures.set(failureKey, {
+          windowIdentity: selectedWindow,
+          count:
+            previous?.windowIdentity === selectedWindow
+              ? previous.count + 1
+              : 1,
+        });
+      }
       this.extractCooldownRemaining.delete(params.projectRoot);
       const writeResult =
         error instanceof AutoMemoryExtractionError ? error.result : undefined;
@@ -2730,6 +2761,7 @@ export class MemoryManager {
     this.extractRunning.clear();
     this.extractCurrentTaskId.clear();
     this.extractQueued.clear();
+    this.extractFailures.clear();
   }
 
   /** Reset all dream scheduling state. */
