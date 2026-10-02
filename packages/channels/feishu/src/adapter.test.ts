@@ -722,7 +722,11 @@ describe('FeishuChannel', () => {
     }
   });
 
-  it('dispatches both media and ordinary text', async () => {
+  it.each([
+    { contentType: 'image/png', mimeType: 'image/png' },
+    { contentType: undefined, mimeType: 'image/jpeg' },
+  ])('dispatches $mimeType media and text', async (testCase) => {
+    const { contentType, mimeType } = testCase;
     const bridge = createMockBridge();
     const channel = new FeishuChannel('test', createConfig(), bridge);
     const onMessage = getPrivateMethod<(data: unknown) => void>(
@@ -759,7 +763,7 @@ describe('FeishuChannel', () => {
         }
         if (url === resourceUrl) {
           return new Response(image, {
-            headers: { 'Content-Type': 'image/png' },
+            headers: contentType ? { 'Content-Type': contentType } : {},
           });
         }
         return jsonResponse({ code: 0, data: {} });
@@ -784,7 +788,7 @@ describe('FeishuChannel', () => {
           images: [
             {
               data: Buffer.from(image).toString('base64'),
-              mimeType: 'image/png',
+              mimeType,
             },
           ],
         }),
@@ -796,7 +800,7 @@ describe('FeishuChannel', () => {
         2,
         'session-1',
         expect.stringContaining('inspect this'),
-        expect.anything(),
+        expect.not.objectContaining({ images: expect.anything() }),
       );
     } finally {
       fetchSpy.mockRestore();
@@ -804,13 +808,37 @@ describe('FeishuChannel', () => {
   });
 
   it.each([
-    { failure: 'authentication', authStatus: 401, mediaStatus: 200 },
-    { failure: 'media download', authStatus: 200, mediaStatus: 500 },
+    {
+      failure: 'authentication',
+      authStatus: 401,
+      mediaStatus: 200,
+      cachedToken: false,
+    },
+    {
+      failure: 'media download',
+      authStatus: 200,
+      mediaStatus: 500,
+      cachedToken: false,
+    },
+    {
+      failure: 'media authorization',
+      authStatus: 200,
+      mediaStatus: 401,
+      cachedToken: true,
+    },
   ])(
     'dispatches an image as text when $failure fails',
-    async ({ authStatus, mediaStatus }) => {
+    async ({ authStatus, mediaStatus, cachedToken }) => {
       const bridge = createMockBridge();
       const channel = new FeishuChannel('test', createConfig(), bridge);
+      if (cachedToken) {
+        Object.assign(channel, {
+          tokenCache: {
+            token: 'test_token',
+            expiresAt: Date.now() + 3600_000,
+          },
+        });
+      }
       const message = feishuDmMessage('failed-image');
       Object.assign(message['message'] as Record<string, unknown>, {
         message_type: 'image',
@@ -820,6 +848,9 @@ describe('FeishuChannel', () => {
         'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
       const resourceUrl =
         'https://open.feishu.cn/open-apis/im/v1/messages/failed-image/resources/img_1?type=image';
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       const fetchSpy = vi
         .spyOn(global, 'fetch')
         .mockImplementation(async (input) => {
@@ -847,13 +878,27 @@ describe('FeishuChannel', () => {
           expect.stringContaining('(image)'),
           expect.not.objectContaining({ images: expect.anything() }),
         );
-        expect(fetchSpy).toHaveBeenCalledWith(authUrl, expect.anything());
+        if (cachedToken) {
+          expect(
+            fetchSpy.mock.calls.filter(([input]) => String(input) === authUrl),
+          ).toHaveLength(0);
+        } else {
+          expect(fetchSpy).toHaveBeenCalledWith(authUrl, expect.anything());
+        }
         const mediaRequests = fetchSpy.mock.calls.filter(
           ([input]) => String(input) === resourceUrl,
         );
         expect(mediaRequests).toHaveLength(authStatus === 200 ? 1 : 0);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            authStatus === 200
+              ? `downloadMedia failed: HTTP ${mediaStatus}`
+              : 'getTenantAccessToken failed: HTTP 401',
+          ),
+        );
       } finally {
         fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
       }
     },
   );
