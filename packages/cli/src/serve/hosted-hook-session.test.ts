@@ -1224,6 +1224,20 @@ it('skips the restore after a Hook operation activation fails to install', async
   expect(released()).toEqual([hooks.broker.runtimeSessionId]);
 });
 
+it('skips a restore that replaces an unrestored Hook operation activation', async () => {
+  const install = session.authority.installActivation.bind(session.authority);
+  vi.spyOn(session.authority, 'installActivation')
+    .mockImplementationOnce(install)
+    .mockRejectedValueOnce(new Error('restore install failed'));
+  await expect(operate(session, hooks, 'a')).rejects.toThrow(
+    'restore install failed',
+  );
+  // The next restore derives from the first operation's own activation.
+  await operate(session, hooks, 'b');
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
+
 it.each([
   ['after its install', false],
   ['after the Hook operation activation it renews is released', true],
@@ -1250,6 +1264,9 @@ it.each([
   const changes = authority
     .eventsInSequenceRange(1, authority.committedSequence)
     .filter((event) => event.kind === 'activation.changed');
+  // A late renewal is possible only because renewActivation checks the phase
+  // outside the authority's serial queue. Once that race is closed, the late
+  // case can no longer be produced and should be removed.
   expect(
     changes.some(
       (event, index) =>

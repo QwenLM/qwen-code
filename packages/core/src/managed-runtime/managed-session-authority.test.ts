@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertSessionExecutionEngine } from '../services/session-execution-engine.js';
 import { readSessionTranscriptSnapshot } from '../services/session-transcript-reader.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -786,14 +786,50 @@ describe('managed session authority activation fences', () => {
       const installed = await install();
       await opened.authority.releaseActivation();
       const committed = opened.authority.committedSequence;
+      const publish = vi.spyOn(
+        LocalManagedSessionResourceStore.prototype,
+        'publish',
+      );
 
       await expect(install()).rejects.toThrow(ManagedSessionConflictError);
+      expect(publish).not.toHaveBeenCalled();
+      publish.mockRestore();
       expect(opened.authority.committedSequence).toBe(committed);
       expect(opened.authority.currentActivation).toMatchObject({
         activationId: 'act-once',
         epoch: installed.epoch,
         phase: 'released',
       });
+      await opened.release();
+    });
+
+    it('refuses one of two concurrent installs of one activation ID', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      const install = () =>
+        opened.authority.installActivation({
+          activationId: 'act-twice',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+      // Whichever install commits first wins; the order depends on when each
+      // publishes its body.
+      const results = await Promise.allSettled([install(), install()]);
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBeInstanceOf(ManagedSessionConflictError);
+      expect(
+        opened.authority
+          .readEvents()
+          .filter((event) => event.kind === 'activation.changed'),
+      ).toHaveLength(1);
       await opened.release();
     });
 

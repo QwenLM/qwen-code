@@ -231,6 +231,11 @@ export class HostedHookSession {
   private occurrenceQueue: Promise<void> = Promise.resolve();
   private messagesProvider?: () => Array<Record<string, unknown>>;
 
+  /**
+   * Construct only on a load activation. Release finds earlier owners by
+   * load activations alone, so an owner named after a Hook operation's
+   * activation or its restore would never be released by a successor.
+   */
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,

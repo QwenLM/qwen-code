@@ -269,6 +269,14 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
   }
 }
 
+function activationAlreadyInstalled(
+  activationId: string,
+): ManagedSessionConflictError {
+  return new ManagedSessionConflictError(
+    `activation ${activationId} was already installed.`,
+  );
+}
+
 /** The digest-chain head of a log that has no commit marker yet. */
 export const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
 
@@ -2016,6 +2024,13 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // The install's command identity is its activation ID, so a repeated ID
+    // would replay the earlier receipt without appending, and the epoch below
+    // would name an activation the log never recorded. Refuse it before the
+    // body is published; the replay check covers a concurrent repeat.
+    if (this.hasInstalledActivation(input.activationId)) {
+      throw activationAlreadyInstalled(input.activationId);
+    }
     const epoch = (this.activation?.epoch ?? 0) + 1;
     const installRef = await this.publishActivationBody(
       'managed-activation-install',
@@ -2040,15 +2055,15 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
-    // The install's command identity is its activation ID, so a repeated ID
-    // replays the earlier receipt without appending; the epoch above would
-    // then name an activation the log never recorded.
-    if (receipt.replayed) {
-      throw new ManagedSessionConflictError(
-        `activation ${input.activationId} was already installed.`,
-      );
-    }
+    if (receipt.replayed) throw activationAlreadyInstalled(input.activationId);
     return { activationId: input.activationId, epoch };
+  }
+
+  /** Whether the log already holds an install of this activation ID. */
+  hasInstalledActivation(activationId: string): boolean {
+    return this.transactions.has(
+      managedSessionCommandKey('installActivation', `${activationId}:active`),
+    );
   }
 
   /**

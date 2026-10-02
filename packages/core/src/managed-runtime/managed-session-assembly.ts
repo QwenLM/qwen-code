@@ -5,7 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+} from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -119,7 +122,7 @@ export interface ManagedSession {
    * release reads a random successor as a load that may own a Hook Runtime,
    * so a successor that never acquires one carries a `hook_operation` subject
    * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
-   * to the log; installing one twice is refused.
+   * to the log; a repeat is refused before the current activation is released.
    */
   replaceActivation(
     subject?: ManagedSessionSubject,
@@ -224,6 +227,16 @@ export async function openManagedSession(
     },
     releaseActivation: () => authority.releaseActivation(),
     async replaceActivation(subject, activationId) {
+      // Refuse before the release, or the current activation would be left
+      // released with no successor.
+      if (
+        activationId !== undefined &&
+        authority.hasInstalledActivation(activationId)
+      ) {
+        throw new ManagedSessionConflictError(
+          `activation ${activationId} was already installed.`,
+        );
+      }
       await authority.releaseActivation();
       activation = await authority.installActivation({
         activationId: activationId ?? randomUUID(),
