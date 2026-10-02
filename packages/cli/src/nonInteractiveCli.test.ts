@@ -52,6 +52,7 @@ import {
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
+import { ToolCallTool } from '@qwen-code/qwen-code-core/tools/tool-call.js';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import {
@@ -4019,7 +4020,9 @@ describe('runNonInteractive', () => {
       });
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name) =>
-          ({ name, kind: Kind.Read }) as unknown as ReturnType<
+          (name === ToolNames.TOOL_CALL
+            ? new ToolCallTool()
+            : { name, kind: Kind.Read }) as unknown as ReturnType<
             typeof mockToolRegistry.getTool
           >,
       );
@@ -4214,14 +4217,16 @@ describe('runNonInteractive', () => {
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
     });
 
-    it('uses deferred target identity for headless bridge concurrency and completion tracking', async () => {
+    it.each(['object', 'string'])('parallelizes %s bridges', async (format) => {
       setupMetricsMock();
       const targetName = 'mcp__docs__read';
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name: string) =>
-          (name === targetName
-            ? { name: targetName, kind: Kind.Read }
-            : undefined) as unknown as ReturnType<
+          (name === ToolNames.TOOL_CALL
+            ? new ToolCallTool()
+            : name === targetName
+              ? { name: targetName, kind: Kind.Read }
+              : undefined) as unknown as ReturnType<
             typeof mockToolRegistry.getTool
           >,
       );
@@ -4257,7 +4262,7 @@ describe('runNonInteractive', () => {
               request: {
                 ...request,
                 name: targetName,
-                args: request.args['arguments'],
+                args: { path: request.callId },
               },
               response,
               durationMs: 1,
@@ -4274,7 +4279,10 @@ describe('runNonInteractive', () => {
           name: ToolNames.TOOL_CALL,
           args: {
             name: targetName,
-            arguments: { path: callId },
+            arguments:
+              format === 'string'
+                ? JSON.stringify({ path: callId })
+                : { path: callId },
           },
           isClientInitiated: false,
           prompt_id: 'p-bridge-parallel',
@@ -4292,6 +4300,14 @@ describe('runNonInteractive', () => {
       );
 
       expect(started).toBe(total);
+      expect(bridgeEvents[0].value).toMatchObject({
+        args: {
+          arguments:
+            format === 'string'
+              ? JSON.stringify({ path: 'bridge-1' })
+              : { path: 'bridge-1' },
+        },
+      });
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-1' },
