@@ -17,7 +17,10 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { hasStandaloneRuntimeLayout } from '../utils/installationInfo.js';
+import {
+  hasStandaloneRuntimeLayout,
+  standaloneRuntimePaths,
+} from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -63,9 +66,14 @@ function validateTarget(target: string): void {
   }
 }
 
-function archiveFilename(target: string): string {
+// Archive names mirror standaloneArchiveName in
+// scripts/create-standalone-package.js: the bun runtime ships as the
+// -opentui-preview flavor, and SHA256SUMS entries match by filename, so both
+// call sites must derive the name from the installed build's runtime.
+function archiveFilename(target: string, runtime: string): string {
   const ext = target.startsWith('win') ? 'zip' : 'tar.gz';
-  return `qwen-code-${target}.${ext}`;
+  const flavor = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${flavor}.${ext}`;
 }
 
 function escapePS(s: string): string {
@@ -483,9 +491,7 @@ async function smokeTest(
   expectedVersion: string,
 ): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
-  const nodeBin = target.startsWith('win')
-    ? path.join(resolvedInstallDir, 'node', 'node.exe')
-    : path.join(resolvedInstallDir, 'node', 'bin', 'node');
+  const nodeBin = standaloneRuntimePaths(resolvedInstallDir, target).node;
   const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
 
   if (!fs.existsSync(nodeBin)) {
@@ -1158,8 +1164,8 @@ export async function prepareStandaloneUpdate(
 }> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = resolveUpdateBaseUrl();
-  const { target } = standaloneUpdateTarget(standaloneDir);
-  const filename = archiveFilename(target);
+  const { target, runtime } = standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target, runtime);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   const cleanup = () => {
     process.off('exit', cleanup);
@@ -1216,7 +1222,7 @@ async function applyStandaloneUpdate(
     runtime: installedRuntime,
     isFirstTimeMigration,
   } = standaloneUpdateTarget(standaloneDir);
-  const filename = archiveFilename(target);
+  const filename = archiveFilename(target, installedRuntime);
   const parentDir = path.dirname(standaloneDir);
 
   // Ensure the parent directory exists so the lock file can be created.
@@ -1305,7 +1311,11 @@ async function applyStandaloneUpdate(
     // directory as a managed standalone install — installation does not
     // rewrite it, so the archive must carry the requested release's name,
     // target, version and runtime flavor, plus the executable layout
-    // (bin/qwen, node/bin/node) that classification requires.
+    // (bin/qwen, node/bin/node) that classification requires. The launcher
+    // execs lib/cli-entry.js while the smoke test probes lib/cli.js, so the
+    // entry point is required here explicitly — the shared layout helper
+    // must not grow the requirement, or installs that predate cli-entry.js
+    // would stop classifying as standalone.
     const manifest = JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
       name?: unknown;
       target?: unknown;
@@ -1322,7 +1332,8 @@ async function applyStandaloneUpdate(
       !isConcreteVersion(manifestVersion) ||
       normalizeVersion(manifestVersion) !== normalizeVersion(newVersion) ||
       manifestRuntime !== installedRuntime ||
-      !hasStandaloneRuntimeLayout(newInstallDir, target)
+      !hasStandaloneRuntimeLayout(newInstallDir, target) ||
+      !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
     ) {
       throw new Error(
         `Archive manifest does not match the requested release: ${JSON.stringify(manifest)}`,

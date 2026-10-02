@@ -192,6 +192,8 @@ describe.skipIf(process.platform === 'win32')(
           name: '@qwen-code/qwen-code',
           target,
           version: INSTALLED_VERSION,
+          // create-standalone-package.js always writes the flavor.
+          runtime: 'node',
         }),
       );
       fs.writeFileSync(path.join(installDir, 'bin', 'qwen'), '#!/bin/sh\n', {
@@ -274,6 +276,8 @@ describe.skipIf(process.platform === 'win32')(
           name: '@qwen-code/qwen-code',
           target,
           version: TARGET_VERSION,
+          // create-standalone-package.js always writes the flavor.
+          runtime: 'node',
         }),
       );
       fs.writeFileSync(
@@ -283,6 +287,12 @@ describe.skipIf(process.platform === 'win32')(
       );
       fs.writeFileSync(
         path.join(fixtureDir, 'qwen-code', 'lib', 'cli.js'),
+        `// fixture ${TARGET_VERSION}\n`,
+      );
+      // The shipped launcher execs lib/cli-entry.js and the updater's
+      // identity gate rejects archives without it before activation.
+      fs.writeFileSync(
+        path.join(fixtureDir, 'qwen-code', 'lib', 'cli-entry.js'),
         `// fixture ${TARGET_VERSION}\n`,
       );
       // Official archives ship an executable launcher

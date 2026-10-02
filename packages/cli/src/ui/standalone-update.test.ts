@@ -413,6 +413,7 @@ describe('standalone-update', () => {
   describe('download sources', () => {
     const baseUrl = 'https://downloads.example.com/qwen-code';
     const filename = 'qwen-code-linux-x64.tar.gz';
+    const bunFilename = 'qwen-code-linux-x64-opentui-preview.tar.gz';
     let standaloneDir: string;
     let originalManifest: string;
 
@@ -454,6 +455,7 @@ describe('standalone-update', () => {
         target?: string;
         runtime?: string;
         binless?: boolean;
+        entryless?: boolean;
       } = {},
     ) {
       const fixture = path.join(tempDir, 'fixture');
@@ -487,6 +489,14 @@ describe('standalone-update', () => {
           { mode: 0o755 },
         );
         fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
+        // The shipped launcher execs lib/cli-entry.js; `entryless` stages a
+        // repacked archive without it.
+        if (!options.entryless) {
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'lib', 'cli-entry.js'),
+            '',
+          );
+        }
         // Official archives ship an executable launcher; `binless` stages a
         // repacked archive without one.
         if (!options.binless) {
@@ -506,12 +516,17 @@ describe('standalone-update', () => {
       const checksum = options.badChecksum
         ? '0'.repeat(64)
         : createHash('sha256').update(archive).digest('hex');
+      // A release root hosts every flavor under one SHA256SUMS, so the
+      // staged archive answers both names; the updater requests the one
+      // matching the installed runtime.
       mockFetch.mockImplementation(async (url: string) => {
-        if (url.endsWith(`/${filename}`)) {
+        if (url.endsWith(`/${filename}`) || url.endsWith(`/${bunFilename}`)) {
           return new Response(new Uint8Array(archive));
         }
         if (url.endsWith('/SHA256SUMS')) {
-          return new Response(`${checksum}  ${filename}\n`);
+          return new Response(
+            `${checksum}  ${filename}\n${checksum}  ${bunFilename}\n`,
+          );
         }
         return new Response('', { status: 404 });
       });
@@ -574,9 +589,10 @@ describe('standalone-update', () => {
 
     it('preserves the installation when the archive manifest omits the package name', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-      // A nameless manifest would install fine and only break later: the
+      // Runnable so that only the name predicate can reject the archive. A
+      // nameless manifest would install fine and only break later: the
       // directory would stop classifying as a managed standalone install.
-      await serveArchive({ nameless: true });
+      await serveArchive({ runnable: true, nameless: true });
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow(
@@ -617,6 +633,55 @@ describe('standalone-update', () => {
       expectInstallationPreserved(bunManifest);
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'installs a matching bun-flavor archive over a bun-flavor installation',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        const bunManifest = JSON.stringify({
+          target: 'linux-x64',
+          version: '0.1.0',
+          runtime: 'bun',
+        });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          bunManifest,
+        );
+        await serveArchive({ runnable: true, runtime: 'bun' });
+
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).resolves.toBe('done');
+
+        // The updater must route to the flavor archive — the node archive
+        // would fail the gate's runtime clause for this install.
+        expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+          `${baseUrl}/v1.2.3/${bunFilename}`,
+          `${baseUrl}/v1.2.3/SHA256SUMS`,
+          `${baseUrl}/v1.2.3/SHA256SUMS.sig`,
+        ]);
+        // The update preserves the flavor instead of converting the install.
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '1.2.3', runtime: 'bun' });
+      },
+    );
+
+    it('preserves the installation when a bun-flavor archive targets a node installation', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // The updater requests the node archive for a node install, so a
+      // mirror serving the bun flavor under that name must be rejected.
+      await serveArchive({ runnable: true, runtime: 'bun' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
+
     it('preserves the installation when the archive ships no launcher', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
       // Runnable but without bin/qwen: isStandaloneInstallDir would stop
@@ -631,11 +696,25 @@ describe('standalone-update', () => {
       expectInstallationPreserved();
     });
 
+    it('preserves the installation when the archive omits the launcher entry point', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // The launcher execs lib/cli-entry.js while the smoke test probes
+      // lib/cli.js, so only this gate clause ever looks for it.
+      await serveArchive({ runnable: true, entryless: true });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
+
     it.each(['01.2.3', '1.2.3-01', '1.2.3+build.5'])(
       'preserves the installation when the archive manifest version is not valid semver: %s',
       async (manifestVersion) => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-        await serveArchive({ manifestVersion });
+        // Runnable so that only the version predicates can reject the archive.
+        await serveArchive({ runnable: true, manifestVersion });
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
