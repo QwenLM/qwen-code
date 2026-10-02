@@ -10,13 +10,19 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
+import { ManagedHookActivationController } from './managed-hook-activation.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
 } from './managed-session-message-projection.js';
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
-import type { ManagedSessionKey } from './managed-session-records.js';
+import type { McpConfiguration } from './managed-mcp-record.js';
+import type { HookExecution, HookRegistration } from './managed-hook-record.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionKey,
+} from './managed-session-records.js';
 import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -70,6 +76,400 @@ describe('HTTP Managed Session store', () => {
         .map((directory) => rm(directory, { recursive: true, force: true })),
     );
   });
+
+  it('verifies committed publication receipts with the scoped Session writer', async () => {
+    const server = new FakeManagedSessionStore();
+    const request = { executionCallId: 'execution-1', historyRevision: 7 };
+    const verified = vi.fn();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const url = new URL(requestUrl(input));
+        if (!url.pathname.endsWith('/receipts/verify'))
+          return server.fetch(input, init);
+        verified();
+        expect(url.pathname).toBe(
+          `/internal/managed-tool-publications/v1/sessions/${SESSION_KEY.sessionId}/receipts/verify`,
+        );
+        expect(url.searchParams.get('workspaceId')).toBe(
+          SESSION_KEY.workspaceId,
+        );
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual(request);
+        return jsonResponse(request);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(
+        stores.publication.request('/receipts/verify', request),
+      ).resolves.toEqual(request);
+      expect(verified).toHaveBeenCalledOnce();
+      await expect(
+        stores.publication.request('/receipts/other', request),
+      ).rejects.toThrow('owner path is invalid');
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('publishes bounded tool output immediately under the original writer grant', async () => {
+    const server = new FakeManagedSessionStore();
+    let publication: Record<string, unknown> | undefined;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        expect(
+          new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+        ).toBe(TOKEN_A);
+        publication = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const { resourceId, kind, schemaVersion, byteLength, digest } =
+          publication;
+        return jsonResponse({
+          resourceId,
+          kind,
+          schemaVersion,
+          byteLength,
+          digest,
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(1024 * 1024, 0x91);
+      const ref = await stores.toolResultResources.publish(
+        'managed-tool-result-content',
+        bytes,
+        'segment-id',
+      );
+      expect(publication).toMatchObject({
+        resourceId: 'segment-id',
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        byteLength: bytes.length,
+        bytesBase64: bytes.toString('base64'),
+      });
+      expect(ref.byteLength).toBe(bytes.length);
+      expect(server.commits).toHaveLength(0);
+      await expect(
+        stores.resourceStore.publish('ordinary', bytes),
+      ).rejects.toThrow('inline limit');
+      await expect(
+        stores.toolResultResources.publish('ordinary', bytes),
+      ).rejects.toThrow('Unsupported');
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.alloc(bytes.length + 1),
+        ),
+      ).rejects.toThrow('Unsupported');
+      await stores.assertWritable();
+      expect(
+        server.fetch.mock.calls.some(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toBe(true);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('refuses a changed durable publication receipt rather than staging it', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          resourceId: 'other',
+          kind: body['kind'],
+          schemaVersion: 1,
+          byteLength: body['byteLength'],
+          digest: body['digest'],
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.from('bytes'),
+          'original',
+        ),
+      ).rejects.toThrow('different metadata');
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a busy receipt commit with the original transaction', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const requests: Array<Record<string, unknown>> = [];
+    let outcomeRef: ManagedSessionDurableRef;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        if (requests.length === 1)
+          return jsonResponse(
+            { error: { code: 'managed_tool_publication_busy' } },
+            429,
+          );
+        const committed = await server.fetch(
+          `http://session-store.test/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          init,
+        );
+        return jsonResponse({
+          ...(await committed.json()),
+          historyRevision: body['lastSequence'],
+          toolOutcomeRef: outcomeRef,
+        });
+      },
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}'),
+      );
+      stores.publication.rememberAdmission('publication-a', outcomeRef);
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-a',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:a',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-a',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'recordToolResult',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each([
+    'uncommitted-503',
+    'lost-commit-response',
+    'lost-response-body',
+    'permanent-409',
+    'exhausted-503',
+    'changed-receipt',
+    'invalid-json',
+  ])(
+    'preserves activation transaction identity and failure fencing after %s',
+    async (failure) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-store-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const requests: string[] = [];
+      const recoverable =
+        failure === 'uncommitted-503' ||
+        failure === 'lost-commit-response' ||
+        failure === 'lost-response-body';
+      let armed = false;
+      let replay: unknown;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) => {
+          if (armed && requestUrl(input).endsWith('/transactions:commit')) {
+            const body = JSON.parse(String(init?.body)) as Record<
+              string,
+              unknown
+            >;
+            if (body['operation'] === 'installActivation') {
+              requests.push(String(init?.body));
+              if (failure === 'permanent-409' || failure === 'exhausted-503')
+                return jsonResponse(
+                  { error: { code: 'commit_rejected' } },
+                  failure === 'permanent-409' ? 409 : 503,
+                );
+              if (failure === 'changed-receipt') {
+                const receipt = (await (
+                  await server.fetch(input, init)
+                ).json()) as Record<string, unknown>;
+                return jsonResponse({ ...receipt, transactionId: 'different' });
+              }
+              if (failure === 'invalid-json')
+                return new Response('{', {
+                  headers: { 'Cache-Control': 'no-store' },
+                });
+              if (requests.length === 1) {
+                if (failure === 'uncommitted-503')
+                  return jsonResponse(
+                    { error: { code: 'temporary_failure' } },
+                    503,
+                  );
+                replay = await (await server.fetch(input, init)).json();
+                if (failure === 'lost-response-body')
+                  return new Response(
+                    new ReadableStream({
+                      start(controller) {
+                        controller.error(
+                          new TypeError('Response stream terminated'),
+                        );
+                      },
+                    }),
+                    { headers: { 'Cache-Control': 'no-store' } },
+                  );
+                throw new TypeError('Commit response lost');
+              }
+              armed = false;
+              if (replay !== undefined) return jsonResponse(replay);
+            }
+          }
+          return server.fetch(input, init);
+        },
+      });
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      try {
+        armed = true;
+        const controller = new ManagedHookActivationController(session);
+        const run = vi.fn(async () => 'completed');
+        const operation = controller.runHookOperation(
+          {
+            operationId: 'notification',
+            occurrenceId: 'notification',
+            originTurnId: null,
+          },
+          run,
+        );
+        if (recoverable) {
+          await expect(operation).resolves.toBe('completed');
+          expect(run).toHaveBeenCalledOnce();
+          expect(requests).toHaveLength(2);
+          const transaction = JSON.parse(requests[0]) as Record<
+            string,
+            unknown
+          >;
+          expect(
+            server.commits.filter(
+              (commit) =>
+                commit['transactionId'] === transaction['transactionId'],
+            ),
+          ).toHaveLength(1);
+          expect(session.authority.writesStopped).toBe(false);
+          expect(session.authority.currentActivation).toMatchObject({
+            ...session.activation,
+            phase: 'active',
+            epoch: 3,
+          });
+          expect(session.authority.currentActivationSubject?.type).not.toBe(
+            'hook_operation',
+          );
+          await expect(
+            controller.runTurn('next-turn', async () => 'accepted'),
+          ).resolves.toBe('accepted');
+        } else {
+          await expect(operation).rejects.toThrow('writes stopped');
+          expect(run).not.toHaveBeenCalled();
+          expect(requests).toHaveLength(failure === 'exhausted-503' ? 3 : 1);
+          expect(session.authority.writesStopped).toBe(true);
+          await expect(controller.runTurn('next-turn', run)).rejects.toThrow(
+            'current Session activation',
+          );
+        }
+        expect(requests.every((body) => body === requests[0])).toBe(true);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   it('commits staged resources and restores without a local transcript', async () => {
     const server = new FakeManagedSessionStore();
@@ -653,6 +1053,147 @@ describe('HTTP Managed Session store', () => {
         }),
       ]),
     );
+    const mcpTemplate = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-mcp-record-v1.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ).templates.mcp_configuration as McpConfiguration;
+    const commitMcp = (commandId: string, record: unknown) =>
+      first.authority.commitExtensionRecord(
+        {
+          operation: 'commitMcpConfiguration',
+          commandId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        { domain: 'mcp_configuration', record },
+        { class: 'trusted_entry' },
+      );
+    await commitMcp('configure-1', mcpTemplate);
+    const dispatched = {
+      ...mcpTemplate,
+      run: {
+        ...mcpTemplate.run,
+        state: 'running',
+        execution: 'dispatch_started',
+        runtime: { runtimeBindingId: 'binding', generation: '1' },
+      },
+    };
+    await commitMcp('configure-dispatch', dispatched);
+    const catalogRef = await first.resources.publish(
+      'mcp-catalog',
+      Buffer.from('{"tools":[]}'),
+    );
+    const configured = {
+      ...dispatched,
+      catalogRef,
+      catalogRevision: 1,
+      connectionGeneration: 1,
+      run: { ...dispatched.run, state: 'settled', execution: 'settled' },
+    };
+    await commitMcp('configure-settled', configured);
+    expect(server.commits.at(-1)?.['resources']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          resourceId: catalogRef.resourceId,
+          bytesBase64: Buffer.from('{"tools":[]}').toString('base64'),
+        }),
+      ]),
+    );
+    const hookTemplates = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-hook-record-v1.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ).templates as {
+      hook_registration: HookRegistration;
+      hook_execution: HookExecution;
+    };
+    const registration = { ...hookTemplates.hook_registration, catalogRef };
+    const commitHook = (
+      commandId: string,
+      domain: 'hook_registration' | 'hook_execution',
+      record: unknown,
+    ) =>
+      first.authority.commitExtensionRecord(
+        {
+          operation: 'commitHookRecord',
+          commandId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'b'.repeat(64),
+        },
+        { domain, record },
+        { class: 'trusted_entry' },
+      );
+    for (const state of ['admitted', 'running', 'settled'] as const)
+      await commitHook(`register-${state}`, 'hook_registration', {
+        ...registration,
+        run: { ...registration.run, state },
+      });
+    const orphanRef = await first.resources.publish(
+      'untrusted-user-object',
+      Buffer.from('{}'),
+    );
+    const messageCases = [
+      [{ role: 'user', content: 'small snapshot' }],
+      [{ role: 'user', content: '😀'.repeat(40_000) }],
+    ];
+    for (const [index, messages] of messageCases.entries()) {
+      const bytes = Buffer.from(JSON.stringify(messages));
+      const parts: ManagedSessionDurableRef[] = [];
+      if (bytes.length > 60 * 1024) {
+        for (let offset = 0; offset < bytes.length; offset += 60 * 1024)
+          parts.push(
+            await first.resources.publish(
+              'managed-hook-message-part',
+              bytes.subarray(offset, offset + 60 * 1024),
+            ),
+          );
+      }
+      const messagesRef = await first.resources.publish(
+        parts.length ? 'managed-hook-message-chunks' : 'managed-hook-messages',
+        parts.length ? Buffer.from(JSON.stringify({ parts })) : bytes,
+      );
+      const planRef = await first.resources.publish(
+        'managed-hook-plan',
+        Buffer.from(
+          JSON.stringify({
+            input: { userObject: orphanRef },
+            messagesRef,
+          }),
+        ),
+      );
+      const executionId = `messages-${index}`;
+      await commitHook(executionId, 'hook_execution', {
+        ...hookTemplates.hook_execution,
+        hookExecutionId: executionId,
+        occurrenceId: executionId,
+        planRef,
+        inputRef: catalogRef,
+        onceKey: null,
+        run: { ...hookTemplates.hook_execution.run, effectId: executionId },
+      });
+      const uploaded = server.commits.at(-1)!['resources'] as Array<{
+        resourceId: string;
+      }>;
+      expect(uploaded.map((ref) => ref.resourceId)).toEqual(
+        expect.arrayContaining([
+          planRef.resourceId,
+          messagesRef.resourceId,
+          ...parts.map((ref) => ref.resourceId),
+        ]),
+      );
+      expect(uploaded.map((ref) => ref.resourceId)).not.toContain(
+        orphanRef.resourceId,
+      );
+    }
     const views = first.authority.taskViews();
     expect(views).toHaveLength(1);
     await first.close();
@@ -660,8 +1201,41 @@ describe('HTTP Managed Session store', () => {
     const restored = await open('harness-b', TOKEN_B);
     expect(restored.authority.taskViews()).toEqual(views);
     expect(
+      restored.authority.extensionRecordsInDomain('mcp_configuration')[0],
+    ).toMatchObject({
+      task: null,
+      record: configured,
+    });
+    expect(await restored.resources.read(catalogRef)).toEqual(
+      Buffer.from('{"tools":[]}'),
+    );
+    expect(
       restored.authority.extensionRecord('monitor_run', 'monitor-1'),
     ).toMatchObject({ revision: 1, recordRef: committed.recordRef });
+    for (const [index, messages] of messageCases.entries()) {
+      const execution = restored.authority.extensionRecord(
+        'hook_execution',
+        `messages-${index}`,
+      )!.record as HookExecution;
+      const plan = JSON.parse(
+        (await restored.resources.read(execution.planRef)).toString(),
+      ) as { messagesRef: ManagedSessionDurableRef };
+      let bytes = await restored.resources.read(plan.messagesRef);
+      if (plan.messagesRef.kind === 'managed-hook-message-chunks') {
+        const manifest = JSON.parse(bytes.toString()) as {
+          parts: ManagedSessionDurableRef[];
+        };
+        bytes = Buffer.concat(
+          await Promise.all(
+            manifest.parts.map((ref) => restored.resources.read(ref)),
+          ),
+        );
+      }
+      expect(JSON.parse(bytes.toString('utf8'))).toEqual(messages);
+    }
+    await expect(restored.resources.read(orphanRef)).rejects.toMatchObject({
+      status: 404,
+    });
     await restored.close();
   });
 

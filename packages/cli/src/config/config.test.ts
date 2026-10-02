@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import * as Mem0Settings from './mem0-settings.js';
 import {
   isCrossSessionMessagingActive,
   isCrossSessionMessagingEnabled,
@@ -519,6 +520,30 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '--insecure'];
     const argv = await parseArguments();
     expect(argv.insecure).toBe(true);
+  });
+
+  it('parses the private ACP execution engine and refuses other engines', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'managed',
+    ];
+    expect((await parseArguments()).acpExecutionEngine).toBe('managed');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'legacy',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    mockExit.mockRestore();
   });
 
   it('rejects --json-schema combined with --acp', async () => {
@@ -1280,6 +1305,136 @@ describe('loadCliConfig', () => {
     vi.unstubAllEnvs();
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
+  });
+
+  it.each([undefined, 'workspace', 'project'] as const)(
+    'registers bundled Mem0 read-only over repository MCP configuration: %s',
+    async (scope) => {
+      const server = {
+        command: process.execPath,
+        args: ['mem0/main.js'],
+        includeTools: ['context_search'],
+      };
+      const createServer = vi
+        .spyOn(Mem0Settings, 'createBundledMem0Server')
+        .mockReturnValue(server);
+      process.argv = ['node', 'script.js', '-p', 'hello'];
+      const argv = await parseArguments();
+      const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
+      await loadCliConfig(
+        {
+          memory: { mem0 },
+          ...(scope
+            ? {
+                mcpServers: {
+                  'external-context': { command: 'repo-mcp', scope },
+                },
+              }
+            : {}),
+        },
+        argv,
+      );
+      expect(createServer).toHaveBeenCalledWith(
+        mem0,
+        expect.any(String),
+        false,
+      );
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          mcpServers: expect.objectContaining({ 'external-context': server }),
+        }),
+      );
+    },
+  );
+
+  it('rejects a manual operator external-context server alongside bundled Mem0', async () => {
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue({
+      command: process.execPath,
+      args: ['mem0/main.js'],
+    });
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: { 'external-context': { command: 'operator-mcp' } },
+        },
+        await parseArguments(),
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server',
+    );
+  });
+
+  it('does not create a bundled server for an explicitly disabled Mem0', async () => {
+    const createServer = vi.spyOn(Mem0Settings, 'createBundledMem0Server');
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await loadCliConfig(
+      { memory: { mem0: null } } as unknown as Settings,
+      await parseArguments(),
+    );
+    expect(createServer).not.toHaveBeenCalled();
+  });
+
+  it('overrides a workspace-scoped external-context server instead of aborting startup', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // A trusted repository's own `.qwen/settings.json` contributes this entry
+    // stamped `scope: 'workspace'` (settings.ts tagMcpServerScope). It is not
+    // operator configuration, so it must not wedge every operator who set
+    // `memory.mem0` in a folder they cannot fix; the built-in binding overrides
+    // it because assembleMcpServers spreads topTierMcpServers last — the same
+    // thing that already happens to a `.mcp.json` entry of that name.
+    await loadCliConfig(
+      {
+        memory: { mem0: { baseUrl: 'https://mem0.example' } },
+        mcpServers: {
+          'external-context': {
+            command: 'node',
+            args: ['.qwen/shim/loader.js'],
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mcpServers: expect.objectContaining({ 'external-context': server }),
+      }),
+    );
+  });
+
+  it('still rejects an operator-scoped external-context server next to memory.mem0', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // No `scope` = user/default settings, i.e. the operator's own binding: that
+    // conflict stays loud, so dropping the provenance check cannot pass.
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: {
+            'external-context': { command: 'node', args: ['loader.js'] },
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
   });
 
   it.each([undefined, '1'])(
@@ -4085,19 +4240,42 @@ describe('mergeExcludeTools', () => {
     expect(codeMode.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
+    'should disable CodeModeOnly and Freeform in %s mode',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
+        { tools: { codeModeOnly: true, freeform: true } },
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 

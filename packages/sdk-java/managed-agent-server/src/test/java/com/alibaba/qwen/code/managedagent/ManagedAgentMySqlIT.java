@@ -23,6 +23,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +40,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -64,7 +67,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class ManagedAgentMySqlIT {
     @Test
     @Order(1)
-    void upgradesAndExercisesStoresOnMySql() {
+    void upgradesAndExercisesStoresOnMySql() throws IOException {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
@@ -86,11 +89,16 @@ class ManagedAgentMySqlIT {
         LegacyLifecycleCommands.Sessions lifecycle =
                 LegacyLifecycleCommands.insert(jdbc, "mysql-lifecycle");
         Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration")
+                .target(MigrationVersion.fromVersion("27")).load().migrate();
+        LegacyHookRecords.insert(jdbc, "mysql-hooks", "session_hooks");
+        Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         LegacyEvents.assertBackfilled(jdbc, "mysql-upgrade",
                 "session_upgrade");
         LegacyLifecycleCommands.assertMigrated(jdbc, "mysql-lifecycle",
                 lifecycle);
+        LegacyHookRecords.assertBackfilled(jdbc, "mysql-hooks", "session_hooks");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id = ?"
                         + " AND session_id = ? AND consumer_name = ?",
@@ -874,12 +882,149 @@ class ManagedAgentMySqlIT {
         assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
     }
 
+    @Test
+    @Order(11)
+    void pagesTurnsNewestFirstOnMySql() {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        String tenant = "mysql-turns-" + UUID.randomUUID();
+        String sessionId = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
+                null, List.of(), null).sessionId();
+        // Turn IDs that differ only by case compare by their bytes, as the
+        // binary collation stores them. The oldest Turn has the largest ID.
+        for (String[] turn : List.of(new String[] {"turn_z", "500"},
+                new String[] {"turn_a", "1000"},
+                new String[] {"turn_B", "5000"},
+                new String[] {"turn_b", "5000"},
+                new String[] {"turn_c", "9000"})) {
+            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                            + " session_id, turn_id, prompt_id, input_json,"
+                            + " payload_digest, status, created_at,"
+                            + " updated_at, completed_at) VALUES (?, ?, ?, ?,"
+                            + " 'not json', 'digest', 'COMPLETED', ?, ?, ?)",
+                    tenant, sessionId, turn[0], UUID.randomUUID().toString(),
+                    Long.parseLong(turn[1]), Long.parseLong(turn[1]),
+                    Long.parseLong(turn[1]) + 1);
+        }
+
+        List<String> order = new ArrayList<>();
+        TurnPage page = store.listTurns(tenant, sessionId, null, null, 2);
+        while (true) {
+            page.turns().forEach(turn -> order.add(turn.turnId()));
+            if (!page.hasMore()) {
+                break;
+            }
+            TurnSummary last = page.turns().getLast();
+            page = store.listTurns(tenant, sessionId, last.createdAt(),
+                    last.turnId(), 2);
+        }
+        assertThat(order).containsExactly("turn_c", "turn_b", "turn_B",
+                "turn_a", "turn_z");
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B"))
+                .get().extracting(TurnSummary::createdAt,
+                        TurnSummary::completedAt)
+                .containsExactly(5000L, 5001L);
+        assertThat(store.findTurnSummary(tenant, sessionId, "TURN_B"))
+                .isEmpty();
+        // The collation pads with spaces; the lookup still wants the exact ID.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = 'turn_B  '",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B  "))
+                .isEmpty();
+        assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null,
+                null, 10).turns()).isEmpty();
+    }
+
     private static int count(JdbcTemplate jdbc, String table, String tenant,
             String session) {
         Integer rows = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
         return rows == null ? 0 : rows;
+    }
+
+    @Test
+    @Order(11)
+    void originalWorkspaceHoldersRecoverWithoutCurrentAuthority() throws Exception {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var jdbc = new JdbcTemplate(source);
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        var authority = new com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore(jdbc,
+                new DataSourceTransactionManager(source));
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
+    }
+
+    @Test
+    @Order(12)
+    void admitsHookExecutionsWithoutReadingTheirHistoryOnMySql() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        String session = "mysql-hooks-" + UUID.randomUUID();
+        HookAdmissionHistory history = new HookAdmissionHistory(dataSource,
+                "mysql-hook-index", "mysql-hook-workspace", session);
+        // Equal modulo 4, so both admissions run the same checks.
+        HookAdmissionHistory.Admission early = history.admitUntil(18);
+        HookAdmissionHistory.Admission late = history.admitUntil(2002);
+        System.out.printf("Hook admission at %d executions: %d SELECTs,"
+                        + " %d statements, %.1f ms; at %d: %d SELECTs,"
+                        + " %d statements, %.1f ms%n", early.history(),
+                early.selects(), early.statements(), early.nanos() / 1e6,
+                late.history(), late.selects(), late.statements(),
+                late.nanos() / 1e6);
+        assertThat(early.history()).isEqualTo(17);
+        assertThat(late.history()).isEqualTo(2001);
+        assertThat(early.selects()).as("lookups admitting execution %d",
+                early.history()).isPositive();
+        assertThat(early.statements()).isPositive();
+        assertThat(late.selects()).isEqualTo(early.selects());
+        assertThat(late.statements()).isEqualTo(early.statements());
+
+        // Each admission lookup is an index lookup, not a scan of the
+        // Session's Hook records. The lookups are the statements the store
+        // ran above.
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.queryForList("ANALYZE TABLE qwen_managed_session_extension_record");
+        String scopeKey = sha256("mysql-hook-index\u0000" + session);
+        for (Object[] lookup : List.of(
+                new Object[] {"uq_managed_session_hook_once",
+                        "hook_once_key_hash = ?", sha256("once-7")},
+                new Object[] {"uq_managed_session_hook_ordinal",
+                        "hook_occurrence_hash = ? AND hook_ordinal = ?",
+                        sha256("occurrence-7"), 1},
+                new Object[] {"uq_managed_session_hook_ordinal",
+                        "hook_occurrence_hash = ?", sha256("occurrence-7")},
+                new Object[] {"idx_managed_session_hook_definition",
+                        "hook_definition_hash = ?", sha256("catalog-1\u00001")})) {
+            Object[] arguments = new Object[lookup.length - 1];
+            arguments[0] = scopeKey;
+            System.arraycopy(lookup, 2, arguments, 1, lookup.length - 2);
+            String query = "SELECT record_resource_id FROM"
+                    + " qwen_managed_session_extension_record WHERE"
+                    + " session_scope_key = ? AND " + lookup[1] + " LIMIT 1";
+            assertThat(history.sql()).as((String) lookup[1]).contains(query);
+            // MySQL may intersect the index with the primary key; either way
+            // the lookup reads the index, never every row of the table.
+            assertThat(jdbc.queryForList("EXPLAIN " + query, arguments))
+                    .as((String) lookup[1]).singleElement().satisfies(plan -> {
+                        assertThat(plan.get("type")).isNotIn("ALL", "index");
+                        assertThat(String.valueOf(plan.get("key")).split(","))
+                                .contains((String) lookup[0]);
+                    });
+        }
     }
 
     private static Process startWorkspaceProcess(String action,

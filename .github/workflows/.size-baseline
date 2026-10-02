@@ -19,7 +19,7 @@
 9256 build-and-publish-image.yml
 50773 cd-cua-driver.yml
 2222 cd-mobile-mcp.yml
-143026 ci.yml
+147136 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 1634 desktop-packaging-check.yml
@@ -66,6 +66,7 @@
 11206 sync-release-to-oss.yml
 2676 tui-parity.yml
 7187 update-ecs-runner-qwen.yml
+6206 verify-landlock-helper.yml
 2307 web-shell-visuals-cleanup.yml
 20047 web-shell-visuals-publish.yml
 17127 web-shell-visuals.yml

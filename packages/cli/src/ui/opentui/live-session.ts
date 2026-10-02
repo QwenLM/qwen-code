@@ -32,6 +32,7 @@ import {
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
+  computeInitialTurnFromHistory,
   CoreToolScheduler,
   didWriteProjectContextFile,
   formatFullTurnVisionNotice,
@@ -195,7 +196,16 @@ export function resetPromptCountForTesting(): void {
  * file checkpoints are recorded under.
  */
 export function nextLivePromptId(config: Config): string {
-  const id = `${config.getSessionId()}########${promptCount}`;
+  const sessionId = config.getSessionId();
+  const resumedRecords =
+    config.getResumedSessionData?.()?.conversation.messages;
+  if (resumedRecords?.length) {
+    promptCount = Math.max(
+      promptCount,
+      computeInitialTurnFromHistory(resumedRecords, sessionId) + 1,
+    );
+  }
+  const id = `${sessionId}########${promptCount}`;
   promptCount += 1;
   return id;
 }

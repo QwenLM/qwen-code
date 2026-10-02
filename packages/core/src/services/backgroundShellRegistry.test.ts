@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
@@ -56,15 +56,13 @@ afterEach(() => {
 });
 
 function makeOutputFile(content: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-notification-'));
-  tmpDirs.push(dir);
-  const file = join(dir, 'shell.output');
+  const file = join(makeTempDir(), 'shell.output');
   writeFileSync(file, content);
   return file;
 }
 
-function makeTempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-notification-'));
+function makeTempDir(prefix = 'qwen-shell-notification-'): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
   tmpDirs.push(dir);
   return dir;
 }
@@ -82,27 +80,32 @@ function makeEntry(
     abortController: new AbortController(),
     ...overrides,
     // Every register/complete/fail/cancel mirrors the entry into a
-    // `<outputPath>.status` sidecar, so the default outputPath decides where
-    // that write lands. A fixed `/tmp/s1.output` pointed every entry in this
-    // file — across tests, across workers, across CI jobs — at the single
-    // path `/tmp/s1.status`. `/tmp` is sticky, so once that file belongs to
-    // another uid the atomic rename fails EPERM, and `renameWithRetrySync`
+    // `<outputPath>.status` sidecar. A fixed `/tmp/s1.output` sent every
+    // entry (across tests, workers and CI jobs) to the single path
+    // `/tmp/s1.status`; `/tmp` is sticky, so once that file belongs to
+    // another uid the atomic rename fails EPERM and `renameWithRetrySync`
     // burns its full 50+100+200ms backoff before the registry swallows the
-    // error. Give each entry its own directory instead: no shared state, and
-    // the sidecar write actually succeeds.
+    // error. A directory per entry shares no state and the write succeeds.
     outputPath:
       overrides.outputPath ?? join(makeTempDir(), `shell-${shellId}.output`),
   };
 }
 
 describe('BackgroundShellRegistry', () => {
+  let reg: BackgroundShellRegistry;
+  beforeEach(() => {
+    reg = new BackgroundShellRegistry();
+  });
+  const add = (...ids: string[]) => {
+    for (const shellId of ids) reg.register(makeEntry({ shellId }));
+  };
+
   it('gives each entry a unique default outputPath', () => {
     expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
   });
 
   describe('register / get / getAll', () => {
     it('captures the Todo work-chain owner at registration', () => {
-      const reg = new BackgroundShellRegistry();
       const entry = todoWorkChainContext.run('work-chain-1', () =>
         reg.register(makeEntry()),
       );
@@ -111,19 +114,16 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('round-trips a registered entry by id', () => {
-      const reg = new BackgroundShellRegistry();
       const e = makeEntry({ shellId: 'a' });
       reg.register(e);
       expect(reg.get('a')).toBe(e);
     });
 
     it('returns undefined for unknown id', () => {
-      const reg = new BackgroundShellRegistry();
       expect(reg.get('missing')).toBeUndefined();
     });
 
     it('lists all entries via getAll', () => {
-      const reg = new BackgroundShellRegistry();
       const a = makeEntry({ shellId: 'a' });
       const b = makeEntry({ shellId: 'b' });
       reg.register(a);
@@ -137,8 +137,7 @@ describe('BackgroundShellRegistry', () => {
 
   describe('complete', () => {
     it('transitions running → completed with exitCode and endTime', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.complete('a', 0, 2000);
       const e = reg.get('a')!;
       expect(e.status).toBe('completed');
@@ -147,8 +146,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op when entry is not running', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.cancel('a', 1500);
       reg.complete('a', 0, 2000);
       const e = reg.get('a')!;
@@ -157,15 +155,13 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op for unknown id', () => {
-      const reg = new BackgroundShellRegistry();
       expect(() => reg.complete('missing', 0, 0)).not.toThrow();
     });
   });
 
   describe('fail', () => {
     it('transitions running → failed with error and endTime', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.fail('a', 'spawn error', 2000);
       const e = reg.get('a')!;
       expect(e.status).toBe('failed');
@@ -174,8 +170,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op when entry is not running', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.complete('a', 0, 1500);
       reg.fail('a', 'late error', 2000);
       const e = reg.get('a')!;
@@ -186,52 +181,42 @@ describe('BackgroundShellRegistry', () => {
 
   describe('callbacks', () => {
     it('clears the status callback only when identities match', () => {
-      const reg = new BackgroundShellRegistry();
       const installed = vi.fn();
       const replacement = vi.fn();
 
       reg.setStatusChangeCallback(installed);
       reg.clearStatusChangeCallback(replacement);
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       expect(installed).toHaveBeenCalledOnce();
 
       reg.setStatusChangeCallback(replacement);
       reg.clearStatusChangeCallback(installed);
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('b');
       expect(replacement).toHaveBeenCalledOnce();
 
       reg.clearStatusChangeCallback(replacement);
-      reg.register(makeEntry({ shellId: 'c' }));
+      add('c');
       expect(replacement).toHaveBeenCalledOnce();
     });
 
     it('fires register callback synchronously when an entry is added', () => {
-      const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
       reg.setRegisterCallback((entry) => seen.push(entry.shellId));
-
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
-
+      add('a', 'b');
       expect(seen).toEqual(['a', 'b']);
     });
 
     it('fires statusChange callback on register too (mirrors BackgroundTaskRegistry)', () => {
-      const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
       reg.setStatusChangeCallback((entry) => {
         if (entry) seen.push(entry.shellId);
       });
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('a', 'b');
       expect(seen).toEqual(['a', 'b']);
     });
 
     it('fires statusChange callback on complete / fail / cancel', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
-      reg.register(makeEntry({ shellId: 'c' }));
+      add('a', 'b', 'c');
       const transitions: Array<{ id: string; status: string }> = [];
       reg.setStatusChangeCallback((entry) => {
         if (entry) {
@@ -251,12 +236,11 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('does not fire statusChange when a transition is a no-op', () => {
-      const reg = new BackgroundShellRegistry();
       const transitions: string[] = [];
       reg.setStatusChangeCallback((entry) => {
         if (entry) transitions.push(entry.shellId);
       });
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.complete('a', 0, 1000);
       transitions.length = 0;
 
@@ -269,34 +253,30 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('keeps the registry usable when a callback throws', () => {
-      const reg = new BackgroundShellRegistry();
       reg.setRegisterCallback(() => {
         throw new Error('subscriber blew up');
       });
 
-      expect(() => reg.register(makeEntry({ shellId: 'a' }))).not.toThrow();
+      expect(() => add('a')).not.toThrow();
       expect(reg.get('a')!.status).toBe('running');
     });
 
     it('clears subscriber when set to undefined', () => {
-      const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
       reg.setRegisterCallback((e) => seen.push(e.shellId));
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.setRegisterCallback(undefined);
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('b');
       expect(seen).toEqual(['a']);
     });
 
     it('setNotificationCallback(undefined) clears the callback', () => {
-      // useLlmStream's cleanup relies on this contract to avoid
-      // leaked callbacks firing into torn-down React state on unmount.
-      // If a future refactor breaks the clearing path, stale callbacks
-      // would fire silently — no test would catch it without this guard.
-      const reg = new BackgroundShellRegistry();
+      // useLlmStream's cleanup relies on this contract to avoid leaked
+      // callbacks firing into torn-down React state on unmount; without this
+      // guard a broken clearing path would fire stale callbacks silently.
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.setNotificationCallback(undefined);
       reg.complete('a', 0, 2000);
       expect(callback).not.toHaveBeenCalled();
@@ -304,25 +284,33 @@ describe('BackgroundShellRegistry', () => {
   });
 
   describe('notifications', () => {
-    it('emits one task-notification when a shell completes', () => {
-      const reg = new BackgroundShellRegistry();
+    // Binds a notification callback, registers one shell and settles it
+    // (default: exit 0 at t=2000); returns the callback and its first call.
+    function notify(
+      overrides: Partial<ShellTaskRegistration> & { shellId: string },
+      settle = (r: BackgroundShellRegistry, id: string) =>
+        r.complete(id, 0, 2000),
+      registry = reg,
+    ) {
       const callback = vi.fn();
-      const outputPath = makeOutputFile('first line\nfinal result\n');
-      reg.setNotificationCallback(callback);
-      reg.register(
-        makeEntry({
-          shellId: 'a',
-          command: 'npm test',
-          cwd: '/repo',
-          outputPath,
-          pid: 1234,
-        }),
-      );
+      registry.setNotificationCallback(callback);
+      registry.register(makeEntry(overrides));
+      settle(registry, overrides.shellId);
+      const [displayText, modelText, meta] = callback.mock.calls[0] ?? [];
+      return { callback, displayText, modelText, meta };
+    }
 
-      reg.complete('a', 0, 2000);
+    it('emits one task-notification when a shell completes', () => {
+      const outputPath = makeOutputFile('first line\nfinal result\n');
+      const { callback, displayText, modelText, meta } = notify({
+        shellId: 'a',
+        command: 'npm test',
+        cwd: '/repo',
+        outputPath,
+        pid: 1234,
+      });
 
       expect(callback).toHaveBeenCalledTimes(1);
-      const [displayText, modelText, meta] = callback.mock.calls[0];
       expect(displayText).toBe('Background shell "npm test" completed.');
       expect(modelText).toContain('<task-notification>');
       expect(modelText).toContain('<task-id>a</task-id>');
@@ -344,17 +332,11 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('truncates long commands for display, summary, and model XML', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
       const command = `node -e ${'a'.repeat(700)}`;
       const displayCommand = command.slice(0, 77) + '...';
       const modelCommand = command.slice(0, 497) + '...';
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', command }));
+      const { displayText, modelText } = notify({ shellId: 'a', command });
 
-      reg.complete('a', 0, 2000);
-
-      const [displayText, modelText] = callback.mock.calls[0];
       expect(displayText).toBe(
         `Background shell "${displayCommand}" completed.`,
       );
@@ -368,30 +350,22 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('strips BIDI OVERRIDES from the OUTPUT TAIL — the biggest field', () => {
-      // The sibling test below asserts modelText-wide absence, which reads
-      // as whole-envelope coverage but is not: its fixture shell has no
-      // output file, so <output-tail> renders the canned unreadable form
-      // and is never exercised. The tail is the LARGEST
-      // attacker-controllable field — up to 8 KiB of a background shell's
-      // own output — and it renders through a different helper, which
-      // stripped C0/C1 but passed bidi overrides through verbatim
-      // (probe-verified). Newlines must survive the fix.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      reg.setNotificationCallback(callback);
-      // ALL NINE codepoints of both stripped ranges: pinning one per
-      // range let a one-character bound typo (0x202a→0x202b,
+      // The sibling test below asserts modelText-wide absence, but its shell
+      // has no output file, so <output-tail> renders the canned unreadable
+      // form and is never exercised. The tail is the LARGEST
+      // attacker-controllable field (up to 8 KiB of the shell's own output)
+      // and renders through a different helper that stripped C0/C1 but
+      // passed bidi overrides verbatim (probe-verified). Newlines must
+      // survive the fix. The fixture holds ALL NINE codepoints of both
+      // ranges: one per range let a bound typo (0x202a→0x202b,
       // 0x2066→0x2067) ship green (probe-verified).
       const outputPath = makeOutputFile(
-        'line one\nharmless\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069 two\n',
+        'line one\nharmless‪‫‬‭‮evil⁦⁧⁨⁩ two\n',
       );
-      reg.register(makeEntry({ shellId: 'tail-bidi', outputPath }));
+      const { modelText } = notify({ shellId: 'tail-bidi', outputPath });
 
-      reg.complete('tail-bidi', 0, 2000);
-
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<output-tail');
-      const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
+      const bidi = '‪‫‬‭‮⁦⁧⁨⁩';
       for (const ch of bidi) {
         expect(modelText).not.toContain(ch);
       }
@@ -402,52 +376,38 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
-      // The shared helper this renders through removes U+202A-202E and
-      // U+2066-2069 as well as C0/C1 — the registry's own former copy did
-      // not. Those characters reorder how a path DISPLAYS without changing
-      // its bytes, so `/tmp/a<RLO>evil<PDI>/out.log` can render as
-      // something else entirely in a model-facing envelope. This pins the
-      // stronger behaviour that came with the shared helper.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      reg.setNotificationCallback(callback);
-      const outputPath = join(makeTempDir(), 'a\u202Eevil\u2069.log');
-      reg.register(
-        makeEntry({
-          shellId: 'bidi',
-          // command and cwd render through the same shared helper — pin
-          // them too, so a field-local bidi-blind sanitizer fails here.
-          command: 'cat \u202Efd\u2069.txt',
-          cwd: '/repo/\u202Efd\u2069',
-          outputPath,
-        }),
-      );
+      // The shared helper this renders through strips U+202A-202E and
+      // U+2066-2069 as well as C0/C1 (the registry's former copy did not).
+      // They reorder how a path DISPLAYS without changing its bytes, so
+      // `/tmp/a<RLO>evil<PDI>/out.log` can render as something else entirely
+      // in a model-facing envelope; this pins the stronger shared behaviour.
+      const outputPath = join(makeTempDir(), 'a‮evil⁩.log');
+      const { modelText } = notify({
+        shellId: 'bidi',
+        // command and cwd render through the same shared helper — pin
+        // them too, so a field-local bidi-blind sanitizer fails here.
+        command: 'cat ‮fd⁩.txt',
+        cwd: '/repo/‮fd⁩',
+        outputPath,
+      });
 
-      reg.complete('bidi', 0, 2000);
-
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain(expectedOutputFileElement(outputPath));
-      expect(modelText).not.toContain('\u202E');
-      expect(modelText).not.toContain('\u2069');
+      expect(modelText).not.toContain('‮');
+      expect(modelText).not.toContain('⁩');
     });
 
     it('escapes XML and strips display control characters on failure', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      reg.setNotificationCallback(callback);
       const outputPath = join(makeTempDir(), 'out&err.log');
-      reg.register(
-        makeEntry({
+      const { displayText, modelText } = notify(
+        {
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
           outputPath,
-        }),
+        },
+        (r, id) => r.fail(id, 'bad <thing>\x1B[31m ‮evil⁩', 2000),
       );
 
-      reg.fail('a&b', 'bad <thing>\x1B[31m \u202Eevil\u2069', 2000);
-
-      const [displayText, modelText] = callback.mock.calls[0];
       expect(displayText).toBe('Background shell "echo "<script>"" failed.');
       expect(modelText).toContain('<task-id>a&amp;b</task-id>');
       expect(modelText).toContain(
@@ -459,74 +419,50 @@ describe('BackgroundShellRegistry', () => {
       );
       // The bidi pair in the fixture pins the fourth render site: <result>
       // is the failed shell's error string and renders only on this path.
-      expect(modelText).not.toContain('\u202E');
-      expect(modelText).not.toContain('\u2069');
+      expect(modelText).not.toContain('‮');
+      expect(modelText).not.toContain('⁩');
       // Assert the whole element, not just the tail: the temp prefix is
       // random but the escaping is what this test is about.
       expect(modelText).toContain(expectedOutputFileElement(outputPath));
     });
 
     it('limits output-tail to the retained byte budget', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
       const outputPath = makeOutputFile(
         'prefix-' +
           'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES) +
           '\nlast line\n',
       );
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', outputPath }));
+      const { modelText } = notify({ shellId: 'a', outputPath });
 
-      reg.complete('a', 0, 2000);
-
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<output-tail truncated="true">');
       expect(modelText).toContain('last line</output-tail>');
       expect(modelText).not.toContain('prefix-');
     });
 
     it('skips leading UTF-8 continuation bytes at the truncation boundary', () => {
-      // When the byte budget cuts a multi-byte UTF-8 codepoint in half,
-      // the raw read would produce a U+FFFD replacement character.
-      // Place a 3-byte '€' (U+20AC → 0xE2 0x82 0xAC) so that the
-      // truncation offset lands on its second byte.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      const dir = mkdtempSync(join(tmpdir(), 'qwen-shell-utf8-'));
-      tmpDirs.push(dir);
-      const file = join(dir, 'shell.output');
+      // A byte budget that cuts a multi-byte codepoint in half would make the
+      // raw read produce U+FFFD. The 3-byte '€' (U+20AC → 0xE2 0x82 0xAC) is
+      // placed so the truncation offset lands on its second byte.
+      const file = join(makeTempDir('qwen-shell-utf8-'), 'shell.output');
       const padding = 'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES - 1);
       // 1 byte of 'a' + 2 continuation bytes = 3 bytes before the clean text
-      const content = padding + '\u20AC' + '\nfinal output\n';
-      writeFileSync(file, content);
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', outputPath: file }));
+      writeFileSync(file, padding + '€' + '\nfinal output\n');
+      const { modelText } = notify({ shellId: 'a', outputPath: file });
 
-      reg.complete('a', 0, 2000);
-
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<output-tail truncated="true">');
       expect(modelText).toContain('final output</output-tail>');
       // Must not contain the UTF-8 replacement character
-      expect(modelText).not.toContain('\uFFFD');
+      expect(modelText).not.toContain('�');
     });
 
     it('strips control and bidi characters from cwd and output-file XML fields', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      reg.setNotificationCallback(callback);
       const dir = makeTempDir();
-      reg.register(
-        makeEntry({
-          shellId: 'a',
-          cwd: '/repo\x01\x02/work',
-          outputPath: join(dir, 'out\x03\u202e.log'),
-        }),
-      );
+      const { modelText } = notify({
+        shellId: 'a',
+        cwd: '/repo\x01\x02/work',
+        outputPath: join(dir, 'out\x03‮.log'),
+      });
 
-      reg.complete('a', 0, 2000);
-
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
       // Whole element: pins exactly which characters are stripped and that
       // the rest of the path survives intact.
@@ -536,25 +472,27 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
-      expect(modelText).not.toContain('\u202e');
+      expect(modelText).not.toContain('‮');
     });
 
-    const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
-
-    itNoFollow('does not follow symlinked output files', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
+    // An output path that is a symlink to a secret file.
+    function symlinkedOutput(): string {
       const dir = makeTempDir();
       const secretPath = join(dir, 'secret.txt');
       const outputPath = join(dir, 'shell.output');
       writeFileSync(secretPath, 'secret credentials');
       symlinkSync(secretPath, outputPath);
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', outputPath }));
+      return outputPath;
+    }
 
-      reg.complete('a', 0, 2000);
+    const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
 
-      const [, modelText] = callback.mock.calls[0];
+    itNoFollow('does not follow symlinked output files', () => {
+      const { modelText } = notify({
+        shellId: 'a',
+        outputPath: symlinkedOutput(),
+      });
+
       expect(modelText).not.toContain('secret credentials');
       expect(modelText).toContain('<output-tail error="unreadable"');
     });
@@ -568,11 +506,7 @@ describe('BackgroundShellRegistry', () => {
         // (the constant is `undefined` and `| (O_NOFOLLOW ?? 0)` collapses
         // to a plain open), so stub the constant away and pin that the
         // compensating check still refuses to read through the link (#8227).
-        const dir = makeTempDir();
-        const secretPath = join(dir, 'secret.txt');
-        const outputPath = join(dir, 'shell.output');
-        writeFileSync(secretPath, 'secret credentials');
-        symlinkSync(secretPath, outputPath);
+        const outputPath = symlinkedOutput();
 
         vi.resetModules();
         vi.doMock('node:fs', async (importOriginal) => {
@@ -587,14 +521,12 @@ describe('BackgroundShellRegistry', () => {
         try {
           const { BackgroundShellRegistry: RegistryWithoutNoFollow } =
             await import('./backgroundShellRegistry.js');
-          const reg = new RegistryWithoutNoFollow();
-          const callback = vi.fn();
-          reg.setNotificationCallback(callback);
-          reg.register(makeEntry({ shellId: 'a', outputPath }));
+          const { modelText } = notify(
+            { shellId: 'a', outputPath },
+            undefined,
+            new RegistryWithoutNoFollow(),
+          );
 
-          reg.complete('a', 0, 2000);
-
-          const [, modelText] = callback.mock.calls[0];
           expect(modelText).not.toContain('secret credentials');
           expect(modelText).toContain('<output-tail error="unreadable"');
         } finally {
@@ -608,66 +540,45 @@ describe('BackgroundShellRegistry', () => {
       // Guards the catch branch in `readOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the
       // error and the entry would never reach a terminal status.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      const dir = makeTempDir();
-      reg.setNotificationCallback(callback);
-      reg.register(
-        makeEntry({
-          shellId: 'a',
-          outputPath: join(dir, 'no-such-file.log'),
-        }),
+      const { callback, modelText } = notify(
+        { shellId: 'a', outputPath: join(makeTempDir(), 'no-such-file.log') },
+        (r, id) => expect(() => r.complete(id, 0, 2000)).not.toThrow(),
       );
 
-      expect(() => reg.complete('a', 0, 2000)).not.toThrow();
-
       expect(callback).toHaveBeenCalledTimes(1);
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<output-tail error="unreadable"');
       expect(reg.get('a')!.status).toBe('completed');
     });
 
     it('skips output-tail when outputPath is a directory (not a regular file)', () => {
       // Guards the `!stat.isFile()` early-return in `readOutputTail`.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
       const dir = makeTempDir();
       // A dir outputPath gets its `<dir>.status` sidecar as a sibling of
       // the temp dir, which the dir cleanup above never removes; tracking
       // it here lets afterEach delete it even if the assertions fail.
       tmpFiles.push(statusFilePathFor(dir));
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
-
-      reg.complete('a', 0, 2000);
+      const { callback, modelText } = notify({ shellId: 'a', outputPath: dir });
 
       expect(callback).toHaveBeenCalledTimes(1);
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-tail');
     });
 
     it('skips output-tail when the output file is empty (stat.size === 0)', () => {
       // Guards the `stat.size <= 0` early-return in `readOutputTail`.
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      const outputPath = makeOutputFile('');
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a', outputPath }));
-
-      reg.complete('a', 0, 2000);
+      const { callback, modelText } = notify({
+        shellId: 'a',
+        outputPath: makeOutputFile(''),
+      });
 
       expect(callback).toHaveBeenCalledTimes(1);
-      const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-tail');
     });
 
     it('keeps the registry usable when the notification callback throws', () => {
-      const reg = new BackgroundShellRegistry();
       reg.setNotificationCallback(() => {
         throw new Error('subscriber blew up');
       });
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('a', 'b');
 
       expect(() => reg.complete('a', 0, 2000)).not.toThrow();
       expect(() => reg.fail('b', 'boom', 3000)).not.toThrow();
@@ -685,23 +596,19 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('does not emit more than once for late terminal transitions', () => {
-      const reg = new BackgroundShellRegistry();
-      const callback = vi.fn();
-      reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a' }));
-
-      reg.complete('a', 0, 2000);
-      reg.fail('a', 'late failure', 3000);
-      reg.cancel('a', 4000);
+      const { callback } = notify({ shellId: 'a' }, (r, id) => {
+        r.complete(id, 0, 2000);
+        r.fail(id, 'late failure', 3000);
+        r.cancel(id, 4000);
+      });
 
       expect(callback).toHaveBeenCalledTimes(1);
     });
 
     it('waits until cancel() to notify after requestCancel()', () => {
-      const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
 
       reg.requestCancel('a');
 
@@ -721,11 +628,9 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('does not emit notifications from abortAll shutdown cleanup', () => {
-      const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('a', 'b');
 
       reg.abortAll();
 
@@ -735,7 +640,6 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('redelivers a retained terminal notification when the same registry is rebound', () => {
-      const reg = new BackgroundShellRegistry();
       const outputPath = makeOutputFile('done\n');
       reg.register(
         makeEntry({ shellId: 'a', command: 'npm test', outputPath }),
@@ -761,11 +665,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('redelivers retained terminal states in settle order once and suppresses shutdown cancellations', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
-      reg.register(makeEntry({ shellId: 'c' }));
-      reg.register(makeEntry({ shellId: 'shutdown' }));
+      add('a', 'b', 'c', 'shutdown');
       reg.cancel('c', 2000);
       reg.fail('b', 'boom', 2001);
       reg.complete('a', 0, 2002);
@@ -787,9 +687,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('does not replay a still-running shell and still delivers its real terminal notification', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'running' }));
-      reg.register(makeEntry({ shellId: 'done' }));
+      add('running', 'done');
       reg.complete('done', 0, 2000);
 
       const callback = vi.fn();
@@ -808,11 +706,15 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  const addWithController = (shellId: string) => {
+    const ac = new AbortController();
+    reg.register(makeEntry({ shellId, abortController: ac }));
+    return ac;
+  };
+
   describe('requestCancel', () => {
     it('aborts the signal but leaves status running and endTime undefined', () => {
-      const reg = new BackgroundShellRegistry();
-      const ac = new AbortController();
-      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+      const ac = addWithController('a');
 
       reg.requestCancel('a');
 
@@ -828,9 +730,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op on a terminal entry', () => {
-      const reg = new BackgroundShellRegistry();
-      const ac = new AbortController();
-      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+      const ac = addWithController('a');
       reg.complete('a', 0, 1500);
 
       reg.requestCancel('a');
@@ -840,20 +740,15 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op for unknown id', () => {
-      const reg = new BackgroundShellRegistry();
       expect(() => reg.requestCancel('missing')).not.toThrow();
     });
   });
 
   describe('abortAll', () => {
     it('cancels every running entry and leaves terminal entries alone', () => {
-      const reg = new BackgroundShellRegistry();
-      const acRunning1 = new AbortController();
-      const acRunning2 = new AbortController();
-      const acDone = new AbortController();
-      reg.register(makeEntry({ shellId: 'a', abortController: acRunning1 }));
-      reg.register(makeEntry({ shellId: 'b', abortController: acRunning2 }));
-      reg.register(makeEntry({ shellId: 'c', abortController: acDone }));
+      const acRunning1 = addWithController('a');
+      const acRunning2 = addWithController('b');
+      const acDone = addWithController('c');
       reg.complete('c', 0, 1500);
 
       reg.abortAll();
@@ -867,22 +762,17 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op when registry is empty', () => {
-      const reg = new BackgroundShellRegistry();
       expect(() => reg.abortAll()).not.toThrow();
     });
 
     it('fires statusChange exactly once regardless of how many entries cancel', () => {
-      // The single subscriber (`useBackgroundTaskView`) re-pulls
-      // `getAll()` from inside the callback, so per-entry statusChange
-      // fires here just produce a flurry of redundant React re-renders
-      // on shutdown / `/clear`. Pin the batch behavior so a future
-      // refactor that loops `cancel()` again doesn't silently
-      // re-introduce the wakeup churn.
-      const reg = new BackgroundShellRegistry();
+      // The single subscriber (`useBackgroundTaskView`) re-pulls `getAll()`
+      // from inside the callback, so per-entry fires here only cause a
+      // flurry of redundant React re-renders on shutdown / `/clear`. Pin the
+      // batch behavior so a refactor that loops `cancel()` again doesn't
+      // silently re-introduce the wakeup churn.
       const transitions: Array<{ id: string; status: string }> = [];
-      for (let i = 0; i < 5; i++) {
-        reg.register(makeEntry({ shellId: `s-${i}` }));
-      }
+      add('s-0', 's-1', 's-2', 's-3', 's-4');
       reg.setStatusChangeCallback((entry) => {
         if (entry) {
           transitions.push({ id: entry.shellId, status: entry.status });
@@ -891,8 +781,7 @@ describe('BackgroundShellRegistry', () => {
 
       reg.abortAll();
 
-      // All five entries must end up cancelled, but the callback
-      // fires only once.
+      // All five entries end up cancelled, but the callback fires only once.
       for (let i = 0; i < 5; i++) {
         expect(reg.get(`s-${i}`)!.status).toBe('cancelled');
       }
@@ -903,8 +792,7 @@ describe('BackgroundShellRegistry', () => {
     it('does not fire statusChange when no entry was cancelled', () => {
       // Empty / all-already-terminal registries shouldn't wake the
       // subscriber for a no-op transition.
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       reg.complete('a', 0, 1500);
       const cb = vi.fn();
       reg.setStatusChangeCallback(cb);
@@ -917,17 +805,14 @@ describe('BackgroundShellRegistry', () => {
 
   describe('session switch helpers', () => {
     it('reports whether any shell is still running', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
+      add('a');
       expect(reg.hasRunningEntries()).toBe(true);
       reg.complete('a', 0, 1234);
       expect(reg.hasRunningEntries()).toBe(false);
     });
 
     it('reset clears all tracked entries', () => {
-      const reg = new BackgroundShellRegistry();
-      reg.register(makeEntry({ shellId: 'a' }));
-      reg.register(makeEntry({ shellId: 'b' }));
+      add('a', 'b');
 
       reg.reset();
 
@@ -936,14 +821,30 @@ describe('BackgroundShellRegistry', () => {
   });
 
   describe('terminal-entry retention cap', () => {
-    it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
-      const reg = new BackgroundShellRegistry();
-      // Register and complete one more entry than the cap allows. Use
-      // strictly increasing endTimes so eviction order is deterministic.
-      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
-        reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
-        reg.complete(`s-${i}`, 0, i * 10 + 5);
+    // Registers and completes `count` entries `<prefix>0..`, with strictly
+    // increasing endTimes so eviction order is deterministic.
+    const completeMany = (count: number, prefix: string, base = 0) => {
+      for (let i = 0; i < count; i++) {
+        const startTime = base + i * 10;
+        reg.register(makeEntry({ shellId: `${prefix}${i}`, startTime }));
+        reg.complete(`${prefix}${i}`, 0, startTime + 5);
       }
+    };
+    // Fills the cap with completed entries, then settles one more.
+    const overflowWith = (settle: (id: string, endTime: number) => void) => {
+      completeMany(MAX_RETAINED_TERMINAL_SHELLS, 'done-');
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      settle('overflow', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+    };
+
+    it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
+      // One more entry than the cap allows.
+      completeMany(MAX_RETAINED_TERMINAL_SHELLS + 2, 's-');
       expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
       // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
       expect(reg.get('s-0')).toBeUndefined();
@@ -952,18 +853,12 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('never evicts running entries even when the cap is exceeded', () => {
-      const reg = new BackgroundShellRegistry();
-      // Register one extra terminal entry beyond the cap, then a single
-      // running entry. The running entry must be retained regardless of
-      // its launch order — pruning a still-running shell would lose the
-      // user's only handle on a live process.
+      // One extra terminal entry beyond the cap, after a single running
+      // entry. The running entry must be retained regardless of its launch
+      // order — pruning a still-running shell would lose the user's only
+      // handle on a live process.
       reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
-      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
-        reg.register(
-          makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
-        );
-        reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
-      }
+      completeMany(MAX_RETAINED_TERMINAL_SHELLS + 1, 'done-', 100);
       // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
       expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
       expect(reg.get('live')?.status).toBe('running');
@@ -972,43 +867,19 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('prunes after fail() too, not just complete()', () => {
-      const reg = new BackgroundShellRegistry();
-      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-        reg.complete(`done-${i}`, 0, i * 10 + 5);
-      }
-      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
-      reg.register(
-        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
-      );
-      reg.fail('overflow', 'boom', overflowStart + 5);
-      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-      expect(reg.get('done-0')).toBeUndefined();
+      overflowWith((id, endTime) => reg.fail(id, 'boom', endTime));
       expect(reg.get('overflow')?.status).toBe('failed');
     });
 
     it('prunes after cancel() too, not just complete()', () => {
-      const reg = new BackgroundShellRegistry();
-      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-        reg.complete(`done-${i}`, 0, i * 10 + 5);
-      }
-      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
-      reg.register(
-        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
-      );
-      reg.cancel('overflow', overflowStart + 5);
-      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-      expect(reg.get('done-0')).toBeUndefined();
+      overflowWith((id, endTime) => reg.cancel(id, endTime));
       expect(reg.get('overflow')?.status).toBe('cancelled');
     });
   });
 
   describe('cancel', () => {
     it('transitions running → cancelled and aborts the signal', () => {
-      const reg = new BackgroundShellRegistry();
-      const ac = new AbortController();
-      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+      const ac = addWithController('a');
       reg.cancel('a', 2000);
       const e = reg.get('a')!;
       expect(e.status).toBe('cancelled');
@@ -1017,9 +888,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op when entry is already terminal', () => {
-      const reg = new BackgroundShellRegistry();
-      const ac = new AbortController();
-      reg.register(makeEntry({ shellId: 'a', abortController: ac }));
+      const ac = addWithController('a');
       reg.complete('a', 0, 1500);
       reg.cancel('a', 2000);
       const e = reg.get('a')!;
@@ -1028,7 +897,6 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('is a no-op for unknown id', () => {
-      const reg = new BackgroundShellRegistry();
       expect(() => reg.cancel('missing', 0)).not.toThrow();
     });
   });
@@ -1040,6 +908,11 @@ describe('BackgroundShellRegistry', () => {
       const entry = makeEntry(overrides);
       return { ...entry, statusPath: statusFilePathFor(entry.outputPath) };
     }
+    const addDir = (shellId: string) => {
+      const e = makeDirEntry({ shellId });
+      reg.register(e);
+      return e;
+    };
 
     function readStatus(statusPath: string): Record<string, unknown> {
       return JSON.parse(readFileSync(statusPath, 'utf8')) as Record<
@@ -1049,7 +922,6 @@ describe('BackgroundShellRegistry', () => {
     }
 
     it('writes a running sidecar on register, with pid and ISO times', () => {
-      const reg = new BackgroundShellRegistry();
       const e = makeDirEntry({ shellId: 'a', pid: 4242, startTime: 1000 });
       reg.register(e);
       const status = readStatus(e.statusPath);
@@ -1063,43 +935,39 @@ describe('BackgroundShellRegistry', () => {
       expect(status['exitCode']).toBeUndefined();
     });
 
-    it('writes completed with exitCode and endTime on complete', () => {
-      const reg = new BackgroundShellRegistry();
-      const e = makeDirEntry({ shellId: 'a' });
-      reg.register(e);
-      reg.complete('a', 0, 2000);
+    it.each<[string, (r: BackgroundShellRegistry) => void, object]>([
+      [
+        'writes completed with exitCode and endTime on complete',
+        (r) => r.complete('a', 0, 2000),
+        {
+          status: 'completed',
+          exitCode: 0,
+          endTime: new Date(2000).toISOString(),
+        },
+      ],
+      [
+        'writes failed with the error message on fail',
+        (r) => r.fail('a', 'exited with code 3', 2000),
+        { status: 'failed', error: 'exited with code 3' },
+      ],
+      [
+        'writes cancelled on cancel',
+        (r) => r.cancel('a', 2000),
+        { status: 'cancelled' },
+      ],
+    ])('%s', (_title, settle, expected) => {
+      const e = addDir('a');
+      settle(reg);
       const status = readStatus(e.statusPath);
-      expect(status['status']).toBe('completed');
-      expect(status['exitCode']).toBe(0);
-      expect(status['endTime']).toBe(new Date(2000).toISOString());
-    });
-
-    it('writes failed with the error message on fail', () => {
-      const reg = new BackgroundShellRegistry();
-      const e = makeDirEntry({ shellId: 'a' });
-      reg.register(e);
-      reg.fail('a', 'exited with code 3', 2000);
-      const status = readStatus(e.statusPath);
-      expect(status['status']).toBe('failed');
-      expect(status['error']).toBe('exited with code 3');
-    });
-
-    it('writes cancelled on cancel', () => {
-      const reg = new BackgroundShellRegistry();
-      const e = makeDirEntry({ shellId: 'a' });
-      reg.register(e);
-      reg.cancel('a', 2000);
-      expect(readStatus(e.statusPath)['status']).toBe('cancelled');
+      for (const [key, value] of Object.entries(expected)) {
+        expect(status[key]).toBe(value);
+      }
     });
 
     it('writes cancelled for every running entry on abortAll', () => {
-      const reg = new BackgroundShellRegistry();
-      const a = makeDirEntry({ shellId: 'a' });
-      const b = makeDirEntry({ shellId: 'b' });
-      const done = makeDirEntry({ shellId: 'c' });
-      reg.register(a);
-      reg.register(b);
-      reg.register(done);
+      const a = addDir('a');
+      const b = addDir('b');
+      const done = addDir('c');
       reg.complete('c', 0, 1500);
       reg.abortAll();
       expect(readStatus(a.statusPath)['status']).toBe('cancelled');
@@ -1108,9 +976,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('leaves no temp-file residue next to the sidecar', () => {
-      const reg = new BackgroundShellRegistry();
-      const e = makeDirEntry({ shellId: 'a' });
-      reg.register(e);
+      const e = addDir('a');
       reg.complete('a', 0, 2000);
       const residue = readdirSync(dirname(e.statusPath)).filter(
         (name) => !/^shell-a\.(output|status)$/.test(name),
@@ -1121,7 +987,6 @@ describe('BackgroundShellRegistry', () => {
     it.skipIf(process.platform === 'win32')(
       'forces 0o600 even when a looser sidecar pre-exists (forceMode)',
       () => {
-        const reg = new BackgroundShellRegistry();
         const e = makeDirEntry({ shellId: 'a' });
         writeFileSync(e.statusPath, '{}');
         chmodSync(e.statusPath, 0o644); // legacy bad perms
@@ -1133,7 +998,6 @@ describe('BackgroundShellRegistry', () => {
     it.skipIf(process.platform === 'win32')(
       'replaces a pre-placed symlink instead of writing through it (noFollow)',
       () => {
-        const reg = new BackgroundShellRegistry();
         const e = makeDirEntry({ shellId: 'a' });
         const secretPath = join(dirname(e.statusPath), 'secret.txt');
         writeFileSync(secretPath, 'secret credentials');
@@ -1147,7 +1011,6 @@ describe('BackgroundShellRegistry', () => {
     );
 
     it('swallows sidecar write failures without throwing', () => {
-      const reg = new BackgroundShellRegistry();
       const e = makeEntry({
         shellId: 'a',
         outputPath: join(makeTempDir(), 'no-such-dir', 'shell-a.output'),

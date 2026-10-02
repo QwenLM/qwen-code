@@ -70,8 +70,10 @@ resync。
 - `SessionResyncRequired` 要求客户端从 Items 列表返回的 `snapshot_through_sequence`
   之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
-  返回全部 Items、Snapshot 之前除输入、文本增量与工具调用更新以外的事件，以及之后的
-  所有事件；其他情况下由 `limit` 限定事件分页。
+  返回全部 Items、Snapshot 之前除 `turn.accepted`、`item.output_text.delta`、
+  `item.reasoning.delta`、`item.tool_call.updated` 与 `item.tool_result.updated`
+  （Items 已包含其内容）以外的事件，以及之后的所有事件；其他情况下由 `limit`
+  限定事件分页。
 - `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
   是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。由于 Snapshot
   在它之后重建，公共客户端要重新读取 Items，直到其 `snapshot_through_sequence`
@@ -92,7 +94,7 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 | `turn.accepted`                                             | `data.itemId`，否则为 `item_<turn>_input`                                         | 无；该事件填充多个 Part                                                                                   |
 | 带文本的 `item.output_text.delta` 与 `item.reasoning.delta` | `data.itemId`，否则为 `item_<turn>_assistant`                                     | 如果紧邻的上一条事件是同一类型、同一 Item 的增量，则沿用它的 Part；否则为 `part_<turn>_<type>_<sequence>` |
 | 文本为空的文本增量                                          | 无                                                                                | 无；投影会跳过它                                                                                          |
-| `item.tool_call.updated`                                    | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
+| `item.tool_call.updated` 与 `item.tool_result.updated`      | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
 | 其他事件                                                    | 无                                                                                | 无                                                                                                        |
 
 这正是物化器构建 Items 时已经采用的规则，物化器现在也通过同一组辅助方法命名。
@@ -100,8 +102,9 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 按主键读取上一条事件，其他事件不需要读取。`data.contentPartId` 保持原样，客户端
 应使用顶层字段。
 
-Flyway V15 是一个 Java 迁移，按同一规则为 V14 之前写入的事件补上身份，逐个
-Session 按 sequence 顺序、每页 5000 条读取，因此内存占用不随 Session 的长度增长。
+Flyway V15 是一个 Java 迁移，按同一规则为 V14 之前写入的事件补上身份。它从
+Session 表中每页 1000 个地列出 Session，并按 sequence 顺序、每页 5000 条读取每个
+Session 的事件，因此内存占用既不随 Session 数量增长，也不随 Session 的长度增长。
 它只为四种有身份的事件类型读取 `data_json`，并把
 身份相同的连续事件（例如同一个文本 Part）用一条范围更新写入。文本已被撤回清空的
 增量不获得身份，这与存储层撤回后重建的 Items 一致。`EventIdentity` 对存储层与 V15
@@ -168,12 +171,13 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
     满页最后一页，以及 1000 的 limit；
   - `Last-Event-ID` 优先于 `after`，并跨越每页 100 条的历史补齐后进入实时事件；
   - 与写入方竞争的历史补齐无缝、不重复地切换到实时事件；
-  - 卡住的事件流落后 600 条事件，超过 hub 保留的 512 条，并从存储重新读回被丢弃的
-    事件；
+  - 卡住的事件流落后 600 条事件，超过 hub 保留的 512 条（测试断言了这一前提），从
+    存储重新读回被丢弃的事件，并且不发送 resync 帧；
   - 下限越过落后的事件流后，事件流在已送达的最后一条事件之后发送一帧 resync；
   - JSON 查询与两个事件流上的过期游标，以及下限的上限与单调性。
 
-  该测试集把轮询间隔与心跳间隔都设为一分钟，因此空闲的事件流在测试期间不会读取
+  卡住与落后事件流这两项在两个事件流上各跑一遍（它们各有自己的投递循环），并从
+  非零游标续传。该测试集把轮询间隔与心跳间隔都设为一分钟，因此空闲的事件流在测试期间不会读取
   存储，实时事件只能经由 hub 到达事件流。
 
 - `EventIdentityTest` 固定该规则。集成测试在以下情形后把每条事件的身份与物化后的
@@ -181,13 +185,14 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
   增量；以及撤回，包括接续了被撤回增量的保留增量。
 - 一个升级测试在 H2 的 MySQL 模式下于 V1 写入事件、执行迁移，并按规则与 Snapshot
   检查补上的身份。`ManagedAgentMySqlIT` 在 MySQL 上执行同样的升级，并在其上检查回放下限。
-- web-shell 测试解码 resync 帧，并检查 provider 只产出一个 `stream_gap` 后停止。
+- web-shell 测试解码 resync 帧，检查 provider 只产出一个 `stream_gap` 后停止，并检查
+  会话 hook 随后重新读取 transcript，从其 `lastSequence` 之后重新订阅。
 
 ## 6. 兼容性
 
 - 事件只新增字段，Session 报告已存储的下限；没有删除任何内容。
 - WebShell 事件流的 `409` 响应从契约中移除；服务端从未返回过它。
-- V14 新增带默认值的列。V15 在迁移事务内先列出有事件的 Session，再分页把每个
+- V14 新增带默认值的列。V15 在迁移事务内分页列出 Session，再分页把每个
   Session 的事件读取一遍，并对每一段事件执行一条更新。在本地 MariaDB 上，它在三秒内迁移了 100 个 Session 中的 20 万条
   事件；短片段很多的表会更慢。
 - 所有副本需要一起升级。V14 之后仍运行旧版本的副本写入的事件没有身份，新副本在

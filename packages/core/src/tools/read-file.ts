@@ -211,6 +211,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         signal,
       },
     );
+    signal.throwIfAborted();
 
     if (result.pdfVisionBridgeCandidate) {
       result = await this.transcribePdfCandidate(result, signal);

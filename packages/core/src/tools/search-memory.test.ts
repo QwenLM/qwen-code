@@ -678,7 +678,7 @@ describe('SearchMemoryTool', () => {
         refs: ['project:project/memory.md'],
         scopes: ['project'],
       } as unknown as Parameters<SearchMemoryTool['validateToolParams']>[0]),
-    ).toBeNull();
+    ).toBe('fetch only accepts refs and optional cursor.');
     expect(
       tool.validateToolParams({
         mode: 'search',
