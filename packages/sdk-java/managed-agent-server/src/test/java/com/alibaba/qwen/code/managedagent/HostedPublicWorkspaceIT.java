@@ -291,7 +291,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
-        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + !durableClose);
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
