@@ -109,8 +109,8 @@ export interface ManagedToolSet {
   readonly directory?: string;
   /**
    * The mount root the Workspace-wide reads are confined to (the Session
-   * directory can be a subdirectory of it). Realpath'd by the mount before
-   * installation, so a boundary check compares against it verbatim.
+   * directory can be a subdirectory of it). Resolve its realpath before
+   * comparing it with a resolved file path.
    */
   readonly workspaceRoot?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
@@ -310,7 +310,7 @@ export class ManagedToolExecutor {
       throw new ManagedToolUnavailableError(
         'Workspace context is unavailable.',
       );
-    const boundary = tools.workspaceRoot ?? tools.directory;
+    const boundary = await fs.realpath(tools.workspaceRoot ?? tools.directory);
     const files: ManagedWorkspaceContextFile[] = [];
     for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
       let text: string;

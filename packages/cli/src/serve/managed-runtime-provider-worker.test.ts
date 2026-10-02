@@ -595,40 +595,57 @@ describe('Managed Runtime provider worker', () => {
     });
   });
 
-  it('reads Workspace context without a provider Session, confined to the Workspace', async () => {
-    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
-    const outside = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-provider-outside-'),
-    );
-    try {
-      // A planted symlink must not promote a host file into the system
-      // instruction.
-      fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
-      fs.symlinkSync(
-        path.join(outside, 'secret.txt'),
-        path.join(workspace, 'AGENTS.md'),
+  it.each([false, true])(
+    'reads Workspace context without a provider Session, confined to the Workspace (linked root: %s)',
+    async (linkedRoot) => {
+      if (linkedRoot) {
+        await worker.close();
+        const linkedWorkspace = path.join(storage, 'workspace-link');
+        fs.symlinkSync(workspace, linkedWorkspace, 'dir');
+        worker = await startManagedRuntimeAttestationWorker({
+          ...BOOT,
+          workspaceCwd: linkedWorkspace,
+        });
+      }
+      fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-provider-outside-'),
       );
-      expect(await control({ kind: 'workspace-context' })).toEqual({
-        files: [{ name: 'QWEN.md', text: 'project rules' }],
-      });
+      try {
+        // A planted symlink must not promote a host file into the system
+        // instruction.
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
+        fs.symlinkSync(
+          path.join(outside, 'secret.txt'),
+          path.join(workspace, 'AGENTS.md'),
+        );
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
 
-      fs.rmSync(path.join(workspace, 'AGENTS.md'));
-      fs.writeFileSync(
-        path.join(workspace, 'AGENTS.md'),
-        'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
-      );
-      const { files } = await control<{
-        files: Array<{ name: string; text: string }>;
-      }>({ kind: 'workspace-context' });
-      expect(files.map((file) => file.name)).toEqual(['QWEN.md', 'AGENTS.md']);
-      expect(files[1].text).toHaveLength(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS);
-      expect(files[1].text).toContain('[Truncated');
-    } finally {
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-    // The read claimed no provider Session, so the legacy protocol is intact.
-    await acquire();
-  });
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.writeFileSync(
+          path.join(workspace, 'AGENTS.md'),
+          'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
+        );
+        const { files } = await control<{
+          files: Array<{ name: string; text: string }>;
+        }>({ kind: 'workspace-context' });
+        expect(files.map((file) => file.name)).toEqual([
+          'QWEN.md',
+          'AGENTS.md',
+        ]);
+        expect(files[1].text).toHaveLength(
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+        );
+        expect(files[1].text).toContain('[Truncated');
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+      // The read claimed no provider Session, so the legacy protocol is intact.
+      await acquire();
+    },
+  );
 
   it('keeps shell calls inside the Session workspace', async () => {
     await begin();
