@@ -147,7 +147,7 @@
         },
         "responses": {
           "202": {
-            "description": "New immutable revision published for this agent.",
+            "description": "The next immutable revision, or the latest revision unchanged when the submitted content digest already equals it; no revision is appended in that case.",
             "headers": {
               "X-Qwen-Idempotent-Replay": {
                 "$ref": "#/components/headers/IdempotentReplay"
