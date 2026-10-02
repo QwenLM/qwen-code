@@ -1184,6 +1184,8 @@ export interface ConfigParameters {
   eagerTools?: string[];
   /** Replace ordinary model-facing tools with the isolated exec bridge. */
   codeModeOnly?: boolean;
+  /** Use Responses Custom Tool text input for exec in Code Mode Only. */
+  freeform?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -2851,6 +2853,7 @@ export class Config {
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
   private readonly toolMode: ToolModeValue;
+  private readonly freeform: boolean;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -3555,6 +3558,8 @@ export class Config {
       params.codeModeOnly && !this.bareMode && !this.safeMode
         ? ToolMode.CodeModeOnly
         : ToolMode.Direct;
+    this.freeform =
+      this.toolMode === ToolMode.CodeModeOnly && params.freeform === true;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -8124,6 +8129,10 @@ export class Config {
 
   getCodeModeOnly(): boolean {
     return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getFreeform(): boolean {
+    return this.freeform;
   }
 
   getToolMode(): ToolModeValue {
