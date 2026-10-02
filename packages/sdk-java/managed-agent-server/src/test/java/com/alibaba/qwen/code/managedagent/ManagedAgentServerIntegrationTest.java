@@ -670,8 +670,8 @@ class ManagedAgentServerIntegrationTest {
                         .content("{\"title\":\"blocked\"}"))
                 .andExpect(status().isOk());
 
-        // The failed key stays free to re-attempt the mutation: the retired
-        // row leaves nothing to replay, so the retry performs the rename.
+        // The retained failed receipt replays the same content and retries
+        // the Harness mutation without duplicating the requested event.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
@@ -679,7 +679,7 @@ class ManagedAgentServerIntegrationTest {
                         .content("{\"title\":\"retry title\"}"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "false"))
+                        "true"))
                 .andExpect(jsonPath("$.metadata.title")
                         .value("retry title"));
 

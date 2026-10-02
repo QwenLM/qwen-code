@@ -60,9 +60,10 @@ public interface AgentStateStore {
 
     /**
      * Retires the command row of a Session mutation the Harness refused
-     * before it could apply it, so the refusal does not leave the Session's
+     * before completion, so the refusal does not leave the Session's
      * later lifecycle changes blocked by a {@code PENDING} row nothing
-     * completes. The idempotency key stays free to re-attempt the mutation.
+     * completes. The receipt and digest survive for same-content retries
+     * and concurrent completion; completed outcomes remain replayable.
      */
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId);
@@ -75,6 +76,25 @@ public interface AgentStateStore {
     OperationAdmission beginOperation(String tenantId, String sessionId,
             OperationKind kind, String actorDigest, String idempotencyKey,
             String requestDigest);
+
+    default boolean workspaceFilesEnabled() {
+        return false;
+    }
+
+    default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest, boolean supported) {
+        throw new UnsupportedOperationException("Workspace close is unavailable");
+    }
+
+    default boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, Duration duration) {
+        return false;
+    }
+
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt) {
+        throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
 
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);

@@ -186,10 +186,14 @@ never means that tools stopped. After the Hosted Harness restarts, its calls fai
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`. A rename answered without completing retires its `PENDING`
-command row, so the same idempotency key starts a fresh attempt instead of
-resuming one and is not reported as a replay, and the `requested` event the
-abandoned attempt already published is not re-appended. Only an in-flight
+`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
+while retaining its receipt and request digest. The same
+key retries the same content with the replay flag set; changed content or a
+different Session conflicts. A successful concurrent request can still complete
+the receipt, and a failing sibling cannot overwrite that completed outcome.
+Retries do not re-append the original `requested` event. If the command store
+is unavailable during cleanup, the original API failure is preserved and the
+same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
 actor returns the original operation once it has completed.
 
@@ -351,8 +355,9 @@ Later Turns may be submitted by the Session's creator under the
 same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
 grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Close, archive, delete,
-unarchive and cwd operations and broad Workspace capability advertisement
+the Session's running Turns and rename the Session. Workspace close follows
+its separate close capability and lifecycle admission. Archive, delete,
+unarchive, cwd operations and broad Workspace capability advertisement
 remain gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -488,9 +493,9 @@ registry's `ACTIVE` state); the creator may also cancel the Session's running
 Turns and rename the Session. Later Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. Public close, archive, delete and
-unarchive remain gated; the private Shell profile is not enabled through public
-creation.
+`session_not_found` when they cannot. Public close follows its separate close
+capability and lifecycle admission. Archive, delete and unarchive remain gated;
+the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 

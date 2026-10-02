@@ -26,9 +26,8 @@ Turn against the creator's Workspace grants, so any other actor, and every
 deployment without the opt-in, keeps the existing refusal:
 `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. The creator may also rename the Session.
-Close, archive, delete, unarchive and cwd operations remain gated: the Runtime
-Broker's drain only stops warming a closed Session and has no Harness-level
-teardown yet.
+Workspace close follows its separate close capability and lifecycle admission.
+Archive, delete, unarchive and cwd operations remain gated for bound Sessions.
 
 ## Decisions
 
@@ -55,6 +54,8 @@ teardown yet.
   load. The Harness's existing immutable definition check pins the profile.
 - Cold load of unsettled input remains blocked. G0 does not enable in-flight
   continuation, adopt workers, remove affinity or change the G1 failover gates.
+
+- A live cancellation reuses its admitted Harness attachment and is retried by the current lease owner. It never certifies a terminal failure from a fresh attach refusal. Recorded rename failures retain a `FAILED` command receipt and digest; same-content retries are replays, conflicting content remains rejected, and a concurrent success can complete the retained receipt.
 
 ## Changes and ownership
 
@@ -104,7 +105,8 @@ different payload conflicts, unauthorized tenants/actors cannot create or read,
 unsupported profiles and unavailable Workspaces refuse, and disabling the
 opt-in preserves the current gate. Exercise the shared WebShell create adapter,
 the later-operation gates that changed (the creator's later-Turn submit, cancel
-and rename are admitted; lifecycle and cwd operations stay gated), and unbound
+and rename are admitted; close follows its separate capability, while archive,
+delete, unarchive and cwd remain gated), and unbound
 no-tool regression paths.
 
 Focused SDK serialization, connector, store/admission and coordinator tests

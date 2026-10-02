@@ -1,5 +1,19 @@
 package com.alibaba.qwen.code.managedagent;
 
+import org.springframework.http.HttpStatus;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.ParameterizedTest;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -446,6 +460,110 @@ class ManagedSessionLifecycleTest {
         } finally {
             harness.setAvailable(true);
         }
+    }
+
+    @Test
+    void failedRenameReceiptKeepsItsDigestAndConcurrentCompletion() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String otherId = attachedSession(tenant);
+        String digest = new RequestDigests().digest(
+                java.util.Map.of("sessionId", sessionId, "title", "renamed"));
+        assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
+                digest, sessionId, SessionMutationKind.RENAME).replayed()).isFalse();
+        assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
+                digest, sessionId, SessionMutationKind.RENAME).replayed()).isTrue();
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
+        for (String target : List.of(sessionId, otherId)) {
+            assertThatThrownBy(() -> store.beginSessionMutation(tenant,
+                    "RENAME_SESSION", "key", "other-digest", target,
+                    SessionMutationKind.RENAME))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        }
+        harness.rename(tenant, sessionId, "renamed");
+        store.completeSessionMutation(tenant, "RENAME_SESSION", "key", sessionId,
+                SessionMutationKind.RENAME, "renamed",
+                store.requireSession(tenant, sessionId).harnessBootId());
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"renamed\"}"), tenant, "key")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("renamed"))
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND event_type = 'session.updated'",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+    }
+
+    @Test
+    void retryingFailedRenameAgainBlocksOtherLifecycleWork() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "key", "digest",
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
+        assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
+                "digest", sessionId, SessionMutationKind.RENAME).replayed()).isTrue();
+        assertThatThrownBy(() -> store.beginSessionMutation(tenant,
+                "RENAME_SESSION", "other", "other-digest", sessionId,
+                SessionMutationKind.RENAME))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("session_operation_active"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"lookup", "completion", "cleanup"})
+    void renameStoreFailuresPreserveTheOriginalErrorAndAllowRetry(String phase)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        AgentStateStore faulted = mock(AgentStateStore.class, delegatesTo(store));
+        if ("lookup".equals(phase)) {
+            AtomicInteger reads = new AtomicInteger();
+            doAnswer(call -> {
+                if (reads.incrementAndGet() == 2) {
+                    throw new IllegalStateException("lookup unavailable");
+                }
+                return store.requireSession(tenant, sessionId);
+            }).when(faulted).requireSession(tenant, sessionId);
+        } else if ("completion".equals(phase)) {
+            doThrow(new IllegalStateException("completion unavailable"))
+                    .when(faulted).completeSessionMutation(anyString(), anyString(),
+                            anyString(), anyString(), any(), anyString(), anyString());
+        } else {
+            doThrow(new IllegalStateException("cleanup unavailable"))
+                    .when(faulted).abandonSessionMutation(tenant, "RENAME_SESSION",
+                            "key", sessionId);
+        }
+        ManagedAgentService subject = new ManagedAgentService(faulted,
+                new RequestDigests(), null, harness, null);
+        harness.setAvailable(!"cleanup".equals(phase));
+        try {
+            assertThatThrownBy(() -> subject.renameSession(tenant, null, "key",
+                    sessionId, "renamed"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                        assertThat(error.getCode()).isEqualTo("cleanup".equals(phase)
+                                ? "hosted_harness_disabled" : "hosted_harness_unavailable");
+                    });
+        } finally {
+            harness.setAvailable(true);
+        }
+        if (!"cleanup".equals(phase)) {
+            assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                            + " managed_agent_command WHERE tenant_id = ?"
+                            + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
+                    String.class, tenant)).isEqualTo("FAILED");
+        }
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"renamed\"}"), tenant, "key")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("renamed"))
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
     }
 
     /**

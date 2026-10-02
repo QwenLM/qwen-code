@@ -1,5 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.after;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -233,99 +243,108 @@ class HarnessCoordinatorTest {
         AgentStateStore store = boundCancellingStore();
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
-        when(harness.createOrLoad("tenant", "session", true))
-                .thenReturn(new Attachment("boot", null, null, null));
         when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("boot"))).thenReturn(true);
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
-                new HarnessEventProjector(), mock(RuntimeWarmer.class),
-                directExecutor(), Clock.systemUTC(),
-                new ManagedAgentProperties());
+        HarnessCoordinator coordinator = coordinator(store, harness);
         try {
             coordinator.cancel("tenant", "session", "turn");
-            // The live cancel keeps the running attachment; a passive reload
-            // would leave the abort on a different one.
-            verify(harness).createOrLoad("tenant", "session", true);
-            verify(harness, never()).createOrLoad("tenant", "session", true,
-                    true);
+            // The admitted Turn's boot is already bound, so the cancel never
+            // attaches: an attach re-runs the Workspace authorization, which
+            // a revoked grant or a draining Workspace would refuse.
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean());
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean(), anyBoolean());
             verify(harness).cancel("tenant", "session");
         } finally {
             coordinator.close();
         }
     }
 
-    @Test
-    void failsTheTurnWhenTheCancelAttachIsRefused() {
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted", "retry", "lease-lost", "completed"})
+    void runningOwnerObservesCancellationAfterStreamingStarts(String mode)
+            throws Exception {
         AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt",
+                "epoch", 1);
+        AtomicReference<TurnRecord> current = new AtomicReference<>(running);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenAnswer(invocation -> Optional.of(current.get()));
+        when(store.renewTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(!"lease-lost".equals(mode));
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
-        when(harness.createOrLoad("tenant", "session", true))
-                .thenThrow(WorkspaceExecutionStore.unavailable());
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        CountDownLatch streaming = new CountDownLatch(1);
+        CountDownLatch cancelled = new CountDownLatch(1);
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenAnswer(invocation -> {
+            cancelled.await();
+            return new SourceEvent(2L, "turn_complete",
+                    Map.of("stopReason", "cancelled"), "prompt", Map.of());
+        }).thenReturn(null);
+        when(harness.stream("tenant", "session", 1, "epoch"))
+                .thenAnswer(invocation -> {
+                    streaming.countDown();
+                    return stream;
+                });
+        AtomicBoolean loseDelivery = new AtomicBoolean("retry".equals(mode));
+        doAnswer(invocation -> {
+            if (loseDelivery.getAndSet(false))
+                throw new IllegalStateException("lost");
+            current.set(turn("tenant", "session", "turn", "prompt",
+                    "epoch", 2, "CANCELLED"));
+            cancelled.countDown();
+            return null;
+        }).when(harness).cancel("tenant", "session");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(20));
+        ExecutorService executor = Executors.newCachedThreadPool();
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), mock(RuntimeWarmer.class),
-                directExecutor(), Clock.systemUTC(),
-                new ManagedAgentProperties());
+                executor, Clock.systemUTC(), properties);
         try {
-            coordinator.cancel("tenant", "session", "turn");
-            // The abort never reached the Harness, so the cancel the API
-            // already answered must not be a silent no-op that leaves the
-            // Turn running and then settling COMPLETED.
-            verify(harness, never()).cancel(anyString(), anyString());
-            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), eq("workspace_unavailable"),
-                    anyString());
+            coordinator.dispatch("tenant", "session", "turn");
+            assertTrue(streaming.await(2, TimeUnit.SECONDS));
+            // Another API replica persists this state without calling the
+            // running owner's coordinator directly.
+            current.set(turn("tenant", "session", "turn", "prompt",
+                    "epoch", 1, "completed".equals(mode)
+                            ? "COMPLETED" : "CANCELLING"));
+            verify(store, timeout(2_000).atLeastOnce()).renewTurn(eq("tenant"),
+                    eq("session"), eq("turn"), anyString(),
+                    any(Duration.class));
+            if ("accepted".equals(mode) || "retry".equals(mode)) {
+                assertTrue(cancelled.await(2, TimeUnit.SECONDS));
+                verify(harness, timeout(2_000).times(
+                        "retry".equals(mode) ? 2 : 1))
+                        .cancel("tenant", "session");
+            } else {
+                verify(harness, after(200).never()).cancel(anyString(),
+                        anyString());
+            }
         } finally {
+            cancelled.countDown();
             coordinator.close();
+            executor.shutdownNow();
         }
     }
 
-    // A retryable refusal is transient: the Turn stays CANCELLING and the
-    // dispatch sweep re-attempts the cancel, so it must not be failed.
-    @Test
-    void keepsTheTurnCancellingWhenTheCancelAttachIsRetryablyRefused() {
-        AgentStateStore store = boundCancellingStore();
-        HarnessConnector harness = mock(HarnessConnector.class);
-        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
-        when(harness.createOrLoad("tenant", "session", true))
-                .thenThrow(new RuntimeBrokerException(409, "workspace_busy",
-                        "The Workspace execution authority is busy.", true));
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+    private static HarnessCoordinator coordinator(AgentStateStore store,
+            HarnessConnector harness) {
+        return new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), mock(RuntimeWarmer.class),
                 directExecutor(), Clock.systemUTC(),
                 new ManagedAgentProperties());
-        try {
-            coordinator.cancel("tenant", "session", "turn");
-            verify(harness, never()).cancel(anyString(), anyString());
-            verify(store, never()).failTurn(anyString(), anyString(),
-                    anyString(), anyString(), anyString(), anyString());
-        } finally {
-            coordinator.close();
-        }
-    }
-
-    // A non-broker attach failure (the connector's approval-mode check, a
-    // store DataAccessException) is transient too: the cancel is re-attempted
-    // rather than settled with a misattributed refusal code.
-    @Test
-    void keepsTheTurnCancellingWhenTheCancelAttachThrowsANonBrokerError() {
-        AgentStateStore store = boundCancellingStore();
-        HarnessConnector harness = mock(HarnessConnector.class);
-        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
-        when(harness.createOrLoad("tenant", "session", true))
-                .thenThrow(new IllegalStateException("Hosted Harness did not"
-                        + " confirm the Session approval mode"));
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
-                new HarnessEventProjector(), mock(RuntimeWarmer.class),
-                directExecutor(), Clock.systemUTC(),
-                new ManagedAgentProperties());
-        try {
-            coordinator.cancel("tenant", "session", "turn");
-            verify(harness, never()).cancel(anyString(), anyString());
-            verify(store, never()).failTurn(anyString(), anyString(),
-                    anyString(), anyString(), anyString(), anyString());
-        } finally {
-            coordinator.close();
-        }
     }
 
     private static AgentStateStore boundCancellingStore() {

@@ -150,6 +150,8 @@ class ManagedArtifactApiIntegrationTest {
     void advertisesConfiguredArtifactReadsUntilSessionDeletion() {
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
+        assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
+        assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
         fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = 'session-1'");
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();

@@ -1153,6 +1153,14 @@ describe('acpRouteTable – query param coercion', () => {
     expect(params['detail']).toBe(true); // not the string 'true'
   });
 
+  it('GET workspace/memory forwards content as the boolean true', () => {
+    expect(extract('/workspace/memory?content=true', 'GET')).toEqual({
+      method: '_qwen/workspace/memory',
+      params: { content: true },
+    });
+    expect(extract('/workspace/memory', 'GET').params).toEqual({});
+  });
+
   it('GET context-usage without detail omits it (sessionId only)', () => {
     expect(extract('/session/s1/context-usage', 'GET').params).toEqual({
       sessionId: 's1',

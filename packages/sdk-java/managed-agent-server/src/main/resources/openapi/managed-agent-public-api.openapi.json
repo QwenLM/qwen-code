@@ -162,7 +162,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; close, archive, delete, unarchive and cwd operations remain gated. This surface has no per-caller capability flag for later Turns, so callers must handle 409 workspace_unavailable. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete, unarchive and cwd operations remain gated. This surface has no per-caller capability flag for later Turns, so callers must handle 409 workspace_unavailable. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1107,7 +1107,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; close, archive, delete, unarchive and cwd operations remain gated. The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
+        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete, unarchive and cwd operations remain gated. The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1680,7 +1680,7 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict",
-            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
+            "description": "Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check."
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
@@ -1715,10 +1715,10 @@
         "tags": ["Public Sessions"],
         "operationId": "closeSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts an active Session; 409 session_state_conflict otherwise. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
+        "description": "Accepts an active Session; 409 session_state_conflict otherwise. Supported hosted-workspace-files/1 Sessions may close when session_close is true. Only the creator with current read access may close a bound Session: unreadable returns 404, readable non-creator returns 403. Active, cancelling or approval-waiting Turns return 409 turn_active; another pending lifecycle operation returns session_operation_active. Unsupported Workspace close returns workspace_unavailable. The same actor and key replay the original operation.",
         "responses": {
           "202": {
-            "description": "Close accepted. The Session stops accepting input and reads closing. The operation asks the Hosted Harness to close the Session and completes once no Harness holds the Session's journal writer under an unexpired lease (the Harness that holds the Session seals it when closing) and the Session's Runtime binding drained; the Session then reads closed. 202 does not mean that tools have stopped.",
+            "description": "Close durably accepted. The Session stops accepting input and reads closing. A bound Session completes only after its permanent Runtime admission fence is stored, no valid journal writer or unsettled execution remains, all original Runtime Sessions and holders are released, and original worker stop proof is persisted; the Session then reads closed. Unknown original identities or executions report recovery_blocked with a stable failure_code and keep the Session closing. History, Artifacts and Workspace files are retained. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1949,7 +1949,7 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict",
-            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
+            "description": "Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check."
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
@@ -2007,7 +2007,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization."
       }
     },
     "/api/agent/web-shell/v1/sessions/archive": {
@@ -3723,6 +3724,11 @@
           },
           "tasks": {
             "type": "boolean"
+          },
+          "session_close": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires creator ownership and current read access."
           }
         }
       },
@@ -4653,6 +4659,11 @@
           },
           "artifacts": {
             "type": "boolean"
+          },
+          "sessionClose": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session."
           }
         }
       },
@@ -5061,7 +5072,7 @@
               },
               "workspace_binding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -5294,7 +5305,7 @@
               },
               "workspaceBinding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -5964,7 +5975,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
@@ -6350,7 +6361,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"

@@ -76,10 +76,23 @@ public final class ApiModels {
             boolean resync,
             @JsonProperty("session_lifecycle") boolean sessionLifecycle,
             boolean tasks,
-            boolean actions) {}
+            boolean actions,
+            @JsonProperty("session_close") boolean sessionClose) {
+        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
+                boolean lifecycle, boolean tasks, boolean actions) {
+            this(items, snapshots, artifacts, resync, lifecycle, tasks, actions, false);
+        }
+    }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-            boolean workspaceTurns) {
+            boolean workspaceTurns, boolean sessionClose) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
+            this(tasks, artifacts, actions, false, false);
+        }
+
+        public WebShellSessionCapabilities(boolean tasks, boolean actions) {
+            this(tasks, false, actions, false, false);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

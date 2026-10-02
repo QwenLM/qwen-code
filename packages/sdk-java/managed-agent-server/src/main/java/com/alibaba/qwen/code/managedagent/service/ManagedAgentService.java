@@ -54,6 +54,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -62,6 +64,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
+    private static final Logger LOG = LoggerFactory.getLogger(ManagedAgentService.class);
     private static final String CREATE = "CREATE_SESSION";
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
@@ -86,6 +89,17 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private ManagedActionStore actions;
+    private RuntimeWarmer runtimeWarmer;
+
+    @Autowired(required = false)
+    void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
+        this.runtimeWarmer = runtimeWarmer;
+    }
+
+    private boolean supportsClose(SessionRecord session) {
+        return session.workspace() == null || store.workspaceFilesEnabled()
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+    }
 
     @Autowired
     void setActions(ManagedActionStore actions) {
@@ -274,23 +288,25 @@ public class ManagedAgentService {
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
         if (!"COMPLETED".equals(command.status())) {
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            HarnessConnector.Attachment attachment;
             try {
                 requireHarness();
-                attachment = harness.createOrLoad(tenantId, sessionId,
+                SessionRecord session = store.requireSession(tenantId, sessionId);
+                HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
+                session = store.completeSessionMutation(tenantId, RENAME,
+                        idempotencyKey, sessionId, SessionMutationKind.RENAME,
+                        effectiveTitle, attachment.bootId());
+                return new SessionMutationResult<>(publicSession(session),
+                        command.replayed());
             } catch (RuntimeException error) {
-                // A rename answered without completing must not leave the
-                // command row PENDING: nothing else clears it, and
-                // requireNoOpenOperation counts it, so every later rename
-                // with a fresh key would die in session_operation_active
-                // for the Session's life. A non-retryable refusal (e.g. the
-                // Workspace authority's) is then answered with its own
-                // status and code instead of a transient 503.
-                store.abandonSessionMutation(tenantId, RENAME,
-                        idempotencyKey, sessionId);
+                try {
+                    store.abandonSessionMutation(tenantId, RENAME,
+                            idempotencyKey, sessionId);
+                } catch (RuntimeException cleanupError) {
+                    LOG.warn("Failed to retire rename tenant={} session={}",
+                            tenantId, sessionId, cleanupError);
+                }
                 if (error instanceof ApiException failure) {
                     throw failure;
                 }
@@ -305,11 +321,6 @@ public class ManagedAgentService {
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.");
             }
-            session = store.completeSessionMutation(tenantId, RENAME,
-                    idempotencyKey, sessionId, SessionMutationKind.RENAME,
-                    effectiveTitle, attachment.bootId());
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
                 sessionId), true);
@@ -529,8 +540,7 @@ public class ManagedAgentService {
                 session.lastSequence(),
                 session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
-                // A Workspace-bound Session has no lifecycle operations yet;
-                // every Session serves its task list and detail (H0c).
+                // Bound close is advertised separately from archive/delete.
                 new SessionCapabilities(
                         true,
                         true,
@@ -538,7 +548,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session)),
+                        hasActions(session), supportsClose(session)),
                 publicWorkspace(session));
     }
 
@@ -562,7 +572,7 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId)));
+                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

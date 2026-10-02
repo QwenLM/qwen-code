@@ -155,6 +155,9 @@ public class HarnessCoordinator {
                         if (!store.renewTurn(tenantId, sessionId, turnId,
                                 owner, leaseDuration)) {
                             leaseLost.set(true);
+                        } else if (!leaseLost.get()) {
+                            executor.execute(() -> cancelAdmittedTurn(
+                                    tenantId, sessionId, turnId));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -555,45 +558,14 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // A live cancel reuses the running Turn's attachment. A passive
-            // attach reloads the Session in the Harness, so the abort would
-            // reach a different attachment and the Turn would stay CANCELLING;
-            // only cancellation recovery, which has no live attachment, may
-            // attach passively.
-            Attachment attachment;
-            try {
-                attachment = harness.createOrLoad(
-                        session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null);
-            } catch (RuntimeException refusal) {
-                // A transient attach failure (a retryable broker refusal, a
-                // daemon 5xx, a store error) recovers like any other
-                // cancellation failure: rethrown, it leaves the Turn
-                // CANCELLING for the dispatch sweep to re-attempt, instead
-                // of settling it permanently.
-                if (!(refusal instanceof RuntimeBrokerException broker)
-                        || broker.isRetryable()) {
-                    throw refusal;
-                }
-                // A permanent refusal can never reach the running Turn, and
-                // no sweeper re-claims a Turn whose lease the live consumer
-                // keeps renewing: settle the Turn the API already answered
-                // 202 for instead of dropping the cancel, which would leave
-                // it running and then settling COMPLETED.
-                LOG.warn("Managed Turn cancellation was refused tenant={}"
-                                + " session={} turn={} failure={}",
-                        tenantId, sessionId, turnId,
-                        refusal.getClass().getSimpleName());
-                fail(turn, broker.getCode(),
-                        "The Hosted Harness refused the Turn cancellation.");
-                return;
-            }
-            if (store.bindHarness(tenantId, sessionId,
-                    turnId, owner, attachment.bootId())) {
+            // Reuse the admitted attachment: attaching would recheck grants
+            // needed for new work and could replace the running attachment.
+            if (session.harnessBootId() != null && store.bindHarness(tenantId,
+                    sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
-            LOG.warn("Managed Turn cancellation will recover tenant={}"
+            LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"
                             + " session={} turn={} failure={}",
                     tenantId, sessionId, turnId,
                     error.getClass().getSimpleName());
