@@ -38,7 +38,7 @@ Before binding retirement, require no active logical Session, no unsettled execu
 
 ## Implementation areas
 
-Managed Agent lifecycle service/store/coordinator, capabilities and canonical OpenAPI/generated WebShell types; Runtime Broker repositories/service/provider and schema; Hosted Harness admission; collocated tests. The close migration is V28, following the upstream V27 managed Hook records migration. Its version is distinct from Hooks so the combined deployment can initialize and upgrade without a duplicate Flyway version. Public and WebShell capabilities retain both upstream Artifact reads and optional close support. No new lifecycle orchestrator or broad core refactor is introduced. Align lifecycle contracts with [#12867](https://github.com/QwenLM/qwen-code/issues/12867) and Harness recovery with [#12740](https://github.com/QwenLM/qwen-code/issues/12740).
+Managed Agent lifecycle service/store/coordinator, capabilities and canonical OpenAPI/generated WebShell types; Runtime Broker repositories/service/provider and schema; Hosted Harness admission; collocated tests. The close migration is V30, following main's V28 Hook admission index and V29 backfill migrations. Its SQL bytes are unchanged. Public and WebShell capabilities retain both upstream Artifact reads and optional close support. No new lifecycle orchestrator or broad core refactor is introduced. Align lifecycle contracts with [#12867](https://github.com/QwenLM/qwen-code/issues/12867) and Harness recovery with [#12740](https://github.com/QwenLM/qwen-code/issues/12740).
 
 ## Validation and acceptance
 
