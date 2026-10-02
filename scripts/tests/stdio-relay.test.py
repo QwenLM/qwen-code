@@ -37,7 +37,8 @@ while len(data) < n:
     data += chunk
 try: os.fchmod(0, 0o600)
 except OSError: pass
-print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode)}))
+print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode),
+                  'socket': stat.S_ISSOCK(os.fstat(0).st_mode)}))
 '''
         with target.open('rb', buffering=0) as source:
             os.lseek(source.fileno(), initial, os.SEEK_SET)
@@ -46,7 +47,7 @@ print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode
                 stdin=source, capture_output=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), {'read': min(count, size-initial), 'regular': False})
+            self.assertEqual(json.loads(result.stdout), {'read': min(count, size-initial), 'regular': False, 'socket': True})
             self.assertEqual(os.lseek(source.fileno(), 0, os.SEEK_CUR), initial + min(count, size-initial))
         self.assertEqual(target.stat().st_mode & 0o777, 0o640)
 
@@ -87,13 +88,24 @@ print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode
             os.set_blocking(reader, True)
             flags = fcntl.fcntl(reader, fcntl.F_GETFL)
             os.write(writer, b'fifo bytes')
-            process = subprocess.Popen([HELPER, '--relay-stdin', '/bin/cat'], stdin=reader,
+            program = '''
+import json, os, stat
+info = os.fstat(0)
+data = b''
+while True:
+    chunk = os.read(0, 4096)
+    if not chunk: break
+    data += chunk
+print(json.dumps({'content': data.decode(), 'socket': stat.S_ISSOCK(info.st_mode),
+                  'fifo': stat.S_ISFIFO(info.st_mode)}))
+'''
+            process = subprocess.Popen([HELPER, '--relay-stdin', sys.executable, '-c', program], stdin=reader,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             os.close(writer)
             writer = -1
             stdout, stderr = process.communicate(timeout=3)
             self.assertEqual(process.returncode, 0, stderr)
-            self.assertEqual(stdout, b'fifo bytes')
+            self.assertEqual(json.loads(stdout), {'content': 'fifo bytes', 'socket': True, 'fifo': False})
             self.assertEqual(fcntl.fcntl(reader, fcntl.F_GETFL), flags)
         finally:
             if writer >= 0: os.close(writer)
@@ -117,6 +129,36 @@ print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode
             self.assertEqual(result.returncode, 125)
             self.assertIn(b'qwen-landlock-run: exec failed:', result.stderr)
             self.assertEqual(os.lseek(descriptor.fileno(), 0, os.SEEK_CUR), 0)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'proc/dev reopening is a Linux contract')
+    def test_write_reopening_does_not_change_exit_or_shared_offset(self):
+        source = self.root / 'input'
+        source.write_bytes(b'x' * 1024 * 1024)
+        program = '''
+import errno, os, sys
+assert os.read(0, 5) == b'xxxxx'
+for path in ('/dev/stdin', '/proc/self/fd/0'):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as error:
+        assert error.errno == errno.ENXIO, error
+    else:
+        os.close(fd)
+        raise AssertionError('stdin reopened for writing')
+try:
+    os.write(0, b'command-owned bytes')
+except OSError as error:
+    assert error.errno == errno.EPIPE, error
+else:
+    raise AssertionError('stdin accepted a write')
+sys.exit(7)
+'''
+        with source.open('rb', buffering=0) as descriptor:
+            descriptor.seek(17)
+            result = subprocess.run([HELPER, '--relay-stdin', sys.executable, '-c', program],
+                                    stdin=descriptor, capture_output=True, timeout=3)
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(descriptor.tell(), 22)
 
     @unittest.skipUnless(sys.platform == 'linux', 'fault injection uses the Linux helper')
     def test_read_failure_after_prepared_invalidates_the_receipt(self):

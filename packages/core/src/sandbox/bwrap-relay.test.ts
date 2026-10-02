@@ -32,6 +32,7 @@ interface RelayReport {
   isDirectory: boolean;
   isFile: boolean;
   isFIFO: boolean;
+  isSocket: boolean;
   chmod: string;
   reopen: string;
 }
@@ -90,6 +91,7 @@ writeFileSync(
     isDirectory: input.isDirectory(),
     isFile: input.isFile(),
     isFIFO: input.isFIFO(),
+    isSocket: input.isSocket(),
     chmod,
     reopen,
   }),
@@ -164,7 +166,7 @@ if (${JSON.stringify(backend)} === 'bwrap') writeSync(3, JSON.stringify({ 'exit-
       };
     };
 
-    it('copies a host file through a relay-owned pipe', async () => {
+    it('copies a host file through a read-only relay socket', async () => {
       const inputPath = path.join(root, 'input.txt');
       writeFileSync(inputPath, 'regular-file-input', { mode: 0o644 });
       const input = openSync(inputPath, 'r');
@@ -176,8 +178,9 @@ if (${JSON.stringify(backend)} === 'bwrap') writeSync(3, JSON.stringify({ 'exit-
             content: 'regular-file-input',
             isDirectory: false,
             isFile: false,
-            isFIFO: true,
-            reopen: 'pipe',
+            isFIFO: false,
+            isSocket: true,
+            reopen: 'ENXIO',
           },
         });
       } finally {
@@ -214,8 +217,9 @@ if (${JSON.stringify(backend)} === 'bwrap') writeSync(3, JSON.stringify({ 'exit-
             content: '',
             isDirectory: false,
             isFile: false,
-            isFIFO: true,
-            reopen: 'pipe',
+            isFIFO: false,
+            isSocket: true,
+            reopen: 'ENXIO',
           },
         });
       } finally {

@@ -6,6 +6,7 @@
 
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 
 static volatile sig_atomic_t relay_child;
@@ -19,8 +20,8 @@ static int relay_setup_failed(void) {
   return 125;
 }
 
-/* Host-backed stdin must not reach the payload. Retain the private pipe's
- * read end so queued bytes can be deducted from regular-file consumption. */
+/* The payload must not reopen stdin for writing into its own receive queue.
+ * Retain the read-only socket so unread bytes can be deducted from consumption. */
 static int relay_stdin(char **command) {
   struct stat input;
   if (fstat(STDIN_FILENO, &input) != 0) return relay_setup_failed();
@@ -33,7 +34,9 @@ static int relay_stdin(char **command) {
     if (source < 0) return relay_setup_failed();
   }
   int channel[2];
-  if (pipe(channel) != 0) return relay_setup_failed();
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, channel) != 0 ||
+      shutdown(channel[0], SHUT_WR) != 0)
+    return relay_setup_failed();
   int flags = fcntl(channel[1], F_GETFL);
   if (flags < 0 || fcntl(channel[1], F_SETFL, flags | O_NONBLOCK) != 0)
     return relay_setup_failed();

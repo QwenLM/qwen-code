@@ -129,6 +129,12 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     copyFileSync: vi.fn(),
+    lstatSync: vi.fn(),
+    fstatSync: vi.fn(),
+    openSync: vi.fn(),
+    closeSync: vi.fn(),
+    fchmodSync: vi.fn(),
+    ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
@@ -150,6 +156,12 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     copyFileSync: vi.fn(),
+    lstatSync: vi.fn(),
+    fstatSync: vi.fn(),
+    openSync: vi.fn(),
+    closeSync: vi.fn(),
+    fchmodSync: vi.fn(),
+    ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
@@ -198,7 +210,30 @@ describe('Settings Loading and Merging', () => {
       (jsonString: string) => jsonString,
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
-    (fs.readFileSync as Mock).mockReturnValue('{}'); // Return valid empty JSON
+    (fs.readFileSync as Mock).mockImplementation(
+      (p: fs.PathOrFileDescriptor) =>
+        typeof p === 'number' ? Buffer.from('{broken') : '{}',
+    );
+    const regular = {
+      isFile: () => true,
+      nlink: 1,
+      dev: 1,
+      ino: 1,
+      mode: 0o600,
+    };
+    (fs.lstatSync as Mock).mockReturnValue(regular);
+    (fs.fstatSync as Mock).mockReturnValue(regular);
+    (fs.openSync as Mock).mockImplementation(
+      (p: fs.PathLike, flags: number | string) =>
+        flags === 'wx'
+          ? 101
+          : flags ===
+              (fs.constants.O_WRONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK)
+            ? 102
+            : 100,
+    );
     (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
       p.toString(),
     );
@@ -2299,22 +2334,22 @@ describe('Settings Loading and Merging', () => {
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
-          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+          typeof p === 'number'
+            ? Buffer.from('{broken')
+            : p === MOCK_WORKSPACE_SETTINGS_PATH
+              ? '{broken'
+              : '{}',
       );
       const loaded = loadSettings(MOCK_WORKSPACE_DIR);
       expect(loaded.corruptedPath).toBe(
         `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
       );
       expect(loaded.wasRecovered).toBe(false);
-      expect(fs.copyFileSync).toHaveBeenCalledWith(
-        MOCK_WORKSPACE_SETTINGS_PATH,
-        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
-      );
       expect(fs.writeFileSync).toHaveBeenCalledWith(
-        MOCK_WORKSPACE_SETTINGS_PATH,
-        '{}',
-        'utf-8',
+        101,
+        Buffer.from('{broken'),
       );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(102, '{}', 'utf-8');
     });
 
     it('keeps Workspace recovery available when the preserved file cannot be reset', () => {
@@ -2323,22 +2358,31 @@ describe('Settings Loading and Merging', () => {
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
-          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+          typeof p === 'number'
+            ? Buffer.from('{broken')
+            : p === MOCK_WORKSPACE_SETTINGS_PATH
+              ? '{broken'
+              : '{}',
       );
-      (fs.writeFileSync as Mock).mockImplementation(() => {
-        throw Object.assign(new Error('read-only file system'), {
-          code: 'EROFS',
-        });
-      });
+      (fs.openSync as Mock).mockImplementation(
+        (_p: fs.PathLike, flags: number | string) => {
+          if (flags === 'wx') return 101;
+          if (typeof flags === 'number' && flags & fs.constants.O_WRONLY)
+            throw Object.assign(new Error('read-only file system'), {
+              code: 'EROFS',
+            });
+          return 100;
+        },
+      );
       const loaded = loadSettings(MOCK_WORKSPACE_DIR);
       expect(loaded.corruptedPath).toBe(
         `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
       );
       expect(loaded.wasRecovered).toBe(false);
       expect(loaded.workspace.settings).toEqual({});
-      expect(fs.copyFileSync).toHaveBeenCalledWith(
-        MOCK_WORKSPACE_SETTINGS_PATH,
-        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        101,
+        Buffer.from('{broken'),
       );
     });
 
@@ -2348,11 +2392,18 @@ describe('Settings Loading and Merging', () => {
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
-          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+          typeof p === 'number'
+            ? Buffer.from('{broken')
+            : p === MOCK_WORKSPACE_SETTINGS_PATH
+              ? '{broken'
+              : '{}',
       );
-      (fs.copyFileSync as Mock).mockImplementation(() => {
-        throw new Error('EACCES');
-      });
+      (fs.openSync as Mock).mockImplementation(
+        (_p: fs.PathLike, flags: number | string) => {
+          if (flags === 'wx') throw new Error('EACCES');
+          return 100;
+        },
+      );
       expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
         'Cannot preserve malformed workspace settings',
       );
@@ -2383,11 +2434,17 @@ describe('Settings Loading and Merging', () => {
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor, encoding?: BufferEncoding) =>
+            typeof p === 'number' ||
             p.toString().startsWith(`${root}${path.sep}`)
               ? actualFs.readFileSync(p, encoding)
               : '{}',
         );
-        (fs.copyFileSync as Mock).mockImplementation(actualFs.copyFileSync);
+        (fs.lstatSync as Mock).mockImplementation(actualFs.lstatSync);
+        (fs.fstatSync as Mock).mockImplementation(actualFs.fstatSync);
+        (fs.openSync as Mock).mockImplementation(actualFs.openSync);
+        (fs.closeSync as Mock).mockImplementation(actualFs.closeSync);
+        (fs.fchmodSync as Mock).mockImplementation(actualFs.fchmodSync);
+        (fs.ftruncateSync as Mock).mockImplementation(actualFs.ftruncateSync);
         (fs.writeFileSync as Mock).mockImplementation(actualFs.writeFileSync);
         (fs.rmSync as Mock).mockImplementation(actualFs.rmSync);
         (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
@@ -2437,6 +2494,7 @@ describe('Settings Loading and Merging', () => {
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor, encoding?: BufferEncoding) =>
+            typeof p === 'number' ||
             p.toString().startsWith(`${root}${path.sep}`)
               ? actualFs.readFileSync(p, encoding)
               : '{}',
@@ -2464,13 +2522,167 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it
+      .skipIf(process.platform === 'win32')
+      .each(['file-link', 'directory-link', 'hard-link'])(
+      'refuses malformed %s recovery without changing external bytes or the old copy',
+      async (kind) => {
+        const actualFs = await vi.importActual<typeof fs>('node:fs');
+        const root = actualFs.mkdtempSync(
+          path.join(osActual.tmpdir(), 'workspace-recovery-link-'),
+        );
+        const workspace = path.join(root, 'workspace');
+        const outside = path.join(root, 'outside');
+        const settingsDir = path.join(workspace, SETTINGS_DIRECTORY_NAME);
+        const original = path.join(settingsDir, 'settings.json');
+        const target = path.join(outside, 'settings.json');
+        const corrupted = `${original}.corrupted`;
+        actualFs.mkdirSync(workspace);
+        actualFs.mkdirSync(outside);
+        actualFs.writeFileSync(target, Buffer.from([0xff, 0x7b, 0x62]), {
+          mode: 0o640,
+        });
+        if (kind === 'directory-link')
+          actualFs.symlinkSync(outside, settingsDir);
+        else {
+          actualFs.mkdirSync(settingsDir);
+          if (kind === 'hard-link') actualFs.linkSync(target, original);
+          else actualFs.symlinkSync(target, original);
+        }
+        actualFs.writeFileSync(corrupted, 'previous copy', { mode: 0o400 });
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) =>
+            p.toString().startsWith(`${root}${path.sep}`) &&
+            actualFs.existsSync(p),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor, encoding?: BufferEncoding) =>
+            p.toString().startsWith(`${root}${path.sep}`)
+              ? actualFs.readFileSync(p, encoding)
+              : '{}',
+        );
+        (fs.lstatSync as Mock).mockImplementation(actualFs.lstatSync);
+        (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
+          p.toString().startsWith(`${root}${path.sep}`)
+            ? actualFs.realpathSync(p)
+            : p.toString(),
+        );
+        try {
+          expect(() => loadSettings(workspace)).toThrow(
+            'Linked Workspace settings cannot be recovered automatically',
+          );
+          expect(actualFs.readFileSync(target)).toEqual(
+            Buffer.from([0xff, 0x7b, 0x62]),
+          );
+          expect(actualFs.statSync(target).mode & 0o777).toBe(0o640);
+          expect(actualFs.readFileSync(corrupted, 'utf8')).toBe(
+            'previous copy',
+          );
+          expect(actualFs.statSync(corrupted).mode & 0o777).toBe(0o400);
+          expect(fs.rmSync).not.toHaveBeenCalled();
+          expect(fs.writeFileSync).not.toHaveBeenCalled();
+          actualFs.writeFileSync(
+            target,
+            JSON.stringify({
+              $version: SETTINGS_VERSION,
+              ui: { theme: 'Default' },
+            }),
+          );
+          expect(loadSettings(workspace).workspace.settings.ui?.theme).toBe(
+            'Default',
+          );
+          expect(fs.writeFileSync).not.toHaveBeenCalled();
+        } finally {
+          actualFs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([false, true])(
+      'preserves raw bytes and safely resets a regular file (replacement link: %s)',
+      async (replace) => {
+        const actualFs = await vi.importActual<typeof fs>('node:fs');
+        const root = actualFs.mkdtempSync(
+          path.join(osActual.tmpdir(), 'workspace-recovery-bytes-'),
+        );
+        const settingsDir = path.join(root, SETTINGS_DIRECTORY_NAME);
+        const original = path.join(settingsDir, 'settings.json');
+        const corrupted = `${original}.corrupted`;
+        const outside = path.join(root, 'external');
+        const bytes = Buffer.from([0xff, 0x7b, 0x62]);
+        actualFs.mkdirSync(settingsDir);
+        actualFs.writeFileSync(original, bytes, { mode: 0o640 });
+        actualFs.writeFileSync(outside, 'external unchanged', { mode: 0o600 });
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) =>
+            p.toString().startsWith(`${root}${path.sep}`) &&
+            actualFs.existsSync(p),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor, encoding?: BufferEncoding) =>
+            typeof p === 'number' ||
+            p.toString().startsWith(`${root}${path.sep}`)
+              ? actualFs.readFileSync(p, encoding)
+              : '{}',
+        );
+        (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
+          p.toString() === root || p.toString().startsWith(`${root}${path.sep}`)
+            ? actualFs.realpathSync(p)
+            : p.toString(),
+        );
+        (fs.lstatSync as Mock).mockImplementation(actualFs.lstatSync);
+        (fs.fstatSync as Mock).mockImplementation(actualFs.fstatSync);
+        (fs.closeSync as Mock).mockImplementation(actualFs.closeSync);
+        (fs.fchmodSync as Mock).mockImplementation(actualFs.fchmodSync);
+        (fs.ftruncateSync as Mock).mockImplementation(actualFs.ftruncateSync);
+        (fs.writeFileSync as Mock).mockImplementation(actualFs.writeFileSync);
+        (fs.rmSync as Mock).mockImplementation(actualFs.rmSync);
+        (fs.openSync as Mock).mockImplementation(
+          (p: fs.PathLike, flags: number | string, mode?: fs.Mode) => {
+            if (
+              replace &&
+              p === original &&
+              typeof flags === 'number' &&
+              flags & fs.constants.O_WRONLY
+            ) {
+              actualFs.unlinkSync(original);
+              actualFs.symlinkSync(outside, original);
+            }
+            return actualFs.openSync(p, flags, mode);
+          },
+        );
+        try {
+          const loaded = loadSettings(root);
+          expect(loaded.workspace.settings).toEqual({});
+          expect(loaded.corruptedPath).toBe(corrupted);
+          expect(actualFs.readFileSync(corrupted)).toEqual(bytes);
+          expect(actualFs.statSync(corrupted).mode & 0o777).toBe(0o640);
+          expect(actualFs.readFileSync(outside, 'utf8')).toBe(
+            'external unchanged',
+          );
+          expect(actualFs.statSync(outside).mode & 0o777).toBe(0o600);
+          expect(actualFs.lstatSync(original).isSymbolicLink()).toBe(replace);
+          if (!replace) {
+            expect(actualFs.readFileSync(original, 'utf8')).toBe('{}');
+            expect(actualFs.statSync(original).mode & 0o777).toBe(0o640);
+          }
+        } finally {
+          actualFs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('refuses recovery when the previous preserved copy cannot be removed', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
-          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+          typeof p === 'number'
+            ? Buffer.from('{broken')
+            : p === MOCK_WORKSPACE_SETTINGS_PATH
+              ? '{broken'
+              : '{}',
       );
       (fs.rmSync as Mock).mockImplementation(() => {
         throw new Error('EACCES');

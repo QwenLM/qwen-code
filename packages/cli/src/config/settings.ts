@@ -55,6 +55,7 @@ import {
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
+  SETTINGS_DIRECTORY_NAME,
   getHomeEnvFallbackVars,
   loadEnvironment,
   preResolveHomeEnvOverrides,
@@ -1233,6 +1234,7 @@ function readSettingsLayers(
           debugLogger.warn(
             `Workspace settings ${filePath} have invalid JSON (${getErrorMessage(parseError)}).`,
           );
+          let original: fs.Stats;
           try {
             if (
               fs.existsSync(corruptedPath) &&
@@ -1241,15 +1243,79 @@ function readSettingsLayers(
               throw new Error(
                 'The corruption copy resolves to the original settings file.',
               );
-            fs.rmSync(corruptedPath, { force: true });
-            fs.copyFileSync(filePath, corruptedPath);
+            original = fs.lstatSync(filePath);
+            if (
+              !original.isFile() ||
+              original.nlink !== 1 ||
+              fs.realpathSync(filePath) !==
+                path.join(
+                  realWorkspaceDir,
+                  SETTINGS_DIRECTORY_NAME,
+                  'settings.json',
+                )
+            )
+              throw new Error(
+                'Linked Workspace settings cannot be recovered automatically; repair the original file.',
+              );
+            const source = fs.openSync(
+              filePath,
+              fs.constants.O_RDONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(source);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error(
+                  'Workspace settings changed before preservation.',
+                );
+              const bytes = fs.readFileSync(source);
+              fs.rmSync(corruptedPath, { force: true });
+              const copy = fs.openSync(
+                corruptedPath,
+                'wx',
+                original.mode & 0o777,
+              );
+              try {
+                fs.fchmodSync(copy, original.mode & 0o777);
+                fs.writeFileSync(copy, bytes);
+              } finally {
+                fs.closeSync(copy);
+              }
+            } finally {
+              fs.closeSync(source);
+            }
           } catch (copyError) {
             throw new Error(
               `Cannot preserve malformed workspace settings ${filePath}: ${getErrorMessage(copyError)}`,
             );
           }
           try {
-            fs.writeFileSync(filePath, '{}', 'utf-8');
+            const target = fs.openSync(
+              filePath,
+              fs.constants.O_WRONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(target);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error('Workspace settings changed before reset.');
+              fs.ftruncateSync(target, 0);
+              fs.writeFileSync(target, '{}', 'utf-8');
+            } finally {
+              fs.closeSync(target);
+            }
           } catch (writeError) {
             debugLogger.warn(
               `Could not reset malformed workspace settings ${filePath}: ${getErrorMessage(writeError)}. Using empty Workspace settings; the preserved copy is ${corruptedPath}.`,

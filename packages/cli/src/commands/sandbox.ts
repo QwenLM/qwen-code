@@ -148,14 +148,22 @@ export const sandboxCommand: CommandModule = {
         );
         if (command.length) {
           let outputError: NodeJS.ErrnoException | undefined;
-          const handleOutputError = (error: NodeJS.ErrnoException) => {
-            if (outputError || controller.signal.aborted) return;
-            outputError = error;
-            cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
-            controller.abort();
+          const outputControllers = {
+            stdout: new AbortController(),
+            stderr: new AbortController(),
           };
-          process.stdout.on('error', handleOutputError);
-          process.stderr.on('error', handleOutputError);
+          const handleOutputError =
+            (stream: 'stdout' | 'stderr') => (error: NodeJS.ErrnoException) => {
+              outputControllers[stream].abort();
+              if (outputError) return;
+              outputError = error;
+              cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
+              controller.abort();
+            };
+          const stdoutError = handleOutputError('stdout');
+          const stderrError = handleOutputError('stderr');
+          process.stdout.on('error', stdoutError);
+          process.stderr.on('error', stderrError);
           try {
             // env resolves PATH inside confinement and receives literal argv.
             const handle = await executeSandbox(
@@ -180,11 +188,13 @@ export const sandboxCommand: CommandModule = {
               { streamStdout: true, streamRawOutput: true },
             );
             const result = await handle.result;
-            await Promise.all([
-              flushOutput(process.stdout, controller.signal),
-              flushOutput(process.stderr, controller.signal),
+            const output = await Promise.allSettled([
+              flushOutput(process.stdout, outputControllers.stdout.signal),
+              flushOutput(process.stderr, outputControllers.stderr.signal),
             ]);
             if (outputError && outputError.code !== 'EPIPE') throw outputError;
+            for (const flushed of output)
+              if (flushed.status === 'rejected') throw flushed.reason;
             if (result.error && !result.aborted) throw result.error;
             process.exitCode =
               result.aborted || controller.signal.aborted
@@ -192,8 +202,8 @@ export const sandboxCommand: CommandModule = {
                 : (result.exitCode ?? 1);
             return;
           } finally {
-            process.stdout.removeListener('error', handleOutputError);
-            process.stderr.removeListener('error', handleOutputError);
+            process.stdout.removeListener('error', stdoutError);
+            process.stderr.removeListener('error', stderrError);
           }
         }
         if (!args.verify) return;

@@ -360,6 +360,83 @@ describe('qwen sandbox tool boundary', () => {
       expect(process.listeners(signal)).toEqual(before[index]);
     expect(process.exitCode).toBe(1);
   });
+  it.each([
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ] as const)(
+    'fences accepted output after %s cancellation',
+    async (signal, code) => {
+      const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(false);
+      mocks.execute.mockImplementationOnce(
+        async (_policy, _payload, onOutput: (event: object) => void) => {
+          for (const stream of ['stdout', 'stderr'])
+            onOutput({ type: 'raw_data', stream, chunk: Buffer.from('tail') });
+          process.emit(signal);
+          return {
+            result: Promise.resolve({
+              aborted: true,
+              exitCode: null,
+              error: null,
+            }),
+          };
+        },
+      );
+      let completed = false;
+      const completion = run({ '--': ['fixture'] }).then(() => {
+        completed = true;
+      });
+      await vi.waitFor(() => expect(stdout.mock.calls).toHaveLength(2));
+      expect(completed).toBe(false);
+      const finish = (write: typeof stdout) => {
+        const callback = write.mock.calls.at(-1)?.[1];
+        if (typeof callback !== 'function')
+          throw new Error('missing flush callback');
+        (callback as (error?: Error | null) => void)();
+      };
+      finish(stdout);
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      finish(stderr);
+      await completion;
+      expect(process.exitCode).toBe(code);
+    },
+  );
+  it('drains valid stderr after stdout closes, including after cancellation', async () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(false);
+    mocks.execute.mockImplementationOnce(
+      async (_policy, _payload, onOutput: (event: object) => void) => {
+        for (const stream of ['stdout', 'stderr'])
+          onOutput({ type: 'raw_data', stream, chunk: Buffer.from('tail') });
+        process.emit('SIGINT');
+        process.stdout.emit(
+          'error',
+          Object.assign(new Error('broken pipe'), { code: 'EPIPE' }),
+        );
+        return {
+          result: Promise.resolve({
+            aborted: true,
+            exitCode: null,
+            error: null,
+          }),
+        };
+      },
+    );
+    let completed = false;
+    const completion = run({ '--': ['fixture'] }).then(() => {
+      completed = true;
+    });
+    await vi.waitFor(() => expect(stderr.mock.calls).toHaveLength(2));
+    expect(stdout.mock.calls).toHaveLength(1);
+    expect(completed).toBe(false);
+    const callback = stderr.mock.calls.at(-1)?.[1];
+    if (typeof callback !== 'function')
+      throw new Error('missing stderr flush callback');
+    (callback as (error?: Error | null) => void)();
+    await completion;
+    expect(process.exitCode).toBe(141);
+  });
   it('forwards cancellation to the confined execution only', async () => {
     let done: (value: object) => void;
     mocks.execute.mockResolvedValueOnce({
