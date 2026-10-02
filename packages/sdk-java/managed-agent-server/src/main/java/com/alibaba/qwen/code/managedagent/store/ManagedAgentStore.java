@@ -515,10 +515,19 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
-        appendEvent(tenantId, sessionId, null,
-                mutationEvent(kind, "requested"),
-                Map.of("sessionId", sessionId), false,
-                mutationSource(operation, idempotencyKey, "requested"), now);
+        // A key abandonSessionMutation freed keeps the requested event the
+        // abandoned attempt already published, and the event's source_key is
+        // a function of the key, so re-appending it would collide on
+        // UNIQUE (tenant_id, session_id, source_key). Like the PENDING-row
+        // replay this re-attempt replaces, it appends nothing.
+        String requestedSource = mutationSource(operation, idempotencyKey,
+                "requested");
+        if (!hasSourceEvent(tenantId, sessionId, requestedSource)) {
+            appendEvent(tenantId, sessionId, null,
+                    mutationEvent(kind, "requested"),
+                    Map.of("sessionId", sessionId), false,
+                    requestedSource, now);
+        }
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 

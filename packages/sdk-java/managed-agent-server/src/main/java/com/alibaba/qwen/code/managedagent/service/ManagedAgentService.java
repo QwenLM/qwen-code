@@ -282,19 +282,17 @@ public class ManagedAgentService {
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
             } catch (RuntimeException error) {
-                // A non-retryable refusal (e.g. the Workspace authority's)
-                // is permanent: answer it with its own status and code
-                // instead of a transient 503, which would invite a fresh-key
-                // retry into session_operation_active on the still-PENDING
-                // command.
+                // A rename answered without completing must not leave the
+                // command row PENDING: nothing else clears it, and
+                // requireNoOpenOperation counts it, so every later rename
+                // with a fresh key would die in session_operation_active
+                // for the Session's life. A non-retryable refusal (e.g. the
+                // Workspace authority's) is then answered with its own
+                // status and code instead of a transient 503.
+                store.abandonSessionMutation(tenantId, RENAME,
+                        idempotencyKey, sessionId);
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
-                    // Retire the command row this refusal would leave
-                    // PENDING: nothing else clears it, so every later rename
-                    // with a fresh key would die in
-                    // requireNoOpenOperation for the Session's life.
-                    store.abandonSessionMutation(tenantId, RENAME,
-                            idempotencyKey, sessionId);
                     HttpStatus status = HttpStatus.resolve(
                             refusal.getStatusCode());
                     throw new ApiException(

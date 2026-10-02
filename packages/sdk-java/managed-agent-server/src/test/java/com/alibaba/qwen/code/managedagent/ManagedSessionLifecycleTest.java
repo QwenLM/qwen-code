@@ -380,11 +380,8 @@ class ManagedSessionLifecycleTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"pending\"}"))
                 .andExpect(status().isServiceUnavailable());
-        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId), tenant,
-                "close")
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("session_operation_active"));
+        // The answered failure retired its command row, so the same key
+        // re-attempts the rename instead of finding the Session wedged.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", "rename")

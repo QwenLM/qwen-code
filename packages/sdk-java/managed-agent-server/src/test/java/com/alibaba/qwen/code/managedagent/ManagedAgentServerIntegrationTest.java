@@ -640,7 +640,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAPendingRenameWithTheSameIdempotencyKey() throws Exception {
+    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -661,15 +661,17 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("hosted_harness_unavailable"));
 
+        // The answered failure retired its command row, so a different key
+        // is admitted instead of wedging on session_operation_active.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("session_operation_active"));
+                .andExpect(status().isOk());
 
+        // The failed key stays free to re-attempt the mutation: the retired
+        // row leaves nothing to replay, so the retry performs the rename.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
@@ -677,7 +679,7 @@ class ManagedAgentServerIntegrationTest {
                         .content("{\"title\":\"retry title\"}"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"))
+                        "false"))
                 .andExpect(jsonPath("$.metadata.title")
                         .value("retry title"));
 
@@ -685,7 +687,7 @@ class ManagedAgentServerIntegrationTest {
                 .getResponse().getContentAsString()).get("data");
         assertThat(events).filteredOn(event -> "session.updated".equals(
                         event.get("type").asText()))
-                .hasSize(1);
+                .hasSize(2);
     }
 
     @Test

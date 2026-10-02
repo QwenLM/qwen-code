@@ -3,12 +3,14 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
@@ -728,6 +730,94 @@ class ManagedWorkspaceAdmissionTest {
                             assertThat(error.getCode())
                                     .isEqualTo("workspace_unavailable");
                         }));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_command WHERE tenant_id = ?"
+                        + " AND session_id = ? AND command_status = 'PENDING'",
+                Integer.class, tenant, sessionId)).isZero();
+
+        // The freed key stays re-usable: a same-key retry re-attempts the
+        // mutation instead of colliding on the requested event the refused
+        // attempt already published.
+        transaction.executeWithoutResult(status -> service.renameSession(
+                tenant, "actor-a", "rename-1", sessionId, "first"));
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("first");
+
+        transaction.executeWithoutResult(status -> service.renameSession(
+                tenant, "actor-a", "rename-2", sessionId, "second"));
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("second");
+    }
+
+    @Test
+    void aRenameFailureThatIsNotABrokerRefusalStillRetiresItsCommand() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        // A Harness that lost the Session answers the rename with a 4xx,
+        // which the client surfaces as a DaemonHttpException — a permanent
+        // failure, but not a broker refusal.
+        DaemonHttpException lost = mock(DaemonHttpException.class);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    private int renames;
+
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                        if (renames++ == 0) {
+                            throw lost;
+                        }
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), null, harness, registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-a", "rename-1", sessionId, "first"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                            assertThat(error.getCode())
+                                    .isEqualTo("hosted_harness_unavailable");
+                        }));
+        // The answered mutation retired its command row too, so a fresh key
+        // is admitted instead of wedging on session_operation_active.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_command WHERE tenant_id = ?"
                         + " AND session_id = ? AND command_status = 'PENDING'",
