@@ -230,8 +230,12 @@ Other operation paths retain their existing behavior.
 
 Use #13135's database-time claim expiry, renewal and generation checks. L2
 retries ordinary transaction/retirement failures with the existing backoff.
-It does not introduce a `RECOVERY_BLOCKED` DELETE path: the current scanner
-reclaims blocked CLOSE only, and L2 performs no uncertain remote execution.
+L2 performs no uncertain remote execution and does not create blocked DELETE
+operations. An older coordinator can nevertheless park an admitted DELETE as
+`RECOVERY_BLOCKED`. The scanner and claim query reclaim BLOCKED CLOSE and
+DELETE admitted from CLOSED or ARCHIVED after their existing backoff; ACTIVE
+DELETE stays blocked. The new coordinator completes those admitted closed-session
+deletes without Runtime work and retains lease/generation checks.
 A residual live writer fails retirement and leaves `DELETING` pending retry;
 L2 neither kills that writer nor manufactures completion evidence.
 
@@ -328,7 +332,9 @@ locking read after the operation lock. Review merged behavior, not just merge co
 
 Deploy compatible binaries and reconciled schemas to all Managed Agent writers
 and lifecycle workers before admitting bound L2 operations. An old #13135
-coordinator would attempt Runtime cleanup for them. Use a coordinated rollout
+coordinator would attempt Runtime cleanup for them and can leave them BLOCKED
+when Runtime close support is unavailable. Upgraded coordinators recover those
+admitted CLOSED/ARCHIVED deletes without another Runtime call. Use a coordinated rollout
 or existing deployment traffic controls, without adding a speculative feature
 flag. Preserve older unbound keys, migration recovery and response shapes.
 
@@ -362,11 +368,16 @@ completion lease query. The lease is now read with `FOR UPDATE` after the
 operation lock, so expiry during the wait cannot authorize a tombstone.
 This applies to close completion as well; its focused regressions pass.
 
-The current host is macOS. The Linux-only packaged Hosted Harness/physical
-worker-stop and crash fixture was not run. The metadata tests use deterministic
-close evidence; they do not claim physical process-stop, crash, shared-file or
-backup-erasure verification. Those deployment checks remain required in the
-Linux Hosted environment.
+The author's host is macOS and its metadata tests use deterministic close
+evidence. Independent reviewer [wenshao's Linux verification](https://github.com/QwenLM/qwen-code/pull/13194#issuecomment-5955445033)
+on `2486d3dad` supplies real packaged Hosted Harness, worker-stop, shared-file,
+neighbour isolation and crash/takeover evidence on both API surfaces. The pinned
+[rig and results](https://github.com/wenshao/qwen-code/tree/ff11be0a23ada2f1bdf955ebafd463779aefb670/pr13194)
+use a deterministic model and a test authentication adapter. This evidence is
+attributed to that reviewer and commit, not an author rerun of the final head.
+Windows, Shell/MCP profiles, real OSS collection and physical erasure remain
+outside that report. Warm refusal with an ACTIVE-neighbour positive control,
+not input refusal alone, establishes the retained close fence.
 
 | Group                  | Required evidence                                                                                                                                                                                                                                                          |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

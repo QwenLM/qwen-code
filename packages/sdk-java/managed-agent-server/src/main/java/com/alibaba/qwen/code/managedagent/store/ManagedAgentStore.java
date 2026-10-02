@@ -757,7 +757,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         jdbc.query(
                                 "SELECT tenant_id, session_id, operation_id FROM"
                                         + " managed_agent_operation WHERE operation_kind <>"
-                                        + " 'ACTION_RESPONSE' AND (delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND operation_kind = 'CLOSE')) AND"
+                                        + " 'ACTION_RESPONSE' AND (delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
+                                        + " OR (operation_kind = 'DELETE' AND session_status_before IN ('CLOSED', 'ARCHIVED'))))) AND"
                                         + " available_at <= ? ORDER BY available_at LIMIT ?",
                                 operationTargetMapper,
                                 now,
@@ -788,7 +789,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " claim_generation = claim_generation + 1,"
                         + " updated_at = ? WHERE tenant_id = ? AND"
                         + " session_id = ? AND operation_id = ? AND"
-                        + " (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND operation_kind = 'CLOSE')) AND available_at <= ?)"
+                        + " (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
+                        + " OR (operation_kind = 'DELETE' AND session_status_before IN ('CLOSED', 'ARCHIVED'))))) AND available_at <= ?)"
                         + " OR (delivery_state = 'LEASED' AND lease_until < ?))",
                 owner, Math.addExact(now, leaseDuration.toMillis()), now,
                 tenantId, sessionId, operationId, now, now);

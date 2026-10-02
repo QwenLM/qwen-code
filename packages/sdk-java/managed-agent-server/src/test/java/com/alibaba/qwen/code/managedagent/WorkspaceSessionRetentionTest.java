@@ -10,16 +10,19 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -39,6 +42,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-retention;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -56,6 +61,8 @@ class WorkspaceSessionRetentionTest {
     @Autowired ManagedSessionStore journal;
     @Autowired JdbcTemplate jdbc;
     @Autowired OnceCloseRuntime runtime;
+    @Autowired PlatformTransactionManager transactions;
+    @Autowired SessionLifecycleCoordinator lifecycle;
 
     @Test
     void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup() throws Exception {
@@ -109,6 +116,42 @@ class WorkspaceSessionRetentionTest {
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive").andExpect(status().isNotFound());
         assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo("DELETED");
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
+                + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
+        assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
+        assertThat(runtime.calls.get(session)).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recoversDeletionBlockedByAnOlderCoordinatorWithoutRuntime(boolean archived) throws Exception {
+        String tenant = tenant();
+        String session = closed(tenant, true);
+        if (archived) {
+            archive(tenant, session, "archive");
+        }
+        String id = new TransactionTemplate(transactions).execute(ignored -> {
+            var admitted = store.beginWorkspaceLifecycle(tenant, session,
+                    OperationKind.DELETE,
+                    "owner", "actor-digest", "delete", "digest", false);
+            var claim = store.claimOperation(tenant, session, admitted.operation().operationId(),
+                    "old-worker", Duration.ofMinutes(1)).orElseThrow();
+            store.blockLifecycleOperation(tenant, session, claim.operationId(), "old-worker",
+                    claim.claimGeneration(), "workspace_close_identity_unverified",
+                    System.currentTimeMillis() + Duration.ofDays(1).toMillis());
+            return claim.operationId();
+        });
+        assertThat(store.findOperation(tenant, session, id).orElseThrow().state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(store.findDeliverableOperations(Long.MAX_VALUE, 100)).noneMatch(target -> id.equals(target.operationId()));
+        assertThat(store.claimOperation(tenant, session, id, "early-worker", Duration.ofMinutes(1))).isEmpty();
+        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE tenant_id = ? AND operation_id = ?", tenant, id);
+        lifecycle.recoverOperations();
+        await().untilAsserted(() -> assertThat(store.findOperation(tenant, session, id).orElseThrow().state()).isEqualTo("COMPLETED"));
+        var completed = store.findOperation(tenant, session, id).orElseThrow();
+        assertThat(completed.claimGeneration()).isEqualTo(2);
+        assertThat(completed.failureCode()).isNull();
+        assertThat(completed.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);

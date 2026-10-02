@@ -329,6 +329,39 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recoversBlockedClosedDeletionAfterItsBackoff(boolean archived) {
+        var store = store(Clock.systemUTC());
+        String tenant = "blocked-delete";
+        String session = closed(store, tenant, true);
+        if (archived) {
+            transaction(() -> store.beginWorkspaceLifecycle(tenant, session, OperationKind.ARCHIVE,
+                    OWNER, ACTOR_DIGEST, "archive", "archive-digest", false));
+        }
+        var old = deleteClaim(store, tenant, session);
+        transaction(() -> {
+            store.blockLifecycleOperation(tenant, session, old.operationId(), "delete-worker", old.claimGeneration(),
+                    "workspace_close_identity_unverified", System.currentTimeMillis() + Duration.ofDays(1).toMillis());
+            return null;
+        });
+        assertThat(store.findDeliverableOperations(Long.MAX_VALUE, 100)).isEmpty();
+        assertThat(transaction(() -> store.claimOperation(tenant, session, old.operationId(), "replacement", Duration.ofMinutes(1)))).isEmpty();
+        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", old.operationId());
+        assertThat(store.findDeliverableOperations(0, 100)).extracting(target -> target.operationId()).containsExactly(old.operationId());
+        var replacement = transaction(() -> store.claimOperation(tenant, session, old.operationId(), "replacement", Duration.ofMinutes(1))).orElseThrow();
+        assertThat(replacement.claimGeneration()).isEqualTo(old.claimGeneration() + 1);
+        assertThat(transaction(() -> store.completeOperation(tenant, session, old.operationId(), "delete-worker", old.claimGeneration(), false))).isFalse();
+        assertThat(transaction(() -> store.completeOperation(tenant, session, old.operationId(), "replacement", replacement.claimGeneration(), false))).isTrue();
+        var completed = store.findOperation(tenant, session, old.operationId()).orElseThrow();
+        assertThat(completed.state()).isEqualTo("COMPLETED");
+        assertThat(completed.failureCode()).isNull();
+        assertThat(completed.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
+        assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
+        assertThat(count("managed_agent_event", "event_type = 'session.deleted'")).isEqualTo(1);
+    }
+
     private String closed(ManagedAgentStore store, String tenant, boolean journal) {
         String session = create(store, tenant);
         if (journal) {

@@ -205,8 +205,11 @@ coordinator 为绑定 DELETE 增加一个窄分支：其持久化
 
 沿用 #13135 的数据库时间 claim 过期、续租和 generation 校验。
 普通事务或退役失败使用现有 backoff 重试。
-L2 不引入 `RECOVERY_BLOCKED` DELETE 路径：当前 scanner 只重新接管 blocked CLOSE，
-而 L2 没有不确定的远端执行。
+L2 没有不确定的远端执行，也不会创建 blocked DELETE。
+但旧 coordinator 仍可能把已准入 DELETE 搁置为 `RECOVERY_BLOCKED`。
+scanner 与 claim 查询在原有 backoff 到期后重新领取 BLOCKED CLOSE，以及
+从 CLOSED/ARCHIVED 准入的 DELETE；ACTIVE DELETE 仍保持 blocked。
+新 coordinator 不调用 Runtime 即可完成这些已准入的关闭后删除，保留租约/generation 校验。
 残留的 live writer 使退役失败，Session 保持 `DELETING` 等待重试；
 L2 不终止该 writer，也不伪造完成证据。
 
@@ -290,7 +293,9 @@ recovery bundle 为 `V31`，close 为 `V32`；#13223 已解决此前编号冲突
 评审集成后的行为，不能只解决文本冲突。
 
 开放绑定 L2 准入前，先让所有 Managed Agent writer 与 lifecycle worker
-运行兼容二进制并完成迁移协调。旧 #13135 coordinator 会对 L2 尝试 Runtime 清理。
+运行兼容二进制并完成迁移协调。旧 #13135 coordinator 会对 L2 尝试 Runtime 清理，
+缺少 Runtime close 支持时可能使操作保持 BLOCKED。升级后的 coordinator
+会重新领取从 CLOSED/ARCHIVED 准入的删除，不再调用 Runtime。
 采用协调发布或既有部署流量控制，不为此新增推测性的 feature flag。
 保留旧未绑定会话的 key、迁移恢复和响应形状。
 
@@ -319,9 +324,15 @@ writer/投影完成、残留 writer 续租与 retirement 竞争，以及前置 s
 现使用 `FOR UPDATE`，等待期间发生的过期不能授权提交墓碑。
 修正也适用于 close 完成，其定向回归通过。
 
-当前主机为 macOS，未运行 Linux 专用的 packaged Hosted Harness/物理 worker-stop
-与崩溃 fixture。元数据测试使用确定性的 close 证据，不宣称验证了物理停机、
-崩溃、共享文件或备份擦除。这些部署检查仍需在 Linux Hosted 环境执行。
+作者的主机为 macOS，元数据测试使用确定性的 close 证据。
+独立评审者 [wenshao 的 Linux 验证](https://github.com/QwenLM/qwen-code/pull/13194#issuecomment-5955445033)
+针对 `2486d3dad`，补充了两个 API 入口上的真实 packaged Hosted Harness、worker 停止、
+共享文件、邻居隔离和崩溃/接管证据。
+固定提交的[装置与结果](https://github.com/wenshao/qwen-code/tree/ff11be0a23ada2f1bdf955ebafd463779aefb670/pr13194)
+使用确定性模型及测试认证 adapter。该证据归属于评审者及该提交，
+不能称为作者对最终 head 的重新运行。Windows、Shell/MCP profile、真实 OSS 回收与
+物理擦除仍未被该报告覆盖。保留关闭围栏的证据是带 ACTIVE 邻居阳性对照的 warm 拒绝，
+不能仅凭输入被拒推断。
 
 | 分组            | 必需证据                                                                                                                                                                                 |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
