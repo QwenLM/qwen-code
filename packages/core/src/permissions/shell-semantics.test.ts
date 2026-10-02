@@ -636,6 +636,12 @@ describe('extractShellOperationsAcrossCommand', () => {
       '/repo/R&D/shared/settings.json',
     ],
     ["cd 'r&d\\x' && printf p > .env", '/repo/r&d/x/.env'],
+    // The closing quote right after a backslash does not make the directory a
+    // quoting artifact either; bash really enters it (#R7-1).
+    [
+      "cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json",
+      'C:/Users/me/R&D/settings.json',
+    ],
   ])(
     'resolves the quoted metacharacter directory in %s without escalating',
     (command, expectedPath) => {
@@ -764,5 +770,81 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
     expect(
       across(`cd sub ; echo 'a\\' ; cd .qwen ; echo {} > settings.json`),
     ).toEqual([write('/repo/sub/.qwen/settings.json')]);
+  });
+});
+
+describe('R8 review round: operand counting, directional artifacts, bash-authoritative merge', () => {
+  // Comment words, redirect residue and process-substitution fragments are
+  // not `cd` operands: bash still performs the cd in every one of these, so
+  // the write must resolve against the cd target with no cwd-unknown flags
+  // (#12280 R7-2).
+  it.each([
+    ['cd .qwen # note\necho {} > settings.json', REPO_SETTINGS],
+    ['cd .qwen > "$LOG" ; echo {} > settings.json', REPO_SETTINGS],
+    [
+      'cd sub >& 2 ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+    [
+      'cd sub > >(tee log) ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+  ])(
+    'counts only real cd operands in `%s` (#R7-2)',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([write(expectedPath)]);
+    },
+  );
+
+  // An unrelated quote divergence elsewhere in the command must not mark a
+  // genuine backslash-bearing directory as a split artifact (#12280 R7-1).
+  it('resolves a genuine directory despite an unrelated divergence (#R7-1)', () => {
+    expect(
+      across(`printf 'a\\' ; cd 'x>y\\z' && echo {} > settings.json`),
+    ).toEqual([write('/repo/x>y/z/settings.json')]);
+  });
+
+  // When the two readings tie, the bash walk sees nothing (its last segment
+  // is one quoted blob) and the escape walk is the only one that surfaces the
+  // write bash really performs (#12280 R7-3 tie).
+  it('recovers the write a comment-sabotaged bash reading quotes away (#R7-3 tie)', () => {
+    expect(
+      across(`cd .qwen ; echo # note 'a\\' ; echo '\necho {} > settings.json`),
+    ).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  // When the readings cross, the escape walk's inverted quote parity hides
+  // the `cd sub` and mines a phantom against the stale cwd; the bash walk is
+  // authoritative, so only the real path is published (#12280 R7-3 crossing).
+  it('does not publish the phantom a crossing escape reading mines (#R7-3 crossing)', () => {
+    expect(
+      across(
+        `echo 'a\\' 'x;y' 'p;q' 'r;s' ; cd sub ; echo 'b\\' ; cd .qwen ; echo {} > settings.json`,
+      ),
+    ).toEqual([write('/repo/sub/.qwen/settings.json')]);
+  });
+
+  // The reading decision re-runs on the unwrapped payload, so wrapping the
+  // #R3-2 shape in a login shell cannot hide the write (#12280 R8-1).
+  it('re-runs the reading decision inside a shell wrapper (#R8-1)', () => {
+    const unwrapped = across(
+      `echo done # note 'a\\''\necho {} > .qwen/settings.json`,
+    );
+    const wrapped = across(
+      `bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+    );
+    expect(wrapped).toEqual([write(REPO_SETTINGS)]);
+    expect(wrapped).toEqual(unwrapped);
+  });
+
+  // When the outer command already produces an operation, no outer-level
+  // fallback runs, so the wrapper payload is the only place the write can
+  // surface; threading the outer reading into the recursion loses it.
+  it('re-decides the wrapped payload when outer segments also write (#R8-1)', () => {
+    expect(
+      across(
+        `echo real > one.txt && bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+      ),
+    ).toEqual([write('/repo/one.txt'), write(REPO_SETTINGS)]);
   });
 });

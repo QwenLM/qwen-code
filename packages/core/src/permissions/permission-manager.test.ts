@@ -1841,6 +1841,128 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('deny rule still fires for a cd hidden by comment or redirect residue (#R7-2)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash performs the cd in every one of these; the leftover comment
+      // words or redirect targets are not operands.
+      for (const command of [
+        'cd .qwen # note\necho {} > settings.json',
+        'cd .qwen > "$LOG" ; echo {} > settings.json',
+        'cd .qwen 1>> "$LOG" ; echo {} > settings.json',
+        'cd .qwen <<< "$STR" ; echo {} > settings.json',
+        'cd .qwen > >(tee log) ; echo {} > settings.json',
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('deny rule still fires for a cd hidden by fd duplication (#R7-2)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(sub/.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd sub >& 2 ; cd .qwen ; echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rule still cites a quoted dir whose closing quote follows a backslash (#R7-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(C:/Users/me/R&D/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rule survives an unrelated quote divergence elsewhere (#R7-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)', 'Bash(printf *)'],
+          permissionsDeny: ['Write(x>y/z/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `printf 'a\\' ; cd 'x>y\\z' && echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write only a tied quote reading can see (#R7-3 tie)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo # note 'a\\' ; echo '\necho {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the wrapped write the outer reading tie used to hide (#R8-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'Bash(cd *)',
+            'Bash(echo *)',
+            'Bash(bash *)',
+            'Bash(sh *)',
+          ],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      for (const command of [
+        `bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+        `sh -c "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = makePm(echoRm);
       expect(await pm.evaluate(sh('echo hello; rm -rf /'))).toBe('deny');
