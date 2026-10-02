@@ -350,13 +350,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
-        if (!ManagedMcpProtocol.isOperation(immutable)) {
+        if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
+                    }
+                    if (ManagedHookProtocol.isOperation(immutable)) {
+                        ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
                     synchronized (context) {
                         requireReadySessionRecord(context);

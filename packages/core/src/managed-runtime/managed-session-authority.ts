@@ -55,12 +55,17 @@ import {
   type ManagedSessionEventKind,
   type ManagedSessionHeader,
   type ManagedSessionKey,
+  type ManagedSessionSubject,
 } from './managed-session-records.js';
 import { readManagedBranchCheckpoint } from './managed-session-resources.js';
 import {
   parseMcpConfiguration,
   parseMcpOperation,
 } from './managed-mcp-record.js';
+import {
+  parseHookRegistration,
+  parseHookExecution,
+} from './managed-hook-record.js';
 import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
@@ -362,6 +367,7 @@ export class LocalManagedSessionAuthority {
   private readonly checkpointSequences = new Map<string, number>();
   private checkpoint: ManagedSessionCheckpoint | undefined;
   private hasContinuation = false;
+  private readonly hookOperationActivations = new Set<string>();
   private compactedThrough = 0;
   private readonly domainRecords = new Map<
     string,
@@ -1330,7 +1336,7 @@ export class LocalManagedSessionAuthority {
       if (replayed !== undefined) return replayed;
       assertManagedSessionDomainEnabled(request.domain);
       const parsed = body.parse(request.record);
-      await this.verifyMcpResources(request.domain, parsed.record);
+      await this.verifyExtensionResources(request.domain, parsed.record);
       this.assertExtensionRevision(
         request.domain,
         body,
@@ -1546,6 +1552,51 @@ export class LocalManagedSessionAuthority {
         }
       }
     }
+    if (domain === 'hook_registration') {
+      for (const registration of this.extensionRecordsInDomain(domain)) {
+        if (
+          !isDefinitionPinConsistent(
+            registration.run.definition,
+            parsed.run.definition,
+          )
+        ) {
+          reject('A Hook catalog revision cannot name two definition digests.');
+        }
+      }
+    }
+    if (domain === 'hook_execution' && previous === undefined) {
+      const execution = parseHookExecution(parsed.record);
+      const registration = this.extensionRecord(
+        'hook_registration',
+        execution.registrationId,
+      );
+      if (
+        registration?.run.state !== 'settled' ||
+        JSON.stringify(registration.run.definition) !==
+          JSON.stringify(execution.run.definition)
+      ) {
+        reject(
+          'Hook execution must bind to its settled committed registration.',
+        );
+      }
+      for (const committed of this.extensionRecordsInDomain(domain)) {
+        const other = parseHookExecution(committed.record);
+        if (execution.onceKey !== null && execution.onceKey === other.onceKey) {
+          reject('Hook onceKey is already consumed in this Session.');
+        }
+        if (
+          other.occurrenceId === execution.occurrenceId &&
+          (other.ordinal === execution.ordinal ||
+            other.registrationId !== execution.registrationId ||
+            other.eventName !== execution.eventName ||
+            JSON.stringify(other.planRef) !== JSON.stringify(execution.planRef))
+        ) {
+          reject(
+            'Hook occurrence must keep its registration, event and plan, with unique ordinals.',
+          );
+        }
+      }
+    }
     if (domain === 'mcp_operation' && previous === undefined) {
       const operation = parseMcpOperation(parsed.record);
       const configuration = this.extensionRecord(
@@ -1668,7 +1719,7 @@ export class LocalManagedSessionAuthority {
           MANAGED_SESSION_LIMITS.maxEventBytes,
         ),
       );
-      await this.verifyMcpResources(domain, parsed.record);
+      await this.verifyExtensionResources(domain, parsed.record);
       this.assertExtensionRevision(
         domain,
         body,
@@ -1691,7 +1742,7 @@ export class LocalManagedSessionAuthority {
     }
   }
 
-  private async verifyMcpResources(
+  private async verifyExtensionResources(
     domain: ManagedSessionDomain,
     record: unknown,
   ): Promise<void> {
@@ -1703,7 +1754,15 @@ export class LocalManagedSessionAuthority {
               parseMcpOperation(record).argsRef,
               parseMcpOperation(record).resultRef,
             ]
-          : [];
+          : domain === 'hook_registration'
+            ? [parseHookRegistration(record).catalogRef]
+            : domain === 'hook_execution'
+              ? [
+                  parseHookExecution(record).planRef,
+                  parseHookExecution(record).inputRef,
+                  parseHookExecution(record).resultRef,
+                ]
+              : [];
     for (const ref of refs) {
       if (ref !== null) await this.resources!.read(ref);
     }
@@ -1955,6 +2014,7 @@ export class LocalManagedSessionAuthority {
      * whether the holder is still there.
      */
     readonly leaseDurationMs: number;
+    readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
     const epoch = (this.activation?.epoch ?? 0) + 1;
     const installRef = await this.publishActivationBody(
@@ -1965,6 +2025,7 @@ export class LocalManagedSessionAuthority {
         epoch,
         workerId: input.workerId,
         leaseDurationMs: input.leaseDurationMs,
+        ...(input.subject ? { subject: input.subject } : {}),
       },
     );
     await this.commitActivation({
@@ -1977,6 +2038,7 @@ export class LocalManagedSessionAuthority {
       installRef,
       boundaryRef: null,
       operation: 'installActivation',
+      subject: input.subject,
     });
     return { activationId: input.activationId, epoch };
   }
@@ -2008,6 +2070,7 @@ export class LocalManagedSessionAuthority {
       installRef: current.installRef,
       boundaryRef: null,
       operation: 'renewActivation',
+      subject: this.currentActivationSubject,
       renewalSeq,
     });
     return this.activation;
@@ -2050,6 +2113,7 @@ export class LocalManagedSessionAuthority {
       installRef: null,
       boundaryRef,
       operation: 'releaseActivation',
+      subject: this.currentActivationSubject,
     });
   }
 
@@ -2066,6 +2130,12 @@ export class LocalManagedSessionAuthority {
     return store.publish(kind, Buffer.from(JSON.stringify(body), 'utf8'));
   }
 
+  get currentActivationSubject(): ManagedSessionSubject | undefined {
+    return this.lastEventOfKind('activation.changed')?.payload['subject'] as
+      | ManagedSessionSubject
+      | undefined;
+  }
+
   private async commitActivation(input: {
     readonly activationId: string;
     readonly epoch: number;
@@ -2077,6 +2147,7 @@ export class LocalManagedSessionAuthority {
     readonly boundaryRef: ManagedSessionDurableRef | null;
     readonly operation: string;
     readonly renewalSeq?: number;
+    readonly subject?: ManagedSessionSubject;
   }): Promise<void> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
@@ -2101,7 +2172,7 @@ export class LocalManagedSessionAuthority {
           activationId: input.activationId,
           epoch: input.epoch,
           workerId: input.workerId,
-          subject: {
+          subject: input.subject ?? {
             type: 'activation',
             scopeId: input.activationId,
             activationId: input.activationId,
@@ -2153,6 +2224,15 @@ export class LocalManagedSessionAuthority {
     event: ManagedSessionEvent,
     branch: boolean,
   ): void {
+    if (
+      event.kind === 'activation.changed' &&
+      (event.payload['subject'] as ManagedSessionSubject).type ===
+        'hook_operation'
+    ) {
+      this.hookOperationActivations.add(
+        event.payload['activationId'] as string,
+      );
+    }
     if (event.kind === 'checkpoint.committed') {
       this.checkpointSequences.set(
         event.payload['checkpointId'] as string,
@@ -2207,7 +2287,11 @@ export class LocalManagedSessionAuthority {
       return;
     }
     if (
-      event.kind === 'model.attempt' ||
+      (event.kind === 'model.attempt' &&
+        !(
+          event.subject?.type === 'activation' &&
+          this.hookOperationActivations.has(event.subject.activationId)
+        )) ||
       event.kind === 'tool.intent' ||
       event.kind === 'tool.receipt' ||
       (event.kind === 'message.committed' &&

@@ -38,7 +38,7 @@ binding 退休前必须确认：无活跃逻辑 Session、无未结算 execution
 
 ## 实现区域
 
-Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAPI 与生成的 WebShell 类型；Runtime Broker repository/service/provider 与 schema；Hosted Harness 准入和同目录测试。close 迁移使用 V27，接在上游工具结果投影的 V26 迁移之后。public 和 WebShell capability 同时保留上游 Artifact 读取与可选 close 支持。不新增 lifecycle orchestrator 或大范围核心重构。与 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 对齐生命周期契约，与 [#12740](https://github.com/QwenLM/qwen-code/issues/12740) 对齐 Harness 恢复。
+Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAPI 与生成的 WebShell 类型；Runtime Broker repository/service/provider 与 schema；Hosted Harness 准入和同目录测试。close 迁移使用 V28，接在上游 managed Hook records 的 V27 迁移之后。两个迁移的版本不同，保证合并部署可以初始化和升级，不出现重复的 Flyway 版本。public 和 WebShell capability 同时保留上游 Artifact 读取与可选 close 支持。不新增 lifecycle orchestrator 或大范围核心重构。与 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 对齐生命周期契约，与 [#12740](https://github.com/QwenLM/qwen-code/issues/12740) 对齐 Harness 恢复。
 
 ## 验证与验收
 
