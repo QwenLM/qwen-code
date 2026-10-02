@@ -94,6 +94,129 @@ describe('useManagedSession', () => {
     });
   });
 
+  it('grows the failure backoff exponentially toward the jittered cap', () => {
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      expect([0, 1, 2, 3, 4, 5, 6].map(failureRetryDelayMs)).toEqual([
+        3_000, 4_500, 7_500, 13_500, 16_500, 16_500, 16_500,
+      ]);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('resets the stream backoff after every delivered event', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    try {
+      let calls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        calls++;
+        if (calls <= 3) {
+          yield event(calls);
+          throw new TypeError('connection reset by peer');
+        }
+        yield event(4);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      function Probe() {
+        useManagedSession(provider, 'client-1', 'session-1');
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      act(() => root!.render(<Probe />));
+      await act(async () => {});
+      for (let step = 0; step < 3; step++)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_000);
+        });
+      expect(
+        subscribeEvents.mock.calls.map(([, options]) => options.lastEventId),
+      ).toEqual([1, 1, 2, 3]);
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops resubscribing when the stream answers with a non-retryable error', async () => {
+    vi.useFakeTimers();
+    try {
+      const subscribeEvents = vi.fn(async function* () {
+        yield event(1);
+        throw Object.assign(new Error('session gone'), { status: 404 });
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      function Probe() {
+        useManagedSession(provider, 'client-1', 'session-1');
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      act(() => root!.render(<Probe />));
+      await act(async () => {});
+      expect(subscribeEvents).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resubscribes an unchanged cursor after a retryable stream failure', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        calls++;
+        if (calls === 1)
+          throw Object.assign(new Error('server busy'), { status: 500 });
+        yield event(2);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      function Probe() {
+        useManagedSession(provider, 'client-1', 'session-1');
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      act(() => root!.render(<Probe />));
+      await act(async () => {});
+      expect(subscribeEvents).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(2);
+      expect(subscribeEvents.mock.calls[1]?.[1].lastEventId).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops the bootstrap retry loop on a non-retryable failure', async () => {
     vi.useFakeTimers();
     try {

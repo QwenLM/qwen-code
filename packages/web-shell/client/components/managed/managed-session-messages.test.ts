@@ -204,6 +204,15 @@ describe('Managed transcript projection', () => {
     expect(merged[2]?.data).toEqual({ text: 'newer' });
   });
 
+  it('returns the current events unchanged for an empty incoming page', () => {
+    expect(
+      mergeManagedEvents([event(1, 'accepted'), event(2, 'completed')], []).map(
+        (item) => item.id,
+      ),
+    ).toEqual([1, 2]);
+    expect(mergeManagedEvents([], []).map((item) => item.id)).toEqual([]);
+  });
+
   it('keeps approval updates out of the Turn being streamed', () => {
     const messages = managedEventsToMessages(
       [

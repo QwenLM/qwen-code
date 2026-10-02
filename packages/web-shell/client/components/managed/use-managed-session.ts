@@ -10,6 +10,9 @@ import { mergeManagedEvents } from './managed-session-messages';
 const BASE_RETRY_DELAY_MS = 3_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 
+// Rung zero must stay exactly BASE_RETRY_DELAY_MS: ManagedSessionsPage pins
+// the gap-recovery cadence with a 2999/3000ms boundary in another file, and
+// any first-failure jitter would break it.
 export function failureRetryDelayMs(failures: number): number {
   const cap = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** failures);
   return (
@@ -116,6 +119,9 @@ export function useManagedSession(
             }
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
+            // A delivered event proves the connection healthy even when it
+            // later dies by proxy idle timeout, which surfaces as a throw.
+            failures = 0;
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),

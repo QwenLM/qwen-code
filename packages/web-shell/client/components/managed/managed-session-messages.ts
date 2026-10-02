@@ -2,10 +2,15 @@ import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
 
+// `current` must already be ascending and deduplicated by id (stream state
+// and transcript pages are); the append path checks only that `incoming`
+// extends it, so a disordered first argument stays disordered.
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
 ): ManagedAgentSessionEvent[] {
+  // An empty input cannot ride the ascending check: strictlyAscendingIds
+  // loops from index 1, and the fast path dereferences incoming[0].
   if (incoming.length === 0) return [...current];
   if (
     strictlyAscendingIds(incoming) &&
