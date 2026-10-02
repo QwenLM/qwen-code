@@ -1616,6 +1616,11 @@ class DurableRuntimeRecoveryTest {
 
     private static final class GatedSessionRepository
             implements RuntimeSessionRepository {
+        @Override
+        public java.util.List<RuntimeSessionRecord> findByBinding(String id, long generation, String after, int limit) {
+            return delegate.findByBinding(id, generation, after, limit);
+        }
+
         private final RuntimeSessionRepository delegate;
         private final CountDownLatch gate;
         private final AtomicInteger counts = new AtomicInteger();
