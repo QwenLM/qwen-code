@@ -355,6 +355,11 @@ public class ManagedActionStore {
             }
             return new OperationAdmission(existing, true);
         }
+        String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
+        if (!"ACTIVE".equals(sessionStatus)) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_inactive", "The Session does not accept responses.");
+        }
         Action action =
                 find(tenantId, sessionId, actionId)
                         .orElseThrow(
