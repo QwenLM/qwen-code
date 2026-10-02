@@ -690,7 +690,113 @@ function retiredFixture(turnId: string | null = null) {
   return { ...f, checkpointRef };
 }
 
+const HISTORY_PROMPT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const HISTORY_RECEIPT = {
+  requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  promptId: HISTORY_PROMPT,
+  filesChanged: ['absent.txt'],
+  conflict: false,
+};
+
+function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
+  const f = fixture();
+  const snapshots = [
+    {
+      promptId: HISTORY_PROMPT,
+      timestamp: '2026-10-01T00:00:00.000Z',
+      trackedFileBackups: {
+        'absent.txt': {
+          backupFileName: null,
+          version: 0,
+          backupTime: '2026-10-01T00:00:00.000Z',
+        },
+      },
+    },
+  ];
+  const historyRef = f.resource('managed-file_history', {
+    operationId: 'history',
+    revision: 1,
+    previousRecordRef: null,
+    schemaVersion: 1,
+    state: {
+      ownerSessionId: SESSION,
+      snapshots,
+      files: { 'absent.txt': null },
+    },
+    pendingTurn: null,
+    pendingUndo: null,
+    undoReceipts: [HISTORY_RECEIPT],
+    ...fields,
+    record: f.record('file_history_snapshot', { snapshots }),
+  });
+  f.append([
+    f.event('domain.committed', {
+      domain: 'file_history',
+      version: 1,
+      operationId: 'history',
+      recordRef: historyRef,
+    }),
+  ]);
+  return { ...f, historyRef };
+}
+
 describe('verifyRecoverySession', () => {
+  it.each([
+    {},
+    { undoReceipts: undefined },
+    {
+      undoReceipts: [
+        HISTORY_RECEIPT,
+        {
+          ...HISTORY_RECEIPT,
+          requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          filesChanged: [],
+          conflict: true,
+        },
+      ],
+    },
+  ])('preserves valid and legacy Hosted undo history (%j)', async (fields) => {
+    const f = hostedHistoryFixture(fields);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'captured',
+    });
+    expect(f.io.read).toHaveBeenCalledWith(f.historyRef);
+    expect(f.complete.size).toBe(f.refs.size);
+    expect(f.io.verifyBackup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { undoReceipts: {} },
+    { undoReceipts: null },
+    { undoReceipts: [{ ...HISTORY_RECEIPT, requestId: 'invalid' }] },
+    {
+      undoReceipts: [
+        {
+          ...HISTORY_RECEIPT,
+          promptId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        },
+      ],
+    },
+    { undoReceipts: [HISTORY_RECEIPT, HISTORY_RECEIPT] },
+    { undoReceipts: [{ ...HISTORY_RECEIPT, filesChanged: ['untracked.txt'] }] },
+    { undoReceipts: [{ ...HISTORY_RECEIPT, conflict: true }] },
+    {
+      undoReceipts: [
+        { ...HISTORY_RECEIPT, filesChanged: ['absent.txt', 'absent.txt'] },
+      ],
+    },
+    { undoReceipts: [{ ...HISTORY_RECEIPT, extra: true }] },
+    { pendingMessageId: 42 },
+    { pendingMessageId: 'message-without-turn' },
+  ])('refuses Hosted records the live reader rejects (%j)', async (fields) => {
+    const f = hostedHistoryFixture(fields);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      /Invalid Hosted file history/u,
+    );
+    expect(f.io.read).toHaveBeenCalledWith(f.historyRef);
+    expect(f.complete.has(f.historyRef.resourceId)).toBe(false);
+  });
+
   it('verifies retained settled checkpoint bytes after permanent retirement clears its pointer', async () => {
     const f = retiredFixture();
     await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({

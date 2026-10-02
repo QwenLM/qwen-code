@@ -49,7 +49,7 @@ import {
   encodeManagedContextBinding,
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
-import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
+import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
 
 export interface RecoverySessionSource {
@@ -425,28 +425,13 @@ export async function verifyRecoverySession(
         const snapshots = object(record['systemPayload'])['snapshots'];
         await backups(snapshots);
         if ('state' in body) {
-          requireValue(
-            body['schemaVersion'] === 1,
-            'invalid Hosted file history schema',
-          );
-          const state = parseHostedFileHistoryState(
-            body['state'],
+          const { state } = parseHostedFileHistoryRecord(
+            body,
             source.sessionId,
           );
           requireValue(
             isDeepStrictEqual(state.snapshots, snapshots),
             'Hosted history snapshots conflict',
-          );
-          requireValue(
-            body['pendingTurn'] === null ||
-              typeof body['pendingTurn'] === 'string',
-            'invalid pending file history turn',
-          );
-          requireValue(
-            body['pendingUndo'] === null ||
-              (typeof object(body['pendingUndo'])['requestId'] === 'string' &&
-                typeof object(body['pendingUndo'])['promptId'] === 'string'),
-            'invalid pending history undo',
           );
         }
       }

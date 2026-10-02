@@ -3,7 +3,7 @@
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
 Status: implemented; local validation passed, deployment acceptance pending.
-Integrated with main `49b6c900`, including the merged file-history dependency
+Integrated with main `d5c22d33`, including the merged file-history dependency
 [#13110](https://github.com/QwenLM/qwen-code/pull/13110) at `e083d6a6b`.
 Its final preparation rollback fixes and recovery tests are preserved.
 Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
@@ -264,6 +264,13 @@ Harness Session ID, and compare those bytes with the operator's copied volume.
 Missing/corrupt referenced backups, failed capture records, ownership conflicts
 or pending history/undo refuse; never substitute current Workspace content.
 
+Hosted records share the live reader's pure record parser, including schema,
+pending message/turn consistency and the complete undo-receipt protocol from
+#13144. Check exact receipt shape, UUIDs, retained prompts, unique requests and
+tracked changed paths; conflict receipts cannot claim changed files. Legacy
+records without receipts remain valid. Checks apply to all retained records,
+without acquiring a writer or changing original resources.
+
 A recorded null backup filename is original absence. A missing non-null backup
 is corruption. No history domain means `not_captured`, not invented undo
 availability. Existing historical backup metadata has no original content
@@ -351,10 +358,11 @@ fixes, five physical interruption windows and real OSS refusal controls.
 It covers that revision, not the subsequent main integration. Maintainer
 architecture signoff and supported-platform validation of the integrated
 revision remain pending; green CI and Ready status do not close these gates.
-#13110 has merged into main. This integration includes main `49b6c900`, preserving
+#13110 has merged into main. This integration includes main `d5c22d33`, preserving
 its V26 tool-result projection, V27 Hosted Hooks records, V28 admission indexes
 and V29 admission backfill, plus V30 Session-owned tool-output retention.
-Only unmerged W1b recovery metadata moves to V31,
+This also includes #13144 file-history/undo guards, #13172 Hosted smoke gates
+and #12965 migration uniqueness checks. Only unmerged W1b recovery metadata moves to V31,
 with its SQL bytes unchanged. Main's migration history is not rewritten.
 The [round-3 deployment report](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
 confirms V28 on `e50e2c37`, but identifies missing ordinary Hosted model route/usage

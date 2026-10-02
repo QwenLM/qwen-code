@@ -2,7 +2,7 @@
 
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
-状态：已实现，本地验证通过，部署验收待完成。已整合 main `49b6c900`，包含已合并的
+状态：已实现，本地验证通过，部署验收待完成。已整合 main `d5c22d33`，包含已合并的
 文件历史依赖 [#13110](https://github.com/QwenLM/qwen-code/pull/13110) `e083d6a6b`。
 保留其最终的准备失败回滚修复及恢复测试。
 属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。完成
@@ -196,6 +196,11 @@ Runtime 工作、模型 continuation、pending file history/undo 和未解决的
 下定位备份，并与运维复制卷的字节比较。引用备份缺失/损坏、失败捕获记录、
 所有权冲突或 pending history/undo 拒绝，不能使用当前 Workspace 内容替代。
 
+Hosted 记录复用运行时 reader 的纯记录解析器，包括 schema、pending message/turn
+一致性及 #13144 的完整 undo 回执协议。校验回执精确字段、UUID、保留 prompt、
+唯一 request 和已跟踪的变更路径；conflict 回执不能宣称文件已改变。旧版没有回执的
+记录仍有效。全部保留记录都接受这些检查，不获取 writer，不修改原资源。
+
 记录中的 null backup filename 表示原本不存在；缺失非 null 备份属于损坏。
 没有 history domain 时记为 `not_captured`，不制造 undo 可用性。已有历史备份
 元数据没有原始内容摘要：W1b 在本次捕获时建立保留字节摘要，只保证从该点开始
@@ -263,10 +268,11 @@ Broker/Harness/Worker、真实阿里云 OSS、四个物理 kill 时点及 20,916
 另在相同 Linux 装置验证了 `0919b9d8`，包括四项评审修复、五个物理中断窗口和真实 OSS
 拒绝对照。它覆盖该版本，不覆盖后续主干整合。维护者架构签核及整合版本的支持平台
 验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
-#13110 已合入主干。本次整合 main `49b6c900`，保留其 V26 工具结果投影、
+#13110 已合入主干。本次整合 main `d5c22d33`，保留其 V26 工具结果投影、
 V27 Hosted Hooks 记录、V28 准入索引、V29 准入回填及 V30 Session-owned
 工具输出保留；仅将尚未合入的 W1b 恢复元数据移到 V31，SQL 字节不变，
-不改写主干迁移历史。
+不改写主干迁移历史。另包含 #13144 文件历史/undo 校验、#13172 Hosted smoke
+门槛及 #12965 迁移唯一性检查。
 [第三轮部署报告](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
 确认 `e50e2c37` 的 V28 有效，但发现普通 Hosted 模型 route/usage 支持缺失；
 其成功的 Linux runbook 和中断检查使用该版本加候选白名单修复。本次纳入这两种
