@@ -5,7 +5,7 @@
  */
 
 import type { HookExecutionResult } from '../hooks/types.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   extractTurnBudgetDirectiveText,
   parseTurnBudgetDirective,
@@ -24,6 +24,22 @@ export interface ManagedHookModelOperation {
   readonly operationId: string;
   readonly occurrenceId: string;
   readonly originTurnId: string | null;
+}
+
+/**
+ * Names the activation a Hook operation restores when it finishes. The ID is
+ * derived from the `hook_operation` activation's, so a reader can tell the
+ * restore from a load, which always installs a random one.
+ */
+export function managedHookRestoreActivationId(activationId: string): string {
+  const bytes = createHash('sha1')
+    .update('qwen-managed-hook-restore/1:')
+    .update(activationId)
+    .digest();
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export type ManagedHookModelScope = Pick<
@@ -297,6 +313,7 @@ export class ManagedHookActivationController {
     );
     modelOwners.set(this.session.authority, scope);
     let restoreActivation = false;
+    let restoreActivationId: string | undefined;
     try {
       if (operation) {
         const authorization =
@@ -312,13 +329,14 @@ export class ManagedHookActivationController {
           );
         }
         restoreActivation = true;
-        // Hosted Hook release relies on this order: neither this activation
-        // nor the one the same worker restores below owns a Runtime.
-        await this.session.replaceActivation({
+        const { activationId } = await this.session.replaceActivation({
           type: 'hook_operation',
           operationId: operation.operationId,
           occurrenceId: operation.occurrenceId,
         });
+        // Hosted Hook release finds the restore by this ID: neither it nor
+        // the Hook operation's activation owns a Runtime.
+        restoreActivationId = managedHookRestoreActivationId(activationId);
       }
       const activation = this.session.authority.currentActivation;
       if (
@@ -334,7 +352,8 @@ export class ManagedHookActivationController {
     } finally {
       await scope.close();
       try {
-        if (restoreActivation) await this.session.replaceActivation();
+        if (restoreActivation)
+          await this.session.replaceActivation(undefined, restoreActivationId);
       } finally {
         modelOwners.delete(this.session.authority);
       }

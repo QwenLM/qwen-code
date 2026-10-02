@@ -29,9 +29,9 @@ import type {
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type {
   ManagedSessionDurableRef,
-  ManagedSessionEvent,
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -300,32 +300,25 @@ export class HostedHookSession {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
-    const hookOperation = (event: ManagedSessionEvent) =>
-      (event.payload['subject'] as ManagedSessionSubject).type ===
-      'hook_operation';
-    let previous: ManagedSessionEvent | undefined;
+    const restores = new Set<string>();
     // Activation is durable before even the first catalog request acquires.
     for (const event of authority.eventsInSequenceRange(
       1,
       authority.committedSequence,
     )) {
       if (event.kind !== 'activation.changed') continue;
-      // A renewal repeats its activation and can commit after the release.
-      if (event.payload['renewalSeq'] !== undefined) continue;
-      const prior = previous;
-      previous = event;
-      if (prior?.payload['activationId'] === event.payload['activationId'])
-        continue;
       // Only a load constructs a Hook owner. A Hook operation's activation,
-      // and the one its worker installs on releasing it, never acquire.
+      // and the one it restores on finishing, never acquire.
+      const activationId = event.payload['activationId'] as string;
       if (
-        hookOperation(event) ||
-        (prior?.payload['phase'] === 'released' &&
-          hookOperation(prior) &&
-          prior.payload['workerId'] === event.payload['workerId'])
-      )
+        (event.payload['subject'] as ManagedSessionSubject).type ===
+        'hook_operation'
+      ) {
+        restores.add(managedHookRestoreActivationId(activationId));
         continue;
-      const id = `hooks-activation-${digest([event.payload['activationId'], event.payload['epoch']])}`;
+      }
+      if (restores.has(activationId)) continue;
+      const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
       if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
         owners.set(id, true);
     }

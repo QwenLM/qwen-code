@@ -1249,29 +1249,30 @@ it.each([
 });
 
 it.each([
-  ['released before another worker loads', true],
-  ['still open when the same worker installs', false],
+  ['released before another worker loads', true, false],
+  ['still open when the same worker installs', false, true],
+  ['released before the same worker loads again', true, true],
 ])(
   'still releases a load that follows an unrestored Hook operation activation (%s)',
-  async (_, released) => {
+  async (_, released, sameWorker) => {
     await hooks.ensureReady();
     await session.replaceActivation({
       type: 'hook_operation',
       operationId: 'lost',
       occurrenceId: 'lost',
     });
+    if (released) await session.releaseActivation();
     let crashed: HostedHookSession;
-    if (released) {
-      await session.releaseActivation();
-      await reopenSession();
-      crashed = new HostedHookSession(options, session, pin);
-    } else {
+    if (sameWorker) {
       const activation = await session.authority.installActivation({
         activationId: randomUUID(),
         workerId: 'worker',
         leaseDurationMs: 60_000,
       });
       crashed = new HostedHookSession(options, { ...session, activation }, pin);
+    } else {
+      await reopenSession();
+      crashed = new HostedHookSession(options, session, pin);
     }
     await crashed.acquire();
     await reopenSession();

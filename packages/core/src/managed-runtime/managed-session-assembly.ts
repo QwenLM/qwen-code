@@ -115,8 +115,12 @@ export interface ManagedSession {
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
+   * The successor's ID is random unless `activationId` names it.
    */
-  replaceActivation(subject?: ManagedSessionSubject): Promise<{
+  replaceActivation(
+    subject?: ManagedSessionSubject,
+    activationId?: string,
+  ): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
@@ -215,10 +219,10 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation(subject) {
+    async replaceActivation(subject, activationId) {
       await authority.releaseActivation();
       activation = await authority.installActivation({
-        activationId: randomUUID(),
+        activationId: activationId ?? randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
         subject,

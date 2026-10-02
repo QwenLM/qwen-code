@@ -15,6 +15,7 @@ import {
 } from './managed-session-assembly.js';
 import {
   ManagedHookActivationController,
+  managedHookRestoreActivationId,
   type ManagedHookModelScope,
 } from './managed-hook-activation.js';
 import { createManagedHarnessHandle } from './managed-harness-factory.js';
@@ -181,8 +182,10 @@ describe('Managed Hook model activation', () => {
     const { session, controller, options } = await fixture();
     const initialEpoch = session.activation.epoch;
     let expired: ManagedHookModelScope | undefined;
+    let hookActivationId: string | undefined;
     await controller.runHookOperation(operation, async (scope) => {
       expired = scope;
+      hookActivationId = session.activation.activationId;
       expect(session.activation.epoch).toBe(initialEpoch + 1);
       expect(session.authority.currentActivationSubject).toEqual({
         type: 'hook_operation',
@@ -201,6 +204,9 @@ describe('Managed Hook model activation', () => {
       ).resolves.toEqual(result);
     });
     expect(session.activation.epoch).toBe(initialEpoch + 2);
+    expect(session.activation.activationId).toBe(
+      managedHookRestoreActivationId(hookActivationId!),
+    );
     expect(() => expired!.evaluate(evaluation, async () => result)).toThrow(
       'active Session model slot',
     );
