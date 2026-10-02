@@ -85,10 +85,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 "Runtime Broker workspace generation");
         require(broker.getWorkspaceCwd(), "Runtime Broker workspace cwd");
         Duration v3ResultWindow = broker.getV3ResultWindow();
-        if (v3ResultWindow == null || v3ResultWindow.isZero()
-                || v3ResultWindow.isNegative()) {
+        if (v3ResultWindow == null || v3ResultWindow.compareTo(
+                RuntimeBrokerService.MIN_V3_RESULT_WINDOW) < 0) {
+            // A suffix-less number binds as milliseconds; fail before the
+            // provisioner exists rather than degrade every v3 execution.
             throw new IllegalStateException(
-                    "Runtime Broker v3 result window must be positive");
+                    "Runtime Broker v3 result window must be at least "
+                            + RuntimeBrokerService.MIN_V3_RESULT_WINDOW);
         }
         String workspaceCwd = resolveWorkspaceCwd(broker);
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);

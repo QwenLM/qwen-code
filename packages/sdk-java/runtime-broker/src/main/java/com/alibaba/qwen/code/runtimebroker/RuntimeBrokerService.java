@@ -50,10 +50,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "managed_runtime_identity_conflict",
             "managed_runtime_unauthorized");
     private static final int MAX_CAS_ATTEMPTS = 16;
+    // A reclaim drains at most this many bounded 100-row passes per call;
+    // a larger generation answers runtime_broker_runtime_lost and the next
+    // reclaim resumes where this one stopped.
+    private static final int MAX_RECOVERY_PASSES = 16;
     // An UNKNOWN record the Runtime just answered for is not asked again
     // inside this window; sequential observations share the one lookup.
-    private static final Duration UNKNOWN_LOOKUP_COOLDOWN =
+    static final Duration UNKNOWN_LOOKUP_COOLDOWN =
             Duration.ofSeconds(1);
+    /** The smallest v3 result window that can complete a second poll. */
+    public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =
             Duration.ofMinutes(30);
 
@@ -181,6 +187,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 dispatchLeaseDuration, "dispatchLeaseDuration");
         this.v3ResultWindow = requireDuration(v3ResultWindow,
                 "v3ResultWindow");
+        if (this.v3ResultWindow.compareTo(MIN_V3_RESULT_WINDOW) < 0) {
+            // Below the first poll tick the window cannot complete even one
+            // retry; configuration bindings parse a suffix-less number as
+            // milliseconds, so fail fast rather than silently degrading
+            // every v3 execution to UNKNOWN.
+            throw new IllegalArgumentException(
+                    "v3ResultWindow must be at least "
+                            + MIN_V3_RESULT_WINDOW);
+        }
         this.sessionResolver = sessionResolver;
         this.provisioner = provisioner;
         this.transport = transport;
@@ -985,12 +1000,6 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<ExecutionReconciliation> lookupOnce(
             SessionContext context, ToolExecutionRecord unknown,
-            boolean takeover) {
-        return lookupOnce(context, unknown, takeover, false);
-    }
-
-    private CompletionStage<ExecutionReconciliation> lookupOnce(
-            SessionContext context, ToolExecutionRecord unknown,
             boolean takeover, boolean cooled) {
         String executionId = unknown.getExecutionCallId();
         if (cooled) {
@@ -998,13 +1007,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     unknownLookupCooldowns.get(executionId);
             if (cooledObservation != null
                     && clock.instant().isBefore(cooledObservation.deadline())) {
+                ExecutionReconciliation cached =
+                        cooledObservation.reconciliation();
+                if (cached.getRecord().getState()
+                        != ToolExecutionRecord.State.UNKNOWN) {
+                    // The cached lookup settled or abandoned the record:
+                    // replay it whole. Pairing its terminal answer with this
+                    // caller's pre-settlement UNKNOWN snapshot would report
+                    // a settled execution as unknown.
+                    return CompletableFuture.completedFuture(cached);
+                }
                 // The caller's record is fresher than the cached one (e.g. a
                 // cancel flag); the cached worker answer is reused as is.
                 return CompletableFuture.completedFuture(
                         new ExecutionReconciliation(unknown,
-                                cooledObservation.reconciliation().getOutcome(),
-                                cooledObservation.reconciliation()
-                                        .getRuntimeState()));
+                                cached.getOutcome(),
+                                cached.getRuntimeState()));
             }
         }
         CompletableFuture<ExecutionReconciliation> created =
@@ -1096,9 +1114,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 deadline);
         unknownLookupCooldowns.put(executionId, observation);
         try {
-            scheduler.schedule(() -> unknownLookupCooldowns.remove(executionId,
-                    observation), UNKNOWN_LOOKUP_COOLDOWN.toMillis(),
-                    TimeUnit.MILLISECONDS);
+            // The eviction consults the same clock as the deadline check, so
+            // a service clock that moves differently from the scheduler's
+            // wall time can never evict an entry its reads still consider
+            // fresh.
+            scheduler.schedule(() -> {
+                if (!clock.instant().isBefore(observation.deadline())) {
+                    unknownLookupCooldowns.remove(executionId, observation);
+                }
+            }, UNKNOWN_LOOKUP_COOLDOWN.toMillis(), TimeUnit.MILLISECONDS);
         } catch (RuntimeException ignored) {
             // A closing service keeps no cooldown state.
             unknownLookupCooldowns.remove(executionId, observation);
@@ -1316,10 +1340,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (context.release() != null) {
                 return context.release();
             }
-            if (context.hasActiveControl()
-                    || executionRepository.hasActiveByRuntimeSession(
-                            context.binding().getBindingId(), context.binding().getGeneration(),
-                            context.session().getRuntimeSessionId())) {
+            // Active executions are rejected inside the transition's own
+            // transaction by beginSessionRelease; only the process-local
+            // control check stays here.
+            if (context.hasActiveControl()) {
                 throw conflict("runtime_session_busy",
                         "Runtime Session has an active operation");
             }
@@ -2245,8 +2269,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
      */
     private RuntimeBindingRecord recoverLostDrained(
             RuntimeBindingRecord claimed, boolean finish) {
-        long sessionsBefore = Long.MAX_VALUE;
-        for (;;) {
+        // The measured baseline lets the stall check fire on the first pass;
+        // the budget bounds the whole loop so a caller never waits out an
+        // arbitrarily large drain — the next reclaim resumes where this one
+        // stopped.
+        long sessionsBefore = sessionRepository.countActiveByBinding(
+                claimed.getBindingId(), claimed.getGeneration());
+        RuntimeBindingRecord latest = claimed;
+        for (int pass = 0; pass < MAX_RECOVERY_PASSES; pass++) {
             RuntimeBindingRecord renewed = renewRecoveryClaim(claimed);
             RuntimeBindingRecord next = finish
                     ? bindingRepository.finishLostRecovery(sessionRepository,
@@ -2257,6 +2287,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw unavailable("runtime_provision_fenced",
                         "Runtime recovery claim expired");
             }
+            latest = next;
             if (next.getState() != RuntimeBindingRecord.State.LOST) {
                 return next;
             }
@@ -2280,6 +2311,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             sessionsBefore = activeSessions;
         }
+        return latest;
     }
 
     /**

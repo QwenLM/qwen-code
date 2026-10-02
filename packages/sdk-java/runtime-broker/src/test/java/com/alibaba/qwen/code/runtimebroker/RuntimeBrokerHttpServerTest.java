@@ -597,7 +597,8 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
             fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
-            awaitObservationCooldown();
+            // A mutation's response never serves the cooldown cache, so no
+            // wait is needed before this cancel.
             HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
                     "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
             assertEquals(200, cancelling.statusCode(), cancelling.body());
@@ -793,7 +794,8 @@ class RuntimeBrokerHttpServerTest {
     // The HTTP face's automatic observation reuses the freshest answer for
     // a short cooldown; a changed Runtime answer is observed once it lapses.
     private static void awaitObservationCooldown() throws InterruptedException {
-        Thread.sleep(1_100);
+        Thread.sleep(RuntimeBrokerService.UNKNOWN_LOOKUP_COOLDOWN.toMillis()
+                + 100);
     }
 
     private static final class Fixture implements AutoCloseable {

@@ -200,6 +200,75 @@ final class RuntimeRecoveryContract {
         assertThrows(IllegalArgumentException.class, () -> bare.withRecoveryEvidence(foreign, null, Instant.now()));
     }
 
+    /**
+     * Contract for the atomic release decision (#13183 item 1): the RELEASING
+     * transition and the no-active-execution check are one decision.
+     */
+    static void verifyBeginSessionRelease(RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, String prefix) {
+        // A READY session with no executions transitions, once.
+        Fixture ready = new Fixture(bindings, sessions, executions,
+                prefix + "-ready");
+        RuntimeSessionRecord releasing = bindings.beginSessionRelease(
+                sessions, executions, ready.session);
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                releasing.getState());
+        assertEquals(ready.session.getVersion() + 1, releasing.getVersion());
+        // Already RELEASING hands the current record back.
+        assertEquals(releasing.getVersion(), bindings.beginSessionRelease(
+                sessions, executions, releasing).getVersion());
+        // A stale snapshot loses.
+        assertNull(bindings.beginSessionRelease(sessions, executions,
+                ready.session));
+
+        // An active execution blocks the transition and nothing moves.
+        Fixture busy = new Fixture(bindings, sessions, executions,
+                prefix + "-busy");
+        busy.prepare("call");
+        RuntimeBrokerException busyFailure = assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                busy.session));
+        assertEquals("runtime_session_busy", busyFailure.getCode());
+        assertEquals(RuntimeSessionRecord.State.READY,
+                sessions.findById(busy.session.getSession().getScope(),
+                        busy.session.getRuntimeSessionId()).getState());
+
+        // ACQUIRING transitions (a broker that died mid-acquire).
+        Fixture acquiring = new Fixture(bindings, sessions, executions,
+                prefix + "-acquiring");
+        RuntimeSessionRecord backToAcquiring = sessions.compareAndSet(
+                acquiring.session, acquiring.session.withState(
+                        RuntimeSessionRecord.State.ACQUIRING, Instant.now()));
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                bindings.beginSessionRelease(sessions, executions,
+                        backToAcquiring).getState());
+
+        // A terminal session is refused.
+        Fixture failedFixture = new Fixture(bindings, sessions, executions,
+                prefix + "-failed");
+        RuntimeSessionRecord failedSession = sessions.compareAndSet(
+                failedFixture.session, failedFixture.session.withState(
+                        RuntimeSessionRecord.State.FAILED, Instant.now()));
+        RuntimeBrokerException notReady = assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                failedSession));
+        assertEquals("runtime_session_not_ready", notReady.getCode());
+
+        // RELEASED hands the current record back.
+        Fixture toRelease = new Fixture(bindings, sessions, executions,
+                prefix + "-released");
+        RuntimeSessionRecord released = bindings.completeSessionRelease(
+                sessions, bindings.beginSessionRelease(sessions, executions,
+                        toRelease.session));
+        assertEquals(RuntimeSessionRecord.State.RELEASED, released.getState());
+        assertEquals(RuntimeSessionRecord.State.RELEASED,
+                bindings.beginSessionRelease(sessions, executions, released)
+                        .getState());
+    }
+
     static RuntimeRecoveryEvidence evidence(RuntimeBindingRecord binding, RuntimeRecoveryEvidence.Fact fact) {
         RuntimeProvisionSeed seed = binding.getProvisionSeed();
         return new RuntimeRecoveryEvidence(UUID.randomUUID().toString(), fact, "deterministic-test-supervisor",

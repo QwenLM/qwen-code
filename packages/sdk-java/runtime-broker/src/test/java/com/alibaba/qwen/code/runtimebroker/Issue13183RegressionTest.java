@@ -50,11 +50,13 @@ import org.junit.jupiter.api.Test;
  * refused unless opted in, a LOST reclaim drains the whole generation, and
  * a released worker that ignores SIGTERM is destroyed forcibly.
  */
+@org.junit.jupiter.api.Timeout(180)
 class Issue13183RegressionTest {
-    private static final RuntimeScope SCOPE = new RuntimeScope("tenant",
+    // Shared with Issue13183AdversarialTest.
+    static final RuntimeScope SCOPE = new RuntimeScope("tenant",
             "workspace", "generation", "/workspace", "capability",
             "workspace");
-    private static final RuntimeResourceHandle HANDLE =
+    static final RuntimeResourceHandle HANDLE =
             new RuntimeResourceHandle("test-scheduler", 1,
                     Map.of("resourceId", "runtime-resource"));
 
@@ -139,24 +141,69 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * Control for finding 1: a committed admission is visible to the
-     * release guard when the check runs after the commit.
+     * Dispatch lease renewals run on the dedicated renewal pool too, so a
+     * stalled binding renewal cannot starve them either.
      */
     @Test
-    void releaseGuardSeesAdmissionWhenCheckedAfterCommit() {
-        DataSource dataSource = dataSource("control");
-        JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(
-                dataSource, protector("control"), () -> "control-binding");
-        JdbcRuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(
-                dataSource);
-        JdbcToolExecutionRepository executions = new JdbcToolExecutionRepository(
-                dataSource);
-        RuntimeRecoveryContract.Fixture fixture = new RuntimeRecoveryContract.Fixture(
-                bindings, sessions, executions, "control");
-        fixture.prepare("settled-order");
-        assertTrue(executions.hasActiveByRuntimeSession(
-                fixture.binding.getBindingId(), fixture.binding.getGeneration(),
-                fixture.session.getRuntimeSessionId()));
+    void dispatchRenewalsRunOnTheRenewalPool() throws Exception {
+        AtomicReference<String> renewalThread = new AtomicReference<>();
+        DelegatingToolExecutionRepository executions =
+                new DelegatingToolExecutionRepository(
+                        new InMemoryToolExecutionRepository(
+                                Clock.systemUTC())) {
+                    @Override
+                    public ToolExecutionRecord renewDispatch(
+                            String executionCallId, String owner,
+                            long dispatchGeneration, Duration leaseDuration) {
+                        renewalThread.compareAndSet(null,
+                                Thread.currentThread().getName());
+                        return super.renewDispatch(executionCallId, owner,
+                                dispatchGeneration, leaseDuration);
+                    }
+                };
+        CompletableFuture<Map<String, Object>> executing =
+                new CompletableFuture<>();
+        NoopTransport transport = new NoopTransport() {
+            @Override
+            public CompletionStage<Map<String, Object>> execute(
+                    RuntimeLease lease, RuntimeSession session,
+                    Map<String, Object> reference) {
+                return executing;
+            }
+        };
+        String runtime = "550e8400-e29b-41d4-a716-446655440399";
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                harnessId -> CompletableFuture.completedFuture(
+                        new RuntimeScope("tenant-dispatch", "workspace",
+                                "generation", "/workspace", "capability",
+                                "workspace")),
+                new StaticRuntimeProvisioner(new RuntimeLease("instance",
+                        URI.create("http://127.0.0.1:1234"), "token",
+                        "lease", 1)),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(), executions, "broker",
+                Duration.ofMinutes(1), Duration.ofSeconds(3));
+        try {
+            service.acquire("harness", runtime, "bootstrap")
+                    .toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", runtime,
+                    "promptId", "turn", "callId", "call", "capabilityDigest",
+                    "a".repeat(64), "policyRevision", "policy",
+                    "invocationId", "invocation", "argsDigest",
+                    "b".repeat(64));
+            ToolExecutionRecord prepared = service.prepareExecution("harness",
+                    runtime, "key", reference)
+                    .toCompletableFuture().join();
+            // The dispatch stays in flight, so its lease renewal ticks.
+            service.startExecution("harness", runtime,
+                    prepared.getExecutionCallId());
+            await(() -> renewalThread.get() != null, Duration.ofSeconds(10));
+            assertEquals("qwen-runtime-broker-lease-renewal",
+                    renewalThread.get());
+        } finally {
+            executing.complete(Map.of("executionStatus", "success"));
+            service.close();
+        }
     }
 
     /**
@@ -424,53 +471,185 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * Finding 2 (v3 polling): result polling backs off exponentially from
-     * 100ms instead of pinning two repository reads and one worker call at
-     * 10/s for the whole window.
+     * A cached lookup whose own record already settled is replayed whole;
+     * pairing its terminal answer with a caller's pre-settlement UNKNOWN
+     * snapshot would report a settled execution as unknown.
      */
     @Test
-    void v3ResultPollingBacksOff() throws Exception {
-        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
-        String digest = "sha256:" + HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(
-                        payload.getBytes(StandardCharsets.UTF_8)));
-        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+    void cooledObservationNeverPairsASettledAnswerWithAStaleRecord()
+            throws Exception {
+        InMemoryToolExecutionRepository real =
+                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        StaleReadExecutions executions = new StaleReadExecutions(real);
+        try (UnknownObservationHarness harness =
+                new UnknownObservationHarness(executions)) {
+            String executionId = harness.prepared.getExecutionCallId();
+            ToolExecutionRecord unknownSnapshot =
+                    real.findByExecutionCallId(executionId);
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    unknownSnapshot.getState());
+
+            // Observer A's lookup settles the execution and stamps the
+            // cooldown.
+            harness.transport.statusResult = Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "success"));
+            ExecutionReconciliation first = harness.service
+                    .observeExecution("harness", harness.runtime, executionId)
+                    .toCompletableFuture().join();
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED,
+                    first.getOutcome());
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    first.getRecord().getState());
+
+            // Observer B arrives inside the cooldown holding its
+            // pre-settlement snapshot.
+            ExecutionReconciliation second;
+            executions.stale = unknownSnapshot;
+            try {
+                second = harness.service
+                        .observeExecution("harness", harness.runtime,
+                                executionId)
+                        .toCompletableFuture().join();
+            } finally {
+                executions.stale = null;
+            }
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    second.getRecord().getState(),
+                    "a settled answer must never ride a stale UNKNOWN record");
+            assertEquals("success",
+                    second.getRecord().getResult().get("executionStatus"));
+        }
+    }
+
+    /** Serves one pre-settlement snapshot to the next reader. */
+    private static final class StaleReadExecutions
+            extends DelegatingToolExecutionRepository {
+        private volatile ToolExecutionRecord stale;
+
+        StaleReadExecutions(ToolExecutionRepository delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public ToolExecutionRecord findByExecutionCallId(
+                String executionCallId) {
+            ToolExecutionRecord snapshot = stale;
+            return snapshot != null ? snapshot
+                    : super.findByExecutionCallId(executionCallId);
+        }
+    }
+
+    /**
+     * The cooldown is scoped per execution: a second UNKNOWN execution in
+     * the same session is asked of the worker on its own first observation.
+     */
+    @Test
+    void cooldownIsScopedPerExecution() throws Exception {
+        try (UnknownObservationHarness harness = new UnknownObservationHarness();
+                HttpClient client = HttpClient.newHttpClient()) {
+            ToolExecutionRecord second = harness.prepareUnknown("key-2");
+            assertEquals(409, observeUnknown(harness.server, client,
+                    harness.prepared, harness.runtime, 0).statusCode());
+            assertEquals(1, harness.transport.statusCalls.get());
+            // A different execution is not covered by the first one's
+            // cooldown.
+            assertEquals(409, observeUnknown(harness.server, client, second,
+                    harness.runtime, 1).statusCode());
+            assertEquals(2, harness.transport.statusCalls.get(),
+                    "each execution's first observation asks the worker");
+            // The first execution is still cooled.
+            assertEquals(409, observeUnknown(harness.server, client,
+                    harness.prepared, harness.runtime, 2).statusCode());
+            assertEquals(2, harness.transport.statusCalls.get());
+        }
+    }
+
+    /**
+     * The service's release path must reach the atomic transition: an
+     * execution another process admits after the service's own pre-check
+     * still blocks the release (issue #13183 item 1 through the service).
+     */
+    @Test
+    void serviceReleaseRejectsARacingCrossProcessAdmission() throws Exception {
+        DataSource dataSource = dataSource("wiring");
+        JdbcRuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(
+                dataSource);
+        JdbcToolExecutionRepository executions = new JdbcToolExecutionRepository(
+                dataSource);
+        // The second Broker process's stack, sharing the database.
+        JdbcRuntimeBindingRepository bindingsB =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector("wiring"));
+        JdbcRuntimeSessionRepository sessionsB =
+                new JdbcRuntimeSessionRepository(dataSource);
+        JdbcToolExecutionRepository executionsB =
+                new JdbcToolExecutionRepository(dataSource);
+        DelegatingBindingRepository bindings = new DelegatingBindingRepository(
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector("wiring"))) {
             @Override
-            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
-                    String id, String token) {
-                return new RuntimePublicationGrant(id, token,
-                        "https://publisher.test",
-                        Map.of("sessionKey", Map.of("tenantId", "tenant",
-                                        "sessionId", "managed"),
-                                "turnId", "prompt", "executionCallId",
-                                execution.getExecutionCallId(),
-                                "bindingGeneration", "1"));
+            public RuntimeSessionRecord beginSessionRelease(
+                    RuntimeSessionRepository sessionsArg,
+                    ToolExecutionRepository executionsArg,
+                    RuntimeSessionRecord expected) {
+                // The racing admission lands after the service's pre-check,
+                // committed by the other process before this transition's
+                // in-transaction re-check reads.
+                bindingsB.admitExecution(sessionsB, executionsB,
+                        ToolExecutionRecord.prepared("racing-execution",
+                                "racing-key", expected.getBindingId(),
+                                expected.getRuntimeGeneration(), "harness",
+                                expected.getRuntimeSessionId(), "turn",
+                                "call", "digest",
+                                Map.of("sessionId",
+                                        expected.getRuntimeSessionId(),
+                                        "promptId", "turn", "callId", "call",
+                                        "argsDigest", "digest")));
+                return super.beginSessionRelease(sessionsArg, executionsArg,
+                        expected);
             }
         };
-        V3Transport transport = new V3Transport();
-        try (RuntimeBrokerService service = new RuntimeBrokerService(
+        RuntimeBrokerService service = new RuntimeBrokerService(
                 harnessId -> CompletableFuture.completedFuture(SCOPE),
                 new StaticRuntimeProvisioner(new RuntimeLease("instance",
                         URI.create("http://127.0.0.1:1234"), "token", "lease",
                         1)),
-                transport, new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(Clock.systemUTC()),
-                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
-                verifier)) {
-            service.acquire("harness", "runtime", "bootstrap")
-                    .toCompletableFuture().join();
-            Map<String, Object> reference = Map.of("sessionId", "runtime",
-                    "promptId", "prompt", "callId", "call", "argsDigest",
-                    "sha256:" + "a".repeat(64));
-            ToolExecutionRecord prepared = service.prepareExecution("harness",
-                    "runtime", "key", reference, digest, "pub-1")
-                    .toCompletableFuture().join();
-            // Never settles: the dispatch drives result polling until the
-            // window closes, which the test never waits for.
-            service.startExecution("harness", "runtime",
-                    prepared.getExecutionCallId(), payload, "pub-1", "token");
+                new NoopTransport(), bindings, sessions, executions,
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+        try {
+            service.acquire("harness", "wiring-session", "bootstrap")
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            CompletionException failure = assertThrows(
+                    CompletionException.class,
+                    () -> service.release("harness", "wiring-session")
+                            .toCompletableFuture().join());
+            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
+            assertEquals("runtime_session_busy",
+                    ((RuntimeBrokerException) failure.getCause()).getCode());
+            RuntimeSessionRecord after = sessions.findById(SCOPE,
+                    "wiring-session");
+            assertEquals(RuntimeSessionRecord.State.READY, after.getState(),
+                    "the racing admission must keep the session READY");
+            assertTrue(executions.hasActiveByRuntimeSession(
+                    after.getBindingId(), after.getRuntimeGeneration(),
+                    "wiring-session"));
+        } finally {
+            service.close();
+        }
+    }
 
+    /**
+     * Finding 2 (v3 polling): result polling backs off exponentially from
+     * 100ms instead of pinning two repository reads and one worker call at
+     * 10/s for the whole window. Gaps are bounded both ways: the doubling
+     * is the backoff, the upper bounds keep early polls prompt.
+     */
+    @Test
+    void v3ResultPollingBacksOff() throws Exception {
+        V3Transport transport = new V3Transport();
+        try (RuntimeBrokerService service = v3Service(transport,
+                Duration.ofMinutes(30))) {
+            startV3Execution(service);
             await(() -> transport.statusV3Nanos.size() >= 4,
                     Duration.ofSeconds(10));
             List<Long> times = transport.statusV3Nanos;
@@ -478,12 +657,49 @@ class Issue13183RegressionTest {
             long secondGap = times.get(2) - times.get(1);
             long thirdGap = times.get(3) - times.get(2);
             assertTrue(firstGap >= Duration.ofMillis(90).toNanos(),
+                    "first retry must double from 100ms: " + firstGap);
+            assertTrue(firstGap < Duration.ofSeconds(1).toNanos(),
                     "first retry must stay prompt: " + firstGap);
             assertTrue(secondGap >= Duration.ofMillis(190).toNanos(),
                     "second retry must double: " + secondGap);
+            assertTrue(secondGap < Duration.ofSeconds(2).toNanos(),
+                    "second retry must stay prompt: " + secondGap);
             assertTrue(thirdGap >= Duration.ofMillis(390).toNanos(),
                     "third retry must double again: " + thirdGap);
+            assertTrue(thirdGap < Duration.ofSeconds(3).toNanos(),
+                    "third retry must stay prompt: " + thirdGap);
         }
+    }
+
+    /**
+     * The configured window bounds the polling: once it lapses, the
+     * dispatch's result watch ends and the execution flips to UNKNOWN
+     * instead of polling for the default half hour.
+     */
+    @Test
+    void v3ResultWindowBoundsThePolling() throws Exception {
+        V3Transport transport = new V3Transport();
+        try (RuntimeBrokerService service = v3Service(transport,
+                RuntimeBrokerService.MIN_V3_RESULT_WINDOW)) {
+            ToolExecutionRecord prepared = startV3Execution(service);
+            await(() -> {
+                ToolExecutionRecord current = service.getExecution("harness",
+                        "runtime", prepared.getExecutionCallId())
+                        .toCompletableFuture().join();
+                return current.getState() == ToolExecutionRecord.State.UNKNOWN;
+            }, Duration.ofSeconds(10));
+        }
+    }
+
+    /**
+     * The window is validated: below the first poll tick the polling could
+     * never complete a retry, so construction fails instead of silently
+     * degrading every v3 execution.
+     */
+    @Test
+    void v3ResultWindowBelowTheFirstPollTickIsRefused() {
+        assertThrows(IllegalArgumentException.class,
+                () -> v3Service(new V3Transport(), Duration.ofMillis(30)));
     }
 
     /**
@@ -494,7 +710,7 @@ class Issue13183RegressionTest {
     void releaseEscalatesToForcibleDestroyWhenWorkerIgnoresSigterm()
             throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
-        Set<Long> before = childPids();
+        Set<Long> before = ProcessTrees.childPids();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
                 .toAbsolutePath();
         try (LocalProcessRuntimeProvisioner provisioner =
@@ -506,7 +722,7 @@ class Issue13183RegressionTest {
                     ManagedContextProtocolTest.request(),
                     ManagedContextProtocolTest.seed()).toCompletableFuture()
                     .get(10, TimeUnit.SECONDS);
-            long worker = childPids().stream()
+            long worker = ProcessTrees.childPids().stream()
                     .filter(pid -> !before.contains(pid)).findFirst()
                     .orElseThrow(() -> new AssertionError("no worker child"));
             assertTrue(ProcessHandle.of(worker).orElseThrow().isAlive());
@@ -525,7 +741,7 @@ class Issue13183RegressionTest {
     void closeEscalatesToForcibleDestroyWhenWorkerIgnoresSigterm()
             throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
-        Set<Long> before = childPids();
+        Set<Long> before = ProcessTrees.childPids();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
                 .toAbsolutePath();
         LocalProcessRuntimeProvisioner provisioner =
@@ -536,12 +752,119 @@ class Issue13183RegressionTest {
         provisioner.provision(ManagedContextProtocolTest.request(),
                 ManagedContextProtocolTest.seed()).toCompletableFuture()
                 .get(10, TimeUnit.SECONDS);
-        long worker = childPids().stream()
+        long worker = ProcessTrees.childPids().stream()
                 .filter(pid -> !before.contains(pid)).findFirst()
                 .orElseThrow(() -> new AssertionError("no worker child"));
         provisioner.close();
         await(() -> ProcessHandle.of(worker).map(process -> !process.isAlive())
                 .orElse(true), Duration.ofSeconds(10));
+    }
+
+    /**
+     * A provision racing close() is either snapshotted into the teardown
+     * (its worker dies with the others) or refused by the terminated guard;
+     * it can never produce an orphan.
+     */
+    @Test
+    void provisionDuringCloseNeverOrphansAWorker() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        Set<Long> before = ProcessTrees.childPids();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--ignore-term"),
+                        Path.of(".").toAbsolutePath(),
+                        new HttpRuntimeTransport());
+        // A plain (non-managed) request keeps the guard's error intact —
+        // managed-context failures are retyped by the startup path.
+        RuntimeProvisionRequest plain = new RuntimeProvisionRequest(
+                new RuntimeScope("tenant-race", "workspace", "1",
+                        "/workspace", "sha256:" + "a".repeat(64),
+                        "workspace"),
+                null, "local-process");
+        // A wedged worker stretches close()'s grace window, so the race
+        // window is seconds wide instead of nanoseconds.
+        provisioner.provision(plain, ManagedContextProtocolTest.seed())
+                .toCompletableFuture().get(10, TimeUnit.SECONDS);
+        Thread closer = new Thread(provisioner::close, "closer");
+        closer.start();
+        RuntimeBrokerException refused = null;
+        Instant giveUp = Instant.now().plusSeconds(10);
+        int attempt = 0;
+        while (refused == null && Instant.now().isBefore(giveUp)) {
+            try {
+                provisioner.provision(plain, RuntimeProvisionSeed
+                        .create("racing-" + attempt++, 1))
+                        .toCompletableFuture().join();
+            } catch (CompletionException failure) {
+                if (failure.getCause() instanceof RuntimeBrokerException broker
+                        && broker.getMessage() != null
+                        && broker.getMessage().contains("closed")) {
+                    refused = broker;
+                }
+            }
+            Thread.sleep(20);
+        }
+        closer.join(TimeUnit.SECONDS.toMillis(15));
+        assertNotNull(refused,
+                "a provision racing the close must hit the closed guard");
+        // Killed children linger as zombies until the JVM reaper runs, so
+        // wait them out rather than snapshot once.
+        await(() -> {
+            Set<Long> lingering = ProcessTrees.childPids();
+            lingering.removeAll(before);
+            lingering.removeIf(pid -> ProcessHandle.of(pid)
+                    .map(process -> !process.isAlive()).orElse(true));
+            return lingering.isEmpty();
+        }, Duration.ofSeconds(10));
+    }
+
+    private static RuntimeBrokerService v3Service(V3Transport transport,
+            Duration v3ResultWindow) {
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String id, String token) {
+                return new RuntimePublicationGrant(id, token,
+                        "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant",
+                                        "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId",
+                                execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        return new RuntimeBrokerService(
+                harnessId -> CompletableFuture.completedFuture(SCOPE),
+                new StaticRuntimeProvisioner(new RuntimeLease("instance",
+                        URI.create("http://127.0.0.1:1234"), "token", "lease",
+                        1)),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
+                verifier, v3ResultWindow);
+    }
+
+    /** Starts a v3 execution that never settles; the poll loop drives it. */
+    private static ToolExecutionRecord startV3Execution(
+            RuntimeBrokerService service) throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(
+                        payload.getBytes(StandardCharsets.UTF_8)));
+        service.acquire("harness", "runtime", "bootstrap")
+                .toCompletableFuture().join();
+        Map<String, Object> reference = Map.of("sessionId", "runtime",
+                "promptId", "prompt", "callId", "call", "argsDigest",
+                "sha256:" + "a".repeat(64));
+        ToolExecutionRecord prepared = service.prepareExecution("harness",
+                "runtime", "key", reference, digest, "pub-1")
+                .toCompletableFuture().join();
+        service.startExecution("harness", "runtime",
+                prepared.getExecutionCallId(), payload, "pub-1", "token");
+        return prepared;
     }
 
     private static HttpResponse<String> observeUnknown(
@@ -588,9 +911,13 @@ class Issue13183RegressionTest {
                 "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
     }
 
-    private static String failureCode(CompletionStage<?> stage) {
-        CompletionException failure = assertThrows(CompletionException.class,
-                () -> stage.toCompletableFuture().join());
+    private static String failureCode(CompletionStage<?> stage)
+            throws Exception {
+        // Bounded: a regression that never answers must fail red, not hang.
+        java.util.concurrent.ExecutionException failure = assertThrows(
+                java.util.concurrent.ExecutionException.class,
+                () -> stage.toCompletableFuture().get(30,
+                        TimeUnit.SECONDS));
         Throwable cause = failure.getCause();
         assertTrue(cause instanceof RuntimeBrokerException,
                 () -> "unexpected failure " + cause);
@@ -602,7 +929,7 @@ class Issue13183RegressionTest {
                 RuntimeBrokerHttpServer.ROUTE_PREFIX + "/runtimes:warm");
     }
 
-    private static DataSource dataSource(String name) {
+    static DataSource dataSource(String name) {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:issue13183-" + name + "-"
                 + UUID.randomUUID()
@@ -611,22 +938,17 @@ class Issue13183RegressionTest {
         return dataSource;
     }
 
-    private static SecretProtector protector(String prefix) {
+    static SecretProtector protector(String prefix) {
         return new AesGcmSecretProtector("key-" + prefix,
                 keyBytes(prefix.hashCode()));
     }
 
-    private static byte[] keyBytes(int seed) {
+    static byte[] keyBytes(int seed) {
         byte[] key = new byte[32];
         for (int index = 0; index < key.length; index++) {
             key[index] = (byte) (seed + index);
         }
         return key;
-    }
-
-    private static Set<Long> childPids() {
-        return ProcessHandle.current().children().map(ProcessHandle::pid)
-                .collect(Collectors.toSet());
     }
 
     private static void await(CheckedCondition condition, Duration timeout)
@@ -673,7 +995,7 @@ class Issue13183RegressionTest {
         }
     }
 
-    private static final class ReclaimProvisioner implements RuntimeProvisioner {
+    static class ReclaimProvisioner implements RuntimeProvisioner {
         @Override
         public String kind() {
             return "test-scheduler";
@@ -722,7 +1044,7 @@ class Issue13183RegressionTest {
         }
     }
 
-    private static class NoopTransport implements RuntimeTransport {
+    static class NoopTransport implements RuntimeTransport {
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease,
                 RuntimeSession session) {
@@ -756,7 +1078,7 @@ class Issue13183RegressionTest {
         }
     }
 
-    private static final class AttestingTransport extends NoopTransport {
+    static final class AttestingTransport extends NoopTransport {
         @Override
         public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
@@ -767,10 +1089,12 @@ class Issue13183RegressionTest {
         }
     }
 
-    private static final class CountingTransport extends NoopTransport {
-        private final AtomicInteger statusCalls = new AtomicInteger();
-        private volatile boolean failExecutions;
-        private volatile boolean failStatus;
+    static class CountingTransport extends NoopTransport {
+        final AtomicInteger statusCalls = new AtomicInteger();
+        volatile boolean failExecutions;
+        volatile boolean failStatus;
+        volatile Map<String, Object> statusResult = Map.of("state",
+                "unknown");
 
         @Override
         public CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
@@ -793,8 +1117,7 @@ class Issue13183RegressionTest {
                         503, "managed_runtime_unavailable",
                         "Runtime is unavailable", true));
             }
-            return CompletableFuture.completedFuture(Map.of("state",
-                    "unknown"));
+            return CompletableFuture.completedFuture(statusResult);
         }
     }
 
@@ -802,17 +1125,22 @@ class Issue13183RegressionTest {
      * One UNKNOWN execution behind a loopback HTTP face, with a mutable
      * service clock so the cooldown window can lapse without sleeping.
      */
-    private static final class UnknownObservationHarness
+    static final class UnknownObservationHarness
             implements AutoCloseable {
-        private final MutableClock clock = new MutableClock();
-        private final CountingTransport transport = new CountingTransport();
-        private final String runtime =
-                "550e8400-e29b-41d4-a716-446655440302";
-        private final RuntimeBrokerHttpServer server;
-        private final ToolExecutionRecord prepared;
+        final MutableClock clock = new MutableClock();
+        final CountingTransport transport = new CountingTransport();
+        final String runtime = "550e8400-e29b-41d4-a716-446655440302";
+        final RuntimeBrokerService service;
+        final RuntimeBrokerHttpServer server;
+        final ToolExecutionRecord prepared;
 
         UnknownObservationHarness() throws IOException {
-            RuntimeBrokerService service = new RuntimeBrokerService(
+            this(new InMemoryToolExecutionRepository(Clock.systemUTC()));
+        }
+
+        UnknownObservationHarness(ToolExecutionRepository executions)
+                throws IOException {
+            service = new RuntimeBrokerService(
                     harnessId -> CompletableFuture.completedFuture(
                             new RuntimeScope("tenant-cooldown", "workspace",
                                     "generation", "/workspace", "capability",
@@ -821,8 +1149,7 @@ class Issue13183RegressionTest {
                             URI.create("http://127.0.0.1:1234"), "token",
                             "lease", 1)),
                     transport, new InMemoryRuntimeBindingRepository(),
-                    new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                    new InMemoryRuntimeSessionRepository(), executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
                     clock, () -> UUID.randomUUID().toString());
             server = new RuntimeBrokerHttpServer(
@@ -835,20 +1162,26 @@ class Issue13183RegressionTest {
             }
             service.acquire("harness", runtime, "bootstrap")
                     .toCompletableFuture().join();
+            prepared = prepareUnknown("key");
+        }
+
+        /** Prepares another execution and drives it to UNKNOWN. */
+        ToolExecutionRecord prepareUnknown(String idempotencyKey) {
             Map<String, Object> reference = Map.of("sessionId", runtime,
                     "promptId", "turn", "callId", "call", "capabilityDigest",
                     "a".repeat(64), "policyRevision", "policy", "invocationId",
                     "invocation", "argsDigest", "b".repeat(64));
-            prepared = service.prepareExecution("harness", runtime, "key",
-                    reference).toCompletableFuture().join();
+            ToolExecutionRecord record = service.prepareExecution("harness",
+                    runtime, idempotencyKey, reference).toCompletableFuture()
+                    .join();
             transport.failExecutions = true;
             service.startExecution("harness", runtime,
-                    prepared.getExecutionCallId()).toCompletableFuture().join();
+                    record.getExecutionCallId()).toCompletableFuture().join();
             // The dispatch answer was lost, so the record flips to UNKNOWN;
             // markUnknown runs inside the failed invocation's handle.
             Instant giveUp = Instant.now().plusSeconds(5);
             while (service.getExecution("harness", runtime,
-                    prepared.getExecutionCallId()).toCompletableFuture().join()
+                    record.getExecutionCallId()).toCompletableFuture().join()
                     .getState() != ToolExecutionRecord.State.UNKNOWN) {
                 if (!Instant.now().isBefore(giveUp)) {
                     throw new IllegalStateException(
@@ -861,6 +1194,7 @@ class Issue13183RegressionTest {
                     throw new IllegalStateException(interrupted);
                 }
             }
+            return record;
         }
 
         @Override

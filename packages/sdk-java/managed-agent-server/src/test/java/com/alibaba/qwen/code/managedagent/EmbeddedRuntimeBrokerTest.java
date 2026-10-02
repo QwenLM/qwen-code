@@ -222,6 +222,20 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("v3 result window");
     }
 
+    @Test
+    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+        properties.getRuntimeBroker().setAllowNonLoopback(true);
+
+        try (EmbeddedRuntimeBroker broker = broker(
+                mock(ManagedAgentStore.class), properties)) {
+            assertThat(broker.getBaseUri()).isNotNull();
+            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
+        }
+    }
+
     private static ManagedAgentProperties properties() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setCapabilityDigest("sha256:"

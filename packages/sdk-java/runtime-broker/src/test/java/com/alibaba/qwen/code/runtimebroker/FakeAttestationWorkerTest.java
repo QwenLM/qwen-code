@@ -152,6 +152,36 @@ class FakeAttestationWorkerTest {
         }
     }
 
+    /**
+     * The {@code --ignore-term} wedge the provisioner's escalation tests
+     * rely on: SIGTERM lands but the worker keeps running, so only a
+     * forcible destroy reclaims it.
+     */
+    @Test
+    void ignoreTermSurvivesSigterm() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        Process worker = new ProcessBuilder("node", script.toString(),
+                "--ignore-term").start();
+        try {
+            try (OutputStream stdin = worker.getOutputStream()) {
+                stdin.write(JSON.writeValueAsBytes(fixtures().get("boot")));
+            }
+            BufferedReader stdout = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            assertTrue(stdout.readLine() != null,
+                    "worker never became ready");
+            worker.toHandle().destroy();
+            Thread.sleep(500);
+            assertTrue(worker.isAlive(),
+                    "--ignore-term must swallow SIGTERM");
+        } finally {
+            worker.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+        }
+    }
+
     private static Process start(byte[] boot) throws IOException {
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
                 .toAbsolutePath();
