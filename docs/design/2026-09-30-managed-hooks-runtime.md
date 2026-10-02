@@ -33,6 +33,18 @@ They do not create user task entries. TypeScript and Java consume shared positiv
 and negative fixtures and enforce resource closure, stable pins, unique ordinals,
 and atomic consumption of once keys at intent.
 
+These checks must not grow with a Session's Hook history. The once key, the
+occurrence and ordinal, and the catalog pin never change across a record's
+revisions, so the Session Store projects them into indexed columns when a record
+first commits. Unique indexes on (Session, once key) and (Session, occurrence,
+ordinal) refuse duplicates, including concurrent ones. The occurrence binding and
+the catalog digest are compared with one committed record of the same key,
+because admission keeps every record under a key in agreement. The Session
+authority keeps the same keys in memory, so a reopened log replays its records in
+linear time. Admission therefore no longer re-reads earlier records, and no
+longer notices on each admission that one of them was damaged; every record and
+its resource closure are verified when the Session is restored.
+
 Each occurrence fixes its catalog and plan. Occurrences are admitted serially
 within a Session so concurrent events cannot reserve the same once Hook; execution
 inside each plan retains native parallel/sequential behavior. Repeated IDs with different semantic
@@ -105,7 +117,11 @@ Commands reuse native output, timeout and TERM/KILL handling. Managed execution
 requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
 writable domain with `cgroup.kill`. A clean launcher enters a fresh unit before
 starting the command. Membership survives `setsid` and detached descendants;
-completion requires `cgroup.events` to report no remaining processes. Cancellation
+completion requires `cgroup.events` to report no remaining processes. A background
+descendant that outlives the command keeps the unit nonempty, so a command that
+has already printed its output and exited still settles as `timeout` when its
+Hook timeout expires; the unit is then killed and the output is not applied. Hook
+commands must not leave background processes behind. Cancellation
 sends TERM, then uses `cgroup.kill` if needed, and retains the owner when emptiness
 cannot be proved. This is lifecycle isolation for deployment-owned trusted Hooks,
 not a sandbox against scripts deliberately modifying the cgroup control plane.
@@ -267,7 +283,12 @@ definitionDigest}` with a Hosted Workspace tool profile and Broker. The saved
 initial pin is restored when omitted on load and must match when supplied; later
 committed registrations remain authoritative. Workspace cold load verifies Hook
 record resources and the complete function-message snapshot closure before
-attachment, while retaining original-owner recovery barriers.
+attachment, while retaining original-owner recovery barriers. Opening the
+authority reads each record, and each resource a record names, once however many
+revisions name it. The Workspace verification reuses that result and reads only
+what it must inspect itself, such as plans and their message snapshots; the
+authority keeps none of it once the Session is open.
+Independent reads run in bounded batches.
 Hook scope identifiers accept the existing Broker character grammar, including
 leading punctuation. Session status reports `recoveryBlocked`, and load reports
 `recoveryRequired`, while Hook operations block prompt admission. Reconciliation
@@ -280,7 +301,11 @@ they cannot settle a turn while ignoring its pending Hook effects or model scope
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
-cannot overlap a turn or another control operation. The public tenant/actor-scoped
+cannot overlap a turn or another control operation. A prompt refused while a Hook
+operation runs returns 409 `hosted_hook_operation_active`. Reusing a
+Notification/expansion operation ID with different input returns 409
+`hosted_hook_operation_conflict`, which a retry cannot resolve. The public
+tenant/actor-scoped
 `GET /v1/agents/sessions/{sessionId}/hook-catalog` projects only display metadata;
 it exposes no recipes, credentials, module paths or handler references. Existing
 Sessions without a Hook pin retain their current behavior.
@@ -291,6 +316,16 @@ projection, and their collocated tests. Migration V27 records the first admissio
 journal sequence as `first_sequence`, which later revisions preserve. The latest
 settled catalog is chosen by this sequence, matching native registration order
 even when an older registration settles later, independently of clocks or UUIDs.
+Migration V28 adds the admission columns and indexes; V29 backfills them for records
+written under V27 from their verified bodies. A record whose body is missing or
+corrupt keeps no keys, and V29 blocks its Session as a missing resource does
+(`BLOCKED_RESOURCE`), so no later admission can reuse a once key it consumed.
+So does a record that repeats a once key or occurrence ordinal of its Session,
+which only a write that bypassed admission can leave; other Sessions are
+unaffected. Running a binary older than V28 against a migrated
+database is unsupported: it writes Hook records without these keys, which the
+Session Store's checks then cannot see, although the Session authority still
+enforces them in memory.
 
 ## Validation and acceptance
 
