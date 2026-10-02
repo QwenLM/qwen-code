@@ -27,9 +27,12 @@ mvn checkstyle:check
 mvn verify
 ```
 
-`mvn verify` runs the SpotBugs high-confidence gate; a new warning fails the
-build, and a false positive needs an exclude filter plus a justification in
-the PR.
+`mvn verify` needs Maven 3.8.9+ and runs the SpotBugs high-confidence gate: a
+new warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To exercise only the
+gate, run `mvn verify -DskipTests` — the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter.
 
 ## Fault gates
 

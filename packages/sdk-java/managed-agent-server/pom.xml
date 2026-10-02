@@ -139,14 +139,15 @@
                 </executions>
             </plugin>
             <!-- High-confidence gate: the tree is clean at this threshold, so
-                 any new warning fails mvn verify. A false positive needs an
-                 exclude filter and a justification in the PR. -->
+                 any new warning fails mvn verify. A false positive goes into
+                 spotbugs-excludes.xml with a justification in the PR. -->
             <plugin>
                 <groupId>com.github.spotbugs</groupId>
                 <artifactId>spotbugs-maven-plugin</artifactId>
                 <version>${spotbugs-maven-plugin.version}</version>
                 <configuration>
                     <threshold>High</threshold>
+                    <excludeFilterFile>${project.basedir}/spotbugs-excludes.xml</excludeFilterFile>
                 </configuration>
                 <executions>
                     <execution>

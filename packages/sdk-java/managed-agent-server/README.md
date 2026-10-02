@@ -568,10 +568,15 @@ artifacts, before enabling the local-process provisioner in a container.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. The optional
-real-MySQL profile also verifies schema upgrade, exact bytes, public
-Item/Snapshot projection, and the independent-JVM Managed Session Store
-crash/takeover path:
+Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
+warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To exercise only the
+gate, run `mvn verify -DskipTests` — the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter. The optional real-MySQL profile also verifies schema upgrade,
+exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+Session Store crash/takeover path:
 
 ```bash
 mvn -Pmysql-integration \

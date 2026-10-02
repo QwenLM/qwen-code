@@ -22,12 +22,21 @@ concurrency:
 
 jobs:
   codeql:
-    name: 'CodeQL'
+    name: 'CodeQL (${{ matrix.language }})'
     runs-on: 'ubuntu-latest'
-    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Cap it
-    # so a runner that drops its heartbeat mid-analysis can't hold a slot for the
-    # default 6h.
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - 'javascript'
+          - 'java'
+    # One job per language: in a shared job an overrun or failure in one leg
+    # kills the other's coverage with it. Size the cap generously: the
+    # JavaScript-only scan hit the previous 30-minute cap on ten consecutive
+    # nightlies (2026-09-23 through 2026-10-02, all cancelled at ~30m). The
+    # cap still exists so a runner that drops its heartbeat mid-analysis
+    # can't hold a slot for the default 6h.
+    timeout-minutes: 60
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -35,10 +44,11 @@ jobs:
       - name: 'Initialize CodeQL'
         uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
         with:
-          languages: 'javascript,java'
+          languages: '${{ matrix.language }}'
           # The Maven modules depend on each other through locally installed
           # snapshots, so a real build here would duplicate sdk-java.yml's
-          # install dance. build-mode none extracts from source instead.
+          # install dance. build-mode none extracts from source instead
+          # (javascript is interpreted and never builds either way).
           build-mode: 'none'
 
       - name: 'Perform CodeQL Analysis'
