@@ -428,9 +428,10 @@ class WorkspaceRecoveryStoreTest {
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = ?", session);
         jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, lease_owner, claim_generation, available_at, created_at, updated_at)"
+                + " session_status_before, lease_owner, lease_until, claim_generation, available_at, created_at,"
+                + " updated_at)"
                 + " VALUES ('tenant', ?, ?, 'DELETE', '', 'delete', 'digest', 'RUNNING', 'JAVA_DURABLE',"
-                + " 'LEASED', 'ACTIVE', 'worker', 1, 0, 0, 0)", session, operation);
+                + " 'LEASED', 'ACTIVE', 'worker', 32503680000000, 1, 0, 0, 0)", session, operation);
         jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
         assertThat(new TransactionTemplate(manager).<Boolean>execute(status ->
                 sessions.completeOperation("tenant", session, operation, "worker", 1, false))).isTrue();
