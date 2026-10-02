@@ -67,6 +67,25 @@ public interface AgentStateStore {
             OperationKind kind, String actorDigest, String idempotencyKey,
             String requestDigest);
 
+    default boolean workspaceFilesEnabled() {
+        return false;
+    }
+
+    default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest, boolean supported) {
+        throw new UnsupportedOperationException("Workspace close is unavailable");
+    }
+
+    default boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, Duration duration) {
+        return false;
+    }
+
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt) {
+        throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
+
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
 
