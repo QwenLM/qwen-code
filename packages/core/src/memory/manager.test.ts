@@ -1575,6 +1575,89 @@ describe('MemoryManager', () => {
       extract.resolve(extractResult('sess'));
       expect(await mgr.drain()).toBe(true);
     });
+
+    it.each([undefined, 1_000])(
+      'waits for trailing extraction with timeout %s',
+      async (timeoutMs) => {
+        const mgr = new MemoryManager();
+        const first = deferred<ExtractResult>();
+        const trailing = deferred<ExtractResult>();
+        vi.mocked(runAutoMemoryExtract)
+          .mockReturnValueOnce(first.promise)
+          .mockReturnValueOnce(trailing.promise);
+        const active = mgr.scheduleExtract(extractParams('/project', 'sess'));
+        const queued = await mgr.scheduleExtract(
+          extractParams('/project', 'sess', 'second'),
+        );
+        expect(queued.skippedReason).toBe('queued');
+        const settled = vi.fn();
+        const draining = mgr.drain({ timeoutMs }).then(settled);
+
+        try {
+          first.resolve(extractResult('sess'));
+          await active;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+
+          expect(mgr.listTasksByType('extract')).toContainEqual(
+            expect.objectContaining({ status: 'running' }),
+          );
+          expect(settled).not.toHaveBeenCalled();
+
+          trailing.resolve(extractResult('sess'));
+          await draining;
+          expect(settled).toHaveBeenCalledWith(true);
+          expect(mgr.listTasksByType('extract')).toHaveLength(2);
+          expect(
+            mgr
+              .listTasksByType('extract')
+              .every((t) => t.status === 'completed'),
+          ).toBe(true);
+        } finally {
+          first.resolve(extractResult('sess'));
+          trailing.resolve(extractResult('sess'));
+          await active;
+          await draining;
+          await mgr.drain();
+        }
+      },
+    );
+
+    it('shares one timeout across active and trailing extraction', async () => {
+      vi.useFakeTimers();
+      const mgr = new MemoryManager();
+      const first = deferred<ExtractResult>();
+      const trailing = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(trailing.promise);
+      const active = mgr.scheduleExtract(extractParams('/project', 'sess'));
+      await mgr.scheduleExtract(extractParams('/project', 'sess', 'second'));
+      const settled = vi.fn();
+      const draining = mgr.drain({ timeoutMs: 20 }).then(settled);
+
+      try {
+        await vi.advanceTimersByTimeAsync(10);
+        first.resolve(extractResult('sess'));
+        await active;
+        await vi.advanceTimersByTimeAsync(10);
+
+        expect(settled).toHaveBeenCalledWith(false);
+        expect(mgr.listTasksByType('extract')).toContainEqual(
+          expect.objectContaining({ status: 'running' }),
+        );
+
+        trailing.resolve(extractResult('sess'));
+        await mgr.drain();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        first.resolve(extractResult('sess'));
+        trailing.resolve(extractResult('sess'));
+        await active;
+        await draining;
+        await mgr.drain();
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('scheduleExtract()', () => {

@@ -859,18 +859,29 @@ export class MemoryManager {
 
   // ─── Drain ────────────────────────────────────────────────────────────────────
 
-  /** Wait for all in-flight tasks to settle, with optional timeout. */
+  /** Wait for tracked tasks, including trailing work, within one timeout. */
   async drain(options: DrainOptions = {}): Promise<boolean> {
-    const promises = [...this.inFlight.values()];
-    if (promises.length === 0) return true;
-    const waitAll = Promise.allSettled(promises).then(() => true);
-    if (!options.timeoutMs || options.timeoutMs <= 0) return waitAll;
-    return Promise.race<boolean>([
-      waitAll,
-      new Promise<boolean>((resolve) =>
-        setTimeout(() => resolve(false), options.timeoutMs),
-      ),
-    ]);
+    if (this.inFlight.size === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout =
+      options.timeoutMs && options.timeoutMs > 0
+        ? new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), options.timeoutMs);
+          })
+        : undefined;
+    try {
+      while (this.inFlight.size > 0) {
+        const batch = Promise.allSettled([...this.inFlight.values()]).then(
+          () => true,
+        );
+        if (!(await (timeout ? Promise.race([batch, timeout]) : batch))) {
+          return false;
+        }
+      }
+      return true;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
