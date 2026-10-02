@@ -173,7 +173,7 @@ interface ManagedSessionResourceStore {
 
 主键为 `(tenant_id, session_id)`。每个变更事务通过唯一键锁定这一行。InnoDB locking read 为 head CAS 提供所需的行级串行化。[MySQL InnoDB locking](https://dev.mysql.com/doc/refman/8.0/en/innodb-best-practices.html)
 
-writer API 的 `leaseUntil` 与 publication/activation 到期值均为 Unix epoch 毫秒，不能使用 JDBC 将数据库本地 `DATETIME` 解码后得到的偏移 epoch。内部租约计算和持久化 `DATETIME` 保持不变，仅在标量 epoch 边界由数据库转换。绑定整秒并单独加回原小数部分，保留 MariaDB 精度。在原加锁 SQL 查询中检查 producer writer 是否存活，避免按 JVM 时区转换 `LocalDateTime`。JDBC/JVM/数据库时区不同时，获取、重复获取、续约和接管的返回值都必须与持久化 SQL Unix epoch 一致；activation 即使 phase 仍为 active，到期后也应拒绝。本修正不增加时区设置或 schema 迁移。升级后，既有到期值偏移的短期 publication grant 可能需要显式续约；不会重写保留字节或释放配额。
+writer API 的 `leaseUntil` 与 publication/activation 到期值均为 Unix epoch 毫秒，不能使用 JDBC 将数据库本地 `DATETIME` 解码后得到的偏移 epoch。内部租约计算和持久化 `DATETIME` 保持不变，仅在标量 epoch 边界由数据库转换。绑定整秒并单独加回原小数部分，保留 MariaDB 精度。在原加锁 SQL 查询中检查 producer writer 是否存活，避免按 JVM 时区转换 `LocalDateTime`。JDBC/JVM/数据库时区不同时，获取、重复获取、续约和接管的返回值都必须与持久化 SQL Unix epoch 一致；activation 即使 phase 仍为 active，到期后也应拒绝。本修正不增加时区设置或 schema 迁移。升级存有偏移到期值的部署前，必须排空进行中的 tool publication。修正 epoch 生效后，一次成功的新 reserve 会在该租户内清理到期的 OPEN grant，不可逆地 fence 它们、清空到期值，并将 held-byte 记账降至 used-byte 记账（FINISHED/REFERENCED producer 的 admission 占额仍保留）。被 fence 的 grant 无法续约；已保留的内容字节不会被重写。
 
 ### 6.2 `qwen_managed_session_journal_tx`
 
