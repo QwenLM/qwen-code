@@ -77,18 +77,25 @@ export class ManagedHookError extends Error {
 
 class ManagedHookImportAbortedError extends Error {}
 
-// Module evaluation runs before HookRunner enforces the manifest timeout and
-// abort signal, so bound it here with both; a stuck top-level await must not
-// pin an admission slot or hold close() open forever.
+// Module evaluation runs before HookRunner enforces the abort signal, so race
+// it with a budget and the operation signal: a stuck top-level await must not
+// pin an admission slot or hold close() open forever. ESM evaluation itself
+// cannot be cancelled, so a timeout or abort only abandons the wait — the
+// evaluation keeps running, which is why a timeout reports
+// 'managed_hook_module_evaluation_timeout' (the host fences the execution as
+// outcome_unknown) instead of 'managed_hook_handler_unavailable', which would
+// certify not_started_proven for code that may already have run.
 function importHookModule(
   modulePath: string,
   timeoutMs: number,
   signal: AbortSignal,
+  entry: Operation,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let finished = false;
     const timer = setTimeout(
-      () => finish(new ManagedHookError('managed_hook_handler_unavailable')),
+      () =>
+        finish(new ManagedHookError('managed_hook_module_evaluation_timeout')),
       timeoutMs,
     );
     const onAbort = () => finish(new ManagedHookImportAbortedError());
@@ -105,10 +112,16 @@ function importHookModule(
       return;
     }
     signal.addEventListener('abort', onAbort, { once: true });
+    entry.moduleEvaluationPending = true;
     import(pathToFileURL(modulePath).href).then(
-      (module) => finish(undefined, module as Record<string, unknown>),
-      (error: unknown) =>
-        finish(error instanceof Error ? error : new Error(String(error))),
+      (module) => {
+        entry.moduleEvaluationPending = false;
+        finish(undefined, module as Record<string, unknown>);
+      },
+      (error: unknown) => {
+        entry.moduleEvaluationPending = false;
+        finish(error instanceof Error ? error : new Error(String(error)));
+      },
     );
   });
 }
@@ -117,6 +130,10 @@ const identifier = /^[a-zA-Z0-9:_.-]{1,512}$/u;
 const MAX_OPERATIONS = 4096;
 const MAX_BYTES = 60 * 1024;
 const FUNCTION_SETTLEMENT_GRACE_MS = 1000;
+// The manifest timeout is declared for the callback; cold-but-healthy module
+// evaluation needs its own floor so it is not judged by a budget written for
+// a different phase.
+const MODULE_EVALUATION_MIN_TIMEOUT_MS = 500;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new ManagedHookError('managed_hook_invalid');
@@ -419,6 +436,12 @@ interface Operation {
   view: ManagedHookOperationView;
   controller: AbortController;
   done?: Promise<void>;
+  // Stays set after the operation settles when the module's top-level code
+  // outlived the abandoned wait, so hold accounting reflects the unfinished
+  // effects. A never-settling evaluation keeps the hold forever: the slot and
+  // close() stay freed, but workspace release remains fenced — the deliberate
+  // honest-hold trade-off over restoring the availability wedge.
+  moduleEvaluationPending?: boolean;
 }
 
 export class ManagedHookRuntime {
@@ -715,7 +738,8 @@ export class ManagedHookRuntime {
     return [...this.operations.values()].some(
       (entry) =>
         entry.runtimeSessionId === runtimeSessionId &&
-        entry.view.state !== 'settled',
+        (entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true),
     );
   }
 
@@ -742,8 +766,12 @@ export class ManagedHookRuntime {
         try {
           const module = await importHookModule(
             handler.modulePath,
-            definition.config.timeout,
+            Math.max(
+              definition.config.timeout,
+              MODULE_EVALUATION_MIN_TIMEOUT_MS,
+            ),
             entry.controller.signal,
+            entry,
           );
           registered = object(module[handler.exportName]);
           if (
@@ -762,6 +790,11 @@ export class ManagedHookRuntime {
             };
             return;
           }
+          if (
+            error instanceof ManagedHookError &&
+            error.code === 'managed_hook_module_evaluation_timeout'
+          )
+            throw error;
           throw new ManagedHookError('managed_hook_handler_unavailable');
         }
         const callback = registered['callback'] as FunctionHookCallback;

@@ -894,6 +894,10 @@ describe('ManagedHookRuntime', () => {
               behavior === 'finish-after-timeout' ? 'timeout' : 'cancelled',
           },
         });
+        if (behavior === 'finish-after-timeout')
+          // The callback-phase timeout is a real result, not an evaluation
+          // failure receipt: pins that the import floor let evaluation finish.
+          expect(receipt.error?.code).toBeUndefined();
         expect(instance.hasHolds('runtime-session')).toBe(false);
         expect(await instance.control('runtime-session', call)).toEqual(
           receipt,
@@ -925,11 +929,79 @@ describe('ManagedHookRuntime', () => {
       },
     ]);
     const call = request();
+    const startedAt = Date.now();
     await instance.control('runtime-session', call);
     const receipt = await settled(instance);
+    // Pins the manifest timeout as the bound; any constant below the 8s poll
+    // window keeps the other assertions green.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    // An abandoned evaluation is not a failed import and must not produce the
+    // not_started_proven certification.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    // The evaluation is still live and never settles, so the hold stays.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('fails fast when the handler module itself rejects', async () => {
+    const modulePath = path.join(directory, 'broken-handler.mjs');
+    await writeFile(
+      modulePath,
+      `throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'broken',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    const startedAt = Date.now();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(receipt).toMatchObject({
       state: 'settled',
       error: { code: 'managed_hook_handler_unavailable' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('lets a slow-but-finite module evaluation finish inside its floor', async () => {
+    const modulePath = path.join(directory, 'slow-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 30));
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'slow',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt.error?.code).toBeUndefined();
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: true },
     });
     expect(instance.hasHolds('runtime-session')).toBe(false);
     expect(await instance.control('runtime-session', call)).toEqual(receipt);
@@ -975,7 +1047,9 @@ describe('ManagedHookRuntime', () => {
       state: 'settled',
       result: { outcome: 'cancelled' },
     });
-    expect(instance.hasHolds('runtime-session')).toBe(false);
+    // The user-requested cancel settles the turn, but the abandoned evaluation
+    // never finishes, so the hold stays reported rather than released.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
     expect(await instance.control('runtime-session', call)).toEqual(receipt);
     await instance.close();
   });
