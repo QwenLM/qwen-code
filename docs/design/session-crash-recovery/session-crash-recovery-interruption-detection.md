@@ -291,12 +291,17 @@ Not covered yet:
   gates are off or unreachable by default (`maxSessionTurns` is `-1`, the arena
   client is unset, `boundedTurns` reaches 0 only once the turn recursion is
   exhausted) — the only observable symptom today is that one banner line
-  because no consumer of a record-derived plan reads `continuation`, and the
-  `retry_user_parts` continuation it advertises would be refused again by the
-  same gate. Closing it properly needs a delivery
-  marker written after the send commits — a new persisted record kind plus a
-  reader change. Pinned by the cap-refusal case in
-  `packages/core/src/core/client.test.ts`.
+  because no consumer of a record-derived plan reads `continuation`. That
+  continuation is not self-limiting on the cap arm named above:
+  `LlmClient.sendMessageStream` wraps both `sessionTurnCount++` and the
+  `MaxSessionTurns` refusal in
+  `messageType !== SendMessageType.Retry && !isGoalRuntimeTurn`, and the
+  existing `retry_user_parts` mapping sends exactly that type (headless
+  `continueInterrupted`), so wiring it would run the turn the cap just
+  refused. The other three gates above sit outside that exclusion and would
+  still refuse it. Closing it properly needs a delivery marker written after
+  the send commits — a new persisted record kind plus a reader change. Pinned
+  by the cap-refusal case in `packages/core/src/core/client.test.ts`.
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states

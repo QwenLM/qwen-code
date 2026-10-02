@@ -159,9 +159,11 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * classifies as the textbook `interrupted_prompt` documented above. Callers
  * that hold only raw `Content[]` (headless
  * `continueInterrupted`/`continue_last_turn`, and the daemon) forward no
- * count, keep the shape-only trim, and still trim a stamped envelope; only
- * unstamped records — cold copies persisted before any turn ran — are
- * trimmed, and only when the count is supplied.
+ * count, keep the shape-only trim, and still trim a stamped envelope: with no
+ * count `authoritativeFrom` is `-Infinity`, so the trim's only bail-out is
+ * unreachable and every trailing envelope-shaped entry goes. When the count IS
+ * supplied, only unstamped records — cold copies persisted before any turn
+ * ran — are trimmed.
  *
  * The stamp is written on the `LlmClient.sendMessageStream` send path — the
  * TUI and headless runtimes. The ACP/serve daemon sends its notification
