@@ -120,6 +120,8 @@ function eventType(
       return 'cancelled';
     case 'stream.reconciled':
       return 'stream_gap';
+    case 'action.updated':
+      return 'action_updated';
     default:
       return undefined;
   }

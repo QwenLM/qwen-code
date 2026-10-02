@@ -19,6 +19,7 @@ public class ManagedAgentProperties {
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private String agentRevision = "1";
+    private String trustedActorHeader = "";
 
     public Harness getHarness() {
         return harness;
@@ -54,6 +55,14 @@ public class ManagedAgentProperties {
 
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
+    }
+
+    public String getTrustedActorHeader() {
+        return trustedActorHeader;
+    }
+
+    public void setTrustedActorHeader(String trustedActorHeader) {
+        this.trustedActorHeader = trustedActorHeader;
     }
 
     @PostConstruct
@@ -228,6 +237,13 @@ public class ManagedAgentProperties {
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
         private Duration maxVerificationTimeout;
+        private boolean gcEnabled;
+        private Duration deletionGrace = Duration.ofHours(24);
+
+        public boolean isGcEnabled() { return gcEnabled; }
+        public void setGcEnabled(boolean value) { gcEnabled = value; }
+        public Duration getDeletionGrace() { return deletionGrace; }
+        public void setDeletionGrace(Duration value) { deletionGrace = value; }
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
