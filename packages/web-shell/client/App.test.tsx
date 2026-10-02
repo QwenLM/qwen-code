@@ -43883,6 +43883,36 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
     features: ['agent_collaboration_v1'],
+    workspaces: [
+      { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      {
+        id: 'enabled',
+        cwd: '/tmp/enabled',
+        primary: false,
+        trusted: true,
+        agentCollaborationEnabled: true,
+      },
+    ],
+  };
+  rerender();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+      entry.cwd === '/tmp/project'
+        ? { ...entry, agentCollaborationEnabled: true }
+        : entry,
+    ),
   };
   rerender();
   await act(async () => {

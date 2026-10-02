@@ -69,7 +69,7 @@ It uses a different language and codebase from our server's `@a2a-js/sdk`, avoid
 
 A grant names exactly one caller and one agent. It does not carry a speculative permission scope; the agent's existing tool policy remains the capability boundary.
 
-A grant follows the agent's current configuration (decided 2026-09-30): it is checked against the agent's live definition on every request, so changing the agent's instructions, role or tools after a share is issued applies to that share too. The share dialog says so. To give a caller less than the agent's current boundary, revoke the share, or share a separate agent.
+A grant follows the agent's current configuration (decided 2026-09-30): it is checked against the agent's live definition on every request, so changing the agent's instructions, role, tools or execution placement after a share is issued applies to that share too. Moving an agent between local and managed-host execution does not revoke its grants; later requests run in the currently assigned runtime's workspace. The share dialog says so. To preserve an earlier boundary, revoke the share before changing the agent, or share a separate agent.
 
 One additional decision from architecture §5 is needed before P3: what signal at the end of a Codex turn counts as an explicit task result.
 
