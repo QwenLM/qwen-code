@@ -956,7 +956,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description A trusted actor is required for this request but none was supplied. */
+        /** @description A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale. */
         Unauthorized: {
             headers: {
                 [name: string]: unknown;
