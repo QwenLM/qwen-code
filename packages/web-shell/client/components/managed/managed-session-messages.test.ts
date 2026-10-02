@@ -213,6 +213,30 @@ describe('Managed transcript projection', () => {
     expect(mergeManagedEvents([], []).map((item) => item.id)).toEqual([]);
   });
 
+  it('appends the first stream event onto an empty current list', () => {
+    expect(
+      mergeManagedEvents([], [event(1, 'accepted')]).map((item) => item.id),
+    ).toEqual([1]);
+  });
+
+  it('sorts an incoming page that is newer but internally disordered', () => {
+    expect(
+      mergeManagedEvents(
+        [event(1, 'accepted')],
+        [event(5, 'assistant_delta'), event(3, 'assistant_delta')],
+      ).map((item) => item.id),
+    ).toEqual([1, 3, 5]);
+  });
+
+  it('deduplicates an equal boundary id in favour of the incoming event', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [event(3, 'assistant_delta', { text: 'newer' }), event(4, 'completed')],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 3, 4]);
+    expect(merged[1]?.data).toEqual({ text: 'newer' });
+  });
+
   it('keeps approval updates out of the Turn being streamed', () => {
     const messages = managedEventsToMessages(
       [

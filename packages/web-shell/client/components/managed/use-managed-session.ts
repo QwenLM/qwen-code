@@ -41,6 +41,9 @@ interface ManagedSessionState {
   olderCursor?: string;
   loading: boolean;
   error?: string;
+  // A terminal (non-retryable) stop, sticky across per-event updates that
+  // legitimately clear the transient `error` of the loop that owns it.
+  stoppedReason?: string;
 }
 
 export function useManagedSession(
@@ -90,6 +93,10 @@ export function useManagedSession(
       });
       return transcript.lastEventId;
     };
+    const stop = (error: unknown) =>
+      update({
+        stoppedReason: error instanceof Error ? error.message : String(error),
+      });
     void (async () => {
       let lastEventId: number | undefined;
       let failures = 0;
@@ -99,29 +106,36 @@ export function useManagedSession(
           failures = 0;
         } catch (error) {
           fail(error);
-          if (isNonRetryableClientError(error)) return;
+          if (isNonRetryableClientError(error)) {
+            stop(error);
+            return;
+          }
           await pause(abort.signal, failureRetryDelayMs(failures++));
         }
       }
       if (lastEventId === undefined || abort.signal.aborted) return;
+      // The durable snapshot read has its own health: the stream can keep
+      // delivering while it fails, so it climbs its own ladder instead of
+      // being charged to (and zeroed by) the stream's counter.
+      let snapshotFailures = 0;
       while (!abort.signal.aborted) {
         let gap = false;
         let delayMs = 0;
+        let delivered = false;
+        const connectedAt = Date.now();
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
             lastEventId,
           })) {
             if (abort.signal.aborted) return;
+            delivered = true;
             if (event.type === 'stream_gap') {
               gap = true;
               break;
             }
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
-            // A delivered event proves the connection healthy even when it
-            // later dies by proxy idle timeout, which surfaces as a throw.
-            failures = 0;
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
@@ -129,7 +143,17 @@ export function useManagedSession(
             }));
           }
           if (gap) {
-            lastEventId = await snapshot();
+            try {
+              lastEventId = await snapshot();
+              snapshotFailures = 0;
+            } catch (error) {
+              fail(error);
+              if (isNonRetryableClientError(error)) {
+                stop(error);
+                return;
+              }
+              delayMs = failureRetryDelayMs(snapshotFailures++);
+            }
           } else if (!abort.signal.aborted) {
             update({
               summary: await provider.getSession(sessionId, opts),
@@ -139,7 +163,15 @@ export function useManagedSession(
           failures = 0;
         } catch (error) {
           fail(error);
-          if (isNonRetryableClientError(error)) return;
+          if (isNonRetryableClientError(error)) {
+            stop(error);
+            return;
+          }
+          // Any delivered frame, or a connection that simply lived long
+          // enough, proves the path healthy; only back-to-back failures
+          // with nothing delivered should stretch the ladder.
+          if (delivered || Date.now() - connectedAt >= BASE_RETRY_DELAY_MS)
+            failures = 0;
           delayMs = failureRetryDelayMs(failures++);
         }
         await pause(abort.signal, delayMs);
@@ -148,17 +180,17 @@ export function useManagedSession(
     void (async () => {
       let failures = 0;
       while (!abort.signal.aborted) {
-        await pause(
-          abort.signal,
-          failures === 0 ? BASE_RETRY_DELAY_MS : failureRetryDelayMs(failures),
-        );
+        await pause(abort.signal, failureRetryDelayMs(failures));
         if (abort.signal.aborted) return;
         try {
           update({ summary: await provider.getSession(sessionId, opts) });
           failures = 0;
         } catch (error) {
           fail(error);
-          if (isNonRetryableClientError(error)) return;
+          if (isNonRetryableClientError(error)) {
+            stop(error);
+            return;
+          }
           failures++;
         }
       }

@@ -383,9 +383,9 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(error || detail.error) && (
+      {(error || detail.error || detail.stoppedReason) && (
         <p role="alert" className="text-sm text-destructive">
-          {error || detail.error}
+          {error || detail.error || detail.stoppedReason}
         </p>
       )}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
