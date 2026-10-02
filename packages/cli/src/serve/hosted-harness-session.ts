@@ -9,6 +9,7 @@ import {
   commitHostedFileHistory,
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
+  HOSTED_UUID,
   canSettleHostedFileHistory,
 } from './hosted-file-history.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
@@ -108,8 +109,6 @@ import {
   type HostedApprovalSettings,
 } from './hosted-tool-approval.js';
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const CLIENT = /^[A-Za-z0-9._:-]{1,128}$/u;
 /** References whose resources a cold Workspace load verifies at once. */
@@ -564,7 +563,7 @@ async function readShellReceipt(
     ) ||
     receipt.payload['historyRevision'] !== receipt.sequence ||
     typeof history?.['messageId'] !== 'string' ||
-    !UUID.test(history['messageId']) ||
+    !HOSTED_UUID.test(history['messageId']) ||
     typeof history['timestamp'] !== 'string' ||
     typeof history['model'] !== 'string' ||
     !Array.isArray(history['parts'])
@@ -1327,7 +1326,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       typeof sessionId !== 'string' ||
-      !UUID.test(sessionId) ||
+      !HOSTED_UUID.test(sessionId) ||
       (create && body?.['sessionScope'] !== 'thread')
     ) {
       error(res, 400, 'invalid_hosted_session');
@@ -1843,6 +1842,9 @@ export function registerHostedHarnessSessionRoutes(
       } else if (cause instanceof ManagedSessionNotFoundError) {
         error(res, 404, 'managed_session_not_found');
       } else {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session open failed: ${String(cause)}`,
+        );
         error(res, 503, 'managed_session_open_failed');
       }
     } finally {
@@ -1872,7 +1874,7 @@ export function registerHostedHarnessSessionRoutes(
     const deadlineMs = body?.['deadlineMs'];
     if (
       typeof promptId !== 'string' ||
-      !UUID.test(promptId) ||
+      !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
       !prompt.every((block) => {
@@ -2084,7 +2086,7 @@ export function registerHostedHarnessSessionRoutes(
     const fields = object(body?.['input']);
     if (
       typeof operationId !== 'string' ||
-      !UUID.test(operationId) ||
+      !HOSTED_UUID.test(operationId) ||
       (event !== HookEventName.Notification &&
         event !== HookEventName.UserPromptExpansion) ||
       !fields
@@ -2182,7 +2184,7 @@ export function registerHostedHarnessSessionRoutes(
     try {
       if (
         typeof operationId !== 'string' ||
-        !UUID.test(operationId) ||
+        !HOSTED_UUID.test(operationId) ||
         !Number.isSafeInteger(expectedRevision) ||
         (expectedRevision as number) < 0
       )
@@ -2223,7 +2225,7 @@ export function registerHostedHarnessSessionRoutes(
     try {
       if (
         typeof operationId !== 'string' ||
-        !UUID.test(operationId) ||
+        !HOSTED_UUID.test(operationId) ||
         !Number.isSafeInteger(expectedRevision) ||
         Number(expectedRevision) < 1
       )
@@ -2273,7 +2275,7 @@ export function registerHostedHarnessSessionRoutes(
     const request = object(body?.['request']);
     if (
       typeof operationId !== 'string' ||
-      !UUID.test(operationId) ||
+      !HOSTED_UUID.test(operationId) ||
       typeof serverId !== 'string' ||
       !request
     )
@@ -2385,7 +2387,7 @@ export function registerHostedHarnessSessionRoutes(
     const activationId = body?.['activationId'];
     if (
       typeof promptId !== 'string' ||
-      !UUID.test(promptId) ||
+      !HOSTED_UUID.test(promptId) ||
       typeof checkpointId !== 'string' ||
       checkpointId.length === 0 ||
       checkpointId.length > 512 ||
@@ -3044,7 +3046,12 @@ export function registerHostedHarnessSessionRoutes(
     void readHostedFileHistory(session.managed).then(
       (history) =>
         res.json({ sessionId: req.params['id'], history: history ?? null }),
-      () => error(res, 503, 'hosted_file_history_failed'),
+      (cause: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted file history read failed: ${String(cause)}`,
+        );
+        error(res, 503, 'hosted_file_history_failed');
+      },
     );
   });
   app.post('/session/:id/files/rewind', (req, res) => {
@@ -3073,9 +3080,9 @@ export function registerHostedHarnessSessionRoutes(
     const promptId = body?.['promptId'];
     if (
       typeof requestId !== 'string' ||
-      !UUID.test(requestId) ||
+      !HOSTED_UUID.test(requestId) ||
       typeof promptId !== 'string' ||
-      !UUID.test(promptId)
+      !HOSTED_UUID.test(promptId)
     )
       return error(res, 400, 'invalid_file_rewind');
     session.active = {

@@ -13,6 +13,7 @@ import express from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as hostedHistory from './hosted-file-history.js';
+import type { HostedFileHistoryState } from './hosted-file-history-protocol.js';
 import {
   LocalJsonlManagedSessionJournalHandle,
   LocalJsonlManagedSessionJournalStore,
@@ -5856,10 +5857,13 @@ describe('Hosted Harness tool approvals', () => {
   });
   it.each([
     'success',
+    'conflict',
     'closing',
     'old-history-unavailable',
+    'corrupt-receipt',
     'release',
     'busy',
+    'warm',
     'bind',
     'unsupported',
     'unknown-acquire',
@@ -5873,7 +5877,7 @@ describe('Hosted Harness tool approvals', () => {
     async (scenario) => {
       const releaseFails = scenario === 'release';
       let writePromptId = PROMPT_ID;
-      const historyState = {
+      const historyState: HostedFileHistoryState = {
         ownerSessionId: SESSION_ID,
         snapshots: [
           {
@@ -5892,15 +5896,24 @@ describe('Hosted Harness tool approvals', () => {
           'notes.txt': { digest: `sha256:${'a'.repeat(64)}`, mode: 0o644 },
         },
       };
+      if (scenario === 'partial') {
+        historyState.snapshots[0].trackedFileBackups['other.txt'] = {
+          ...historyState.snapshots[0].trackedFileBackups['notes.txt'],
+        };
+        historyState.files['other.txt'] = historyState.files['notes.txt'];
+      }
+      const conflict = scenario === 'conflict';
       const control = vi
         .mocked(HostedWorkspaceBroker.prototype.fileHistory)
         .mockImplementation(async (operation) =>
           operation.action === 'rewind'
             ? {
-                state: { ...historyState, files: { 'notes.txt': null } },
-                filesChanged: ['notes.txt'],
+                state: conflict
+                  ? historyState
+                  : { ...historyState, files: { 'notes.txt': null } },
+                filesChanged: conflict ? [] : ['notes.txt'],
                 filesFailed: [],
-                conflict: false,
+                conflict,
               }
             : historyState,
         );
@@ -5997,6 +6010,68 @@ describe('Hosted Harness tool approvals', () => {
         supertest(server).get(`/session/${SESSION_ID}/files/history`),
       ).set('X-Qwen-Client-Id', clientId);
       expect(before.body.history.state).toEqual(historyState);
+      if (scenario === 'corrupt-receipt') {
+        const read = LocalManagedSessionResourceStore.prototype.read;
+        const fault = vi
+          .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+          .mockImplementation(async function (
+            this: LocalManagedSessionResourceStore,
+            ref,
+          ) {
+            const bytes = await read.call(this, ref);
+            if (ref.kind !== 'managed-file_history') return bytes;
+            const record = JSON.parse(bytes.toString('utf8'));
+            record.undoReceipts = [
+              {
+                requestId: randomUUID(),
+                promptId: PROMPT_ID,
+                filesChanged: ['missing.txt'],
+                conflict: false,
+              },
+            ];
+            return Buffer.from(JSON.stringify(record));
+          });
+        const log = vi
+          .spyOn(stdio, 'writeStderrLineSafe')
+          .mockImplementation(() => {});
+        const detail =
+          'Invalid Hosted file history undo receipt 0: filesChanged must contain only tracked paths.';
+        const failed = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/files/history`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(failed.status).toBe(503);
+        expect(failed.body).toEqual({
+          error: 'hosted_file_history_failed',
+          code: 'hosted_file_history_failed',
+        });
+        expect(log).toHaveBeenCalledWith(
+          `qwen serve: Hosted file history read failed: Error: ${detail}`,
+        );
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({})
+          .expect(204);
+        log.mockClear();
+        const failedLoad = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store(), toolProfile: files });
+        expect(failedLoad.status).toBe(503);
+        expect(failedLoad.body).toEqual({
+          error: 'managed_session_open_failed',
+          code: 'managed_session_open_failed',
+        });
+        expect(log).toHaveBeenCalledWith(
+          `qwen serve: Hosted Session open failed: Error: ${detail}`,
+        );
+        fault.mockRestore();
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({ managedSessionStore: store(), toolProfile: files })
+          .expect(200);
+        await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        ).expect(204);
+        return;
+      }
       if (releaseFails)
         vi.mocked(
           HostedWorkspaceBroker.prototype.release,
@@ -6006,6 +6081,24 @@ describe('Hosted Harness tool approvals', () => {
         headers(supertest(server).post(`/session/${SESSION_ID}/files/rewind`))
           .set('X-Qwen-Client-Id', clientId)
           .send(request);
+      const physicalUndo = control.getMockImplementation()!;
+      let rewinds = 0;
+      control.mockImplementation(async (operation) => {
+        if (operation.action === 'rewind') {
+          const pending = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/files/history`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(pending.body.history.pendingUndo).toEqual({
+            requestId: expect.any(String),
+            promptId: operation.promptId,
+          });
+          if (rewinds++ === 0) {
+            expect(pending.body.history.pendingUndo).toEqual(request);
+            expect(pending.body.history.state).toEqual(historyState);
+          }
+        }
+        return physicalUndo(operation);
+      });
       if (scenario === 'closing') {
         const releaseActivation =
           LocalManagedSessionAuthority.prototype.releaseActivation;
@@ -6050,6 +6143,7 @@ describe('Hosted Harness tool approvals', () => {
       }
       if (
         scenario !== 'success' &&
+        scenario !== 'conflict' &&
         scenario !== 'release' &&
         scenario !== 'old-history-unavailable'
       ) {
@@ -6060,6 +6154,10 @@ describe('Hosted Harness tool approvals', () => {
         const retryable = ['busy', 'bind', 'unsupported', 'capacity'].includes(
           scenario,
         );
+        if (scenario === 'warm')
+          vi.mocked(HostedWorkspaceBroker.prototype.warm).mockRejectedValueOnce(
+            new Error('warm response lost'),
+          );
         if (['busy', 'unknown-acquire', 'unknown-released'].includes(scenario))
           acquire.mockRejectedValueOnce(
             new HostedWorkspaceBrokerRejection(
@@ -6099,19 +6197,27 @@ describe('Hosted Harness tool approvals', () => {
           );
         if (scenario === 'partial') {
           const physical = control.getMockImplementation()!;
-          control.mockImplementation(async (operation) =>
-            operation.action === 'rewind'
+          control.mockImplementation(async (operation) => {
+            const result = await physical(operation);
+            return operation.action === 'rewind'
               ? {
-                  state: historyState,
-                  filesChanged: [],
-                  filesFailed: ['notes.txt'],
+                  state: {
+                    ...historyState,
+                    files: { ...historyState.files, 'notes.txt': null },
+                  },
+                  filesChanged: ['notes.txt'],
+                  filesFailed: ['other.txt'],
                   conflict: false,
                 }
-              : physical(operation),
-          );
+              : result;
+          });
         }
         const response = await undo();
         expect(response.status).toBe(retryable ? 409 : 503);
+        if (!retryable)
+          expect(response.body.code).toBe(
+            'hosted_file_history_recovery_required',
+          );
         if (scenario === 'capacity')
           expect(response.body.code).toBe(
             'hosted_file_history_capacity_exceeded',
@@ -6138,7 +6244,7 @@ describe('Hosted Harness tool approvals', () => {
           control.mock.calls.filter(([op]) => op.action === 'rewind'),
         ).toHaveLength(scenario === 'partial' ? 1 : 0);
         expect(acquire).toHaveBeenCalledTimes(
-          acquiredBefore + (scenario === 'capacity' ? 0 : 1),
+          acquiredBefore + (['capacity', 'warm'].includes(scenario) ? 0 : 1),
         );
         expect(release).toHaveBeenCalledTimes(
           releasedBefore +
@@ -6173,15 +6279,31 @@ describe('Hosted Harness tool approvals', () => {
         return;
       }
       const response = await undo();
-      expect(response.status).toBe(releaseFails ? 503 : 200);
+      expect(response.status).toBe(releaseFails ? 503 : conflict ? 409 : 200);
+      if (releaseFails)
+        expect(response.body.code).toBe(
+          'hosted_file_history_recovery_required',
+        );
       const after = await headers(
         supertest(server).get(`/session/${SESSION_ID}/files/history`),
       ).set('X-Qwen-Client-Id', clientId);
       expect(after.body.history.pendingUndo).toEqual(
         releaseFails ? request : null,
       );
+      expect(after.body.history.state.files).toEqual(
+        conflict ? historyState.files : { 'notes.txt': null },
+      );
+      expect(after.body.history.undoReceipts).toEqual([
+        {
+          ...request,
+          filesChanged: conflict ? [] : ['notes.txt'],
+          conflict,
+        },
+      ]);
       if (!releaseFails) {
-        expect((await undo()).body).toEqual(response.body);
+        const replay = await undo();
+        expect(replay.status).toBe(conflict ? 409 : 200);
+        expect(replay.body).toEqual(response.body);
         expect(
           control.mock.calls.filter(([op]) => op.action === 'rewind'),
         ).toHaveLength(1);
@@ -6190,11 +6312,17 @@ describe('Hosted Harness tool approvals', () => {
         )
           .set('X-Qwen-Client-Id', clientId)
           .send({ promptId: PROMPT_ID, requestId: randomUUID() })
-          .expect(200);
+          .expect(conflict ? 409 : 200);
         const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
         const acquisitions = acquire.mock.calls.length;
         expect((await undo()).body).toEqual(response.body);
         expect(acquire).toHaveBeenCalledTimes(acquisitions);
+
+        const anotherPrompt = randomUUID();
+        historyState.snapshots.push({
+          ...historyState.snapshots[0],
+          promptId: anotherPrompt,
+        });
 
         writePromptId = randomUUID();
         await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
@@ -6215,6 +6343,17 @@ describe('Hosted Harness tool approvals', () => {
           });
         });
         expect((await undo()).body).toEqual(response.body);
+        const controls = control.mock.calls.length;
+        const acquired = acquire.mock.calls.length;
+        const mismatched = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ ...request, promptId: anotherPrompt });
+        expect(mismatched.status).toBe(409);
+        expect(mismatched.body.code).toBe('hosted_file_rewind_conflict');
+        expect(control).toHaveBeenCalledTimes(controls);
+        expect(acquire).toHaveBeenCalledTimes(acquired);
         expect(
           control.mock.calls.filter(([op]) => op.action === 'rewind'),
         ).toHaveLength(2);
