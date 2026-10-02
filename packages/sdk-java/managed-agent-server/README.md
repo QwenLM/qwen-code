@@ -284,23 +284,31 @@ panel to this Spring service.
 
 The one-shot launcher starts the ordinary daemon and the private Hosted
 Harness from TypeScript source, writes the Harness wiring
-(`QWEN_MANAGED_AGENT_HARNESS_*` and the rotating capability digest) to the
-git-ignored `.qwen/managed-agent-dev/spring.env`, waits for
-`/actuator/health` on the Spring service (`--skip-java-wait` bypasses), and
-opens the WebShell with the Managed panel selected:
+(`QWEN_MANAGED_AGENT_HARNESS_*` and the rotating capability digest) to a
+mode-0600 `spring.env` under the OS temp directory (kept outside the served
+workspace; a PowerShell `spring.env.ps1` sibling is written next to it),
+waits for `/actuator/health` on the Spring service (`--skip-java-wait`
+bypasses), then opens the WebShell with the Managed panel selected:
 
 ```bash
 npm run dev:managed-agent
-# in a second terminal, before the Java health wait expires (10 min):
-source .qwen/managed-agent-dev/spring.env
+# In a second terminal, before the Java health wait expires (10 min).
+# One-time, on a fresh clone:
+mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
+mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+# Every run; the launcher prints this spring.env path at startup:
+source <printed spring.env path>
+export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
+export SPRING_DATASOURCE_USERNAME='qwen'
+export SPRING_DATASOURCE_PASSWORD='replace-me'
 mvn -f packages/sdk-java/managed-agent-server/pom.xml spring-boot:run
 ```
 
-The Managed URL and ports print at startup, along with the `spring.env`
-path that carries the Harness token; ports auto-increment when busy. To wire
-the pieces by hand instead, start an ordinary `qwen serve` on port 4170 in
-addition to the private Hosted Harness used by Spring, then run from the
-repository root:
+The daemon, Harness and Java URLs print at startup with the `spring.env`
+path, and the full Managed URL (which carries the daemon token) prints on an
+interactive terminal; ports auto-increment when busy. To wire the pieces by
+hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
+private Hosted Harness used by Spring, then run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
