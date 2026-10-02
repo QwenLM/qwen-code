@@ -14,6 +14,8 @@ import {
   getAllMemoryFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
+import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
+import { openNoFollow } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
 import type { WorkspaceEventBridge } from './acp-session-bridge.js';
@@ -30,6 +32,8 @@ import {
   sendGenerationClosedError,
 } from './workspace-route-runtime.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { FsError } from './fs/errors.js';
+import { resolveWithinWorkspace } from './fs/paths.js';
 
 /**
  * Issue #4175 PR 16: workspace memory CRUD routes.
@@ -571,7 +575,11 @@ export async function collectWorkspaceMemoryStatus(
       try {
         Object.assign(
           file,
-          await readMemoryFileContent(file.absolutePath, file.bytes),
+          await readMemoryFileContent(
+            file.absolutePath,
+            file.bytes,
+            file.scope === 'workspace' ? boundWorkspace : globalDir,
+          ),
         );
       } catch (err) {
         errors.push({
@@ -658,12 +666,9 @@ async function walkWorkspaceForMemory(
  * `fs.writeFile` with no backup), so this read must be lossless or
  * honest — never serve bytes the panel could mistake for the original:
  *
- * - A byte count that differs from the earlier `stat` means a writer
- *   rewrote the file between the stat and this read (memory writes are
- *   truncate-then-write under a per-file lock this read does not take,
- *   and out-of-process writers hold no lock at all). Flag `truncated`
- *   and omit `content` rather than serve a torn prefix the panel would
- *   save back over the real tail.
+ * - Resolve within the file's own scope and bind the bounded read to one
+ *   regular-file descriptor. A changed path, size, or modification time
+ *   makes the snapshot unsafe to replace: flag `truncated` and omit text.
  * - Bytes that are not valid BOM-free UTF-8 (GBK, Shift_JIS, UTF-16 from
  *   PowerShell `>` redirection, BOM'd UTF-8) cannot round-trip through
  *   a replace write: omit `content` so the client's fallback path takes
@@ -672,39 +677,68 @@ async function walkWorkspaceForMemory(
 async function readMemoryFileContent(
   filePath: string,
   expectedBytes: number,
+  scopeRoot: string,
 ): Promise<{ content?: string; truncated?: boolean }> {
-  const buffer = await fs.readFile(filePath);
-  if (buffer.length !== expectedBytes) {
-    return { truncated: true };
+  const resolved = await resolveWithinWorkspace(filePath, scopeRoot, 'read');
+  const before = await fs.lstat(resolved);
+  if (!before.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${filePath}`);
   }
-  const truncated = buffer.length > MAX_MEMORY_CONTENT_BYTES;
-  const slice = buffer.subarray(
-    0,
-    truncated ? MAX_MEMORY_CONTENT_BYTES : buffer.length,
-  );
-  // A UTF-8 BOM survives the fatal decode below as an invisible U+FEFF
-  // first character; a replace save would then drop the BOM. BOM'd
-  // UTF-16/32 fails the fatal decode on its own.
-  if (
-    buffer.length >= 3 &&
-    buffer[0] === 0xef &&
-    buffer[1] === 0xbb &&
-    buffer[2] === 0xbf
-  ) {
-    return {};
-  }
+  const handle = await openNoFollow(resolved);
   try {
-    return {
-      content: new TextDecoder('utf-8', { fatal: true }).decode(slice),
-      truncated,
-    };
-  } catch {
-    // Not valid UTF-8 (GBK, Shift_JIS, UTF-16LE from PowerShell `>`). A
-    // lenient decode would hand the client U+FFFD text that still looks
-    // complete, and its `mode=replace` save rewrites the real bytes with no
-    // backup. Omit `content` so the client falls back to the encoding-aware
-    // file route instead.
-    return {};
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== expectedBytes
+    ) {
+      return { truncated: true };
+    }
+    const buffer = Buffer.alloc(
+      Math.min(opened.size, MAX_MEMORY_CONTENT_BYTES + 1),
+    );
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
+    const after = await handle.stat();
+    const current = await resolveWithinWorkspace(filePath, scopeRoot, 'read');
+    const currentStat = await fs.lstat(current);
+    if (
+      bytesRead !== buffer.length ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs ||
+      current !== resolved ||
+      currentStat.dev !== opened.dev ||
+      currentStat.ino !== opened.ino ||
+      currentStat.size !== opened.size ||
+      currentStat.mtimeMs !== opened.mtimeMs
+    ) {
+      return { truncated: true };
+    }
+    const truncated = opened.size > MAX_MEMORY_CONTENT_BYTES;
+    const slice = buffer.subarray(0, MAX_MEMORY_CONTENT_BYTES);
+    if (detectBOM(slice)) return { truncated };
+    try {
+      return {
+        content: new TextDecoder('utf-8', { fatal: true }).decode(slice, {
+          stream: truncated,
+        }),
+        truncated,
+      };
+    } catch {
+      return { truncated };
+    }
+  } finally {
+    await handle.close();
   }
 }
 
