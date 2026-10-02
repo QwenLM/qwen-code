@@ -292,7 +292,7 @@ public class ManagedAgentService {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
-            if ("COMPLETED".equals(existing.commandStatus())) {
+            if ("COMPLETED".equals(existing.status())) {
                 return new SessionMutationResult<>(getPublicSession(tenantId,
                         sessionId), true);
             }
