@@ -2582,10 +2582,18 @@ export class DaemonClient {
    * companion helper `walkWorkspaceForMemory` keeps a guarded
    * upward-walk loop body for a future hierarchical mode but breaks
    * after iteration 1 in this release.
+   *
+   * `includeContent` also returns each file's text. It is the only way
+   * to read the global file, which sits outside the bound workspace and
+   * so is refused by `readWorkspaceFile`. Daemons that predate it ignore
+   * the flag and return metadata only.
    */
-  async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
+  async workspaceMemory(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus> {
+    const query = options?.includeContent ? '?content=true' : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/memory`,
+      `${this.baseUrl}/workspace/memory${query}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {

@@ -76,6 +76,10 @@ public class ManagedAgentStore implements AgentStateStore {
             "ACCEPTED", "RUNNING", "CANCELLING");
     private static final String TURN_SUMMARY_COLUMNS = "session_id,"
             + " turn_id, status, created_at, completed_at, error_code";
+    private static final String LATEST_TURN_ID =
+            "SELECT turn_id FROM managed_agent_event WHERE tenant_id = ?"
+                    + " AND session_id = ? AND event_type = 'turn.accepted'"
+                    + " ORDER BY sequence_id DESC LIMIT 1";
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -181,7 +185,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("receipt_id"),
                     result.getString("lease_owner"),
                     result.getLong("claim_generation"),
-                    result.getInt("attempt_count"));
+                    result.getInt("attempt_count"), result.getString("error_code"));
     private final RowMapper<OperationTarget> operationTargetMapper =
             (result, row) -> new OperationTarget(
                     result.getString("tenant_id"),
@@ -574,9 +578,35 @@ public class ManagedAgentStore implements AgentStateStore {
     public OperationAdmission beginOperation(String tenantId,
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, null, false);
+    }
+
+    @Override
+    public boolean workspaceFilesEnabled() {
+        return workspaceFilesEnabled;
+    }
+
+    @Override
+    @Transactional
+    public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
+            String actorDigest, String key, String digest, boolean supported) {
+        return beginLifecycle(tenantId, sessionId, OperationKind.CLOSE, actorDigest, key, digest, actorId, supported);
+    }
+
+    private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null) {
-            throw workspaceExecutionUnavailable();
+            if (!workspaces.canRead(tenantId, actorId, session.workspace().getWorkspaceId())) {
+                throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+            }
+            if (!workspaces.isSessionCreator(tenantId, sessionId, actorId)) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                        "Only the Session creator may close it.");
+            }
         }
         Optional<OperationRecord> existing = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -599,9 +629,15 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
         }
+        if (session.workspace() != null && (kind != OperationKind.CLOSE || !supported || !workspaceFilesEnabled)) {
+            throw workspaceExecutionUnavailable();
+        }
+        if (session.workspace() != null && "ACTIVE".equals(session.status())) {
+            validateOperationStart(session, kind);
+        }
         requireNoOpenOperation(tenantId, sessionId);
         validateOperationStart(session, kind);
-        long now = clock.millis();
+        long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
         Map<String, Object> data = Map.of("sessionId", sessionId,
                 "operationId", operationId);
@@ -647,12 +683,13 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public List<OperationTarget> findDeliverableOperations(long now,
             int limit) {
+        now = lifecycleDatabaseTime();
         List<OperationTarget> targets =
                 new ArrayList<>(
                         jdbc.query(
                                 "SELECT tenant_id, session_id, operation_id FROM"
                                         + " managed_agent_operation WHERE operation_kind <>"
-                                        + " 'ACTION_RESPONSE' AND delivery_state = 'PENDING' AND"
+                                        + " 'ACTION_RESPONSE' AND (delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND operation_kind = 'CLOSE')) AND"
                                         + " available_at <= ? ORDER BY available_at LIMIT ?",
                                 operationTargetMapper,
                                 now,
@@ -676,14 +713,14 @@ public class ManagedAgentStore implements AgentStateStore {
     public Optional<OperationRecord> claimOperation(String tenantId,
             String sessionId, String operationId, String owner,
             Duration leaseDuration) {
-        long now = clock.millis();
+        long now = lifecycleDatabaseTime();
         int updated = jdbc.update("UPDATE managed_agent_operation SET state ="
                         + " 'RUNNING', delivery_state = 'LEASED',"
                         + " lease_owner = ?, lease_until = ?,"
                         + " claim_generation = claim_generation + 1,"
                         + " updated_at = ? WHERE tenant_id = ? AND"
                         + " session_id = ? AND operation_id = ? AND"
-                        + " ((delivery_state = 'PENDING' AND available_at <= ?)"
+                        + " (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND operation_kind = 'CLOSE')) AND available_at <= ?)"
                         + " OR (delivery_state = 'LEASED' AND lease_until < ?))",
                 owner, Math.addExact(now, leaseDuration.toMillis()), now,
                 tenantId, sessionId, operationId, now, now);
@@ -696,6 +733,10 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean completeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed) {
+        var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
+        if (target.kind() == OperationKind.DELETE) {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
+        }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         OperationRecord operation = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -703,7 +744,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 operationMapper, tenantId, sessionId, operationId).stream()
                 .findFirst().orElseThrow(() -> new IllegalStateException(
                         "Session operation is unavailable"));
-        if (!"LEASED".equals(operation.deliveryState())
+        Long leaseUntil = jdbc.queryForObject("SELECT lease_until FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Long.class,
+                tenantId, sessionId, operationId);
+        if (leaseUntil == null || leaseUntil <= lifecycleDatabaseTime()
+                || !"LEASED".equals(operation.deliveryState())
                 || !owner.equals(operation.leaseOwner())
                 || operation.claimGeneration() != claimGeneration) {
             return false;
@@ -713,7 +758,10 @@ public class ManagedAgentStore implements AgentStateStore {
                     + session.status() + " during its "
                     + operation.kind() + " operation");
         }
-        long now = clock.millis();
+        long now = lifecycleDatabaseTime();
+        if (operation.kind() == OperationKind.DELETE) {
+            ToolPublicationRetentionStore.retire(jdbc, tenantId, sessionId, operationId);
+        }
         switch (operation.kind()) {
             case CLOSE, ARCHIVE -> jdbc.update("UPDATE managed_agent_session"
                             + " SET status = ?, harness_event_epoch = NULL,"
@@ -730,7 +778,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " tenant_id = ? AND session_id = ?",
                     now, now, tenantId, sessionId);
         }
-        jdbc.update("UPDATE managed_agent_operation SET state = 'COMPLETED',"
+        jdbc.update("UPDATE managed_agent_operation SET error_code = NULL, state = 'COMPLETED',"
                         + " admission_stage = ?, delivery_state = 'CONFIRMED',"
                         + " receipt_id = ?, lease_owner = NULL,"
                         + " lease_until = NULL, updated_at = ?,"
@@ -747,20 +795,53 @@ public class ManagedAgentStore implements AgentStateStore {
         return true;
     }
 
+    private long lifecycleDatabaseTime() {
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
+    }
+
+    @Override
+    @Transactional
+    public boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, Duration duration) {
+        long now = lifecycleDatabaseTime();
+        return jdbc.update("UPDATE managed_agent_operation SET lease_until = ?, updated_at = ?"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
+                + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
+                Math.addExact(now, duration.toMillis()), now, tenantId, sessionId, operationId, owner, generation, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt) {
+        long now = lifecycleDatabaseTime();
+        jdbc.update("UPDATE managed_agent_operation SET state = 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED',"
+                + " error_code = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, updated_at = ?,"
+                + " attempt_count = attempt_count + 1"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
+                + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
+                failureCode, Math.addExact(now, Math.max(0, availableAt - clock.millis())),
+                now, tenantId, sessionId, operationId, owner, generation, now);
+    }
+
     @Override
     @Transactional
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt) {
+        long delay = Math.max(0, availableAt - clock.millis());
+        long now = lifecycleDatabaseTime();
+        availableAt = Math.addExact(now, delay);
         jdbc.update("UPDATE managed_agent_operation SET delivery_state ="
                         + " 'PENDING', lease_owner = NULL, lease_until = NULL,"
                         + " attempt_count = attempt_count + 1,"
                         + " available_at = ?, updated_at = ? WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
                         + " operation_id = ? AND delivery_state = 'LEASED'"
-                        + " AND lease_owner = ? AND claim_generation = ?",
-                availableAt, clock.millis(), tenantId, sessionId,
-                operationId, owner, claimGeneration);
+                        + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
+                availableAt, now, tenantId, sessionId,
+                operationId, owner, claimGeneration, now);
     }
 
     public Admission replayCommand(String tenantId, String operation,
@@ -901,9 +982,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId) {
         List<TurnRecord> rows = jdbc.query(
                 "SELECT * FROM managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? ORDER BY created_at DESC,"
-                        + " turn_id DESC LIMIT 1",
-                turnMapper, tenantId, sessionId);
+                        + " session_id = ? AND turn_id = (" + LATEST_TURN_ID + ")",
+                turnMapper, tenantId, sessionId, tenantId, sessionId);
         return rows.stream().findFirst();
     }
 
@@ -966,10 +1046,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " event.tenant_id = ? AND event.session_id = ? AND"
                         + " event.event_type IN ('environment.provisioning',"
                         + " 'environment.ready', 'environment.failed') AND"
-                        + " turn_record.turn_id = (SELECT turn_id FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? ORDER BY created_at DESC, turn_id"
-                        + " DESC LIMIT 1) ORDER BY event.sequence_id DESC"
+                        + " turn_record.turn_id = (" + LATEST_TURN_ID
+                        + ") ORDER BY event.sequence_id DESC"
                         + " LIMIT 1",
                 eventMapper, tenantId, sessionId, tenantId, sessionId)
                 .stream().findFirst();
@@ -983,7 +1061,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " sequence_id <= ? AND event_type NOT IN"
                         + " ('turn.accepted', 'item.output_text.delta',"
                         + " 'item.reasoning.delta',"
-                        + " 'item.tool_call.updated') ORDER BY sequence_id"
+                        + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
                         + " ASC",
                 eventMapper, tenantId, sessionId, throughSequence);
     }
@@ -1686,7 +1764,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "output_text");
             case "item.reasoning.delta" -> materializeText(event,
                     "reasoning");
-            case "item.tool_call.updated" -> materializeTool(event);
+            case "item.tool_call.updated", "item.tool_result.updated" -> materializeTool(event);
             case "turn.completed", "turn.failed", "turn.cancelled" ->
                     settleTurnItems(event);
             default -> {
@@ -1756,10 +1834,20 @@ public class ManagedAgentStore implements AgentStateStore {
             default -> "in_progress";
         };
         Map<String, Object> attributes = existingAttributes(event, itemId);
+        if (attributes.get("result") instanceof Map<?, ?> previous) {
+            if (!(event.data().get("result") instanceof Map<?, ?> next)
+                    || number(next.get("projection_revision")) <= number(previous.get("projection_revision"))) {
+                return;
+            }
+        }
         attributes.putAll(event.data());
         attributes.remove("itemId");
         upsertItem(event, itemId, "tool_call", "assistant", status,
                 Map.copyOf(attributes));
+    }
+
+    private static long number(Object value) {
+        return value instanceof Number numeric ? numeric.longValue() : 0;
     }
 
     private Map<String, Object> existingAttributes(EventRecord event,
@@ -2021,7 +2109,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 Integer.class, tenantId, sessionId);
         Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND state IN ('PENDING', 'RUNNING')",
+                        + " session_id = ? AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')",
                 Integer.class, tenantId, sessionId);
         if ((commands != null && commands > 0)
                 || (operations != null && operations > 0)) {
@@ -2045,10 +2133,27 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         if ("ACTIVE".equals(status)
-                && hasActiveTurn(session.tenantId(), session.sessionId())) {
+                && (hasActiveTurn(session.tenantId(), session.sessionId())
+                        || session.workspace() != null && hasDecidableAction(session))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
+    }
+
+    private boolean hasDecidableAction(SessionRecord session) {
+        long now = lifecycleDatabaseTime();
+        for (String options : jdbc.queryForList("SELECT options_json FROM managed_agent_action"
+                + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", String.class,
+                session.tenantId(), session.sessionId())) {
+            try {
+                if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {
+                    return true;
+                }
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException("Stored Action options are invalid", error);
+            }
+        }
+        return false;
     }
 
     // ARCHIVING remains only for an archive admitted before V17, which closes

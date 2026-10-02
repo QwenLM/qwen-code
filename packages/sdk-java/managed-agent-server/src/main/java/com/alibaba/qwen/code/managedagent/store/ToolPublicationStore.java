@@ -110,6 +110,7 @@ public final class ToolPublicationStore {
         require(now != null && row.expiresAt() != null && row.expiresAt() > now.getTime(),
                 "Publication grant expired");
         JsonNode key = binding.get("sessionKey");
+        ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
@@ -232,8 +233,8 @@ public final class ToolPublicationStore {
             jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
                             + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
                             + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes,"
-                            + " capture_held_bytes, producer_held_bytes, admission_held_bytes)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)",
+                            + " capture_held_bytes, producer_held_bytes, admission_held_bytes, write_evidence)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
                     scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
                     ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES,

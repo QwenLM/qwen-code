@@ -510,6 +510,15 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
+  if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
+    const { runWorkspaceRecoveryWorker } = await import(
+      './serve/workspace-recovery-worker.js'
+    );
+    await runWorkspaceRecoveryWorker();
+    return;
+  }
+
   // Before ANY route can start a child: an inherited messaging pair names
   // an ancestor session's inbox plus a token that authenticates to it, and
   // no route here consumes it — a session that binds its own inbox

@@ -97,7 +97,13 @@ public final class StoreModels {
             String operationId, OperationKind kind, String requestDigest,
             String state, String admissionStage, String deliveryState,
             String sessionStatusBefore, String receiptId, String leaseOwner,
-            long claimGeneration, int attemptCount) {
+            long claimGeneration, int attemptCount, String failureCode) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null);
+        }
     }
 
     public record OperationAdmission(OperationRecord operation,
