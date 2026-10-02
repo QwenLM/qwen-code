@@ -156,8 +156,11 @@ public final class ToolPublicationAdmissionStore {
                     writerToken, request);
             jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'REFERENCED',"
                             + " admission_held_bytes = admission_used_bytes, receipt_sequence = ?,"
-                            + " receipt_revision = ? WHERE scope_key = ? AND publication_id = ?",
-                    request.lastSequence(), receipt.journalRevision(), scope, publicationId);
+                            + " receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+                    request.lastSequence(), receipt.journalRevision(),
+                    "committed".equals(outcome.path("decision").asText())
+                            && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
+                    scope, publicationId);
             return response(outcome, outcomeRef, request.lastSequence(), receipt.journalRevision());
         });
     }

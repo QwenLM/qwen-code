@@ -40840,6 +40840,122 @@ describe('Session', () => {
         ).toEqual(['read_b', 'read_a']);
       });
 
+      it('overlaps independent Bash calls with commands that are not read-only', async () => {
+        const started: string[] = [];
+        const release = deferred();
+        const commands = ['npm test --workspace=a', 'npm test --workspace=b'];
+        const shell = nestedTool(
+          core.ToolNames.SHELL,
+          core.Kind.Execute,
+          async (_signal, args) => {
+            const command = String(args['command']);
+            started.push(command);
+            await release.promise;
+            return output(command);
+          },
+        );
+        const running = runCode([shell], (runtime, signal) =>
+          Promise.allSettled(
+            commands.map((command) =>
+              runtime.dispatch(shell.name, { command }, signal),
+            ),
+          ),
+        );
+        try {
+          await vi.waitFor(() => expect(started).toEqual(commands));
+        } finally {
+          release.resolve();
+          await running;
+        }
+        const result = await running;
+        expect(
+          JSON.parse(
+            String(result.parts[0].functionResponse?.response?.['output']),
+          ),
+        ).toEqual(
+          commands.map((command) => ({
+            status: 'fulfilled',
+            value: expect.objectContaining({ output: command }),
+          })),
+        );
+      });
+
+      it.each([true, false])(
+        'preserves concurrent AUTO denial state when the later result blocks=%s',
+        async (laterBlocks) => {
+          let denialState: core.AutoModeDenialState = {
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          };
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.AUTO);
+          mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+          mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+          mockConfig.getAutoModeDenialState = vi.fn(() => denialState);
+          mockConfig.setAutoModeDenialState = vi.fn((next) => {
+            denialState = next;
+          });
+          mockConfig.getLlmClient = vi.fn().mockReturnValue({
+            ...mockLlmClient,
+            getHistoryTail: () => [],
+          });
+          const release = [deferred(), deferred()];
+          const classify = vi.spyOn(core, 'evaluateAutoMode');
+          for (const [index, gate] of release.entries()) {
+            classify.mockImplementationOnce(async () => {
+              await gate.promise;
+              return {
+                via: 'classifier',
+                shouldBlock: index === 0 || laterBlocks,
+                reason: 'test decision',
+                unavailable: false,
+                stage: 'fast',
+                durationMs: 0,
+              };
+            });
+          }
+          const commands = ['npm test --workspace=a', 'npm test --workspace=b'];
+          const execute = vi.fn(async () => output('ok'));
+          const shell = nestedTool(
+            core.ToolNames.SHELL,
+            core.Kind.Execute,
+            execute,
+            'ask',
+          );
+          const running = runCode([shell], (runtime, signal) =>
+            Promise.allSettled(
+              commands.map((command) =>
+                runtime.dispatch(shell.name, { command }, signal),
+              ),
+            ),
+          );
+          try {
+            await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(2));
+            release[0].resolve();
+            await vi.waitFor(() => expect(denialState.totalBlock).toBe(1));
+          } finally {
+            release.forEach((gate) => gate.resolve());
+            await running;
+          }
+          expect(denialState).toEqual({
+            consecutiveBlock: laterBlocks ? 2 : 0,
+            consecutiveUnavailable: 0,
+            totalBlock: laterBlocks ? 2 : 1,
+            totalUnavailable: 0,
+            pendingManualRetryFingerprint: core.getAutoModeActionFingerprint(
+              shell.name,
+              { command: commands[laterBlocks ? 1 : 0] },
+              mockConfig.getCwd(),
+            ),
+          });
+          expect(execute).toHaveBeenCalledTimes(laterBlocks ? 0 : 1);
+          expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        },
+      );
+
       it('caps active calls and starts the next queued read when a slot becomes free', async () => {
         vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
         const started: number[] = [];

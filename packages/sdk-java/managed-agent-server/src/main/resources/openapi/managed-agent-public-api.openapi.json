@@ -1680,7 +1680,7 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict",
-            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
+            "description": "Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check."
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
@@ -1715,10 +1715,10 @@
         "tags": ["Public Sessions"],
         "operationId": "closeSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts an active Session; 409 session_state_conflict otherwise. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
+        "description": "Accepts an active Session; 409 session_state_conflict otherwise. Supported hosted-workspace-files/1 Sessions may close when session_close is true. Only the creator with current read access may close a bound Session: unreadable returns 404, readable non-creator returns 403. Active, cancelling or approval-waiting Turns return 409 turn_active; another pending lifecycle operation returns session_operation_active. Unsupported Workspace close returns workspace_unavailable. The same actor and key replay the original operation.",
         "responses": {
           "202": {
-            "description": "Close accepted. The Session stops accepting input and reads closing. The operation asks the Hosted Harness to close the Session and completes once no Harness holds the Session's journal writer under an unexpired lease (the Harness that holds the Session seals it when closing) and the Session's Runtime binding drained; the Session then reads closed. 202 does not mean that tools have stopped.",
+            "description": "Close durably accepted. The Session stops accepting input and reads closing. A bound Session completes only after its permanent Runtime admission fence is stored, no valid journal writer or unsettled execution remains, all original Runtime Sessions and holders are released, and original worker stop proof is persisted; the Session then reads closed. Unknown original identities or executions report recovery_blocked with a stable failure_code and keep the Session closing. History, Artifacts and Workspace files are retained. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1949,7 +1949,7 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict",
-            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
+            "description": "Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check."
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
@@ -2007,7 +2007,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization."
       }
     },
     "/api/agent/web-shell/v1/sessions/archive": {
@@ -3723,6 +3724,11 @@
           },
           "tasks": {
             "type": "boolean"
+          },
+          "session_close": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires creator ownership and current read access."
           }
         }
       },
@@ -4648,6 +4654,11 @@
           },
           "artifacts": {
             "type": "boolean"
+          },
+          "sessionClose": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session."
           }
         }
       },
@@ -5959,7 +5970,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
@@ -6345,7 +6356,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
