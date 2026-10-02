@@ -131,7 +131,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "updateAgent",
-        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. An identical concurrent request replays the committed result; a different concurrent update answers 409 agent_revision_conflict, and its Idempotency-Key can be retried.",
+        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. The same Idempotency-Key and request replay the recorded revision. If another update takes the same next revision number, the losing write answers 409 agent_revision_conflict without recording its key, so that key can be retried. The returned revision may be superseded by a concurrent update before the response arrives.",
         "x-qwen-implementation-status": "implemented",
         "parameters": [
           {

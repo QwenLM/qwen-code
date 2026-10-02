@@ -85,7 +85,10 @@ request digest also covers the operation and, for an update, the agent ID.
   result. Otherwise a concurrent update that took the revision number answers
   `409 agent_revision_conflict` without recording the command, so its key can
   be retried, and a different request under the same key answers
-  `409 idempotency_conflict`.
+  `409 idempotency_conflict`. A no-op update may precede an overlapping
+  content-changing update; its response and later replays still name the
+  recorded revision, even if that revision is no longer the head when the
+  response arrives.
 - **Get** reads the latest revision, or the one named by `revision` (a decimal
   number from `1`). Anything else answers `404 agent_not_found`.
 - The response carries `id`, `object: "agent"`, `revision`, `digest`,
