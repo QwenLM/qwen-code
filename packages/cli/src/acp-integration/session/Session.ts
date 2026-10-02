@@ -4753,15 +4753,25 @@ export class Session implements SessionContext {
     const targetPromptId = this.#snapshotList()[targetTurnIndex]?.promptId;
     const recorder = this.config.getChatRecordingService();
     const lookup = recorder?.recordedTurnIndexForPrompt;
-    let recorderIndex = targetTurnIndex;
-    let recorderRefused = false;
     let mappedTurn: number | undefined;
     if (lookup) {
       mappedTurn = targetPromptId
         ? lookup.call(recorder, targetPromptId)
         : undefined;
-      if (mappedTurn !== undefined) recorderIndex = mappedTurn;
-      else if (compressed) recorderRefused = true;
+    }
+    const identityIndex = targetPromptId
+      ? findApiHistoryPromptIndex(apiHistory, targetPromptId)
+      : -1;
+    // Both sides cut at the prompt when the recorder and the API history
+    // name it. An uncompressed session with no marker falls back to the
+    // positional cut, on both sides. Compressed history stays closed.
+    const cutByIdentity = mappedTurn !== undefined && identityIndex >= 0;
+    let recorderIndex = targetTurnIndex;
+    let recorderRefused = false;
+    if (cutByIdentity && mappedTurn !== undefined) {
+      recorderIndex = mappedTurn;
+    } else if (compressed && (lookup || identityIndex < 0)) {
+      recorderRefused = true;
     }
     if (
       !recorderRefused &&
@@ -4776,16 +4786,13 @@ export class Session implements SessionContext {
       targetTurnIndex < rewindWindow.end;
     let apiTruncateIndex = -1;
     if (inWindow && !recorderRefused) {
-      const cutByPromptId = compressed || mappedTurn !== undefined;
       apiTruncateIndex =
-        cutByPromptId && targetPromptId
-          ? findApiHistoryPromptIndex(apiHistory, targetPromptId)
-          : cutByPromptId
-            ? -1
-            : this.#computeApiTruncationIndexForUserTurn(
-                apiHistory,
-                targetTurnIndex,
-              );
+        cutByIdentity || compressed
+          ? identityIndex
+          : this.#computeApiTruncationIndexForUserTurn(
+              apiHistory,
+              targetTurnIndex,
+            );
     }
 
     if (apiTruncateIndex < 0) {
@@ -6140,8 +6147,18 @@ export class Session implements SessionContext {
           return { stopReason: 'cancelled' };
         }
         if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
-        // Increment turn counter for each user prompt
-        this.turn += 1;
+        const retryMetadata = (params as { _meta?: Record<string, unknown> })
+          ._meta;
+        const isRetry =
+          (params as { retry?: boolean }).retry === true ||
+          retryMetadata?.[DAEMON_RETRY_META_KEY] === true;
+        const isContinue = retryMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
+        // A retry or continue resubmits the prompt already recorded under
+        // this turn. A new id would stamp API history with a marker the
+        // snapshot and the recorder do not have.
+        if (!(isRetry || isContinue) || this.turn === 0) {
+          this.turn += 1;
+        }
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
         if (
@@ -6231,12 +6248,6 @@ export class Session implements SessionContext {
             // history (no dangling user message from the failed attempt).
             // Also skip recordUserMessage to avoid duplicating the user
             // turn in the JSONL transcript.
-            const isRetry =
-              (params as { retry?: boolean }).retry === true ||
-              (params as { _meta?: Record<string, unknown> })._meta?.[
-                DAEMON_RETRY_META_KEY
-              ] === true;
-
             // Continue an interrupted previous turn without a synthetic user
             // message. Classified from full history (the strip pass removes the
             // entire trailing user run, so detection must see all of it):
@@ -6245,10 +6256,6 @@ export class Session implements SessionContext {
             // `interrupted_turn` closes dangling tool calls with synthesized
             // error responses. Mirrors the stream-json path in
             // nonInteractiveCli.ts so both surfaces behave identically.
-            const isContinue =
-              (params as { _meta?: Record<string, unknown> })._meta?.[
-                DAEMON_CONTINUE_META_KEY
-              ] === true;
             const isRestoreAskUserQuestion =
               this.config.getRestoreAskUserQuestion?.() === true &&
               (params as { _meta?: Record<string, unknown> })._meta?.[
@@ -6686,18 +6693,28 @@ export class Session implements SessionContext {
             if (!isRestoreAskUserQuestion) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
-                await fileHistoryService.makeSnapshot(promptId);
-                try {
-                  const latestSnapshot = fileHistoryService
-                    .getSnapshots()
-                    .at(-1);
-                  if (latestSnapshot) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordFileHistorySnapshot(latestSnapshot);
+                // Retry and continue keep the prompt id of the attempt that
+                // already snapshotted this turn. A second snapshot would
+                // duplicate that id and make rewind refuse the turn.
+                const alreadySnapshotted = fileHistoryService
+                  .getSnapshots()
+                  .some((snapshot) => snapshot.promptId === promptId);
+                if (!alreadySnapshotted) {
+                  await fileHistoryService.makeSnapshot(promptId);
+                  try {
+                    const latestSnapshot = fileHistoryService
+                      .getSnapshots()
+                      .at(-1);
+                    if (latestSnapshot) {
+                      this.config
+                        .getChatRecordingService()
+                        ?.recordFileHistorySnapshot(latestSnapshot);
+                    }
+                  } catch (e) {
+                    debugLogger.error(
+                      `FileHistory: recordSnapshot failed: ${e}`,
+                    );
                   }
-                } catch (e) {
-                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
                 }
               } catch (e) {
                 debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
