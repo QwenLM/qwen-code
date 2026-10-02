@@ -50,7 +50,8 @@ surfaces, and that cross-tenant reads return `404 session_not_found`.
   These are D3.
 - Durable archive and delete operations (lifecycle work) and context changes
   (W2), which raise `context_revision` and report the other `state` values.
-- AgentDefinition. Only one agent revision exists until it lands.
+- AgentDefinition. D8a stores definition revisions; Sessions keep pinning the
+  configured revision until D8b pins a stored one.
 
 ## 4. Decisions
 
