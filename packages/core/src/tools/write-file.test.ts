@@ -38,6 +38,9 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { registerMemoryChangedListener } from '../memory/memory-file-change.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import { HookEventName, HookType } from '../hooks/types.js';
 
 // A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
 // previous run by another user (e.g. a sandboxed root run on a shared CI
@@ -154,6 +157,60 @@ describe('WriteFileTool', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
     fs.rmSync(rootDir, { recursive: true, force: true });
     vi.clearAllMocks();
+  });
+
+  it('delivers the memory hook when cancelled after the file is committed', async () => {
+    vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+    clearAutoMemoryRootCache();
+    const controller = new AbortController();
+    const filePath = path.join(rootDir, '.qwen', 'memory', 'cancelled.md');
+    const runner = new HookRunner();
+    const outcomes: boolean[] = [];
+    const unregister = registerMemoryChangedListener(
+      rootDir,
+      async (_, signal) => {
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `"${process.execPath}" -e "process.exit(0)"`,
+          },
+          HookEventName.MemoryChanged,
+          {
+            session_id: 'committed-memory-write',
+            timestamp: new Date().toISOString(),
+            transcript_path: '',
+            cwd: rootDir,
+            hook_event_name: HookEventName.MemoryChanged,
+          },
+          signal,
+        );
+        outcomes.push(result.success);
+      },
+    );
+    const originalWrite = fsService.writeTextFile.bind(fsService);
+    const writeSpy = vi
+      .spyOn(fsService, 'writeTextFile')
+      .mockImplementation(async (params) => {
+        const result = await originalWrite(params);
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('after memory\n');
+        controller.abort();
+        return result;
+      });
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const result = await tool
+        .build({ file_path: filePath, content: 'after memory\n' })
+        .execute(controller.signal);
+      expect(result.error).toBeUndefined();
+      expect(controller.signal.aborted).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('after memory\n');
+      expect(outcomes).toEqual([true]);
+    } finally {
+      writeSpy.mockRestore();
+      unregister();
+      vi.unstubAllEnvs();
+      clearAutoMemoryRootCache();
+    }
   });
 
   // Simulates the model having read `filePath` earlier in the session (by
