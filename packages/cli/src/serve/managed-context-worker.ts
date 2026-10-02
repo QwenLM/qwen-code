@@ -46,6 +46,14 @@ import {
   WORKSPACE_CONTEXT_CONFIG_REF,
 } from './managed-workspace-activation.js';
 import {
+  ManagedHookRuntime,
+  loadManagedHookManifest,
+} from './managed-hook-runtime.js';
+import {
+  MANAGED_HOOK_WORKER_ROUTE,
+  registerManagedHookRoutes,
+} from './managed-hook-routes.js';
+import {
   ManagedMcpRuntime,
   loadManagedMcpManifest,
 } from './managed-mcp-runtime.js';
@@ -62,6 +70,7 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_HOOK_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -221,6 +230,18 @@ export function registerManagedContextRoutes(
     loadManagedMcpManifest(process.env['QWEN_MANAGED_MCP_CONFIG']),
   );
   registerManagedMcpRoutes(app, boot, mcp);
+  const hooks = new ManagedHookRuntime(
+    boot,
+    async (runtimeSessionId) => {
+      if (!requiresActivation || !activations.isActive(runtimeSessionId))
+        return undefined;
+      const binding = installations.installed(runtimeSessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      return activations.isActive(runtimeSessionId) ? directory : undefined;
+    },
+    loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
+  );
+  registerManagedHookRoutes(app, boot, hooks);
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -253,6 +274,7 @@ export function registerManagedContextRoutes(
     },
     publisher,
     mcp,
+    hooks,
   );
   registerManagedRuntimeProviderRoute(
     app,

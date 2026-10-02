@@ -23,6 +23,14 @@ import {
   parseMcpConfiguration,
   parseMcpOperation,
 } from './managed-mcp-record.js';
+import {
+  isHookRegistrationStart,
+  isHookRegistrationSuccessor,
+  isHookExecutionStart,
+  isHookExecutionSuccessor,
+  parseHookRegistration,
+  parseHookExecution,
+} from './managed-hook-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -100,6 +108,24 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isMcpOperationStart,
     isSuccessor: isMcpOperationSuccessor,
+  }),
+  hook_registration: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookRegistration(value);
+      return { record, recordId: record.registrationId, run: record.run };
+    },
+    isStart: isHookRegistrationStart,
+    isSuccessor: isHookRegistrationSuccessor,
+  }),
+  hook_execution: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookExecution(value);
+      return { record, recordId: record.hookExecutionId, run: record.run };
+    },
+    isStart: isHookExecutionStart,
+    isSuccessor: isHookExecutionSuccessor,
   }),
   monitor_run: Object.freeze({
     taskKind: 'monitor',
