@@ -191,6 +191,14 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.breakdown.cachedTokens).toBe(1_000);
   });
 
+  it('shows a million-token context window in millions', async () => {
+    const data = await collectContextData(makeMockConfig(1_000_000), false);
+
+    expect(formatContextUsageText(data)).toContain(
+      'Context window: 1.0m tokens',
+    );
+  });
+
   it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
     // Pins ?? vs || on the per-session preference: a chat that reports 0 must
     // not fall through to the process-global singleton.

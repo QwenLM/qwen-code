@@ -44,6 +44,24 @@ function makeBreakdown(
 }
 
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
+  it('shows a million-token context window in millions', () => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="coder-model"
+        totalTokens={50_000}
+        contextWindowSize={1_000_000}
+        breakdown={makeBreakdown('safe')}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+        showDetails={false}
+      />,
+    );
+    expect(lastFrame()).toContain('1.0m tokens');
+    expect(lastFrame()).not.toContain('1000.0k');
+  });
+
   it('keeps a loaded skill name and listing cost on one line with one body-cost label', () => {
     const name = 'agent-reproduce-feature';
     const { lastFrame } = render(
