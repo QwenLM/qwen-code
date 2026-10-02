@@ -2962,12 +2962,11 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
-    it('keeps a clean answer from the only queried server the mapping excuses', async () => {
-      // `LANGUAGE_ID_TO_EXTENSIONS.typescript` is ['ts','tsx'], so the
-      // relevance predicate excuses a typescript-keyed server for a .js file.
-      // Its authoritative empty report is still the only backing there is, so
-      // the query stays clean: the unbacked-answer gate keys on "nothing
-      // answered", never on "the answering server looks irrelevant".
+    it('keeps a clean answer from the only queried server that answered', async () => {
+      // The queried server is READY and returned an authoritative empty
+      // report, so its answer is the only backing there is and the query
+      // stays clean: the unbacked-answer gate keys on "nothing answered",
+      // never on "the answering server looks irrelevant".
       const jsFile = path.join(directory, 'index.js');
       fs.writeFileSync(jsFile, 'const a = 1;\n');
       mockDiagnosticsResponses(connection);
@@ -2978,6 +2977,84 @@ describe('NativeLspService disk document synchronization', () => {
       );
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('does not excuse a failed server whose config key is capitalized', async () => {
+      // `.lsp.json` keys reach `languages` unnormalized, so `"Python"` has to
+      // derive `py` exactly like `"python"` does. Otherwise the relevance rule
+      // excuses the only Python-capable server for a `.py` file and the
+      // sibling's empty report certifies it clean.
+      addFile('main.py', 'x = 1\n');
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['Python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'main.py'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('method not found');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not excuse a downed typescript server from a .js query it serves', async () => {
+      // `typescript-language-server` answers for `.js` as well, so a FAILED
+      // `typescript` handle keeps its veto on an `index.js` query instead of
+      // being excused by a `{ts,tsx}` declaration; the sibling's empty report
+      // is no backing for a file the downed server owned.
+      addFile('index.js', 'const a = 1;\n');
+      const failedHandle: LspServerHandle = {
+        ...handle,
+        config: { ...handle.config, name: 'typescript' },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([
+        [
+          'healthy',
+          {
+            ...emptyReportHandle('healthy'),
+            config: { ...handle.config, name: 'healthy', languages: ['yaml'] },
+          },
+        ],
+        ['typescript', failedHandle],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'index.js'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('typescript is failed');
+      expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
     it('does not blame a server that could never own the file when no server is ready', async () => {

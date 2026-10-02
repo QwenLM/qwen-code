@@ -158,6 +158,24 @@ const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
   Object.values(LANGUAGE_ID_TO_EXTENSIONS).flat(),
 );
 
+/**
+ * Language IDs one JS/TS-family server answers for. `warmupTypescriptServer`
+ * already relies on this: it opens a `.js`/`.jsx` file with languageId
+ * `javascript`/`javascriptreact` against a server it recognizes by a
+ * `typescript` name or command. Extensions are derived from the table above so
+ * the two cannot drift; the table itself stays untouched because
+ * `getWorkspaceSymbolExtensions` and the warmup chooser also read it.
+ */
+const JS_TS_FAMILY_LANGUAGE_IDS = [
+  'typescript',
+  'typescriptreact',
+  'javascript',
+  'javascriptreact',
+];
+const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
+  (id) => LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
+);
+
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
   '**/.git/**',
@@ -703,9 +721,16 @@ export class NativeLspService {
   private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
     const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
     for (const language of handle.config.languages) {
-      for (const ext of LANGUAGE_ID_TO_EXTENSIONS[language] ?? [
-        language.toLowerCase(),
-      ]) {
+      // `.lsp.json` keys reach `languages` unnormalized, while every extension
+      // this set is compared against is lowercase.
+      const id = language.toLowerCase();
+      if (JS_TS_FAMILY_LANGUAGE_IDS.includes(id)) {
+        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
+          owned.add(ext);
+        }
+        continue;
+      }
+      for (const ext of LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
         owned.add(ext);
       }
     }
