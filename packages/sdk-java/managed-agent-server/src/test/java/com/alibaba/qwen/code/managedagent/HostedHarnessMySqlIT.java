@@ -261,7 +261,7 @@ class HostedHarnessMySqlIT {
             assertThat(awaitOperation(id, deleteId).path("admission_stage").asText())
                     .isEqualTo("java_durable");
             api("GET", "/v1/agents/sessions/" + id, null, null, 404);
-            assertThat(writerState(id)).isEqualTo("SEALED");
+            assertThat(writerState(id)).isEqualTo("DELETED");
             assertThat(modelRequests).hasSize(1);
             assertThat(modelFailure.get()).isNull();
         } catch (Exception | AssertionError failure) {
