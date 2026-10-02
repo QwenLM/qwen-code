@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -37,9 +38,29 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service) throws IOException {
+        this(address, token, service, false);
+    }
+
+    /**
+     * The face authenticates with one global Bearer token over plaintext
+     * HTTP, so by default it only binds a loopback address. Serving beyond
+     * loopback requires {@code allowNonLoopback} and a deployment that
+     * terminates TLS and authorizes callers in front.
+     */
+    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
+            RuntimeBrokerService service, boolean allowNonLoopback)
+            throws IOException {
         if (address == null || service == null) {
             throw new IllegalArgumentException(
                     "address and service are required");
+        }
+        InetAddress bind = address.getAddress();
+        if (!allowNonLoopback && (bind == null || !bind.isLoopbackAddress())) {
+            throw new IllegalArgumentException("Runtime Broker serves one"
+                    + " global token over plaintext HTTP and refuses a"
+                    + " non-loopback listen address (" + address
+                    + "); pass allowNonLoopback only behind a TLS-terminating"
+                    + " layer that authorizes callers");
         }
         this.authorization = ("Bearer "
                 + BrokerValues.requireId(token, "token"))
@@ -365,8 +386,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                     ExecutionReconciliation.Outcome.IN_FLIGHT, null));
         }
-        CompletionStage<ExecutionReconciliation> observation = service.reconcileExecution(
-                harnessSessionId, runtimeSessionId, record.getExecutionCallId());
+        // An explicit reconcile asks the Runtime every time; the automatic
+        // observation cools down, so rapid polling shares one lookup.
+        CompletionStage<ExecutionReconciliation> observation = reconcile
+                ? service.reconcileExecution(harnessSessionId,
+                        runtimeSessionId, record.getExecutionCallId())
+                : service.observeExecution(harnessSessionId, runtimeSessionId,
+                        record.getExecutionCallId());
         if (reconcile) {
             return observation;
         }

@@ -195,6 +195,33 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
+    @Test
+    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("could not start")
+                .cause()
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("non-loopback");
+    }
+
+    @Test
+    void refusesANonPositiveV3ResultWindowBeforeAnythingIsBuilt()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setV3ResultWindow(
+                java.time.Duration.ZERO);
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("v3 result window");
+    }
+
     private static ManagedAgentProperties properties() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setCapabilityDigest("sha256:"

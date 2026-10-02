@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -34,6 +36,7 @@ public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
     static final String KIND = "local-process";
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
@@ -55,6 +58,15 @@ public final class LocalProcessRuntimeProvisioner
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
     private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
+    // Spawned but not yet issued: the exit hook and close() must see a
+    // worker from the moment the process exists, not from when its lease
+    // lands in `owned` — the ready handshake can take READY_TIMEOUT.
+    private final Set<OwnedProcess> starting = ConcurrentHashMap.newKeySet();
+    // Serialize spawn-and-register against the exit snapshot, so a worker
+    // can never exist unseen by terminateAll.
+    private final Object lifecycle = new Object();
+    private volatile boolean terminated;
+    private final Thread exitHook;
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -98,6 +110,31 @@ public final class LocalProcessRuntimeProvisioner
         this.storageResolver = storageResolver;
         this.store = store;
         this.trustedRebootRecovery = trustedRebootRecovery;
+        // Non-durable workers have no recovery path, so a Broker exit must
+        // not strand them.
+        exitHook = store == null ? registerExitHook() : null;
+    }
+
+    private Thread registerExitHook() {
+        Thread hook = new Thread(this::terminateAll, "runtime-provisioner-exit");
+        Runtime.getRuntime().addShutdownHook(hook);
+        return hook;
+    }
+
+    private void terminateAll() {
+        List<Process> all;
+        synchronized (lifecycle) {
+            terminated = true;
+            all = new ArrayList<>(starting.size() + owned.size());
+            for (OwnedProcess process : starting) {
+                all.add(process.process);
+            }
+            for (OwnedProcess process : owned.values()) {
+                all.add(process.process);
+            }
+        }
+        all.forEach(Process::destroy);
+        forceAllAfterGrace(all);
     }
 
     @Override
@@ -252,18 +289,71 @@ public final class LocalProcessRuntimeProvisioner
         OwnedProcess process = owned.remove(ownershipKey(lease));
         if (process != null) {
             process.process.destroy();
+            // A worker that ignores SIGTERM must not outlive its release;
+            // escalate after the grace window without blocking the caller.
+            try {
+                executor.execute(() -> forceAfterGrace(process.process));
+            } catch (RejectedExecutionException closing) {
+                process.process.destroyForcibly();
+            }
+        }
+    }
+
+    private static void forceAfterGrace(Process process) {
+        try {
+            if (!process.waitFor(GRACE_BEFORE_FORCE.toMillis(),
+                    TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+        }
+    }
+
+    /**
+     * All destroys are already sent; the grace windows overlap, so the total
+     * wait is one bounded window — and zero when nothing ignores it.
+     */
+    private static void forceAllAfterGrace(Iterable<Process> processes) {
+        long deadline = System.nanoTime() + GRACE_BEFORE_FORCE.toNanos();
+        boolean interrupted = false;
+        for (Process process : processes) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
+            try {
+                process.waitFor(remaining, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException interruption) {
+                interrupted = true;
+                break;
+            }
+        }
+        for (Process process : processes) {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
     @Override
     public void close() {
         if (store == null) {
-            for (OwnedProcess process : owned.values()) {
-                process.process.destroy();
-            }
+            terminateAll();
         }
         owned.clear();
         executor.shutdownNow();
+        if (exitHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(exitHook);
+            } catch (IllegalStateException ignored) {
+                // The VM is already shutting down and the hook is running.
+            }
+        }
     }
 
     private RuntimeLease start(RuntimeProvisionRequest request,
@@ -282,11 +372,18 @@ public final class LocalProcessRuntimeProvisioner
                     ? provided : newSeed();
             Map<String, Object> document = boot(request, seed);
             byte[] encoded = JsonCodec.encode(document);
-            Process process = new ProcessBuilder(command)
-                    .directory(workingDirectory.toFile())
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
-            ownedProcess = new OwnedProcess(process, null, seed);
+            Process process;
+            synchronized (lifecycle) {
+                if (terminated) {
+                    throw failed("Managed Runtime provisioner is closed.");
+                }
+                process = new ProcessBuilder(command)
+                        .directory(workingDirectory.toFile())
+                        .redirectError(ProcessBuilder.Redirect.DISCARD)
+                        .start();
+                ownedProcess = new OwnedProcess(process, null, seed);
+                starting.add(ownedProcess);
+            }
             process.getOutputStream().write(encoded);
             process.getOutputStream().close();
             String readyLine = readReadyLine(process);
@@ -303,6 +400,7 @@ public final class LocalProcessRuntimeProvisioner
                         false);
             }
             owned.put(key, ownedProcess);
+            starting.remove(ownedProcess);
             adopted = true;
             return lease;
         } catch (IOException | RuntimeException exception) {
@@ -317,6 +415,7 @@ public final class LocalProcessRuntimeProvisioner
             throw failed("Managed Runtime worker failed to start.", exception);
         } finally {
             if (!adopted && ownedProcess != null) {
+                starting.remove(ownedProcess);
                 ownedProcess.process.destroyForcibly();
             }
         }

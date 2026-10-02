@@ -84,6 +84,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         require(broker.getWorkspaceGeneration(),
                 "Runtime Broker workspace generation");
         require(broker.getWorkspaceCwd(), "Runtime Broker workspace cwd");
+        Duration v3ResultWindow = broker.getV3ResultWindow();
+        if (v3ResultWindow == null || v3ResultWindow.isZero()
+                || v3ResultWindow.isNegative()) {
+            throw new IllegalStateException(
+                    "Runtime Broker v3 result window must be positive");
+        }
         String workspaceCwd = resolveWorkspaceCwd(broker);
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
@@ -154,13 +160,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.service = new RuntimeBrokerService(resolver, provisioner,
                 transport, bindingRepository, sessionRepository,
                 executionRepository, UUID.randomUUID().toString(), LEASE,
-                LEASE, verifier);
+                LEASE, verifier, v3ResultWindow);
         try {
             this.server = new RuntimeBrokerHttpServer(
                     new InetSocketAddress(broker.getHost(), broker.getPort()),
-                    broker.getToken(), service);
+                    broker.getToken(), service, broker.isAllowNonLoopback());
             server.start();
-        } catch (IOException error) {
+        } catch (IOException | IllegalArgumentException error) {
             service.close();
             throw new IllegalStateException(
                     "Runtime Broker listener could not start", error);

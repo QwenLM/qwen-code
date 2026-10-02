@@ -30,6 +30,17 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
 
+    /**
+     * Moves the Session to RELEASING in one decision with the no-active-
+     * execution check, under the same Session row lock admission takes, so
+     * two Broker processes cannot interleave an admission into the gap.
+     * Returns null when the row no longer matches {@code expected}, the
+     * current record when it is already RELEASING or RELEASED, and throws
+     * {@code runtime_session_busy} when an execution is still active.
+     */
+    RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected);
+
     RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 
     RuntimeBindingRecord findActive(RuntimeProvisionRequest request);
