@@ -187,6 +187,7 @@ export function createJavaManagedAgentProvider(
         ),
         olderCursor: transcript.olderCursor ?? undefined,
         lastEventId: transcript.lastSequence,
+        coveredSequence: transcript.coveredSequence,
       };
     },
     async createSession(request, command) {

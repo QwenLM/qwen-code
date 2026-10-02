@@ -435,14 +435,20 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.events).toEqual([
-      expect.objectContaining({ id: 1, type: 'accepted' }),
+      expect.objectContaining({
+        id: 1,
+        type: 'accepted',
+        assembledFromItem: true,
+      }),
       expect.objectContaining({
         id: 2,
         type: 'assistant_delta',
         data: { itemId: 'output-1', text: 'world' },
+        assembledFromItem: true,
       }),
       expect.objectContaining({ id: 4, type: 'completed' }),
     ]);
+    expect(transcript.coveredSequence).toBe(4);
     expect(transcript.olderCursor).toBeUndefined();
     expect(transcript.lastEventId).toBe(4);
   });

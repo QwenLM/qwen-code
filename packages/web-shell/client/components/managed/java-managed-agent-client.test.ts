@@ -126,6 +126,370 @@ describe('JavaManagedAgentClient', () => {
     expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
   });
 
+  it('skips one corrupt frame and delivers the frames behind it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          // The persisted frame at sequence 2 has a truncated JSON payload.
+          'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2"\r\n\r\n' +
+            'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"eventId":"evt_3","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":3,"data":{"text":"after"},"terminal":false}\r\n\r\n',
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({ sequence: 3, data: { text: 'after' } }),
+    ]);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('resyncs past a run of only corrupt frames instead of aborting', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(corrupt(2) + corrupt(3) + corrupt(4) + corrupt(5), {
+          status: 200,
+        }),
+      ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+    // Rate-limited skip warning for the first frame, plus the resync warning.
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('resyncs when a connection delivers nothing but skipped corrupt frames', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        // Two corrupt frames stay under the resync budget, but nothing valid
+        // was delivered before the stream ended: retrying the same cursor
+        // would replay them identically, so the stream ends with a resync.
+        new Response(corrupt(2) + corrupt(3), { status: 200 }),
+      ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+  });
+
+  it('resyncs on a corrupt action update frame instead of skipping it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          // A skipped action update leaves a pending approval unreachable.
+          'id: 2\r\nevent: action.updated\r\ndata: {"sequence":2,"eventId":"evt_2"\r\n\r\n',
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+  });
+
+  it('tolerates three consecutive corrupt frames when a valid frame resets the count', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const valid = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence},"eventId":"evt_${sequence}","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":${sequence},"data":{},"terminal":false}\r\n\r\n`;
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        // A run of exactly three consecutive corrupt frames (4-6) stays under
+        // the budget, and the valid frame at 3 resets an earlier count.
+        new Response(
+          corrupt(2) +
+            valid(3) +
+            corrupt(4) +
+            corrupt(5) +
+            corrupt(6) +
+            valid(7),
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({ sequence: 3 }),
+      expect.objectContaining({ sequence: 7 }),
+    ]);
+    // Skip warnings are rate-limited: only the first skip logs.
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rate-limits skip warnings when corruption alternates with valid frames', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const valid = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence},"eventId":"evt_${sequence}","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":${sequence},"data":{},"terminal":false}\r\n\r\n`;
+    let stream = '';
+    for (let index = 2; index <= 41; index += 1) {
+      stream += index % 2 === 0 ? corrupt(index) : valid(index);
+    }
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(stream, { status: 200 })),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toHaveLength(20);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs a mid-frame close distinctly and spares the budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":2,"data":{},"terminal":true}\r\n\r\n' +
+            // Truncated final frame without the terminating blank line.
+            'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"ev',
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([expect.objectContaining({ sequence: 2 })]);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('closed mid-frame'),
+    );
+  });
+
+  it('charges the budget for corrupt frames but not for a mid-frame close', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          // Three corrupt frames stay under the budget; the torn tail must
+          // not take the fourth slot. With nothing delivered at all, the end
+          // of the stream still surfaces the loss.
+          corrupt(2) +
+            corrupt(3) +
+            corrupt(4) +
+            'id: 5\r\nevent: item.output_text.delta\r\ndata: {"sequence":5,"ev',
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('closed mid-frame'),
+    );
+  });
+
+  it('does not count heartbeats toward the corrupt-frame budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            ': keepalive\r\n\r\n'.repeat(5) +
+              'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":2,"data":{},"terminal":false}\r\n\r\n',
+            { status: 200 },
+          ),
+        ),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([expect.objectContaining({ sequence: 2 })]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not let heartbeats dilute the corrupt-frame budget', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const corrupt = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
+    const heartbeat = ': keepalive\r\n\r\n';
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            corrupt(2) +
+              heartbeat +
+              corrupt(3) +
+              heartbeat +
+              corrupt(4) +
+              heartbeat +
+              corrupt(5),
+            { status: 200 },
+          ),
+        ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+  });
+
+  it('counts data frames without a string event type as corrupt', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const valid = (sequence: number) =>
+      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence},"eventId":"evt_${sequence}","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":${sequence},"data":{},"terminal":false}\r\n\r\n`;
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          // Valid JSON, but none of these is an event object (the schema
+          // requires a string `type`): as corrupt as broken JSON.
+          'id: 2\r\nevent: item.output_text.delta\r\ndata: null\r\n\r\n' +
+            valid(3) +
+            'id: 4\r\nevent: item.output_text.delta\r\ndata: []\r\n\r\n' +
+            valid(5) +
+            'id: 6\r\nevent: item.output_text.delta\r\ndata: {}\r\n\r\n' +
+            valid(7),
+          { status: 200 },
+        ),
+      ),
+    });
+
+    const events = [];
+    for await (const event of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({ sequence: 3 }),
+      expect.objectContaining({ sequence: 5 }),
+      expect.objectContaining({ sequence: 7 }),
+    ]);
+    // Rate-limited: only the first skip logs.
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a corrupt id-less resync frame as a resync request', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            'event:agent.session.resync_required\r\ndata:{"type":"agent.session.resync_required","sessionId":"sess\r\n\r\n',
+            { status: 200 },
+          ),
+        ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 3,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+  });
+
   it('maps the stable Java error envelope', async () => {
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
