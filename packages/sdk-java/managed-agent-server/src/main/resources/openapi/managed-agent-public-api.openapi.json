@@ -1107,7 +1107,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session; close, archive, delete, unarchive and cwd operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
+        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in; close, archive, delete, unarchive and cwd operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
         "requestBody": {
           "required": true,
           "content": {
