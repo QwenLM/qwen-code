@@ -5,7 +5,6 @@
  */
 
 #include <poll.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 
@@ -112,8 +111,14 @@ static int relay_stdin(char **command) {
     while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
   }
   if (regular) {
-    int unread = 0;
-    if (ioctl(channel[0], FIONREAD, &unread) != 0 || unread > sent ||
+    off_t unread = 0;
+    ssize_t remaining;
+    do {
+      remaining = recv(channel[0], buffer, sizeof(buffer), MSG_DONTWAIT);
+      if (remaining > 0) unread += remaining;
+    } while (remaining > 0 || (remaining < 0 && errno == EINTR));
+    if ((remaining < 0 && errno != EAGAIN && errno != EWOULDBLOCK) ||
+        unread > sent ||
         lseek(STDIN_FILENO, initial + sent - unread, SEEK_SET) < 0)
       failed = 1;
   }

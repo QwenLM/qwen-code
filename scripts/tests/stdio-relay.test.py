@@ -55,7 +55,9 @@ print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode
         self.regular(0)
 
     def test_partial_read_advances_only_consumed_bytes(self):
-        self.regular(7)
+        for count in (1, 7, 4095, 4096, 4097):
+            with self.subTest(count=count):
+                self.regular(count)
 
     def test_full_read_and_eof(self):
         self.regular(2 * 1024 * 1024)

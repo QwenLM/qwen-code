@@ -3395,7 +3395,8 @@ export class LlmClient {
     if (!turnBudget) return;
     const sessionId = this.config.getSessionId();
     if (
-      messageType === SendMessageType.Retry &&
+      (messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.UserQuery) &&
       turnBudget.current(sessionId)?.promptId === promptId
     ) {
       return;
