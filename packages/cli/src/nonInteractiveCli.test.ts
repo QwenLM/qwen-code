@@ -52,7 +52,6 @@ import {
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
-import { ToolCallTool } from '@qwen-code/qwen-code-core/tools/tool-call.js';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import {
@@ -4020,9 +4019,7 @@ describe('runNonInteractive', () => {
       });
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name) =>
-          (name === ToolNames.TOOL_CALL
-            ? new ToolCallTool()
-            : { name, kind: Kind.Read }) as unknown as ReturnType<
+          ({ name, kind: Kind.Read }) as unknown as ReturnType<
             typeof mockToolRegistry.getTool
           >,
       );
@@ -4222,11 +4219,9 @@ describe('runNonInteractive', () => {
       const targetName = 'mcp__docs__read';
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name: string) =>
-          (name === ToolNames.TOOL_CALL
-            ? new ToolCallTool()
-            : name === targetName
-              ? { name: targetName, kind: Kind.Read }
-              : undefined) as unknown as ReturnType<
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
             typeof mockToolRegistry.getTool
           >,
       );

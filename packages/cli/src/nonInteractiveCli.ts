@@ -519,19 +519,15 @@ function getHeadlessExecutionRequest(
     return request;
   }
 
-  const registry = config.getToolRegistry();
-  const envelope = structuredClone(request.args);
-  try {
-    const bridge = registry.getTool(ToolNames.TOOL_CALL);
-    if (!bridge || bridge.validateToolParams(envelope) !== null) {
+  const targetName = request.args['name'];
+  let targetArgs = request.args['arguments'];
+  if (typeof targetArgs === 'string') {
+    try {
+      targetArgs = JSON.parse(targetArgs) as unknown;
+    } catch {
       return request;
     }
-  } catch {
-    return request;
   }
-
-  const targetName = envelope['name'];
-  const targetArgs = envelope['arguments'];
   if (
     typeof targetName !== 'string' ||
     typeof targetArgs !== 'object' ||
@@ -541,6 +537,7 @@ function getHeadlessExecutionRequest(
     return request;
   }
 
+  const registry = config.getToolRegistry();
   const target = registry.getTool(canonicalToolName(targetName));
   if (!target || !registry.isDeferredAndHidden(target.name)) {
     return request;
