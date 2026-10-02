@@ -125,13 +125,28 @@ not a sandbox against scripts deliberately modifying the cgroup control plane.
 Missing isolation, including macOS and Windows, returns
 `managed_hook_command_isolation_unavailable` before command execution. The ledger
 records `not_started_proven` with `handler_unavailable`, and cancellation can close
-the blocked occurrence. For SessionStart and UserPromptSubmit, explicit cancellation
+the blocked occurrence. For SessionStart, UserPromptSubmit and native
+InstructionsLoaded before model execution, explicit cancellation
 also settles the admitted turn identified by the Hook's durable input `prompt_id`
 when no model attempt, tool intent/receipt or non-user message has followed
 admission, and no Hook remains pending. An earlier SessionStart cancellation cannot
-settle a later turn. This recovery is durable
-and also runs on load for previously cancelled records; cancellation never
-abandons a model/tool continuation. A process group alone is never accepted as proof.
+settle a later turn. For a refused PreToolUse child explicitly cancelled with
+`not_started_proven`, recovery may also close the first committed tool-call batch:
+all model attempts must have ended, at least one has committed output, no tool
+intent/receipt, pending approval, file-history work or Hook may remain, and the
+cancelled child's occurrence and input must match an original call in the sole
+unsettled turn. Recovery persists a matching refusal for every missing call before
+settling the turn as cancelled. Responses are split by the actual UTF-8 size of
+each complete record, including metadata, to respect the 64 KiB inline limit;
+each successful record becomes the parent of the next. A response that cannot
+fit alone retains the recovery barrier without truncating its identity.
+New batches check each cancellation response before committing the assistant
+message, rejecting oversized calls before tool acquisition or dispatch.
+Already committed responses are preserved across partial batches; failed
+writes retain the barrier and retries do not duplicate them. This recovery is
+serialized with turn and control admission and also runs on load for previously
+cancelled records. Other model/tool continuations stay blocked. A process group
+alone is never accepted as proof.
 Environment inheritance is restricted to execution necessities and explicit
 recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
@@ -152,9 +167,14 @@ operations and inactive activations. On cold load, pending file history is obser
 through the original Runtime owner saved in the matching checkpoint tool inputs,
 before earlier Hook owners are released. Missing or conflicting owner evidence
 keeps recovery blocked; no new durable field is needed.
+Shell receipt recovery also reads the original Runtime owner from its committed
+tool input when acknowledging capture delivery; neither the prompt ID nor the
+replacement Hook owner identifies that execution.
 
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
-refused. A local runner-construction failure before dispatch is a settled failure
+refused. The Runtime URL allowlist uses the same allowed-variable interpolation
+as the HTTP runner; internal secrets and native SSRF checks remain enforced.
+A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
 For an in-flight managed HTTP Hook, user cancellation keeps the original request
@@ -224,6 +244,8 @@ Model attempts and usage are associated with the original Hook operation and
 originating turn when present. Budget accounting follows the existing Session
 and turn budget semantics; Hook operations must not reset the original budget.
 There is no new monetary-budget policy or independent Hook token pool.
+Isolated model Config cleanup failures are logged separately and do not replace
+an already returned Hook result or the primary operation error.
 
 ## Event integration
 
@@ -246,6 +268,10 @@ flag; an ordinary tool round does not. An explicit after/batch Hook stop ends
 orchestration while preserving physical receipts and their unconsumed status,
 and leaves the Session ready for another turn.
 
+When the loaded catalog contains Stop or MessageDisplay, model text stays buffered
+until their decisions complete. Discarded or suppressed drafts never become durable
+text deltas. Sessions without either output policy retain incremental streaming.
+
 ## Interfaces and compatibility
 
 Session creation/load accepts `hookCatalog: {catalogId, catalogRevision,
@@ -259,6 +285,15 @@ revisions name it. The Workspace verification reuses that result and reads only
 what it must inspect itself, such as plans and their message snapshots; the
 authority keeps none of it once the Session is open.
 Independent reads run in bounded batches.
+Hook scope identifiers accept the existing Broker character grammar, including
+leading punctuation. Session status reports `recoveryBlocked`, and load reports
+`recoveryRequired`, while Hook operations block prompt admission. Reconciliation
+clears this diagnostic when the saved operation actually settles.
+
+Runtime-only takeover flags keep Hook Sessions on the existing Hook-aware load
+reconciliation path. The Runtime-only continue/cancel routes refuse Hook Sessions
+with `hosted_hook_recovery_required` before changing records or Runtime ownership;
+they cannot settle a turn while ignoring its pending Hook effects or model scope.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
@@ -305,3 +340,7 @@ prompt activation and unchanged no-Hook behavior. Run `npm run build`,
 Two clean self-audit passes and independent review follow integration verification.
 Unknown physical or model outcomes remain blocked with their original evidence;
 passing a mocked event test alone does not establish a missing producer's support.
+
+Explicit Runtime recovery and cancellation retain the owner proven by the original durable tool inputs, including a shared MCP owner, rather than assuming the prompt ID. Missing or conflicting ownership evidence refuses recovery before any Broker call. Raw Shell intents without routing evidence can use the prompt owner only when the saved definition has no shared Hook or MCP owner.
+
+A Broker execution-unknown response remains an unknown outcome, distinct from a missing execution. Cancellation refuses this state before or after a cancel request; it cannot commit a cancelled result or release ownership based on unknown physical stopping. Passive recovery continues reporting the outcome as unknown.

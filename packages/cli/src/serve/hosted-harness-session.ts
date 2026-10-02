@@ -15,6 +15,7 @@ import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
@@ -47,7 +48,10 @@ import type {
   ManagedSessionEvent,
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  assertManagedSessionStableId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -68,6 +72,13 @@ import {
   isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
+import { HostedTextDeltaStream } from './hosted-text-deltas.js';
+import {
+  recoverHostedRuntimeTurn,
+  settleParkedTurnCancelled,
+  stopParkedRuntimeExecutions,
+  type HostedRuntimeRecoveryReport,
+} from './hosted-runtime-recovery.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -136,6 +147,9 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  /** A recovery load acquired the Runtime Session for this promptId;
+   * whichever terminal route runs must release it. */
+  runtimeLeaseHeld?: string;
 }
 
 async function runHostedLifecycleHook(
@@ -230,10 +244,10 @@ function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
     );
 }
 
-function hasUnsettledInput(
+function unsettledInputsThrough(
   session: HostedSession,
   throughSequence: number,
-): boolean {
+): Set<string> {
   const accepted = new Set<string>();
   const authority = session.managed.authority;
   for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
@@ -242,59 +256,111 @@ function hasUnsettledInput(
     if (event.kind === 'turn.settled')
       accepted.delete(event.payload['turnId'] as string);
   }
-  return accepted.size > 0;
+  return accepted;
 }
 
-async function settleCancelledPreModelHook(
+function hasUnsettledInput(
   session: HostedSession,
-): Promise<void> {
-  if (
-    !session.blocked ||
-    session.active ||
-    !session.hooks ||
-    session.hooks.hasPendingOperations
-  )
-    return;
-  const { authority } = session.managed;
-  const events = authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
+  throughSequence: number,
+): boolean {
+  return unsettledInputsThrough(session, throughSequence).size > 0;
+}
+
+function unsettledInputs(session: HostedSession): Set<string> {
+  return unsettledInputsThrough(
+    session,
+    session.managed.authority.committedSequence,
   );
-  const pending = new Map<string, number>();
+}
+
+// Recovery needs one unambiguous parked Turn; more than one fails closed.
+function unsettledPromptId(session: HostedSession): string | undefined {
+  const unsettled = unsettledInputs(session);
+  return unsettled.size === 1 ? [...unsettled][0] : undefined;
+}
+
+async function recoverCancelledPreToolHook(
+  session: HostedSession,
+  promptId: string,
+  events: readonly ManagedSessionEvent[],
+): Promise<boolean> {
+  const { authority, sink } = session.managed;
+  const attempts = new Map<string, unknown>();
   for (const event of events) {
-    if (event.kind === 'input.accepted')
-      pending.set(event.payload['turnId'] as string, event.sequence);
-    if (event.kind === 'turn.settled')
-      pending.delete(event.payload['turnId'] as string);
+    if (event.kind === 'model.attempt')
+      attempts.set(
+        event.payload['attemptId'] as string,
+        event.payload['state'],
+      );
+    if (
+      event.kind === 'tool.intent' ||
+      event.kind === 'tool.receipt' ||
+      (event.kind === 'action.changed' &&
+        authority.action(event.payload['requestId'] as string)?.state ===
+          'requested')
+    )
+      return false;
   }
-  if (pending.size !== 1) return;
-  const [promptId, sequence] = [...pending][0];
   if (
-    events.some(
-      (event) =>
-        event.sequence > sequence &&
-        (event.kind === 'model.attempt' ||
-          event.kind === 'tool.intent' ||
-          event.kind === 'tool.receipt' ||
-          (event.kind === 'message.committed' &&
-            event.payload['role'] !== 'user')),
+    ![...attempts.values()].includes('output_committed') ||
+    [...attempts.values()].some(
+      (state) => state !== 'output_committed' && state !== 'abandoned',
     )
   )
-    return;
-  const occurrenceIds = new Set([
-    hostedHookOccurrenceId(HookEventName.UserPromptSubmit, promptId),
-    hostedHookOccurrenceId(
-      HookEventName.SessionStart,
-      `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
-    ),
-  ]);
+    return false;
+  const authorization = await authority.harnessRunAuthorization();
+  if (
+    authorization.status !== 'runnable' ||
+    !['before_model', 'model_output_committed'].includes(
+      authorization.checkpoint.continuation.phase,
+    ) ||
+    authorization.checkpoint.tools?.items.length
+  )
+    return false;
+  const history = await readHostedFileHistory(session.managed);
+  if (history?.pendingTurn || history?.pendingUndo) return false;
+  const current = (await sink.project()).filter(
+    (item) => item.daemonPromptId === promptId && item.type !== 'user',
+  );
+  const [assistant, ...tail] = current;
+  if (
+    assistant?.type !== 'assistant' ||
+    tail.some((item) => item.type !== 'tool_result')
+  )
+    return false;
+  const calls = (assistant.message?.parts ?? []).flatMap((part) =>
+    part.functionCall ? [part.functionCall] : [],
+  );
+  if (
+    !calls.length ||
+    calls.some((call) => !call.id || !call.name) ||
+    new Set(calls.map((call) => call.id)).size !== calls.length
+  )
+    return false;
+  const responded = new Set<string>();
+  for (const item of tail) {
+    for (const part of item.message?.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        !response?.id ||
+        responded.has(response.id) ||
+        !calls.some(
+          (call) => call.id === response.id && call.name === response.name,
+        )
+      )
+        return false;
+      responded.add(response.id);
+    }
+  }
   let cancelled = false;
   for (const { record } of authority.extensionRecordsInDomain(
     'hook_execution',
   )) {
     const execution = parseHookExecution(record);
     if (
-      !occurrenceIds.has(execution.occurrenceId) ||
+      execution.eventName !== HookEventName.PreToolUse ||
+      execution.hookId === '__plan__' ||
+      !execution.cancelRequested ||
       execution.run.state !== 'cancelled' ||
       execution.run.execution !== 'not_started_proven'
     )
@@ -304,30 +370,163 @@ async function settleCancelledPreModelHook(
         (await session.managed.resources.read(execution.inputRef)).toString(),
       ),
     );
-    if (input?.['prompt_id'] === promptId) {
+    if (
+      input?.['prompt_id'] === promptId &&
+      calls.some(
+        (call) =>
+          input['tool_use_id'] === call.id &&
+          input['tool_name'] === call.name &&
+          execution.occurrenceId ===
+            hostedHookOccurrenceId(
+              HookEventName.PreToolUse,
+              `${promptId}:${call.id}`,
+            ),
+      )
+    )
       cancelled = true;
-      break;
-    }
   }
-  if (!cancelled) return;
-  await session.managed.sink.write(
+  if (!cancelled) return false;
+  const missing = calls.filter((call) => !responded.has(call.id!));
+  const refusalRecord = (parts: Part[], parentUuid: string) =>
     record(
       session,
       authority.sessionHeader.sessionKey.sessionId,
-      'system',
-      null,
+      'tool_result',
+      parentUuid,
       {
-        subtype: 'turn_result',
-        systemPayload: {
-          promptId,
-          state: 'cancelled',
-          stopReason: 'cancelled',
-          endedAt: Date.now(),
-        },
+        daemonPromptId: promptId,
+        model: assistant.model,
+        message: { role: 'user', parts },
       },
+    );
+  let result = refusalRecord([], current.at(-1)!.uuid);
+  const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+  for (const part of missing.flatMap((call) =>
+    convertToFunctionErrorResponse(
+      call.name!,
+      call.id!,
+      [],
+      'The turn was cancelled before this tool call ran.',
     ),
-  );
-  session.blocked = false;
+  )) {
+    result.message!.parts!.push(part);
+    if (Buffer.byteLength(JSON.stringify(result)) <= maxBytes) continue;
+    result.message!.parts!.pop();
+    if (!result.message!.parts!.length)
+      throw new Error(
+        'Hosted tool refusal exceeds the inline Session Store limit.',
+      );
+    await sink.write(result);
+    result = refusalRecord([part], result.uuid);
+    if (Buffer.byteLength(JSON.stringify(result)) > maxBytes)
+      throw new Error(
+        'Hosted tool refusal exceeds the inline Session Store limit.',
+      );
+  }
+  if (result.message!.parts!.length) await sink.write(result);
+  return true;
+}
+
+async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
+  if (
+    !session.blocked ||
+    session.active ||
+    session.hooksBusy ||
+    session.mcpBusy ||
+    session.mcpRecovering ||
+    !session.hooks ||
+    session.hooks.hasPendingOperations
+  )
+    return;
+  session.hooksBusy = true;
+  try {
+    const { authority } = session.managed;
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    );
+    const pending = new Map<string, number>();
+    for (const event of events) {
+      if (event.kind === 'input.accepted')
+        pending.set(event.payload['turnId'] as string, event.sequence);
+      if (event.kind === 'turn.settled')
+        pending.delete(event.payload['turnId'] as string);
+    }
+    if (pending.size !== 1) return;
+    const [promptId, sequence] = [...pending][0];
+    const turnEvents = events.filter((event) => event.sequence > sequence);
+    const preModel = !turnEvents.some(
+      (event) =>
+        event.kind === 'model.attempt' ||
+        event.kind === 'tool.intent' ||
+        event.kind === 'tool.receipt' ||
+        (event.kind === 'message.committed' &&
+          event.payload['role'] !== 'user'),
+    );
+    const occurrenceIds = new Set([
+      hostedHookOccurrenceId(HookEventName.UserPromptSubmit, promptId),
+      hostedHookOccurrenceId(
+        HookEventName.SessionStart,
+        `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
+      ),
+    ]);
+    let cancelled = false;
+    if (preModel)
+      for (const { record } of authority.extensionRecordsInDomain(
+        'hook_execution',
+      )) {
+        const execution = parseHookExecution(record);
+        const cancelledInstructions =
+          execution.eventName === HookEventName.InstructionsLoaded &&
+          execution.hookId !== '__plan__' &&
+          execution.cancelRequested;
+        if (
+          (!occurrenceIds.has(execution.occurrenceId) &&
+            !cancelledInstructions) ||
+          execution.run.state !== 'cancelled' ||
+          execution.run.execution !== 'not_started_proven'
+        )
+          continue;
+        const input = object(
+          JSON.parse(
+            (
+              await session.managed.resources.read(execution.inputRef)
+            ).toString(),
+          ),
+        );
+        if (input?.['prompt_id'] === promptId) {
+          cancelled = true;
+          break;
+        }
+      }
+    if (!preModel)
+      cancelled = await recoverCancelledPreToolHook(
+        session,
+        promptId,
+        turnEvents,
+      );
+    if (!cancelled) return;
+    await session.managed.sink.write(
+      record(
+        session,
+        authority.sessionHeader.sessionKey.sessionId,
+        'system',
+        null,
+        {
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId,
+            state: 'cancelled',
+            stopReason: 'cancelled',
+            endedAt: Date.now(),
+          },
+        },
+      ),
+    );
+    session.blocked = false;
+  } finally {
+    session.hooksBusy = false;
+  }
 }
 
 async function readShellReceipt(
@@ -706,11 +905,36 @@ async function recoverShellReceipts(
       envelope.executionStatus === 'not_started'
     )
       continue;
+    const intent = events.findLast(
+      (event) =>
+        event.sequence < receipt.sequence &&
+        event.kind === 'tool.intent' &&
+        event.payload['executionCallId'] === executionCallId,
+    );
+    const inputRef = assertManagedSessionDurableRef(
+      intent?.payload['argsRef'],
+      'original Shell input',
+    );
+    if (inputRef.kind !== 'managed-tool-input')
+      throw new Error('Original Shell Runtime owner conflicts.');
+    const input = object(
+      JSON.parse((await session.managed.resources.read(inputRef)).toString()),
+    );
+    if (
+      input?.['harnessSessionId'] !==
+        authority.sessionHeader.sessionKey.sessionId ||
+      typeof input['runtimeSessionId'] !== 'string'
+    )
+      throw new Error('Original Shell Runtime owner conflicts.');
+    const runtimeSessionId = assertManagedSessionStableId(
+      input['runtimeSessionId'],
+      'original Shell Runtime owner',
+    );
     try {
       const broker = new HostedWorkspaceBroker(
         options,
         authority.sessionHeader.sessionKey,
-        receiptPromptId,
+        runtimeSessionId,
       );
       await broker.acknowledgeV3(executionCallId, {
         executionCallId,
@@ -732,6 +956,7 @@ async function recoverShellReceipts(
 async function eventEnvelope(
   session: HostedSession,
   event: ManagedSessionEvent,
+  streamedDeltaIds: Set<string>,
 ): Promise<{
   v: 1;
   id: number;
@@ -741,6 +966,28 @@ async function eventEnvelope(
 }> {
   const sessionId =
     session.managed.authority.sessionHeader.sessionKey.sessionId;
+  if (event.kind === 'message.delta') {
+    const text = event.payload['text'];
+    const turnId = event.payload['turnId'];
+    const messageId = event.payload['messageId'];
+    if (typeof messageId === 'string') streamedDeltaIds.add(messageId);
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'session_update',
+      ...(typeof turnId === 'string' ? { promptId: turnId } : {}),
+      data: {
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: typeof text === 'string' ? text : '',
+          },
+        },
+      },
+    };
+  }
   if (
     event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
@@ -760,9 +1007,13 @@ async function eventEnvelope(
           ?.filter((part) => !part.thought)
           .map((part) => part.text ?? '')
           .join('') ?? '';
+      // A message whose text already streamed as message.delta events must not
+      // project a second chunk, or from-scratch consumers would see it twice.
+      const streamed = streamedDeltaIds.has(message.uuid);
       if (
         message.type === 'tool_result' ||
-        message.message?.parts?.some((part) => part.functionCall)
+        message.message?.parts?.some((part) => part.functionCall) ||
+        streamed
       ) {
         return {
           v: 1,
@@ -880,6 +1131,9 @@ async function executeHostedTurn(
             message: { role: type === 'assistant' ? 'model' : 'user', parts },
             ...identity,
           });
+        const deltas = session.toolProfile
+          ? new HostedTextDeltaStream(session.managed, promptId)
+          : undefined;
         const commit = async (
           type: 'assistant' | 'tool_result',
           parts: Part[],
@@ -887,6 +1141,10 @@ async function executeHostedTurn(
           identity?: { uuid: string; timestamp: string },
         ) => {
           const message = messageRecord(type, parts, model, identity);
+          if (type === 'assistant' && deltas) {
+            const streamed = deltas.takeMessageId();
+            if (streamed !== undefined) message.uuid = streamed;
+          }
           await session.managed.sink.write(message);
           parentUuid = message.uuid;
           return message.uuid;
@@ -941,6 +1199,7 @@ async function executeHostedTurn(
             ...(session.hooks ? { hooks: session.hooks } : {}),
             ...(toolTurn ? { toolTurn } : {}),
             ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+            ...(deltas ? { textDeltas: deltas } : {}),
           });
           await commit(
             'assistant',
@@ -1258,10 +1517,21 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp?.broker,
         );
       if (pinned) session.approval = pinned;
+      // A takeover recovers exactly the parked Turn, including the file
+      // history it left pending; only refuse a stranger's pending state.
+      const unsettled = unsettledPromptId(session);
+      // Cold loads stay inert: only an explicit takeover request may touch
+      // the Broker or settle anything. A bare load of a parked Session keeps
+      // refusing with 409 so it never drives a Runtime by accident.
+      const takeover =
+        !session.hooks &&
+        (body?.['passiveManagedRuntimeRecovery'] === true ||
+          body?.['driveRuntimeRecovery'] === true);
       const fileHistory = await readHostedFileHistory(managed);
       if (
         fileHistory?.pendingUndo ||
         (fileHistory?.pendingTurn &&
+          !(takeover && fileHistory.pendingTurn === unsettled) &&
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
         await managed.close();
@@ -1298,7 +1568,51 @@ export function registerHostedHarnessSessionRoutes(
       }
       let resume: { promptId: string; text: string; parts: Part[] } | undefined;
       let settlePromptId: string | undefined;
+      let recovery: HostedRuntimeRecoveryReport | undefined;
       if (
+        restore.recoveryStatus === 'ok' &&
+        unsettled !== undefined &&
+        takeover
+      ) {
+        // A parked Runtime turn is taken over, not refused: settle its
+        // executions under their original ids (or report them for a
+        // cancellation) and answer with the recovery snapshot.
+        if (toolProfile === undefined || !brokerOptions) {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        try {
+          const recovered = await recoverHostedRuntimeTurn({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId: unsettled,
+            brokerOptions,
+            passive: body?.['passiveManagedRuntimeRecovery'] === true,
+          });
+          if (recovered === undefined) {
+            await managed.close();
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+          recovery = recovered.report;
+          if (recovered.acquiredRuntime)
+            session.runtimeLeaseHeld =
+              recovered.report.executions[0]?.runtimeSessionId ??
+              recovered.promptId;
+        } catch (cause) {
+          await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,
+          );
+          // A failed takeover keeps the turn parked for the next attempt:
+          // refuse exactly like a plain recovery refusal so the coordinator
+          // retries instead of failing the Turn.
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+      } else if (
         restore.recoveryStatus === 'ok' &&
         (session.publication || session.hooks || fileHistory) &&
         brokerOptions
@@ -1395,8 +1709,12 @@ export function registerHostedHarnessSessionRoutes(
         ) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks)
+          !session.hooks &&
+          !recovery)
       ) {
+        // The Session is closed without being registered, so no later route
+        // can hand back a lease the takeover acquired; release it here.
+        await releaseLeaseNow(session);
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -1405,6 +1723,7 @@ export function registerHostedHarnessSessionRoutes(
         try {
           await stores.assertWritable();
         } catch {
+          await releaseLeaseNow(session);
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1413,10 +1732,11 @@ export function registerHostedHarnessSessionRoutes(
       if (
         hasUnsettledInput(session, restore.throughSequence) &&
         !resume &&
-        !settlePromptId
+        !settlePromptId &&
+        !recovery
       )
         session.blocked = true;
-      await settleCancelledPreModelHook(session);
+      await settleCancelledHookTurn(session);
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -1467,7 +1787,12 @@ export function registerHostedHarnessSessionRoutes(
         eventEpoch: epoch,
         // A Harness older than approvals omits this, so a caller can tell.
         ...(pinned ? { approvalMode: pinned.mode } : {}),
-        ...(session.blocked ? { recoveryRequired: true } : {}),
+        ...(session.blocked || session.hooks?.hasPendingOperations
+          ? { recoveryRequired: true }
+          : {}),
+        ...(recovery
+          ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
+          : {}),
       });
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
@@ -1810,7 +2135,7 @@ export function registerHostedHarnessSessionRoutes(
       .then(async (execution) => {
         if (execution.hookId !== '__plan__')
           await session.hooks!.status(execution.occurrenceId);
-        await settleCancelledPreModelHook(session);
+        await settleCancelledHookTurn(session);
         res.json({
           operationId: execution.hookExecutionId,
           state: execution.run.state,
@@ -2036,6 +2361,478 @@ export function registerHostedHarnessSessionRoutes(
       });
   });
 
+  const recoveryRequest = (
+    req: Request,
+  ):
+    | { promptId: string; checkpointId: string; activationId: string }
+    | undefined => {
+    const body = object(req.body);
+    const promptId = body?.['promptId'];
+    const checkpointId = body?.['checkpointId'];
+    const activationId = body?.['activationId'];
+    if (
+      typeof promptId !== 'string' ||
+      !UUID.test(promptId) ||
+      typeof checkpointId !== 'string' ||
+      checkpointId.length === 0 ||
+      checkpointId.length > 512 ||
+      typeof activationId !== 'string' ||
+      activationId.length === 0 ||
+      activationId.length > 512
+    ) {
+      return undefined;
+    }
+    return { promptId, checkpointId, activationId };
+  };
+
+  // The coordinator replays a recovery call whose reply was lost; an already
+  // settled Turn answers with the current watermark instead of driving twice.
+  const settledReplay = (
+    session: HostedSession,
+    promptId: string,
+    res: Response,
+  ): boolean => {
+    if (
+      !hasAcceptedInput(session, promptId) ||
+      unsettledInputs(session).has(promptId)
+    ) {
+      return false;
+    }
+    res.status(200).json({
+      accepted: true,
+      promptId,
+      lastEventId: session.managed.authority.committedSequence,
+      eventEpoch: epoch,
+    });
+    return true;
+  };
+
+  const matchesRecovery = (
+    session: HostedSession,
+    promptId: string,
+    checkpointId: string,
+    activationId: string,
+  ): boolean =>
+    session.managed.authority.latestCheckpoint?.checkpointId === checkpointId &&
+    session.managed.activation.activationId === activationId &&
+    unsettledPromptId(session) === promptId;
+
+  // A recovery load may hold the Runtime Session; whichever terminal route
+  // runs must release it, or the workspace lease stays pinned forever. The
+  // flag clears only once the release is confirmed, so a failed handback
+  // stays owed and the next terminal route retries it.
+  const releaseRecoveredRuntime = (session: HostedSession): void => {
+    const promptId = session.runtimeLeaseHeld;
+    if (promptId === undefined || !brokerOptions) return;
+    new HostedWorkspaceBroker(
+      brokerOptions,
+      session.managed.authority.sessionHeader.sessionKey,
+      promptId,
+    )
+      .release()
+      .then(
+        () => {
+          if (session.runtimeLeaseHeld === promptId)
+            session.runtimeLeaseHeld = undefined;
+        },
+        (cause: unknown) => {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
+          );
+        },
+      );
+  };
+
+  // Awaited variant for exits after which no route can retry the handback
+  // (session close, load refusals of an unregistered Session).
+  const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
+    const promptId = session.runtimeLeaseHeld;
+    if (promptId === undefined || !brokerOptions) return;
+    await new HostedWorkspaceBroker(
+      brokerOptions,
+      session.managed.authority.sessionHeader.sessionKey,
+      promptId,
+    )
+      .release()
+      .then(() => {
+        if (session.runtimeLeaseHeld === promptId)
+          session.runtimeLeaseHeld = undefined;
+      })
+      .catch((cause: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
+        );
+      });
+  };
+
+  app.post('/session/:id/managed-runtime/continue', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
+    const request = recoveryRequest(req);
+    if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
+    const { promptId, checkpointId, activationId } = request;
+    // A blocked Turn never writes a terminal record, so a replay must meet
+    // the refusal rather than re-answer an admission that will never settle.
+    if (session.blocked) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    // A continuation whose reply was lost is replayed by the coordinator: it
+    // must get the watermark it was admitted at, running or settled, or the
+    // coordinator would stream from after the Turn's own events.
+    const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
+    const admittedRecovery = session.admissions.get(promptId);
+    if (admittedRecovery?.digest === recoveryDigest) {
+      if (!session.active) releaseRecoveredRuntime(session);
+      res.status(200).json({
+        accepted: true,
+        promptId,
+        lastEventId: admittedRecovery.lastEventId,
+        eventEpoch: epoch,
+      });
+      return;
+    }
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (!session.toolProfile || !brokerOptions) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
+      if (settledReplay(session, promptId, res)) {
+        releaseRecoveredRuntime(session);
+        return;
+      }
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    }
+    // Prove the checkpoint is continuable before answering: a 200 admission
+    // for a turn that cannot continue would settle it with a bare
+    // turn.settled and wedge the Session for good.
+    const continueAuthorization = await session.managed.authority
+      .harnessRunAuthorization()
+      .catch(() => undefined);
+    if (
+      continueAuthorization?.status !== 'runnable' ||
+      continueAuthorization.checkpoint.continuation.phase !== 'results_ready'
+    ) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    const abort = new AbortController();
+    session.active = { promptId, digest: '', abort };
+    session.admissions.set(promptId, {
+      digest: recoveryDigest,
+      lastEventId: session.managed.authority.committedSequence,
+    });
+    res.status(200).json({
+      accepted: true,
+      promptId,
+      lastEventId: session.managed.authority.committedSequence,
+      eventEpoch: epoch,
+    });
+    const sessionId = req.params['id'];
+    void (async () => {
+      let toolTurn: HostedWorkspaceToolTurn | undefined;
+      const turnResultRecord = (state: 'cancelled' | 'error' | 'completed') =>
+        record(session, sessionId, 'system', null, {
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId,
+            state,
+            stopReason: state === 'completed' ? 'end_turn' : state,
+            endedAt: Date.now(),
+          },
+        });
+      try {
+        const harness = createManagedHarnessHandle(session.managed);
+        const projected = await session.managed.sink.project();
+        const settledPrompts = new Set(
+          session.managed.authority
+            .eventsInSequenceRange(
+              1,
+              session.managed.authority.committedSequence,
+            )
+            .filter((event) => event.kind === 'turn.settled')
+            .map((event) => event.payload['turnId']),
+        );
+        const turnRecords = projected.filter(
+          (entry) => entry.daemonPromptId === promptId,
+        );
+        // Split at the last assistant message carrying function calls: earlier
+        // tool rounds stay in history, and only the parked round's results
+        // become the resume request. Otherwise a turn that parked after two
+        // tool rounds would resume with an unanswered call in between.
+        let lastCallIndex = -1;
+        for (const [index, entry] of turnRecords.entries()) {
+          if (
+            entry.type === 'assistant' &&
+            entry.message?.parts?.some((part) => part.functionCall)
+          ) {
+            lastCallIndex = index;
+          }
+        }
+        if (lastCallIndex < 0) {
+          throw new Error('Recovered Runtime turn has no journaled tool call.');
+        }
+        const parkedRound = new Set(turnRecords.slice(lastCallIndex + 1));
+        const history = projected.filter(
+          (entry) =>
+            settledPrompts.has(entry.daemonPromptId) ||
+            (entry.daemonPromptId === promptId && !parkedRound.has(entry)),
+        );
+        const resumeParts = turnRecords
+          .slice(lastCallIndex + 1)
+          .filter((entry) => entry.type === 'tool_result')
+          .flatMap((entry) => entry.message?.parts ?? []);
+        if (resumeParts.length === 0) {
+          throw new Error(
+            'Recovered Runtime turn has no journaled tool results.',
+          );
+        }
+        let parentUuid = projected.at(-1)?.uuid ?? null;
+        const messageRecord = (
+          type: 'assistant' | 'tool_result',
+          parts: Part[],
+          model: string,
+          identity?: { uuid: string; timestamp: string },
+        ) =>
+          record(session, sessionId, type, parentUuid, {
+            daemonPromptId: promptId,
+            model,
+            message: { role: type === 'assistant' ? 'model' : 'user', parts },
+            ...identity,
+          });
+        const deltas = new HostedTextDeltaStream(session.managed, promptId);
+        const commit = async (
+          type: 'assistant' | 'tool_result',
+          parts: Part[],
+          model: string,
+          identity?: { uuid: string; timestamp: string },
+        ) => {
+          const message = messageRecord(type, parts, model, identity);
+          if (type === 'assistant') {
+            const streamed = deltas.takeMessageId();
+            if (streamed !== undefined) message.uuid = streamed;
+          }
+          await session.managed.sink.write(message);
+          parentUuid = message.uuid;
+          return message.uuid;
+        };
+        toolTurn = new HostedWorkspaceToolTurn(
+          brokerOptions,
+          session.managed,
+          harness,
+          promptId,
+          commit,
+          (type, parts, model) =>
+            Buffer.byteLength(
+              JSON.stringify(messageRecord(type, parts, model)),
+            ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+          session.publication,
+          session.shell,
+          session.approval && {
+            settings: session.approval,
+            waiters: session.waiters,
+          },
+          session.mcp,
+        );
+        let state: 'completed' | 'cancelled' | 'error' = 'completed';
+        try {
+          // Reconcile the pending file-history obligation the recovered turn
+          // left behind before inference — a text-only continuation never
+          // re-acquires, so without this the marker outlives the turn and
+          // wedges every later cold load.
+          await toolTurn.resumeCommittedResults();
+          const result = await runHostedHarnessTextTurn({
+            sessionId,
+            cwd,
+            history,
+            prompt: '',
+            promptId,
+            signal: abort.signal,
+            toolTurn,
+            resumeFromToolResults: resumeParts,
+            textDeltas: deltas,
+          });
+          await commit(
+            'assistant',
+            result.parts ?? [{ text: result.text }],
+            result.model,
+          );
+        } catch (cause) {
+          if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
+          state = abort.signal.aborted ? 'cancelled' : 'error';
+          if (state === 'error') {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+            );
+          }
+        }
+        await toolTurn.finish();
+        await harness.settleConsumedRuntimeContinuation();
+        await session.managed.sink.write(turnResultRecord(state));
+      } catch (cause) {
+        if (cause instanceof HostedToolRecoveryRequiredError) {
+          session.blocked = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
+          );
+          return;
+        }
+        try {
+          await session.managed.sink.write(turnResultRecord('error'));
+        } catch (settleCause) {
+          session.blocked = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
+          );
+        }
+      } finally {
+        try {
+          await toolTurn?.close();
+        } catch (cause) {
+          session.blocked = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,
+          );
+        }
+        releaseRecoveredRuntime(session);
+        session.active = undefined;
+      }
+    })();
+  });
+
+  app.post('/session/:id/managed-runtime/cancel', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
+    const request = recoveryRequest(req);
+    if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
+    const { promptId, checkpointId, activationId } = request;
+    if (session.blocked) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    // A cancellation whose reply was lost is replayed by the coordinator: it
+    // must get the watermark it was admitted at, running or settled — the
+    // same contract the continue route documents.
+    const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
+    const admittedCancel = session.admissions.get(promptId);
+    if (admittedCancel?.digest === recoveryDigest) {
+      if (!session.active) releaseRecoveredRuntime(session);
+      res.status(200).json({
+        accepted: true,
+        promptId,
+        lastEventId: admittedCancel.lastEventId,
+        eventEpoch: epoch,
+      });
+      return;
+    }
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
+      if (settledReplay(session, promptId, res)) {
+        releaseRecoveredRuntime(session);
+        return;
+      }
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_recovery_identity_mismatch');
+    }
+    const sessionId = req.params['id'];
+    // Symmetric with the continue route: without the tool profile or the
+    // Broker there is no way to prove the parked executions stopped.
+    if (!session.toolProfile || !brokerOptions) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    // A checkpoint whose authorization is no longer readable cannot prove
+    // its parked executions; refuse like the load path instead of settling
+    // a cancellation nothing verified.
+    const cancelAuthorization = await session.managed.authority
+      .harnessRunAuthorization()
+      .catch(() => undefined);
+    if (cancelAuthorization?.status !== 'runnable') {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required');
+    }
+    session.admissions.set(promptId, {
+      digest: recoveryDigest,
+      lastEventId: session.managed.authority.committedSequence,
+    });
+    session.active = { promptId, digest: '', abort: new AbortController() };
+    void (async () => {
+      try {
+        const broker = await stopParkedRuntimeExecutions({
+          session: session.managed,
+          promptId,
+          brokerOptions,
+        });
+        // Settle the parked executions as cancelled so the terminal record
+        // can move the checkpoint past the durable wait instead of wedging
+        // the session on its next prompt.
+        await settleParkedTurnCancelled({
+          session: session.managed,
+          sessionId,
+          cwd: session.cwd,
+          promptId,
+        });
+        // The cancelled Turn never continues, so its pending file-history
+        // obligation dies with it — keep the snapshots, drop the marker, or
+        // every later load stays refused.
+        const savedHistory = await readHostedFileHistory(session.managed);
+        if (savedHistory?.pendingTurn === promptId) {
+          await commitHostedFileHistory(session.managed, {
+            schemaVersion: 1,
+            state: savedHistory.state,
+            pendingTurn: null,
+            pendingUndo: null,
+          });
+        }
+        // The original owner's Runtime Session keeps the Workspace lease
+        // pinned; a passive takeover never re-acquired it, so release it
+        // here once the executions are confirmed stopped.
+        await broker.release().catch((cause: unknown) => {
+          if (
+            cause instanceof HostedWorkspaceBrokerRejection &&
+            cause.status === 404
+          )
+            return;
+          throw cause;
+        });
+        await session.managed.sink.write(
+          record(session, sessionId, 'system', null, {
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId,
+              state: 'cancelled',
+              stopReason: 'cancelled',
+              endedAt: Date.now(),
+            },
+          }),
+        );
+        // Answer at the admission watermark: the cancelled turn_result
+        // streams in from there, and a replayed cancel replays it exactly.
+        res.status(200).json({
+          accepted: true,
+          promptId,
+          lastEventId: session.admissions.get(promptId)!.lastEventId,
+          eventEpoch: epoch,
+        });
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness turn ${promptId} could not settle the cancellation: ${String(cause)}`,
+        );
+        // The cancellation never confirmed: drop the admission so the
+        // coordinator's retry re-drives instead of replaying the watermark.
+        session.admissions.delete(promptId);
+        if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
+      } finally {
+        releaseRecoveredRuntime(session);
+        session.active = undefined;
+      }
+    })();
+  });
+
   app.get('/session/:id/events', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
@@ -2062,6 +2859,14 @@ export function registerHostedHarnessSessionRoutes(
       if (!res.destroyed && !res.writableEnded) res.end();
     };
     session.streams.add(stop);
+    // Seeded once per stream, then updated as deltas flow: a committed
+    // message whose text streamed must not project a second chunk.
+    const streamedDeltaIds = new Set(
+      session.managed.authority
+        .eventsInSequenceRange(1, after)
+        .filter((event) => event.kind === 'message.delta')
+        .map((event) => event.payload['messageId'] as string),
+    );
     const pump = async (): Promise<void> => {
       if (busy || res.destroyed || res.writableEnded) return;
       if (cursor >= session.managed.authority.committedSequence) return;
@@ -2071,7 +2876,11 @@ export function registerHostedHarnessSessionRoutes(
           afterSequence: cursor,
           limit: 256,
         })) {
-          const envelope = await eventEnvelope(session, event);
+          const envelope = await eventEnvelope(
+            session,
+            event,
+            streamedDeltaIds,
+          );
           if (res.destroyed || res.writableEnded) return;
           const writable = res.write(
             `id: ${event.sequence}\nevent: ${envelope.type}\ndata: ${JSON.stringify(envelope)}\n\n`,
@@ -2109,7 +2918,9 @@ export function registerHostedHarnessSessionRoutes(
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active,
       recoveryBlocked:
-        session.blocked || (session.mcp?.recoveryBlocked ?? false),
+        session.blocked ||
+        (session.mcp?.recoveryBlocked ?? false) ||
+        (session.hooks?.hasPendingOperations ?? false),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {
@@ -2132,9 +2943,15 @@ export function registerHostedHarnessSessionRoutes(
           afterSequence: cursor,
           limit,
         });
-        for (const event of page)
-          events.push(await eventEnvelope(session, event));
         const last = page.at(-1)?.sequence ?? cursor;
+        const streamedDeltaIds = new Set(
+          session.managed.authority
+            .eventsInSequenceRange(1, last)
+            .filter((event) => event.kind === 'message.delta')
+            .map((event) => event.payload['messageId'] as string),
+        );
+        for (const event of page)
+          events.push(await eventEnvelope(session, event, streamedDeltaIds));
         res.json({
           v: 1,
           sessionId: req.params['id'],
@@ -2387,6 +3204,9 @@ export function registerHostedHarnessSessionRoutes(
         );
       }
       await session.hooks?.close();
+      // A lease a recovery load acquired must go back with the Session, or
+      // the Workspace stays pinned after every later route is gone.
+      await releaseLeaseNow(session);
       await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();

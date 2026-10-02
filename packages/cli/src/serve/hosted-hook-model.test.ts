@@ -14,6 +14,7 @@ import {
 import type { ManagedHookModelScope } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
+import * as stdio from '../utils/stdioHelpers.js';
 import {
   createHostedPromptHookRunner,
   runHostedHookOperation,
@@ -79,6 +80,41 @@ function fixture() {
 describe('Hosted Hook model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => vi.useRealTimers());
+
+  it.each([false, true])(
+    'preserves the operation result or error when cleanup fails (operation failed: %s)',
+    async (failed) => {
+      const { config, scope } = fixture();
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      config.shutdown.mockRejectedValue(new Error('cleanup failed'));
+      const primary = new Error('operation failed');
+      const result = { committed: true };
+      const operation = runHostedHookOperation(
+        {
+          sessionId: 'session-1',
+          cwd: '/workspace',
+          signal: new AbortController().signal,
+          scope,
+        },
+        async () => {
+          if (failed) throw primary;
+          return result;
+        },
+      );
+      if (failed) await expect(operation).rejects.toBe(primary);
+      else await expect(operation).resolves.toBe(result);
+      expect(config.shutdown).toHaveBeenCalledExactlyOnceWith({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('cleanup failed'),
+      );
+      log.mockRestore();
+    },
+  );
 
   it('authorizes an isolated prompt evaluation and attributes provider usage to its original operation', async () => {
     const { config, generateContent, evaluate, usage, scope } = fixture();

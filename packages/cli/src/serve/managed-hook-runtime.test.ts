@@ -21,6 +21,7 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import {
   ManagedHookRuntime,
+  parseManagedHookControl,
   type ManagedHookDefinition,
 } from './managed-hook-runtime.js';
 const key = {
@@ -130,6 +131,171 @@ async function settled(instance: ManagedHookRuntime, id = 'execution') {
   return view!;
 }
 describe('ManagedHookRuntime', () => {
+  it.each(['_scope', '.scope', '-scope', ':scope'])(
+    'accepts existing scope and manifest identifiers with a leading punctuation (%s)',
+    async (id) => {
+      const scopedKey = { tenantId: id, workspaceId: id, sessionId: id };
+      const scopedPin = { ...pin, catalogId: id };
+      const instance = new ManagedHookRuntime(
+        { ...scopedKey, workspaceGeneration: '1' },
+        async () => directory,
+        {
+          version: 1,
+          catalogs: [
+            {
+              ...scopedPin,
+              tenantId: id,
+              workspaceId: id,
+              hooks: [{ ...definition(), hookId: id }],
+            },
+          ],
+        },
+      );
+      runtimes.push(instance);
+      const original = request(id);
+      const call = {
+        ...original,
+        sessionKey: scopedKey,
+        pin: scopedPin,
+        hookId: id,
+        input: { ...original.input, session_id: id },
+        grant: { ...original.grant, sessionKey: scopedKey, ownerId: id },
+      };
+      expect(() => parseManagedHookControl(call)).not.toThrow();
+      for (const kind of ['hook-status', 'hook-cancel'] as const)
+        expect(() =>
+          parseManagedHookControl({
+            kind,
+            sessionKey: scopedKey,
+            operationId: id,
+            targetOperationId: id,
+          }),
+        ).not.toThrow();
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-catalog',
+        sessionKey: scopedKey,
+        operationId: id,
+        pin: scopedPin,
+      });
+      expect(view).toMatchObject({
+        state: 'settled',
+        catalog: { catalogId: id, hooks: [{ hookId: id }] },
+      });
+    },
+  );
+
+  it.each(['', 'a/b', 'a b', 'a'.repeat(513)])(
+    'still rejects invalid Hook identifiers (%s)',
+    (id) => {
+      expect(() =>
+        parseManagedHookControl({ ...request(), operationId: id }),
+      ).toThrow('managed_hook_invalid');
+      expect(() => runtime([{ ...definition(), hookId: id }])).toThrow(
+        'managed_hook_manifest_invalid',
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: 'allowed',
+      variable: 'HOOK_TENANT',
+      value: 'acme',
+      allowed: true,
+      path: '/hooks/acme',
+    },
+    {
+      name: 'unlisted',
+      variable: 'HOOK_TENANT',
+      value: 'acme',
+      allowed: false,
+      path: '/hooks/',
+    },
+    {
+      name: 'internal secret',
+      variable: 'QWEN_SERVER_TOKEN',
+      value: 'secret',
+      allowed: true,
+      path: '/hooks/',
+    },
+    {
+      name: 'one interpolation',
+      variable: 'HOOK_TENANT',
+      value: '${HOOK_OTHER}',
+      allowed: true,
+      path: '/hooks/$%7BHOOK_OTHER%7D',
+    },
+  ])(
+    'dispatches the native interpolated URL ($name)',
+    async ({ variable, value, allowed, path: expectedPath }) => {
+      vi.stubEnv(variable, value);
+      vi.stubEnv('HOOK_OTHER', 'recursive');
+      const paths: string[] = [];
+      const server = createServer((req, res) => {
+        paths.push(req.url!);
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"continue":true}');
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: `http://127.0.0.1:${address.port}/hooks/\${${variable}}`,
+            allowedEnvVars: allowed ? [variable, 'HOOK_OTHER'] : [],
+          },
+        },
+      ]);
+      try {
+        const call = request();
+        await instance.control('runtime-session', call);
+        expect(await settled(instance)).toMatchObject({
+          state: 'settled',
+          result: { success: true, outcome: 'success' },
+        });
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+        });
+        expect(paths).toEqual([expectedPath]);
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it.each(['10.0.0.1', '169.254.169.254', '100.100.100.200'])(
+    'retains native SSRF refusal after interpolating host %s',
+    async (host) => {
+      vi.stubEnv('HOOK_HOST', host);
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: 'http://${HOOK_HOST}/hook',
+            allowedEnvVars: ['HOOK_HOST'],
+          },
+        },
+      ]);
+      await instance.control('runtime-session', request());
+      expect(await settled(instance)).toMatchObject({
+        state: 'settled',
+        result: { success: false, outcome: 'non_blocking_error' },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+    },
+  );
+
   it.each([HookEventName.PreToolUse, HookEventName.PermissionRequest])(
     'retains quota refusals without dispatch or eviction and bounds grant storage (%s)',
     async (eventName) => {

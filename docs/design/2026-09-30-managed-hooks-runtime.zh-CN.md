@@ -95,11 +95,23 @@ launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进�
 
 隔离能力不可用时（包括 macOS 和 Windows），在命令启动前返回
 `managed_hook_command_isolation_unavailable`。日志记录 `not_started_proven` 和
-`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart 和
-UserPromptSubmit，若准入后没有 model attempt、tool intent/receipt 或非 user 消息，
+`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart、
+UserPromptSubmit 和模型执行前的原生 InstructionsLoaded，若准入后没有 model
+attempt、tool intent/receipt 或非 user 消息，
 且没有未决 Hook，显式取消还会持久化结算 Hook 持久化输入 `prompt_id` 对应的已准入
-turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修复此前已取消的记录；取消不会丢弃
-模型或工具 continuation。单个进程组消失不能作为
+turn。此前 SessionStart 的取消不能结算后来的 turn。对于被拒绝且显式取消后具有
+`not_started_proven` 的 PreToolUse child，恢复还可关闭首个已提交的工具调用批次：
+所有模型 attempt 必须已结束，至少一个已提交输出，不得有 tool intent/receipt、
+未决审批、文件历史工作或 Hook，且取消 child 的 occurrence 与输入必须匹配唯一
+未结算 turn 的原始调用。恢复先为每个缺失的调用持久化匹配的拒绝结果，再将 turn
+结算为 cancelled。响应按包含元数据的完整记录实际 UTF-8 大小分批，遵守 64 KiB
+inline 上限；每条成功记录作为下一条的 parent。单条响应仍超限时保留恢复屏障，
+不截断调用身份。
+新批次在提交 assistant 消息前检查每个取消响应的大小，超限调用在工具 acquire
+或派发前即被拒绝。
+部分批次已提交的响应保持不变；写入失败保留屏障，重试不会重复响应。
+恢复与 turn、控制操作准入串行化；Load 同样修复此前已取消的记录。其他模型或
+工具 continuation 仍保持阻塞。单个进程组消失不能作为
 进程树排空证明。环境继承限于执行必需变量和 recipe 显式条目。Async 准入等待 Runtime
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入
 并保留 Runtime hold。
@@ -115,8 +127,12 @@ Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime ow
 目录/模型操作和非 active activation。冷加载时，先用匹配 checkpoint 工具输入中
 保存的原 Runtime owner 观察未决文件历史，再释放此前的 Hook owner。缺失或冲突的
 owner 证据继续阻塞恢复，不增加新的持久化字段。
+Shell 回执恢复确认 capture 投递时，也从已提交的工具输入读取原 Runtime owner；
+prompt ID 和接管后的 Hook owner 都不能标识原执行。
 
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
+Runtime URL 白名单与 HTTP 执行器使用相同的允许变量插值，仍限制内部密钥并执行原生
+SSRF 检查。
 执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。Managed HTTP Hook 已派发后，用户取消
 保留原请求及响应体读取，最多等待配置的 HTTP 超时，用完整响应作为结算证据；
@@ -166,6 +182,7 @@ HTTP journal 提交遇到临时传输失败、429 或 5xx 时，最多尝试三�
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立
 Hook token 池。
+隔离模型的 Config 清理错误单独记录，不替换已返回的 Hook 结果或原操作错误。
 
 ## 事件接线
 
@@ -186,6 +203,9 @@ Dispatcher 不在 Managed Config 中加载或执行环境中的 Legacy Hooks。H
 设置。显式 after/batch Hook stop 结束编排，同时保留物理回执和未被模型消费的状态，
 Session 仍可开始下一轮。
 
+已加载目录包含 Stop 或 MessageDisplay 时，模型文本在两者完成决策前保持缓冲。
+丢弃或隐藏的草稿不会成为持久化 text delta。没有这两类输出策略的 Session 保留增量流式输出。
+
 ## 接口与兼容性
 
 Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, definitionDigest}`，
@@ -196,6 +216,14 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 Workspace 校验复用该结果，只读取它必须自行检查的内容，例如 plan 及其消息快照；
 Session 打开后 authority 不再保留该结果。
 相互独立的读取按有界批次并发执行。
+Hook scope 标识符兼容现有 Broker 字符语法，包括开头的标点。Hook 操作阻塞 prompt
+准入期间，Session status 返回 `recoveryBlocked`，load 返回 `recoveryRequired`。
+已保存的操作实际结算后，对账会清除此诊断。
+
+Runtime-only 接管标志仍让 Hook Session 使用现有的 Hook 感知加载与核对路径。
+Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
+`hosted_hook_recovery_required` 拒绝 Hook Session；不能忽略待结算 Hook 副作用或
+模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
@@ -230,3 +258,7 @@ command 排空。
 回归。运行 `npm run build`、`npm run typecheck`、`npm run bundle`、包内定向测试与 Java
 契约测试。集成验证后进行两轮无新问题的自审及独立评审。未知物理或模型结果保留原证据并
 阻塞；仅模拟事件的测试通过，不代表缺少生产者的能力已经受支持。
+
+显式 Runtime 恢复与取消保留原始持久工具输入证明的 owner（包括共用 MCP owner），不默认替换为 prompt ID。所有权证据缺失或冲突时，在任何 Broker 调用之前拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。
+
+Broker 的 execution-unknown 响应仍表示结果未知，与执行记录不存在区分。取消请求之前或之后观察到未知状态时都拒绝结算；不能据此提交 cancelled 结果或释放 owner。被动恢复仍把该结果报告为 unknown。
