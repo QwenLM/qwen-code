@@ -583,22 +583,26 @@ function ManagedSessionsContent({
               </Button>
             </div>
           )}
-          {(approvals.answerError !== undefined ||
-            approvals.respondForbidden) && (
-            <p
-              // The first refusal is news; the latch that keeps every later
-              // approval of this Session disabled only restates it, so it is a
-              // status line rather than a second alert.
-              role={approvals.answerError !== undefined ? 'alert' : 'status'}
-              className="text-sm text-destructive"
-            >
-              {t(
-                approvals.respondForbidden || approvalForbidden
-                  ? 'managed.approval.forbidden'
-                  : 'managed.approval.failed',
-              )}
-            </p>
-          )}
+          {/* `answerError` is only exposed for the Action on screen, so this
+              guard only bounds the latch: the reason describes a card, and
+              once the Session has none there is nothing left to explain. */}
+          {pendingApproval !== null &&
+            (approvals.answerError !== undefined ||
+              approvals.respondForbidden) && (
+              <p
+                // The first refusal is news; the latch that keeps every later
+                // approval of this Session disabled only restates it, so it is
+                // a status line rather than a second alert.
+                role={approvals.answerError !== undefined ? 'alert' : 'status'}
+                className="text-sm text-destructive"
+              >
+                {t(
+                  approvals.respondForbidden || approvalForbidden
+                    ? 'managed.approval.forbidden'
+                    : 'managed.approval.failed',
+                )}
+              </p>
+            )}
           <ManagedSessionProgress
             summary={summary}
             submitting={

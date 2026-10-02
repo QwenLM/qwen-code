@@ -589,6 +589,63 @@ describe('ManagedSessionsPage', () => {
     ).toContain('Only the Session creator can answer this approval.');
   });
 
+  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'resolved' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+    const refusal = 'Only the Session creator can answer this approval.';
+
+    await render('s1');
+    await act(async () => flush());
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.textContent).toContain(refusal);
+
+    // The refused Action leaves and nothing replaces it. The latch outlives it,
+    // but the reason describes a card, so it leaves with the last one instead
+    // of explaining an approval that is not on screen.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain(refusal);
+  });
+
   it('keeps a coded but retryable answer failure answerable', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
