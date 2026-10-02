@@ -9057,7 +9057,7 @@ describe('Session', () => {
               expect(
                 restored.projection?.runtime.recording.rewindTurnPromptIds,
               ).toEqual([promptId(1), promptId(2), promptId(3)]);
-              mockChat.truncateHistory.mockClear();
+              vi.mocked(mockChat.truncateHistory).mockClear();
               expect(session.rewindToTurn(index).targetTurnIndex).toBe(index);
               expect(mockChat.truncateHistory).toHaveBeenCalled();
             } finally {
@@ -9101,7 +9101,7 @@ describe('Session', () => {
               expect(
                 restored.recorder.recordedTurnIndexForPrompt(promptId(1)),
               ).toBeUndefined();
-              mockChat.truncateHistory.mockClear();
+              vi.mocked(mockChat.truncateHistory).mockClear();
               expect(session.rewindToTurn(index).targetTurnIndex).toBe(index);
               expect(mockChat.truncateHistory).toHaveBeenCalled();
             } finally {
