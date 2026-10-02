@@ -1077,4 +1077,81 @@ describe('recoverHostedRuntimeTurn', () => {
       await second.close();
     }
   });
+
+  it('hands the lease back when the final authorization fails on a continuation load', async () => {
+    // The no-pending re-attach shape: the continuation acquires even with
+    // nothing left to drive, and this route's failure exits are the only
+    // handback that exists when no report is returned.
+    await parkAtAwaitRuntime('write_file', false, true);
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          return Promise.reject(new Error('store hiccup'));
+        return original();
+      });
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      ).rejects.toThrow('store hiccup');
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the lease back when the final authorization is not runnable on a continuation load', async () => {
+    await parkAtAwaitRuntime('write_file', false, true);
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'missing_state',
+          } as never);
+        return original();
+      });
+      const recovered = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(recovered).toBeUndefined();
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await replacement.close();
+    }
+  });
 });

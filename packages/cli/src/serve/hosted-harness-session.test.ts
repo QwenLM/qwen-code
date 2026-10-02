@@ -6367,6 +6367,180 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('keeps the lease owed when the cancel route fails transiently and settles on retry', async () => {
+    await parkToolTurn();
+    let released = false;
+    let stopConfirmed = false;
+    let failNextStatus = false;
+    // Model the real Broker: once released, the same identity can never be
+    // re-acquired and its reads refuse — a stray release must not stay green.
+    acquireSpy.mockImplementation(async () => {
+      if (released)
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'runtime_session_not_acquirable',
+        );
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => {
+        if (released)
+          throw new HostedWorkspaceBrokerRejection(
+            404,
+            'runtime_session_not_found',
+          );
+        if (failNextStatus) {
+          failNextStatus = false;
+          throw new Error('broker transport blip');
+        }
+        return { state: stopConfirmed ? 'settled' : 'prepared' };
+      },
+    );
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockImplementation(async () => {
+        stopConfirmed = true;
+      });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockImplementation(async () => {
+        released = true;
+      });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      checkpointId: string;
+      activationId: string;
+    };
+    const cancelTurn = () =>
+      replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+    // One transient transport failure on the cancel route's first read.
+    failNextStatus = true;
+    const first = await cancelTurn();
+    expect(first.status).toBe(503);
+    expect(first.body.code).toBe('managed_runtime_cancel_failed');
+    // The coordinator retries a failed cancel: the adopted lease must stay
+    // owed, or the retried takeover can never be driven again.
+    expect(release).not.toHaveBeenCalled();
+    const retried = await cancelTurn();
+    expect(retried.status).toBe(200);
+    expect(retried.body.accepted).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('66666666-6666-4666-8666-666666666666');
+    // The only handback is the successful retry's own.
+    expect(release).toHaveBeenCalledTimes(1);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('keeps the adoption owed when the terminal cancel record fails', async () => {
+    await parkToolTurn();
+    let released = false;
+    acquireSpy.mockImplementation(async () => {
+      if (released)
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'runtime_session_not_acquirable',
+        );
+    });
+    // The parked execution already settled before the owner died: the
+    // cancel only has to confirm it, settle the Turn, and release.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockImplementation(async () => {
+        released = true;
+      });
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let failTerminalWrite = false;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      function (this: ManagedSessionRecordSink, record) {
+        if (failTerminalWrite && record.subtype === 'turn_result') {
+          failTerminalWrite = false;
+          throw new Error('store hiccup');
+        }
+        return originalWrite.call(this, record);
+      },
+    );
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      checkpointId: string;
+      activationId: string;
+    };
+    const cancelTurn = () =>
+      replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+    // A store hiccup on the terminal turn_result write only. Releasing the
+    // adopted session before that write would leave the Turn unsettled with
+    // its identity RELEASED — no retry could ever re-acquire it.
+    failTerminalWrite = true;
+    const first = await cancelTurn();
+    expect(first.status).toBe(503);
+    expect(first.body.code).toBe('managed_runtime_cancel_failed');
+    expect(release).not.toHaveBeenCalled();
+    // The first attempt settled the checkpoint before the write failed, so
+    // the bare retried cancel no longer matches its load-time identity. The
+    // coordinator's loop always re-derives the identity from a fresh
+    // takeover load before re-cancelling (recoverManagedRuntime →
+    // cancelManagedRuntime), and the owed, still-READY lease is what keeps
+    // that reload's acquire idempotent.
+    const mismatched = await cancelTurn();
+    expect(mismatched.status).toBe(409);
+    expect(mismatched.body.code).toBe('hosted_recovery_identity_mismatch');
+    expect(release).not.toHaveBeenCalled();
+    // Nothing falsely settled: no terminal record, identity still
+    // re-acquirable — the poisoned Broker model would have answered 409
+    // runtime_session_not_acquirable here had any release leaked.
+    expect(acquireSpy).toHaveBeenCalledTimes(1);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(
+      (
+        transcript.body.events as Array<{ type: string; promptId?: string }>
+      ).filter(
+        (event) =>
+          event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+      ),
+    ).toHaveLength(0);
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
   it('refuses to settle a cancellation the Broker never confirmed', async () => {
     await parkToolTurn();
     // The cancel is accepted but the stop can never be observed: the
