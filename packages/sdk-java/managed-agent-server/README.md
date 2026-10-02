@@ -280,7 +280,25 @@ for transport identity. Responses under the private prefix use
 
 The full WebShell can keep an ordinary Qwen daemon for its existing chat,
 workspace, settings, and terminal surfaces while routing only the Managed
-panel to this Spring service. Start an ordinary `qwen serve` on port 4170 in
+panel to this Spring service.
+
+The one-shot launcher starts the ordinary daemon and the private Hosted
+Harness from TypeScript source, writes the Harness wiring
+(`QWEN_MANAGED_AGENT_HARNESS_*` and the rotating capability digest) to the
+git-ignored `.qwen/managed-agent-dev/spring.env`, waits for
+`/actuator/health` on the Spring service (`--skip-java-wait` bypasses), and
+opens the WebShell with the Managed panel selected:
+
+```bash
+npm run dev:managed-agent
+# in a second terminal, before the Java health wait expires (10 min):
+source .qwen/managed-agent-dev/spring.env
+mvn -f packages/sdk-java/managed-agent-server/pom.xml spring-boot:run
+```
+
+The Managed URL and ports print at startup, along with the `spring.env`
+path that carries the Harness token; ports auto-increment when busy. To wire
+the pieces by hand instead, start an ordinary `qwen serve` on port 4170 in
 addition to the private Hosted Harness used by Spring, then run from the
 repository root:
 
