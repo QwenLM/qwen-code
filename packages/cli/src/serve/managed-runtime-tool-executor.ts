@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
@@ -100,6 +101,12 @@ export interface ManagedToolSet {
    */
   readonly sessionId: string;
   readonly directory?: string;
+  /**
+   * The mount root the Workspace-wide reads are confined to (the Session
+   * directory can be a subdirectory of it). Realpath'd by the mount before
+   * installation, so a boundary check compares against it verbatim.
+   */
+  readonly workspaceRoot?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
   /**
    * Whether a shell `directory` lies inside the tools' workspace. Calls run
@@ -791,6 +798,37 @@ export class ManagedToolExecutor {
           params['file_path'].trim(),
         );
       }
+      if (
+        entry.toolName === ReadFileTool.Name &&
+        typeof params['file_path'] === 'string' &&
+        (tools.workspaceRoot ?? tools.directory) !== undefined
+      ) {
+        // The mount realpaths the Session directory; the file half needs the
+        // same check or a symlink planted in the Workspace (git preserves
+        // them) turns a read into a host-path one — and the harness's
+        // automatic context read promotes what it reads into the system
+        // instruction. A file that does not exist yet falls through to the
+        // tool's own not-found report.
+        let real: string | undefined;
+        try {
+          real = await fs.realpath(params['file_path']);
+        } catch {
+          real = undefined;
+        }
+        if (real !== undefined) {
+          const boundary = tools.workspaceRoot ?? tools.directory!;
+          const rel = path.relative(boundary, real);
+          if (
+            rel === '..' ||
+            rel.startsWith(`..${path.sep}`) ||
+            path.isAbsolute(rel)
+          ) {
+            throw new Error(
+              `Path '${params['file_path']}' is not within the Workspace directory.`,
+            );
+          }
+        }
+      }
       if (entry.toolName === GlobTool.Name) {
         // Glob's own validation admits external paths, so the executor pins
         // the search to the Session's installed context: the workspace-wide
@@ -807,7 +845,14 @@ export class ManagedToolExecutor {
             ? root
             : path.resolve(root, requested);
         const relative = path.relative(root, resolved);
-        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        // A boundary test, not a prefix one: `..data` is a directory INSIDE
+        // the Session (`path.relative` yields `..data`), while `..` and
+        // `../x` are escapes.
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
           throw new Error(
             `Path '${requested}' is not within the Workspace directory.`,
           );
@@ -872,13 +917,8 @@ export class ManagedToolExecutor {
       } else {
         result = await invoke();
       }
-      if (entry.toolName === GlobTool.Name) {
-        const root = tools.directory;
-        if (root === undefined)
-          throw new ManagedToolUnavailableError(
-            'Managed context directory is unavailable.',
-          );
-        result = relativizeGlobResult(result, root);
+      if (entry.toolName === GlobTool.Name && tools.directory !== undefined) {
+        result = relativizeGlobResult(result, tools.directory);
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
@@ -888,7 +928,13 @@ export class ManagedToolExecutor {
           : 'error',
         responseParts: [],
         error: {
-          message: error instanceof Error ? error.message : String(error),
+          // A thrown tool error (e.g. glob's validatePath on a missing
+          // directory) carries the Runtime host's absolute Session path —
+          // strip it the same way the glob result rewrite does.
+          message: stripSessionRoot(
+            error instanceof Error ? error.message : String(error),
+            tools.directory,
+          ),
         },
       };
     }
@@ -1037,6 +1083,7 @@ export function createManagedToolSet(
   return {
     sessionId,
     directory,
+    workspaceRoot,
     admitsDirectory: (candidate) =>
       config.getWorkspaceContext().isPathWithinWorkspace(candidate),
     tools: new Map(
@@ -1124,16 +1171,30 @@ function sameInvocation(
  */
 function relativizeGlobResult(result: ToolResult, directory: string) {
   if (typeof result.llmContent !== 'string') return result;
-  const root = path.resolve(directory);
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-  const bareRoot = new RegExp(
-    root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![/\\w.-])',
-    'g',
-  );
   return {
     ...result,
-    llmContent: result.llmContent.split(prefix).join('').replace(bareRoot, '.'),
+    llmContent: stripSessionRoot(result.llmContent, directory),
   };
+}
+
+/**
+ * Removes the Runtime host's absolute Session directory from model-visible
+ * text. The replacement is boundary-anchored: an occurrence of the root only
+ * rewrites at a path boundary (start of text, or after a character that
+ * cannot be part of a path segment), so a nested directory that repeats the
+ * root's tail (`<root>/sub/<root-tail>/notes.md`) is never collapsed into a
+ * wrong relative path.
+ */
+function stripSessionRoot(text: string, directory: string | undefined): string {
+  if (directory === undefined) return text;
+  const root = path.resolve(directory);
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundaryPrefix = new RegExp(
+    `(?<![/\\w.-])${escape(root + path.sep)}`,
+    'g',
+  );
+  const bareRoot = new RegExp(`(?<![/\\w.-])${escape(root)}(?![/\\w.-])`, 'g');
+  return text.replace(boundaryPrefix, '').replace(bareRoot, '.');
 }
 
 function toPayload(

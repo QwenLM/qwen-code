@@ -1025,6 +1025,47 @@ describe('Managed context tool gate', () => {
     );
   });
 
+  it('refuses a read whose file is a symlink escaping the Workspace', async () => {
+    const root = workspace(['services/api']);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+    const read = (callId: string, filePath: string) => ({
+      ...shell('session-1', callId, ''),
+      toolName: 'read_file',
+      input: { file_path: filePath },
+    });
+
+    // A planted symlink targeting a file outside the mount must not be
+    // followed — the harness's context read promotes what it reads into the
+    // system instruction.
+    const outside = workspace(['staged']);
+    fs.writeFileSync(
+      path.join(outside, 'staged/host-secret.txt'),
+      'host-secret',
+    );
+    fs.symlinkSync(
+      path.join(outside, 'staged/host-secret.txt'),
+      path.join(root, 'services/api/AGENTS.md'),
+    );
+    const escaped = await (
+      await post(origin, EXECUTE, read('call-1', 'AGENTS.md'))
+    ).json();
+    expect(escaped.result.executionStatus).toBe('error');
+    expect(JSON.stringify(escaped)).not.toContain('host-secret');
+
+    // Positive control: a regular file inside the Session still reads.
+    fs.rmSync(path.join(root, 'services/api/AGENTS.md'));
+    fs.writeFileSync(
+      path.join(root, 'services/api/AGENTS.md'),
+      'in-bounds-rules',
+    );
+    const plain = await (
+      await post(origin, EXECUTE, read('call-2', 'AGENTS.md'))
+    ).json();
+    expect(plain.result.executionStatus).toBe('success');
+    expect(JSON.stringify(plain)).toContain('in-bounds-rules');
+  });
+
   it('refuses new calls once the directory is gone, and still answers settled ones', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });

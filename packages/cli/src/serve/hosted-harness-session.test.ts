@@ -1476,7 +1476,19 @@ describe('Hosted Harness no-tool session', () => {
       ),
     ).toHaveLength(1);
     expect(state.model).toHaveBeenCalledOnce();
-    expect(execute).toHaveBeenCalledOnce();
+    // The acquisition also dispatches the two Workspace-context reads through
+    // the same broker; count only the model-driven execution.
+    expect(
+      execute.mock.calls.filter((call) => {
+        const payload = JSON.parse(call[1] as string) as {
+          input?: { file_path?: string };
+        };
+        return (
+          payload.input?.file_path !== 'QWEN.md' &&
+          payload.input?.file_path !== 'AGENTS.md'
+        );
+      }),
+    ).toHaveLength(1);
     expect(
       requests.filter((operation) => operation.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -2876,7 +2888,7 @@ describe('Hosted Harness no-tool session', () => {
       toolProfile: 'hosted-workspace-files/2',
     };
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send(
       body,
     );
@@ -7000,12 +7012,42 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
     const EXEC_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const EXEC_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare')
-      .mockResolvedValueOnce(EXEC_A)
-      .mockResolvedValue(EXEC_B);
+    // The Workspace-context fetch reserves its own executions through the
+    // same prepare call; route by the request digest instead of call order.
+    const contextDigests = new Set(
+      ['QWEN.md', 'AGENTS.md'].map(
+        (name) =>
+          `sha256:${createHash('sha256')
+            .update(
+              JSON.stringify({
+                toolName: 'read_file',
+                input: { file_path: name },
+              }),
+            )
+            .digest('hex')}`,
+      ),
+    );
+    const pendingIds = [EXEC_A, EXEC_B];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockImplementation(
+      async (_callId, digest) =>
+        contextDigests.has(digest)
+          ? randomUUID()
+          : (pendingIds.shift() ?? EXEC_B),
+    );
     const execute = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'execute')
-      .mockImplementation((id, _payload, signal) => {
+      .mockImplementation((id, payload, signal) => {
+        // The Workspace-context reads ride the same broker; settle them
+        // immediately so they never consume the parked-execution ids.
+        if (
+          typeof payload === 'string' &&
+          (payload.includes('QWEN.md') || payload.includes('AGENTS.md'))
+        ) {
+          return Promise.resolve({
+            executionStatus: 'success',
+            responseParts: [{ text: '' }],
+          }) as never;
+        }
         if (id === EXEC_A) {
           return Promise.resolve({
             executionStatus: 'success',

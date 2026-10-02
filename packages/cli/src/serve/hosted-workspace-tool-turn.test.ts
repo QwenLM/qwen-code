@@ -1198,6 +1198,77 @@ it('reads Workspace instructions once after the first acquisition', async () => 
   expect(broker.execute).toHaveBeenCalledTimes(4);
 });
 
+it('does not latch the context slot when its reads are cancelled', async () => {
+  // An aborted read resolves `{executionStatus: 'cancelled'}` (the broker
+  // POSTs :cancel instead of throwing). Writing `''` then would pin "no
+  // Workspace context" for the Session's whole attached life — the retry
+  // gate reads `undefined` as "not fetched yet", so the slot must stay
+  // undefined and the next turn must re-dispatch both reads.
+  const slot = contextSlot();
+  broker.execute.mockImplementation(async (_id: string, payload: string) => {
+    const parsed = JSON.parse(payload) as {
+      toolName: string;
+      input: { file_path?: string };
+    };
+    if (
+      parsed.input.file_path === 'QWEN.md' ||
+      parsed.input.file_path === 'AGENTS.md'
+    ) {
+      // Context read payload — cancelled, as an aborted signal produces.
+      return { executionStatus: 'cancelled', responseParts: [] };
+    }
+    return {
+      executionStatus: 'success',
+      responseParts: [{ text: 'original result' }],
+    };
+  });
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.read()).toBeUndefined();
+  // Both cancelled reads ran; the write was skipped because the batch is
+  // indefinite — no latched "no context" for this Session.
+  const ctxAfterFirst = broker.execute.mock.calls.filter(([, payload]) =>
+    ['QWEN.md', 'AGENTS.md'].includes(
+      (JSON.parse(payload as string) as { input?: { file_path?: string } })
+        .input?.file_path ?? '',
+    ),
+  ).length;
+  expect(ctxAfterFirst).toBe(2);
+  await turn.consumeResults();
+  await turn.finish();
+
+  const second = turnWithContext(slot, 'prompt-2');
+  await second.execute(
+    [{ ...calls[0], callId: 'call-next' }],
+    [
+      {
+        functionCall: {
+          id: 'call-next',
+          name: 'read_file',
+          args: { file_path: 'file.txt' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  await second.consumeResults();
+  await second.finish();
+  // The slot was never latched, so the retry turn re-dispatches both reads.
+  const ctxTotal = broker.execute.mock.calls.filter(([, payload]) =>
+    ['QWEN.md', 'AGENTS.md'].includes(
+      (JSON.parse(payload as string) as { input?: { file_path?: string } })
+        .input?.file_path ?? '',
+    ),
+  ).length;
+  expect(ctxTotal).toBe(4);
+});
+
 it('never blocks a turn when the Workspace context read fails', async () => {
   const slot = contextSlot();
   let first = true;
@@ -1222,6 +1293,12 @@ it('never blocks a turn when the Workspace context read fails', async () => {
     output: 'original result',
   });
   expect(slot.value).toBeUndefined();
+  // The failed context read reserved a durable execution (prepare), so the
+  // swallow must cancel it — otherwise the record stays active and
+  // releaseSession 409s the Session for good. Assert by the reserved id:
+  // the first execute call's execution id is the context read's own.
+  const contextExecutionId = broker.execute.mock.calls[0][0];
+  expect(broker.cancel).toHaveBeenCalledWith(contextExecutionId);
   await turn.consumeResults();
   await turn.finish();
 });
@@ -1513,7 +1590,9 @@ it.each(['files', 'shell', 'mcp'])(
       undefined,
       undefined,
       profile === 'mcp'
-        ? { mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession }
+        ? {
+            mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+          }
         : undefined,
     );
     const declarations = await described.declarations(
@@ -1582,7 +1661,9 @@ it.each(['refresh', 'warmup'] as const)(
       undefined,
       undefined,
       undefined,
-      { mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     );
     const abort = new AbortController();
     const reason = new Error('cancelled test turn');
@@ -1618,7 +1699,9 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
     undefined,
     undefined,
     undefined,
-    { mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
   );
   await mcpTurn.execute(calls, parts, 'model', new AbortController().signal);
   await mcpTurn.consumeResults();
@@ -1648,7 +1731,9 @@ it('executes against the declarations actually advertised before a catalog repla
     undefined,
     undefined,
     undefined,
-    { mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
   );
   expect(
     (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
@@ -2277,7 +2362,9 @@ it.each(['allow', 'deny'])(
       undefined,
       undefined,
       { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-      { mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     );
     const call = { ...calls[0], name: 'mcp_echo', args: { text: 'hello' } };
     const running = turn.execute(

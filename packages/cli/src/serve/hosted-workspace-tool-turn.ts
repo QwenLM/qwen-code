@@ -545,9 +545,19 @@ export class HostedWorkspaceToolTurn {
   private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
     const slot = this.context;
     if (!slot) return;
+    // A failed read leaves a reserved execution no recovery path can
+    // enumerate — cancel it before swallowing. An aborted read must not
+    // latch the slot at all: `''` means "the Workspace has none", so writing
+    // after a cancel would turn a retryable miss into permanent absence.
+    let inFlight: string | undefined;
     try {
       const sections: string[] = [];
+      // A cancelled or never-started read says nothing about the file — mark
+      // the batch indefinite and skip the write, so the slot stays
+      // undefined and a later turn retries instead of latching "no context".
+      let indefinite = false;
       for (const name of HOSTED_WORKSPACE_CONTEXT_FILES) {
+        if (signal.aborted) return;
         const payloadJson = JSON.stringify({
           toolName: 'read_file',
           input: { file_path: name },
@@ -559,11 +569,20 @@ export class HostedWorkspaceToolTurn {
           undefined,
           this.promptId,
         );
+        inFlight = executionCallId;
         const result = await this.broker.execute(
           executionCallId,
           payloadJson,
           signal,
         );
+        inFlight = undefined;
+        if (
+          result.executionStatus === 'cancelled' ||
+          result.executionStatus === 'not_started'
+        ) {
+          indefinite = true;
+          continue;
+        }
         if (result.executionStatus !== 'success') continue;
         const text = (result.responseParts as Array<{ text?: unknown }>)
           .flatMap((part) =>
@@ -576,8 +595,12 @@ export class HostedWorkspaceToolTurn {
             `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
           );
       }
+      if (signal.aborted || indefinite) return;
       slot.write(sections.join('\n\n'));
     } catch (cause) {
+      if (inFlight !== undefined) {
+        await this.broker.cancel(inFlight).catch(() => undefined);
+      }
       writeStderrLineSafe(
         'qwen serve: Hosted Workspace context read failed: ' + String(cause),
       );
