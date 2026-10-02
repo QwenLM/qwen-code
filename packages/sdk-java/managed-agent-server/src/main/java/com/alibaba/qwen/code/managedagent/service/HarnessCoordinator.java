@@ -566,16 +566,25 @@ public class HarnessCoordinator {
                         session.tenantId(), session.sessionId(),
                         session.harnessBootId() != null);
             } catch (RuntimeException refusal) {
-                // A refused attach can never reach the running Turn, and no
-                // sweeper re-claims a Turn whose lease the live consumer keeps
-                // renewing: settle the Turn the API already answered 202 for
-                // instead of dropping the cancel, which would leave it running
-                // and then settling COMPLETED.
+                // A transient attach failure (a retryable broker refusal, a
+                // daemon 5xx, a store error) recovers like any other
+                // cancellation failure: rethrown, it leaves the Turn
+                // CANCELLING for the dispatch sweep to re-attempt, instead
+                // of settling it permanently.
+                if (!(refusal instanceof RuntimeBrokerException broker)
+                        || broker.isRetryable()) {
+                    throw refusal;
+                }
+                // A permanent refusal can never reach the running Turn, and
+                // no sweeper re-claims a Turn whose lease the live consumer
+                // keeps renewing: settle the Turn the API already answered
+                // 202 for instead of dropping the cancel, which would leave
+                // it running and then settling COMPLETED.
                 LOG.warn("Managed Turn cancellation was refused tenant={}"
                                 + " session={} turn={} failure={}",
                         tenantId, sessionId, turnId,
                         refusal.getClass().getSimpleName());
-                fail(turn, cancelRefusalCode(refusal),
+                fail(turn, broker.getCode(),
                         "The Hosted Harness refused the Turn cancellation.");
                 return;
             }
@@ -601,14 +610,6 @@ public class HarnessCoordinator {
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
         return true;
-    }
-
-    private static String cancelRefusalCode(RuntimeException refusal) {
-        if (refusal instanceof RuntimeBrokerException broker
-                && broker.getCode() != null) {
-            return broker.getCode();
-        }
-        return "hosted_harness_unavailable";
     }
 
     private boolean transientFailure(TurnRecord turn,
