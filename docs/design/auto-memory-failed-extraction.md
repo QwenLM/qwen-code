@@ -6,7 +6,7 @@ Status: implemented correctness fix for #13158 R1-3; failure cost and backlog ac
 
 ## Problem and scope
 
-A fork can write a valid memory file before failing or being cancelled. Its result retains successful `filesWritten`, but the extraction planner throws before mapping them to memory topics and scopes. The document remains on disk without a rebuilt index, and the manager does not record user-memory mutation. A successful fork followed by an index, refresh, or cursor-write error similarly loses its known write scope.
+A fork can write a valid memory file before failing or being cancelled. Its result retains successful `filesWritten`, but the extraction planner throws before mapping them to memory topics and scopes. The document remains on disk without a rebuilt index, and the manager does not record user-memory mutation. A successful fork followed by an index or cursor-write error similarly loses its known write scope.
 
 Recover reported writes without advancing a failed extraction's cursor. Apply the same durability rule to the default and experimental window paths. Keep existing window selection, budgets, cooldown, queue and drain behavior.
 
@@ -18,7 +18,7 @@ Reuse the existing project-index error propagation and best-effort user-index po
 
 ## Constraints and risks
 
-Only reported successful writes can be attributed to the fork. A thrown fork without a result carries no write evidence. Indexing uses the existing document validation; a malformed partial file does not become valid merely because the fork reported it. User-index rebuild failure remains best-effort and does not prove user recall availability. The original failed cursor is retained, so the same history can be retried.
+Only reported successful writes can be attributed to the fork. A thrown fork without a result carries no write evidence. Indexing uses the existing document validation; a malformed partial file does not become valid merely because the fork reported it. User-index rebuild failure remains best-effort and does not prove user recall availability. Live memory instruction refresh also remains best-effort: its existing helper catches and warns on underlying refresh errors, so those errors do not reach the typed failure context. Index recovery does not prove live prompt refresh succeeded. The original failed cursor is retained, so the same history can be retried.
 
 This correction does not bound repeated failures, move beyond a failing window, schedule remaining history, replay discarded history across sessions, or establish model quality or token savings. Those requirements remain open. Skipping a failed window on the assumption that no file was written is unsafe.
 
