@@ -438,60 +438,56 @@ describe('managed auto-memory indexer', () => {
     expect(body.length).toBeLessThanOrEqual(25_000);
   });
 
-  it('keeps short entries sorted after a run of merely-long ones', () => {
-    // A run of filesystem-legal but very long paths exhausts the aggregate
-    // budget between them, and cutting the TAIL at the budget silently dropped
-    // every entry sorted after them from the committed index. Dropping each
-    // entry that does not fit the REMAINING budget — and keeping on measuring —
-    // brings them back. No single entry here is over budget, so this is the
-    // shape a "skip only the one oversized entry" rule cannot fix.
-    const doc = (relativePath: string, title: string, description: string) => ({
-      scope: 'team' as const,
-      type: 'feedback' as const,
-      filePath: `/tmp/${relativePath}`,
-      relativePath,
-      filename: path.basename(relativePath),
-      title,
-      description,
-      category: 'uncategorized' as const,
-      keywords: [],
-      usageScenarios: [],
-      body: '',
-      mtimeMs: 0,
-    });
-    // ~2 KB of plain `[a-z/.-]` each: legal, resolving, and 13 of them together
-    // past MAX_INDEX_BYTES. `aaa-` keeps them sorted ahead of `zzz/`.
-    const longPath = (seed: number) =>
-      `aaa-long/${seed}/${'x'.repeat(1_980)}/note-${seed}.md`;
-    const shortPaths = [1, 2, 3, 4, 5].map(
-      (n) => `zzz/feedback/real-fact-${n}.md`,
-    );
-    const content = buildTeamAutoMemoryIndex([
-      ...Array.from({ length: 13 }, (_, i) => i + 1).map((s) =>
-        doc(longPath(s), `long ${s}`, `shared long fact ${s}`),
-      ),
-      // Distinct descriptions: identical ones would be collapsed into a single
-      // grouped entry, which is the dedup this builder is for, not what this
-      // case measures.
-      ...shortPaths.map((p, i) =>
-        doc(p, `real fact ${i + 1}`, `distinct fact ${i + 1} worth keeping`),
-      ),
-    ]);
+  it.each(['project', 'team'] as const)(
+    'keeps ordinary %s entries before spending spare budget on long links',
+    (scope) => {
+      const doc = (relativePath: string, title: string) => ({
+        scope,
+        type: 'feedback' as const,
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: path.basename(relativePath),
+        title,
+        description: `Distinct fact ${title}`,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      });
+      const longPaths = Array.from(
+        { length: 12 },
+        (_, i) => `!${i}/${Array(4).fill('('.repeat(200)).join('/')}/note.md`,
+      );
+      const shortPaths = Array.from(
+        { length: 50 },
+        (_, i) => `zzz/short-${i}.md`,
+      );
+      const docs = [
+        ...longPaths.map((p, i) => doc(p, `Long ${i}`)),
+        ...shortPaths.map((p, i) => doc(p, `Short ${i}`)),
+      ];
+      const build =
+        scope === 'team'
+          ? buildTeamAutoMemoryIndex
+          : buildManagedAutoMemoryIndex;
+      const content = build(docs);
+      const body = content.split('\n\n> WARNING')[0];
+      const targets = body
+        .split('\n')
+        .map((line) => decodeURIComponent(linkTarget(line)));
 
-    // Every legitimate short pointer still reaches the committed index…
-    for (const p of shortPaths) {
-      expect(content).toContain(`](${p})`);
-    }
-    // …and each surviving line is still one whole, resolving link.
-    const body = content.split('\n\n> WARNING')[0];
-    const entryLines = body.split('\n').filter((l) => l.startsWith('- ['));
-    expect(entryLines.length).toBeGreaterThan(0);
-    for (const line of entryLines) {
-      const target = linkTarget(line);
-      expect(decodeURIComponent(target)).toBe(target);
-    }
-    expect(body.length).toBeLessThanOrEqual(25_000);
-  });
+      for (const p of shortPaths) {
+        expect(targets).toContain(p);
+      }
+      expect(targets.some((p) => longPaths.includes(p))).toBe(true);
+      expect(targets).toEqual(
+        docs.map((d) => d.relativePath).filter((p) => targets.includes(p)),
+      );
+      expect(body.length).toBeLessThanOrEqual(25_000);
+      expect(content).toContain('WARNING: MEMORY.md is too large');
+    },
+  );
 
   it('does not let a few long non-ASCII paths evict the rest of the index', () => {
     // Regression: percent-encoding expanded one CJK char to nine, so six

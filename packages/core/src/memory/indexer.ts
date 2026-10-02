@@ -228,25 +228,25 @@ function assembleIndex(lines: string[]): string {
     : raw;
 
   if (truncated.length > MAX_INDEX_BYTES) {
-    // Cut on an entry boundary only: slicing mid-line would emit a half-written
-    // `](path)` link. Drop each entry that does not fit the REMAINING budget
-    // whole and keep measuring the ones after it — the same rule `docIndexLine`
-    // already applies to "(also: …)" siblings — so one pathological entry costs
-    // only itself instead of every entry sorted behind it. Emptying the buffer
-    // here (what `lastIndexOf('\n', MAX_INDEX_BYTES)` returning -1 used to do
-    // when the FIRST entry alone exceeded the budget) discarded the whole index
-    // while the warning below still claimed "only part of it was written".
-    const kept: string[] = [];
+    // Reserve space for entries within the normal line budget before letting
+    // long links use the remainder. Keep the original output order.
+    const entries = truncated.split('\n');
+    const kept = new Set<number>();
     let size = 0;
-    for (const line of truncated.split('\n')) {
-      const next = kept.length === 0 ? line.length : size + 1 + line.length;
-      if (next > MAX_INDEX_BYTES) {
-        continue;
+    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_BYTES]) {
+      for (const [index, line] of entries.entries()) {
+        if (kept.has(index) || line.length > limit) {
+          continue;
+        }
+        const next = size + (kept.size > 0 ? 1 : 0) + line.length;
+        if (next > MAX_INDEX_BYTES) {
+          continue;
+        }
+        size = next;
+        kept.add(index);
       }
-      size = next;
-      kept.push(line);
     }
-    truncated = kept.join('\n');
+    truncated = entries.filter((_, index) => kept.has(index)).join('\n');
   }
 
   if (!wasLineTruncated && truncated.length === raw.length) {
