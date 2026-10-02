@@ -102,6 +102,7 @@ export async function declareTargetAfterEmptyBridgedCall(
     return false;
   if (
     typeof registry.revealDeferredTool !== 'function' ||
+    registry.isPermissionDeferred?.(targetName) === true ||
     !registry.isDeferredAndHidden(targetName)
   ) {
     return false;

@@ -177,6 +177,18 @@ describe('declareTargetAfterEmptyBridgedCall (#12889)', () => {
     expect(setTools).not.toHaveBeenCalled();
   });
 
+  it('keeps a target demoted by tools.eager behind the bridge', async () => {
+    const registry = {
+      ...revealRegistry(),
+      isPermissionDeferred: vi.fn(() => true),
+    };
+    const setTools = vi.fn(async () => {});
+
+    await expect(declare(registry, { setTools }, {})).resolves.toBe(false);
+    expect(registry.revealDeferredTool).not.toHaveBeenCalled();
+    expect(setTools).not.toHaveBeenCalled();
+  });
+
   it('does nothing for a visible target, without a client, or in a subagent', async () => {
     const setTools = vi.fn(async () => {});
     const visible = revealRegistry(false);
