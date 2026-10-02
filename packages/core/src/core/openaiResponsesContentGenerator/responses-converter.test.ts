@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type {
   Content,
   FunctionDeclaration,
+  GenerateContentParameters,
   GenerateContentResponse,
   Part,
   FunctionResponsePart,
@@ -26,12 +27,18 @@ import type {
   ResponsesApiFunctionCallOutputItem,
   ResponsesApiMessageItem,
   ResponsesApiReasoningItem,
+  ResponsesApiInputItem,
   ResponsesSSEEvent,
 } from './types.js';
 import { ToolCallTool } from '../../tools/tool-call.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
-import { content, fnCall, userText } from '../../test-utils/model-fixtures.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  userText,
+} from '../../test-utils/model-fixtures.js';
 
 type Resp = GenerateContentResponse | null;
 
@@ -110,6 +117,227 @@ function thrownBy(fn: () => unknown): unknown {
 
 const A_TS_ARGS = '{"path":"a.ts"}';
 const READ_A_TS = [fnCall('read_file', { path: 'a.ts' }, 'call_1')];
+
+describe('freeform exec', () => {
+  const source = String.raw`const r = await tools.node_repl({code: "console.log('一\\n二'.split('\\n')); console.log(/issues\\/[0-9]/.test('issues/7'));"});
+text(r);`;
+  const call = {
+    type: 'custom_tool_call' as const,
+    id: 'ctc_1',
+    call_id: 'call_exec',
+    name: 'exec',
+    input: source,
+  };
+  const request: GenerateContentParameters = {
+    model: 'gpt-6-astra',
+    contents: [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call_exec', name: 'exec', args: { source } } },
+          {
+            functionCall: {
+              id: 'call_read',
+              name: 'read_file',
+              args: { path: 'a' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_exec',
+              response: { output: '一\n二' },
+            },
+          },
+          {
+            functionResponse: {
+              id: 'call_read',
+              name: 'read_file',
+              response: { output: 'file' },
+            },
+          },
+        ],
+      },
+    ],
+    config: {
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: 'exec',
+              description: 'Execute JavaScript',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { source: { type: 'string' } },
+                required: ['source'],
+              },
+            },
+            {
+              name: 'read_file',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it('exposes only exec as a custom tool when enabled', () => {
+    const defaults = convertGeminiToolsToResponsesTools(request)!;
+    const enabled = convertGeminiToolsToResponsesTools(request, true)!;
+    expect(defaults.map((t) => t.type)).toEqual(['function', 'function']);
+    expect(enabled[0]).toEqual({
+      type: 'custom',
+      name: 'exec',
+      format: { type: 'text' },
+      description: expect.stringContaining('raw JavaScript source'),
+    });
+    expect(enabled[1]).toEqual(defaults[1]);
+  });
+
+  it('uses the completed input unchanged and never executes partial input', () => {
+    const state = new ResponsesStreamState();
+    for (const event of [
+      {
+        event: 'response.output_item.added',
+        data: { output_index: 0, item: { ...call, input: '' } },
+      },
+      {
+        event: 'response.custom_tool_call_input.delta',
+        data: { output_index: 0, delta: 'incomplete' },
+      },
+      {
+        event: 'response.custom_tool_call_input.done',
+        data: { output_index: 0, input: source },
+      },
+    ] satisfies ResponsesSSEEvent[]) {
+      expect(
+        convertResponsesEventToGemini(event, request.model, state),
+      ).toBeNull();
+    }
+    const result = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: { output_index: 0, item: call },
+      },
+      request.model,
+      state,
+    );
+    expect(result?.functionCalls).toEqual([
+      { id: 'call_exec', name: 'exec', args: { source } },
+    ]);
+  });
+
+  it('accepts a complete custom call without earlier deltas', () => {
+    const result = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: { output_index: 0, item: call },
+      },
+      request.model,
+      new ResponsesStreamState(),
+    );
+    expect(result?.functionCalls?.[0]?.args).toEqual({ source });
+  });
+
+  it('preserves unknown custom calls for scheduler validation and replay', () => {
+    const result = conv('response.output_item.done', {
+      output_index: 0,
+      item: { ...call, name: 'unknown_tool' },
+    });
+    expect(result?.functionCalls).toEqual([
+      { id: call.call_id, name: 'unknown_tool', args: { source } },
+    ]);
+
+    const error =
+      'Tool "unknown_tool" is unavailable on this CodeModeOnly call surface.';
+    const { input } = convertGeminiContentsToResponsesInput(
+      {
+        model: request.model,
+        contents: [
+          content('model', ...partsOf(result)!),
+          content('user', fnResponse('unknown_tool', { error }, call.call_id)),
+        ],
+      },
+      true,
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call',
+        call_id: call.call_id,
+        name: 'unknown_tool',
+        arguments: JSON.stringify({ source }),
+      },
+      { type: 'function_call_output', call_id: call.call_id, output: error },
+    ]);
+    expect(cleanOrphanedFunctionCalls(input)).toEqual(input);
+  });
+
+  it('replays raw source and matching output while preserving ordinary calls', () => {
+    const defaults = convertGeminiContentsToResponsesInput(request).input;
+    const enabled = convertGeminiContentsToResponsesInput(request, true).input;
+    expect(enabled).toEqual([
+      {
+        type: 'custom_tool_call',
+        call_id: 'call_exec',
+        name: 'exec',
+        input: source,
+      },
+      defaults[1],
+      {
+        type: 'custom_tool_call_output',
+        call_id: 'call_exec',
+        output: '一\n二',
+      },
+      defaults[3],
+    ]);
+    expect(defaults[0]).toEqual({
+      type: 'function_call',
+      call_id: 'call_exec',
+      name: 'exec',
+      arguments: JSON.stringify({ source }),
+    });
+    expect(defaults[2]?.type).toBe('function_call_output');
+    expect(cleanOrphanedFunctionCalls(enabled)).toEqual(enabled);
+    expect(
+      convertGeminiContentsToResponsesInput(
+        { ...request, config: undefined },
+        true,
+      ).input,
+    ).toEqual(enabled);
+  });
+
+  it('drops orphaned and mismatched custom call/output pairs', () => {
+    const items: ResponsesApiInputItem[] = [
+      {
+        type: 'custom_tool_call',
+        call_id: 'orphan',
+        name: 'exec',
+        input: source,
+      },
+      { type: 'custom_tool_call_output', call_id: 'missing', output: 'lost' },
+      {
+        type: 'custom_tool_call',
+        call_id: 'mismatch',
+        name: 'exec',
+        input: source,
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'mismatch',
+        output: 'wrong type',
+      },
+    ];
+    expect(cleanOrphanedFunctionCalls(items)).toEqual([]);
+  });
+});
 
 describe('convertResponsesEventToGemini', () => {
   it('emits a plain text chunk for response.output_text.delta', () => {
