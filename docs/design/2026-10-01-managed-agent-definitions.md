@@ -42,7 +42,7 @@ change Harness execution and needs its own design.
 
 ### 4.1 Storage
 
-Flyway `V27` adds two tables. `managed_agent_definition` holds one row per
+Flyway `V28` adds two tables. `managed_agent_definition` holds one row per
 revision, keyed by tenant, agent ID and revision number, with the digest, the
 request's JSON and the creation time. Rows are only inserted.
 `managed_agent_definition_command` records each create or update under its

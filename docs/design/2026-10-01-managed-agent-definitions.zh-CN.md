@@ -38,7 +38,7 @@ revision；D8c 让定义字段影响 Harness 执行，需要单独的设计。
 
 ### 4.1 存储
 
-Flyway `V27` 新增两张表。`managed_agent_definition` 每个 revision 一行，以租户、
+Flyway `V28` 新增两张表。`managed_agent_definition` 每个 revision 一行，以租户、
 agent ID 与 revision 号为键，保存 digest、请求 JSON 与创建时间，只插入不修改。
 `managed_agent_definition_command` 按租户与 `Idempotency-Key` 记录每次创建或
 更新，保存请求 digest 与该命令应答的 revision。
