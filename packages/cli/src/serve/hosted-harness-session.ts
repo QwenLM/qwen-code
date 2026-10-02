@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -127,6 +128,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
+const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
 
 interface HostedSession {
   managed: ManagedSession;
@@ -1366,7 +1368,8 @@ export function registerHostedHarnessSessionRoutes(
           ? {}
           : { allowInsecureHttp: store.allowInsecureHttp }),
       });
-    } catch {
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor refused:', cause);
       error(res, 400, 'invalid_managed_session_store');
       return;
     }

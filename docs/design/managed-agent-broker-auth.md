@@ -205,6 +205,12 @@ New configuration `qwen.managed-agent.internal-server`:
   a configured `binding-key` for the internal surface — unless
   `allow-insecure-bind` is set. The internal surface with no binding key
   is therefore loopback-only by construction.
+- Two more fail-fast guards: `internal-server.port` must differ from
+  `server.port` (the routing filter classifies by local port, and equal
+  port numbers on different addresses would serve `/internal/**` on the
+  public address), and the signing key must differ from the binding key
+  (a signing-key holder must not be able to mint journal writer
+  credentials).
 
 ### 4.4 Durable Session ownership for approvals (G4)
 

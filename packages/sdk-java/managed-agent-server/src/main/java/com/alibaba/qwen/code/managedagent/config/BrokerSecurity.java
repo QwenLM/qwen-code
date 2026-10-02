@@ -3,9 +3,12 @@ package com.alibaba.qwen.code.managedagent.config;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.stereotype.Component;
 
@@ -23,6 +26,8 @@ public class BrokerSecurity {
         SIGNED
     }
 
+    private static final Logger LOG = LoggerFactory.getLogger(
+            BrokerSecurity.class);
     private static final int MIN_SIGNING_KEY_BYTES = 32;
     private static final Pattern LOOPBACK_IPV4 = Pattern.compile(
             "^127(\\.(0|[1-9][0-9]{0,2})){3}$");
@@ -101,14 +106,34 @@ public class BrokerSecurity {
                 ? Duration.ofMinutes(5) : auth.getAllowedDrift();
         ManagedAgentProperties.InternalServer internal =
                 properties.getInternalServer();
+        String bindingKey = properties.getSessionStore().getBindingKey();
+        byte[] bindingKeyBytes = bindingKey == null || bindingKey.isBlank()
+                ? null : bindingKey.getBytes(StandardCharsets.UTF_8);
+        // The routing filter classifies by local port; equal port numbers on
+        // different addresses would let the public address serve /internal/**.
+        Integer publicPort = server.getPort();
+        if (internal.getPort() > 0 && publicPort != null && publicPort > 0
+                && internal.getPort() == publicPort.intValue()) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.internal-server.port must differ"
+                            + " from server.port; the surface routing is"
+                            + " port-based.");
+        }
+        // The two keys protect different domains; reusing one key hands a
+        // signing-key holder the journal write credential.
+        if (mode == Mode.SIGNED && bindingKeyBytes != null
+                && MessageDigest.isEqual(signingKey, bindingKeyBytes)) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.auth.signing-key and"
+                            + " session-store.binding-key must differ.");
+        }
         boolean internalExposed = internal.getPort() > 0
                 || properties.getSessionStore().isEnabled()
                 || properties.getToolPublication().isEnabled();
         boolean internalLoopback = internal.getPort() > 0
                 && isLoopback(internal.getAddress());
-        String bindingKey = properties.getSessionStore().getBindingKey();
         if (internalExposed && !allowInsecureBind
-                && (bindingKey == null || bindingKey.isBlank())
+                && bindingKeyBytes == null
                 && !(internal.getPort() > 0 ? internalLoopback
                         : publicLoopback)) {
             throw new IllegalStateException(
@@ -117,6 +142,12 @@ public class BrokerSecurity {
                             + " before it can leave a loopback address; set"
                             + " auth.allow-insecure-bind=true to override.");
         }
+        LOG.info(
+                "Managed Agent Broker security: mode={} internalPort={}"
+                        + " writerBinding={} allowInsecureBind={}",
+                mode, internal.getPort() > 0 ? internal.getPort() : "shared",
+                bindingKeyBytes != null ? "bound" : "unbound",
+                allowInsecureBind);
     }
 
     public Mode getMode() {

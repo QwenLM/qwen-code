@@ -104,7 +104,8 @@ class BrokerSecurityTest {
         assertThatThrownBy(() -> security(properties, "10.0.0.8"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("binding-key");
-        properties.getSessionStore().setBindingKey(KEY);
+        properties.getSessionStore().setBindingKey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assertThatCode(() -> security(properties, "10.0.0.8"))
                 .doesNotThrowAnyException();
 
@@ -125,6 +126,41 @@ class BrokerSecurityTest {
         assertThatThrownBy(() -> security(publications, "10.0.0.8"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("binding-key");
+    }
+
+    @Test
+    void refusesAnInternalPortEqualToThePublicPort() throws Exception {
+        // Equal port numbers on different addresses bind two sockets, and
+        // the port-based routing filter would serve /internal/** on the
+        // public address.
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getInternalServer().setPort(8080);
+        properties.getInternalServer().setAddress("127.0.0.1");
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("10.0.0.8"));
+        server.setPort(8080);
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("internal-server.port");
+        properties.getInternalServer().setPort(8081);
+        assertThatCode(() -> new BrokerSecurity(properties, server))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void refusesReusingTheSigningKeyAsTheBindingKey() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getSessionStore().setBindingKey(KEY);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must differ");
+        properties.getSessionStore().setBindingKey(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
     }
 
     @Test

@@ -192,6 +192,10 @@ writer_credential_invalid`（常数时间比较）。密钥为空时保持
   公网面要求 `signed` 模式，内部面要求已配置 `binding-key`——
   除非设置了 `allow-insecure-bind`。因此未配置绑定密钥时，内部面
   在构造上就是仅回环的。
+- 另有两条快速失败守卫：`internal-server.port` 必须与 `server.port`
+  不同（路由过滤器按本地端口分类，同号不同址会让公网地址服务
+  `/internal/**`）；签名密钥必须与 binding-key 不同（持有签名密钥者
+  不得能铸造 journal 写入凭证）。
 
 ### 4.4 审批的持久会话属主（G4）
 
