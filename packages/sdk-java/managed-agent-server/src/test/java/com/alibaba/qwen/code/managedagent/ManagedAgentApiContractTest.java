@@ -122,6 +122,8 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.AgentDefinitionRequest.class, List.of("AgentDefinitionRequest")),
+                    entry(ApiModels.AgentDefinition.class, List.of("AgentDefinition")),
                     entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
                     entry(ApiModels.WebShellPermissionResponse.class, List.of("WebShellPermissionResponse")),
                     entry(ApiModels.WebShellActionQueryRequest.class, List.of("WebShellActionQueryRequest")),
@@ -232,7 +234,8 @@ class ManagedAgentApiContractTest {
     void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
         Map<String, String> drift = new TreeMap<>();
         for (Operation operation : CONTRACT.operations()) {
-            if (!operation.path().startsWith("/v1/agents/")
+            if (!operation.path().equals("/v1/agents")
+                    && !operation.path().startsWith("/v1/agents/")
                     && !operation.path().startsWith(WEB_SHELL + "/")) {
                 continue;
             }
@@ -961,6 +964,7 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getSessionHookCatalog", 400,
                 get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
+        exchangeAgents(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1095,6 +1099,49 @@ class ManagedAgentApiContractTest {
      * Pages through the Turns of a new Session: the Turn its creation ran and
      * a failed Turn written after it.
      */
+    /**
+     * Creates a definition, adds a second revision and reads both, with the
+     * idempotency, validation and cross-tenant refusals.
+     */
+    private void exchangeAgents(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String body = """
+                {"model":{"id":"qwen3-coder-plus"},"instructions":"Review code.",
+                 "tools":[{"name":"read_file"}],
+                 "permission_policy":{"mode":"default"},
+                 "metadata":{"team":"contract"}}
+                """;
+        JsonNode created = json(exchange(drift, "createAgent", 202,
+                post("/v1/agents").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "agent-create"), body));
+        String agentId = created.path("id").asText();
+        assertThat(created.path("revision").asText()).isEqualTo("1");
+        assertThat(created.path("metadata").path("team").asText())
+                .isEqualTo("contract");
+        exchange(drift, "createAgent", 409, post("/v1/agents")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent-create"),
+                body.replace("Review code.", "Other."));
+        exchange(drift, "createAgent", 400, post("/v1/agents")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent create"),
+                body);
+        String changed = body.replace("Review code.", "Review code carefully.");
+        JsonNode updated = json(exchange(drift, "updateAgent", 202,
+                post("/v1/agents/{id}", agentId).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "agent-update"), changed));
+        assertThat(updated.path("id").asText()).isEqualTo(agentId);
+        assertThat(updated.path("revision").asText()).isEqualTo("2");
+        exchange(drift, "updateAgent", 404, post("/v1/agents/{id}", agentId)
+                .header(TENANT, otherTenant)
+                .header(IDEMPOTENCY_KEY, "agent-update"), changed);
+        JsonNode first = json(exchange(drift, "getAgent", 200,
+                get("/v1/agents/{id}", agentId).param("revision", "1")
+                        .header(TENANT, tenant), null));
+        assertThat(first.path("digest").asText())
+                .isEqualTo(created.path("digest").asText());
+        exchange(drift, "getAgent", 404, get("/v1/agents/{id}", agentId)
+                .header(TENANT, otherTenant), null);
+    }
+
     private void exchangeTurns(Map<String, String> drift, String tenant,
             String otherTenant) throws Exception {
         String sessionId = json(mvc.perform(post("/v1/agents/sessions")
