@@ -139,7 +139,17 @@ class ManagedAgentDefinitionTest {
         update(tenant, agentId, "key", DEFINITION)
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
-        assertThat(rows(tenant)).isEqualTo(1);
+        // The request digest covers the agent ID: an update key reused on
+        // another agent with the same body conflicts instead of replaying
+        // the first agent's revision.
+        String otherId = json(create(tenant, "other", DEFINITION)
+                .andExpect(status().isAccepted())).get("id").asText();
+        update(tenant, agentId, "update-key", DEFINITION)
+                .andExpect(status().isAccepted());
+        update(tenant, otherId, "update-key", DEFINITION)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
+        assertThat(rows(tenant)).isEqualTo(2);
     }
 
     @Test

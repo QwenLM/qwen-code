@@ -82,7 +82,8 @@ class TenantContextFilterTest {
     @Test
     void scopesTheBareAgentCollectionRoute() throws Exception {
         for (String path : new String[] {"/v1/agents",
-                "/v1/agents;jsessionid=abc", "/v1;route=public/agents"}) {
+                "/v1/agents;jsessionid=abc", "/v1;route=public/agents",
+                "/v1/%61gents"}) {
             MockHttpServletRequest bare = new MockHttpServletRequest("POST", path);
             MockHttpServletResponse response = new MockHttpServletResponse();
             MockFilterChain chain = new MockFilterChain();
