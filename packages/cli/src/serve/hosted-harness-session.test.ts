@@ -384,11 +384,15 @@ describe('Hosted Harness no-tool session', () => {
         ).send(operation)
       ).status,
     ).toBe(200);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const conflict = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
     ).send({ ...operation, input: { ...operation.input, message: 'changed' } });
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('hosted_hook_operation_conflict');
+    expect(log).not.toHaveBeenCalled();
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -1647,6 +1651,36 @@ describe('Hosted Harness no-tool session', () => {
         deleted_session_id: SESSION_ID,
       }),
     ]);
+  });
+
+  it('logs a failed Session deletion and keeps the Session usable', async () => {
+    const { server, authorize } = await hookApp();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'installActivation',
+    ).mockRejectedValueOnce(new Error('activation unavailable'));
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    expect(log).toHaveBeenCalledWith(
+      `qwen serve: Hosted Session ${SESSION_ID} close failed: Error: activation unavailable`,
+    );
+    // The busy guards run before body validation, so an empty prompt shows
+    // the deletion cleared its Hook flag.
+    const prompt = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({});
+    expect(prompt.status).toBe(400);
+    expect(prompt.body.code).toBe('invalid_hosted_prompt');
+    expect(
+      (await authorize(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
   });
 
   it('pins dynamic Hook revisions and rejects unscoped operations', async () => {

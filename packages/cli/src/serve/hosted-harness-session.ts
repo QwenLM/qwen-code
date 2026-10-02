@@ -3188,7 +3188,10 @@ export function registerHostedHarnessSessionRoutes(
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
-    } catch {
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} close failed: ${String(cause)}`,
+      );
       error(res, 503, 'managed_session_close_failed');
     } finally {
       session.mcpClosing = false;
