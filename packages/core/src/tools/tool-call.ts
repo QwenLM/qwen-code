@@ -11,7 +11,6 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
 import {
   canonicalToolName,
   resolveRegisteredToolName,
@@ -74,52 +73,6 @@ export function describeBridgedArgumentError(
   message: string,
 ): string {
   return `Deferred tool "${targetName}" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: ${message.replace(/\.$/, '')}. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "${targetName}".`;
-}
-
-/**
- * Recovery for a hidden target that a model could not reach through the
- * bridge (#12889). `tool_call` declares `arguments` as an open object, so a
- * model that cannot fill it — a constrained decoder, or a model that ignores
- * the target schema it reviewed — keeps sending `{}` and stops on the retry
- * guard. When a hidden deferred target reached through tool_call received no
- * arguments at all and its own validation rejected that, declare it directly
- * so the next request carries its real parameter schema.
- *
- * Primary session only: a subagent's declarations are not the LlmClient's.
- * Narrow on purpose — an ordinary argument mistake (any non-empty arguments)
- * never widens the declaration list, because a revealed tool stays declared
- * for the rest of the session. The cost is one prompt-prefix rebuild, paid
- * only on this failure path. Returns whether the target is now declared.
- */
-export async function declareTargetAfterEmptyBridgedCall(
-  registry: ToolRegistry,
-  client: { setTools(): Promise<void> } | null | undefined,
-  targetName: string,
-  args: Record<string, unknown> | undefined,
-): Promise<boolean> {
-  if (args && Object.keys(args).length > 0) return false;
-  if (!client || getCurrentAgentChat() || isSubagentLikeExecutionContext())
-    return false;
-  if (
-    typeof registry.revealDeferredTool !== 'function' ||
-    registry.isPermissionDeferred?.(targetName) === true ||
-    !registry.isDeferredAndHidden(targetName)
-  ) {
-    return false;
-  }
-  registry.revealDeferredTool(targetName);
-  try {
-    await client.setTools();
-  } catch {
-    registry.unrevealDeferredTool?.(targetName);
-    return false;
-  }
-  return true;
-}
-
-/** Appended to the bridged validation error once the target is declared. */
-export function describeDirectDeclaration(targetName: string): string {
-  return ` "${targetName}" is now declared directly with its full parameter schema: call "${targetName}" by name with its required arguments, not through ${ToolNames.TOOL_CALL}.`;
 }
 
 export async function resolveDeferredToolCall(

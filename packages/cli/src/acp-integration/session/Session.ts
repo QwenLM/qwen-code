@@ -19,12 +19,11 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  FinishReason,
-  type Content,
-  type FunctionCall,
-  type GenerateContentResponseUsageMetadata,
-  type Part,
+import type {
+  Content,
+  FunctionCall,
+  GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   type AgentRunContext,
@@ -113,9 +112,7 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
-  declareTargetAfterEmptyBridgedCall,
   describeBridgedArgumentError,
-  describeDirectDeclaration,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -2154,7 +2151,6 @@ function isCallerCausedModelRefusal(error: Error): boolean {
  */
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
-  private readonly truncatedToolCalls = new WeakSet<FunctionCall>();
   private pendingPrompt: AbortController | null = null;
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
@@ -8929,10 +8925,7 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
-    const truncatedToolCalls = this.truncatedToolCalls;
     const responseStream = (async function* () {
-      const functionCalls: FunctionCall[] = [];
-      let wasOutputTruncated = false;
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
@@ -8947,10 +8940,6 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
-            functionCalls.push(...(event.value.functionCalls ?? []));
-            wasOutputTruncated ||=
-              event.value.candidates?.[0]?.finishReason ===
-              FinishReason.MAX_TOKENS;
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
@@ -8959,8 +8948,6 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
-            functionCalls.length = 0;
-            wasOutputTruncated = false;
           }
           yield event;
         }
@@ -8968,9 +8955,6 @@ export class Session implements SessionContext {
           commitMemoryDelivery();
         }
       } finally {
-        if (wasOutputTruncated) {
-          for (const call of functionCalls) truncatedToolCalls.add(call);
-        }
         if (!committed && receivedChunk && abortSignal.aborted) {
           commitMemoryDelivery();
         }
@@ -15972,25 +15956,13 @@ export class Session implements SessionContext {
         } catch (e) {
           const caught = e instanceof Error ? e : new Error(String(e));
           // Same labelling as the scheduler: a target reached through
-          // tool_call names itself when its own build() rejects the arguments,
-          // and is declared directly when the bridge delivered none (#12889).
-          const bridgedBuildFailure =
-            bridgedThroughToolCall && !toolBuildSucceeded;
-          const declaredDirectly =
-            bridgedBuildFailure &&
-            !this.truncatedToolCalls.has(fc) &&
-            (await declareTargetAfterEmptyBridgedCall(
-              this.config.getToolRegistry(),
-              this.config.getLlmClient?.(),
-              toolName,
-              args,
-            ));
-          const error = bridgedBuildFailure
-            ? new Error(
-                describeBridgedArgumentError(toolName, caught.message) +
-                  (declaredDirectly ? describeDirectDeclaration(toolName) : ''),
-              )
-            : caught;
+          // tool_call names itself when its own build() rejects the arguments.
+          const error =
+            bridgedThroughToolCall && !toolBuildSucceeded
+              ? new Error(
+                  describeBridgedArgumentError(toolName, caught.message),
+                )
+              : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =

@@ -1195,7 +1195,6 @@ describe('CoreToolScheduler', () => {
       hasMatchingAskRule?: (ctx: unknown) => boolean;
     };
     deferredHiddenNames?: ReadonlySet<string>;
-    revealDeferredTool?: (name: string) => void;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
   }) {
@@ -1233,7 +1232,6 @@ describe('CoreToolScheduler', () => {
           getAllToolNames: () => [...options.toolsByName.keys()],
           isDeferredAndHidden: (name: string) =>
             options.deferredHiddenNames?.has(name) ?? false,
-          revealDeferredTool: options.revealDeferredTool,
         }),
         {
           getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
@@ -1696,136 +1694,6 @@ describe('CoreToolScheduler', () => {
     expect(message).toContain(`Deferred tool "${deferred.name}"`);
     expect(message).toContain("must have required property 'url'");
     expect(message).toContain(ToolNames.TOOL_SEARCH);
-  });
-
-  it('declares the target directly when the bridge delivered no arguments (#12889)', async () => {
-    const revealDeferredTool = vi.fn();
-    const setTools = vi.fn(async () => {});
-    const { completed, deferred } = await runBridgeCall(
-      'bridge-empty-args',
-      { params: URL_REQUIRED_PARAMS },
-      { revealDeferredTool, getLlmClient: () => ({ setTools }) },
-    );
-
-    expectStatus(completed, 'error');
-    expect(revealDeferredTool).toHaveBeenCalledWith(deferred.name);
-    expect(setTools).toHaveBeenCalledOnce();
-    const message = completed.response.error?.message ?? '';
-    expect(message).toContain("must have required property 'url'");
-    expect(message).toContain(`"${deferred.name}" is now declared directly`);
-  });
-
-  it('keeps the target hidden when the bridged arguments are present but wrong', async () => {
-    const revealDeferredTool = vi.fn();
-    const setTools = vi.fn(async () => {});
-    const harness = bridgeWithDeferred(
-      { params: URL_REQUIRED_PARAMS },
-      { revealDeferredTool, getLlmClient: () => ({ setTools }) },
-    );
-
-    await scheduleBridgeCall(
-      harness.scheduler,
-      'bridge-wrong-args',
-      harness.deferred.name,
-      // Non-empty but still missing `url`. A wrong type is no good here: the
-      // schema validator coerces `42` to `"42"` and the call succeeds.
-      { title: 'news' },
-    );
-
-    const completed = firstBatch(harness.onAllToolCallsComplete)[0];
-    expectStatus(completed, 'error');
-    expect(revealDeferredTool).not.toHaveBeenCalled();
-    expect(setTools).not.toHaveBeenCalled();
-    expect(completed.response.error?.message ?? '').not.toContain(
-      'declared directly',
-    );
-  });
-
-  it('keeps the target hidden when the empty bridged arguments came from a truncated turn', async () => {
-    // R13-2: turn.ts marks EVERY pending call of a MAX_TOKENS turn truncated,
-    // and a truncated `arguments` buffer falls back to `{}`
-    // (streamingToolCallParser.ts, responses-converter.ts), so empty args do
-    // not prove the model cannot fill the schema. A reveal stays declared for
-    // the rest of the session, so a transient truncation must not buy one.
-    const revealDeferredTool = vi.fn();
-    const setTools = vi.fn(async () => {});
-    const harness = bridgeWithDeferred(
-      { params: URL_REQUIRED_PARAMS },
-      { revealDeferredTool, getLlmClient: () => ({ setTools }) },
-    );
-
-    await harness.scheduler.schedule(
-      {
-        ...toolRequest(
-          'bridge-truncated-empty-args',
-          ToolNames.TOOL_CALL,
-          { name: harness.deferred.name, arguments: {} },
-          'prompt-bridge-truncated',
-        ),
-        wasOutputTruncated: true,
-      },
-      new AbortController().signal,
-    );
-
-    const completed = firstBatch(harness.onAllToolCallsComplete)[0];
-    expectStatus(completed, 'error');
-    expect(revealDeferredTool).not.toHaveBeenCalled();
-    expect(setTools).not.toHaveBeenCalled();
-    const message = completed.response.error?.message ?? '';
-    // The target naming and the truncation diagnosis both survive; only the
-    // "now declared directly ... not through tool_call" directive — which
-    // would contradict "retry the tool call" — goes with the reveal.
-    expect(message).toContain(`"${harness.deferred.name}"`);
-    expect(message).toContain("must have required property 'url'");
-    expect(message).not.toContain('declared directly');
-    expect(message).toContain('truncated due to max_tokens');
-  });
-
-  it('books a cancellation when the turn is aborted during the declaration refresh', async () => {
-    // R13-1: the declaration refresh awaits client.setTools() -> warmAll(),
-    // and was this loop's only await with no sibling
-    // recordPrevalidationCancellation() re-check. An abort inside it must book
-    // a cancellation, not an INVALID_TOOL_PARAMS error.
-    const abortController = new AbortController();
-    const revealDeferredTool = vi.fn();
-    const setTools = vi.fn(async () => {
-      abortController.abort();
-    });
-    const { completed, deferred, scheduler, onAllToolCallsComplete } =
-      await runBridgeCall(
-        'bridge-abort-during-refresh',
-        { params: URL_REQUIRED_PARAMS },
-        { revealDeferredTool, getLlmClient: () => ({ setTools }) },
-        abortController.signal,
-      );
-
-    expectStatus(completed, 'cancelled');
-    expect(completed.response.errorType).not.toBe(
-      ToolErrorType.INVALID_TOOL_PARAMS,
-    );
-    // The refresh itself is not rolled back: it completed before the abort was
-    // observed, and declareTargetAfterEmptyBridgedCall only unreveals when
-    // setTools throws.
-    expect(setTools).toHaveBeenCalledOnce();
-    expect(revealDeferredTool).toHaveBeenCalledWith(deferred.name);
-
-    // The cancelled turn booked no retry strike. THRESHOLD - 1 further
-    // identical failures therefore stay under the loop guard; without the
-    // re-check the cancelled call is the first strike and the last of these
-    // injects RETRY LOOP DETECTED one call early.
-    for (const callId of ['bridge-abort-strike-1', 'bridge-abort-strike-2']) {
-      const later = await completeBridgeCall(
-        scheduler,
-        onAllToolCallsComplete,
-        callId,
-        deferred.name,
-        'prompt-bridge-abort-strike',
-      );
-      expectStatus(later, 'error');
-      expect(later.response.error?.message ?? '').not.toContain(
-        'RETRY LOOP DETECTED',
-      );
-    }
   });
 
   it("leaves a direct call's validation error unlabelled", async () => {
