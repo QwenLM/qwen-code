@@ -773,17 +773,23 @@ export function fitManagedRuntimeProviderResult(
     Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
   if (fits()) return value;
   if (operation.kind === 'confirmation') {
-    if (root['type'] === 'edit') root['hideModify'] = true;
+    if (root['type'] === 'edit') {
+      root['hideModify'] = true;
+      root['warnings'] = [
+        ...(Array.isArray(root['warnings'])
+          ? (root['warnings'] as string[])
+          : []),
+        `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial.`,
+      ];
+    }
     const slots = confirmationFitSlots(root).map((slot) => ({
       slot,
       bytes: jsonTextBytes(slot.get()),
       floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
     }));
-    if (!fits()) {
-      const level = providerFitLevel(
-        slots,
-        Buffer.byteLength(JSON.stringify(root), 'utf8') - budgetBytes,
-      );
+    const size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+    if (size > budgetBytes) {
+      const level = providerFitLevel(slots, size - budgetBytes);
       for (const { slot, bytes } of slots)
         if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
     }

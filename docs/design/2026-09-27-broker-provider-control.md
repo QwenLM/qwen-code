@@ -80,11 +80,19 @@ This diagnostic evidence does not establish whether execution started.
 Control requests and responses are bounded at 8 MiB for `bind-history`,
 `checkpoint` and `history`, and 1 MiB for other operations. Tool arguments
 also have the existing core limit of 256 KiB of canonical JSON; fitting the
-outer envelope does not bypass that limit. An `execute`, `status` or `cancel`
-result that would exceed its operation's response budget is fitted rather
-than refused: the worker first evicts oldest progress events (announced
-through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
-head-and-tail with an inline notice and sets `truncated` on shell displays.
+outer envelope does not bypass that limit. An `execute`, `status`, `cancel` or
+`confirmation` result that would exceed its operation's response budget is
+fitted rather than refused: for execution and status observations, the worker
+first evicts oldest progress events (announced through
+`firstAvailableSeq`/`progressGap`), then cuts bulk text fields head-and-tail
+with an inline notice and sets `truncated` on shell displays. For
+`confirmation` results, bulk text fields are collected per variant (`fileDiff`,
+`originalContent` and `newContent` for `edit`, `command` for `exec`, and `prompt`
+for `info`) while variant-required fields and variant structures are never
+removed, `originalContent: null` survives, and a fitted `edit` confirmation is
+returned with `hideModify: true` and an omission notice in `warnings`; unlike
+observations, confirmations undergo no progress eviction and set no `truncated`
+flag.
 When even fully cut text could not fit beside what the cut cannot reach, a
 structured display (such as an edit's file diff, which only feeds the UI), then
 artifacts, which also only feed a client surface, and then hook results are

@@ -529,6 +529,24 @@ describe('managed-runtime-provider/1', () => {
           budget,
         ),
       ).toBe(smallConfirmation);
+      const smallEditConfirmation: Record<string, unknown> = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'f.txt',
+        filePath: '/w/f.txt',
+        fileDiff: 'd',
+        originalContent: null,
+        newContent: 'n',
+      };
+      expect(
+        fitManagedRuntimeProviderResult(
+          confirmation,
+          smallEditConfirmation,
+          budget,
+        ),
+      ).toBe(smallEditConfirmation);
+      expect(smallEditConfirmation['hideModify']).toBeUndefined();
+      expect(smallEditConfirmation['warnings']).toBeUndefined();
       const prepareResult = { description: 'x'.repeat(budget * 2) };
       expect(
         fitManagedRuntimeProviderResult(
@@ -959,6 +977,10 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
       ).toBeLessThanOrEqual(budget);
       expect(editDetails.hideModify).toBe(true);
+      expect(Array.isArray(editDetails.warnings)).toBe(true);
+      expect(
+        editDetails.warnings.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
       expect(editDetails.fileDiff.startsWith('d')).toBe(true);
       expect(editDetails.fileDiff.endsWith('d')).toBe(true);
       expect(editDetails.fileDiff).toContain(
