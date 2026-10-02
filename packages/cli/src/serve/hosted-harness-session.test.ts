@@ -6262,14 +6262,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const afterLoad = await getStatus();
     expect(afterLoad.body.hasActivePrompt).toBe(true);
     expect(afterLoad.body.recoveryBlocked).toBe(false);
-    // A user cancel stays a no-op, and a fresh Turn must not start over the
-    // checkpoint the takeover just advertised: it would supersede it and
-    // strand the recovered Runtime lease.
-    await replacementHeaders(
+    // A user cancel cannot stop an undriven recovered Turn — only the
+    // coordinator's managed-runtime/cancel settles its parked executions —
+    // so the route refuses instead of confirming a cancellation that never
+    // happened. A fresh Turn must not start over the checkpoint the takeover
+    // just advertised either.
+    const userCancelled = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .expect(204);
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(userCancelled.status).toBe(409);
+    expect(userCancelled.body.code).toBe('hosted_turn_recovery_required');
     const freshPrompt = [{ type: 'text', text: 'a second turn' }];
     const refused = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -7113,11 +7115,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const recovery = loaded.body._meta?.[
       'qwen.daemon.managedRuntimeRecovery'
     ] as { checkpointId: string; activationId: string };
-    // The continuation's reconciliation re-acquire fails retryably: the
-    // route already answered, so the Turn must block for the coordinator's
-    // next takeover load instead of settling a terminal turn_result.
-    acquireSpy.mockRejectedValueOnce(
-      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    // The continuation's reconciliation fails with a RAW escape from
+    // resumeCommittedResults() — a retryable re-acquire refusal is wrapped
+    // inside the tool turn long before the route sees it, so the route-level
+    // wrap exists only for a failure that escapes raw. The route already
+    // answered, so the Turn must block for the coordinator's next takeover
+    // load instead of settling a terminal turn_result.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockRejectedValueOnce(
+      new Error('warm gone'),
     );
     const continued = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
@@ -7149,6 +7154,60 @@ describe('Hosted Harness Runtime turn takeover', () => {
           event.type === 'turn_complete' && event.promptId === PROMPT_ID,
       ),
     ).toHaveLength(0);
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('logs the root cause when the recovered continuation fails pre-wrapped', async () => {
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    // The reconcile sees a file-history snapshot that drifted from the
+    // durable one, so resumeCommittedResults throws an already-wrapped
+    // recovery error; the route must rethrow it as-is, or the blocked log
+    // line names the wrapper instead of the cause an operator needs.
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'fileHistory',
+    ).mockResolvedValueOnce({
+      ownerSessionId: SESSION_ID,
+      snapshots: [{ filePath: 'drifted' } as never],
+      files: {},
+    });
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('Original file history snapshots changed.'),
+    );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

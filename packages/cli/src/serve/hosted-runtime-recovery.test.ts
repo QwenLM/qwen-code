@@ -692,6 +692,38 @@ describe('recoverHostedRuntimeTurn', () => {
     },
   );
 
+  it('accepts a terminally abandoned record as cancellation-complete', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      // The Broker fenced the record permanently, so neither a cancel nor
+      // the terminal poll could ever observe more: accepted without proof
+      // of a stop, unlike a still-reconcilable unknown — and unlike the old
+      // sentinel fold, never read back as "the Broker never knew it".
+      await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable')
+        expect(authorization.checkpoint.continuation.phase).toBe(
+          'await_runtime',
+        );
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('does not journal a tool result twice across a recovery retry', async () => {
     await parkAtAwaitRuntime('write_file', true);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();

@@ -235,7 +235,11 @@ export async function settleParkedTurnCancelled(input: {
  * A cancellation only becomes durable evidence after the execution reaches a
  * terminal state — issuing cancel is not proof, since the Broker accepts a
  * cancel without having stopped anything yet. An execution the Broker never
- * knew (definitive not-found) is already stopped.
+ * knew (definitive not-found) is already stopped. A terminally abandoned
+ * record is accepted without proof of a stop: the Broker fenced it
+ * permanently on loss evidence, so neither cancel nor the terminal poll
+ * could ever observe more — a still-reconcilable unknown fails closed
+ * instead.
  */
 export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
@@ -260,14 +264,24 @@ export async function stopParkedRuntimeExecutions(input: {
     const before = await broker.status(item.executionCallId);
     if (before?.state === 'unknown')
       throw new Error('Runtime execution outcome is unknown.');
-    if (before === undefined || before.state === 'settled') continue;
+    if (
+      before === undefined ||
+      before.state === 'settled' ||
+      before.state === 'abandoned'
+    )
+      continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
       if (status?.state === 'unknown')
         throw new Error('Runtime execution outcome is unknown.');
-      if (status === undefined || status.state === 'settled') break;
+      if (
+        status === undefined ||
+        status.state === 'settled' ||
+        status.state === 'abandoned'
+      )
+        break;
       if (Date.now() >= deadline) {
         throw new Error(
           'Runtime execution did not reach a terminal state after cancellation.',
@@ -333,7 +347,9 @@ export async function recoverHostedRuntimeTurn(input: {
         const status = await broker.status(item.executionCallId);
         states.set(
           item.executionCallId,
-          status?.state === 'unknown' ? undefined : status,
+          status?.state === 'unknown' || status?.state === 'abandoned'
+            ? undefined
+            : status,
         );
       }
     } else {

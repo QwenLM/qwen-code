@@ -1152,6 +1152,7 @@ async function executeHostedTurn(
             await toolTurn.resumeCommittedResults();
           } catch (cause) {
             if (isRetryableWorkspaceAcquisition(cause)) throw cause;
+            if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
             throw new HostedToolRecoveryRequiredError(cause);
           }
           onResumeReady?.();
@@ -1893,9 +1894,14 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
     // A fresh Turn must not start over the recovered-but-undriven one: it
-    // would supersede the checkpoint the takeover just advertised.
-    if (session.recoveredTurn !== undefined)
+    // would supersede the checkpoint the takeover just advertised. A Session
+    // that never receives continue/cancel is otherwise invisible to oncall.
+    if (session.recoveredTurn !== undefined) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness refused a fresh prompt while recovered Turn ${session.recoveredTurn} is undriven.`,
+      );
       return error(res, 409, 'hosted_turn_active');
+    }
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
@@ -2622,6 +2628,7 @@ export function registerHostedHarnessSessionRoutes(
             // cannot reach the caller as a 409: every reconciliation failure
             // blocks for recovery instead of settling a terminal turn_result,
             // and the coordinator's next takeover load re-drives the Turn.
+            if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
             throw new HostedToolRecoveryRequiredError(cause);
           }
           const result = await runHostedHarnessTextTurn({
@@ -2962,6 +2969,12 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/cancel', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    // A recovered-but-undriven Turn cannot be stopped from this route — only
+    // the coordinator's managed-runtime/cancel settles its parked executions
+    // — so refuse honestly instead of confirming a cancellation that never
+    // happened. An idle Session keeps the plain 204.
+    if (session.recoveredTurn !== undefined && !session.active)
+      return error(res, 409, 'hosted_turn_recovery_required');
     session.active?.abort.abort();
     res.sendStatus(204);
   });
