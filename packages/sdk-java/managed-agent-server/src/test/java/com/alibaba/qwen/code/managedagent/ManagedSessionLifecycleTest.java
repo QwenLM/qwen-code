@@ -636,7 +636,7 @@ class ManagedSessionLifecycleTest {
     }
 
     @Test
-    void workspaceBoundSessionsHaveNoLifecycleOperationsYet()
+    void activeWorkspaceSessionsRejectRetentionAndUnsupportedClose()
             throws Exception {
         String tenant = tenant();
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
@@ -666,15 +666,18 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.capabilities.session_lifecycle")
                         .value(false));
+        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-close")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
         for (MockHttpServletRequestBuilder request : List.of(
-                post("/v1/agents/sessions/{id}/close", sessionId),
                 post("/v1/agents/sessions/{id}/archive", sessionId),
                 delete("/v1/agents/sessions/{id}", sessionId))) {
             lifecycle(request.principal(actor(tenant, "actor-a")), tenant,
                     "bound-" + UUID.randomUUID())
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
-                            .value("workspace_unavailable"));
+                            .value("session_state_conflict"));
         }
         mvc.perform(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
                         .principal(actor(tenant, "actor-b"))

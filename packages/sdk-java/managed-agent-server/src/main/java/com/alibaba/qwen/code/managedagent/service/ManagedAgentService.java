@@ -330,7 +330,27 @@ public class ManagedAgentService {
     // Harness nor the Runtime.
     public SessionMutationResult<PublicSession> unarchiveSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
+        var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
+        return new SessionMutationResult<>(publicSession(result.session()), result.replayed());
+    }
+
+    public SessionMutationResult<WebShellSession> unarchiveWebShellSession(
+            String tenantId, String actorId, String idempotencyKey, String sessionId) {
+        var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
+        return new SessionMutationResult<>(webShellSession(result.session(), actorId), result.replayed());
+    }
+
+    private StoreModels.SessionMutation unarchive(String tenantId, String actorId,
+            String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
+        SessionRecord target = store.requireSession(tenantId, sessionId);
+        if (target.workspace() != null) {
+            requireReadGrant(target, actorId);
+            String scopedKey = digests.digest(Map.of("sessionId", sessionId,
+                    "actorDigest", digests.digest(Map.of("actorId", actorId)), "idempotencyKey", idempotencyKey));
+            return store.unarchiveWorkspaceSession(tenantId, sessionId, actorId,
+                    scopedKey, lifecycleDigest(sessionId, UNARCHIVE));
+        }
         requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
@@ -340,11 +360,9 @@ public class ManagedAgentService {
             SessionRecord session = store.completeSessionMutation(tenantId,
                     UNARCHIVE, idempotencyKey, sessionId,
                     SessionMutationKind.UNARCHIVE, null, null);
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
+            return new StoreModels.SessionMutation(session, command.replayed());
         }
-        return new SessionMutationResult<>(getPublicSession(tenantId,
-                sessionId), true);
+        return new StoreModels.SessionMutation(requireVisibleSession(tenantId, sessionId), true);
     }
 
     private PublicSession getPublicSession(String tenantId,
@@ -527,6 +545,7 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
+        boolean retention = supportsRetention(session);
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -548,7 +567,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session)),
+                        hasActions(session), supportsClose(session), retention, retention, retention),
                 publicWorkspace(session));
     }
 
@@ -558,6 +577,7 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
                 session.tenantId(), session.sessionId()).orElse(null);
+        boolean retention = supportsRetention(session);
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -572,7 +592,12 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session)));
+                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session),
+                        retention, retention, retention));
+    }
+
+    private boolean supportsRetention(SessionRecord session) {
+        return session.workspace() == null || store.hasCompletedWorkspaceClose(session.tenantId(), session.sessionId());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

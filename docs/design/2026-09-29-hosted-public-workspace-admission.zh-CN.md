@@ -10,7 +10,7 @@ Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前�
 
 G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。G0 本身无需修改 UI；后续改动唯一的 UI 变化是为创建者开放输入框与取消控件。
 
-后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。工作区关闭通过独立的关闭能力及生命周期准入控制；绑定会话的归档、删除、取消归档与 cwd 操作仍保持门禁。
+后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。工作区关闭通过独立的关闭能力及生命周期准入控制；归档、删除与取消归档遵循可靠工作区关闭后的独立保留能力；cwd 操作仍保持门禁。
 
 ## 决策
 
@@ -45,7 +45,7 @@ G0 开放随创建会话准入的一次初始文件工具轮次，使用现有�
 
 使用确定性的本地模型和打包 CLI，运行真实 Spring coordinator、SQL Store、按部署配置启动的生产 Broker 及独立 worker。仅模型和可信网关 principal 使用测试夹具。Workspace registry 和 grants 作为部署数据预置；会话必须通过公开 HTTP 创建。
 
-初始轮次必须在所选 Workspace 的相对 cwd 下写、编辑并读取文件，产生持久工具历史和恰好一个公开终态事件，且不改动 Harness 的诱饵目录。重复创建幂等键，验证相同 Session/Turn 且无额外模型/工具副作用。验证改变载荷冲突、未授权租户/actor 无法创建或读取、不支持的 profile 与不可用 Workspace 被拒绝，以及关闭开关后保持原门禁。覆盖共享 WebShell 创建适配器、实际发生变化的后续操作门禁（创建者的后续 Turn 提交、取消与重命名被放行；关闭遵循独立能力，归档、删除、取消归档与 cwd 操作仍受限）和无绑定无工具回归路径。
+初始轮次必须在所选 Workspace 的相对 cwd 下写、编辑并读取文件，产生持久工具历史和恰好一个公开终态事件，且不改动 Harness 的诱饵目录。重复创建幂等键，验证相同 Session/Turn 且无额外模型/工具副作用。验证改变载荷冲突、未授权租户/actor 无法创建或读取、不支持的 profile 与不可用 Workspace 被拒绝，以及关闭开关后保持原门禁。覆盖共享 WebShell 创建适配器、实际发生变化的后续操作门禁（创建者的后续 Turn 提交、取消与重命名被放行；关闭与保留操作遵循独立能力，cwd 操作仍受限）和无绑定无工具回归路径。
 
 SDK 序列化、connector、store/准入及 coordinator 的定向测试覆盖 create/load 身份、权限复核与关闭的门禁。本地通过 H2 跑 Hosted 集成，并加入现有 Hosted MySQL CI 套件；单独记录本地 MySQL 是否可用。完成前执行 build、typecheck、bundle、定向测试和两轮无发现的完整 diff 自查。
 

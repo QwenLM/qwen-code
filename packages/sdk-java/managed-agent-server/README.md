@@ -30,7 +30,9 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. Every response carries `X-Request-Id`, which error
+`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+`POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
+revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -52,7 +54,9 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
-[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
+AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-agent-definitions.md) |
+[简体中文](../../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
 ## Managed tool results (O3)
 
@@ -356,9 +360,9 @@ same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
 grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
 the Session's running Turns and rename the Session. Workspace close follows
-its separate close capability and lifecycle admission. Archive, delete,
-unarchive, cwd operations and broad Workspace capability advertisement
-remain gated. Shell and in-flight recovery are separate slices.
+its separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable Workspace
+close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -494,7 +498,8 @@ Turns and rename the Session. Later Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. Public close follows its separate close
-capability and lifecycle admission. Archive, delete and unarchive remain gated;
+capability and lifecycle admission. Archive, delete and unarchive follow their
+separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.

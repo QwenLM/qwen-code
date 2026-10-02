@@ -27,7 +27,8 @@ deployment without the opt-in, keeps the existing refusal:
 `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. The creator may also rename the Session.
 Workspace close follows its separate close capability and lifecycle admission.
-Archive, delete, unarchive and cwd operations remain gated for bound Sessions.
+Archive, delete and unarchive follow the separate retention capabilities after
+reliable Workspace close. Cwd operations remain gated for bound Sessions.
 
 ## Decisions
 
@@ -105,8 +106,8 @@ different payload conflicts, unauthorized tenants/actors cannot create or read,
 unsupported profiles and unavailable Workspaces refuse, and disabling the
 opt-in preserves the current gate. Exercise the shared WebShell create adapter,
 the later-operation gates that changed (the creator's later-Turn submit, cancel
-and rename are admitted; close follows its separate capability, while archive,
-delete, unarchive and cwd remain gated), and unbound
+and rename are admitted; close and retention follow their separate capabilities,
+while cwd remains gated), and unbound
 no-tool regression paths.
 
 Focused SDK serialization, connector, store/admission and coordinator tests
