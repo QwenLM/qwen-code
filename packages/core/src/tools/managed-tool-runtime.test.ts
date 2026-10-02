@@ -1003,14 +1003,19 @@ describe('ManagedToolRuntime', () => {
         exitCode: null,
         signal: 15,
         pid: 123,
-        error: 'process terminated with signal',
+        error: 'signal 15 (SIGTERM) received',
         outcome: 'cancelled',
         notices: [],
         truncated: false,
         outputFiles: [],
       },
     });
-    expect((await executing).executionStatus).toBe('cancelled');
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('cancelled');
     expect(hooks.failure).toHaveBeenCalledTimes(1);
     expect(hooks.failure).toHaveBeenCalledWith(
       undefined,
