@@ -1174,6 +1174,19 @@ describe('ChatRecordingService', () => {
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
 
+    it('maps prompt ids projected from turns recorded before resume', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'u1'],
+        rewindTurnPromptIds: ['p0', 'p1'],
+      });
+
+      expect(service.recordedTurnIndexForPrompt('p0')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(1);
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(2);
+    });
+
     it('counts projected pre-resume turns in the prompt index', () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
         lastCompletedUuid: 'projected-leaf',

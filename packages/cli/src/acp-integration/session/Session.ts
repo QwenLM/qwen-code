@@ -4756,13 +4756,11 @@ export class Session implements SessionContext {
     let recorderIndex = targetTurnIndex;
     let recorderRefused = false;
     if (lookup) {
-      if (!targetPromptId) {
-        recorderRefused = true;
-      } else {
-        const found = lookup.call(recorder, targetPromptId);
-        if (found === undefined) recorderRefused = true;
-        else recorderIndex = found;
-      }
+      const found = targetPromptId
+        ? lookup.call(recorder, targetPromptId)
+        : undefined;
+      if (found !== undefined) recorderIndex = found;
+      else if (compressed) recorderRefused = true;
     }
     if (
       !recorderRefused &&
