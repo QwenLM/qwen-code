@@ -266,6 +266,11 @@
   opacity: 0.85;
 }
 
+.option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .optionActive {
   border-color: transparent;
 }

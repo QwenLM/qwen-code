@@ -20,6 +20,10 @@ interface Grant {
   readonly operationId: string;
   readonly operationRevision: number;
   readonly expiresAt: number;
+  readonly resourceScope: {
+    readonly phases: string[];
+    readonly recordRef: Readonly<Record<string, unknown>>;
+  };
 }
 
 const fixtures = JSON.parse(
@@ -32,12 +36,7 @@ const fixtures = JSON.parse(
     'utf8',
   ),
 ) as {
-  readonly grant: Grant & {
-    readonly resourceScope: {
-      readonly phases: string[];
-      readonly recordRef: Readonly<Record<string, unknown>>;
-    };
-  };
+  readonly grant: Grant;
   readonly grantSuccessorCases: ReadonlyArray<{
     readonly id: string;
     readonly valid: boolean;
@@ -80,12 +79,24 @@ describe('managed operation grant gate', () => {
         }
         if (
           each.id === 'invalid-next' ||
-          each.id === 'next-past-double-range'
+          each.id === 'next-past-double-range' ||
+          each.id === 'replacement-with-a-non-text-digest'
         ) {
           // A malformed grant is refused as malformed, not as a conflict,
           // which is a subclass of the record error.
           expect(thrown).toBeInstanceOf(ManagedSessionRecordError);
           expect(thrown).not.toBeInstanceOf(ManagedSessionConflictError);
+          expect(
+            gate.admits(
+              each.previous.sessionKey,
+              each.previous.operationId,
+              each.previous.resourceScope.phases[0],
+              0,
+            ),
+          ).toBe(true);
+          // The refusal left the previous grant installed, not the refused
+          // one: installing it again is idempotent, so it answers unchanged.
+          expect(gate.install(each.previous)).toBe('unchanged');
         } else {
           expect(thrown).toBeInstanceOf(ManagedSessionConflictError);
         }
