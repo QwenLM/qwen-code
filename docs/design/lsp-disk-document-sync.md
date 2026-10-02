@@ -126,9 +126,12 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. A server that
   could never own the queried file does not veto a document query; a workspace
   query refuses an unbacked clean report while any configured server is
-  unreachable. Other request/pull catches and public query catches other than
-  hierarchy provenance handling are unchanged and can return empty arrays or
-  null; these are **not evidence of clean diagnostics**.
+  unreachable. That relevance rule excuses a server from vetoing _another_
+  server's answer, never from being the only answer: a document query that no
+  queried server answered rejects even when every recorded failure belongs to
+  a server the queried file excludes. Other request/pull catches and public
+  query catches other than hierarchy provenance handling are unchanged and can
+  return empty arrays or null; these are **not evidence of clean diagnostics**.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 

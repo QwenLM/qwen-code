@@ -1982,6 +1982,9 @@ export class NativeLspService {
       error: unknown;
       handle: LspServerHandle;
     }> = [];
+    // Queried servers that answered with a usable report, including an
+    // authoritative empty one: the only thing that can back a clean answer.
+    let answered = 0;
 
     for (const [name, handle] of handles) {
       // A sync failure must reject, not report incomplete diagnostics as clean.
@@ -2030,6 +2033,8 @@ export class NativeLspService {
                 handle,
                 error: new Error('server returned only unusable diagnostics'),
               });
+            } else {
+              answered++;
             }
           } else {
             // A report without an `items` array (or a bare array) answered
@@ -2073,6 +2078,14 @@ export class NativeLspService {
       );
       if (relevantFailures.length > 0 || unreachable.length > 0) {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
+      }
+      // The relevance rule excuses a server from vetoing *another* server's
+      // answer; it cannot excuse the only answer there is. When no queried
+      // server answered and every recorded failure was filtered out above as
+      // irrelevant, the empty result certifies a file nothing analyzed. The
+      // failures ledger is non-empty here, so the rejection names a cause.
+      if (answered === 0 && failures.length > 0) {
+        throw nothingRetrievedForDiagnostics(failures, unreachable);
       }
     }
     return allDiagnostics;

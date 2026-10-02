@@ -2931,6 +2931,55 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
+    it('rejects a document query whose only server was excused and retrieved nothing', async () => {
+      // The sole configured server declares python only, so the relevance
+      // rule excuses its failed pull for main.ts — but nothing else was asked
+      // and nothing answered, so the empty result would certify a file no
+      // server analyzed.
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('method not found');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('keeps a clean answer from the only queried server the mapping excuses', async () => {
+      // `LANGUAGE_ID_TO_EXTENSIONS.typescript` is ['ts','tsx'], so the
+      // relevance predicate excuses a typescript-keyed server for a .js file.
+      // Its authoritative empty report is still the only backing there is, so
+      // the query stays clean: the unbacked-answer gate keys on "nothing
+      // answered", never on "the answering server looks irrelevant".
+      const jsFile = path.join(directory, 'index.js');
+      fs.writeFileSync(jsFile, 'const a = 1;\n');
+      mockDiagnosticsResponses(connection);
+      const result = await run(
+        lspTool()
+          .build({ operation: 'diagnostics', filePath: jsFile })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
     it('does not blame a server that could never own the file when no server is ready', async () => {
       // Only a python server is configured and it is down; querying main.ts
       // must still fail hard, but must name the real state instead of
