@@ -105,6 +105,21 @@ public class ManagedExtensionRecordStore {
         }).toList();
     }
 
+    public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {
+        return jdbc.query("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'hook_registration' AND settled_at IS NOT NULL"
+                        + " ORDER BY first_sequence DESC",
+                (result, row) -> result.getString("record_resource_id"),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)
+                .stream().map(id -> {
+                    JsonNode record = readBody(readResource(tenantId, sessionId, id));
+                    ManagedHookRecords.requireRegistration(record);
+                    return record;
+                }).filter(record -> "settled".equals(record.path("run").path("state").textValue()))
+                .findFirst();
+    }
+
     /** Reads only a committed resource in this Session's scope. */
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref) {
@@ -192,7 +207,7 @@ public class ManagedExtensionRecordStore {
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
-                        occurredAt, resources);
+                        firstSequence + index, occurredAt, resources);
                 applied = true;
             }
         }
@@ -288,9 +303,15 @@ public class ManagedExtensionRecordStore {
         return occurredAt;
     }
 
+    private List<String> domainResources(String scopeKey, String domain) {
+        return jdbc.query("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ? AND domain = ?",
+                (result, row) -> result.getString("record_resource_id"), scopeKey, domain);
+    }
+
     private void applyRevision(String tenantId, String workspaceId,
             String sessionId, String domain, Body body, String operationId,
-            JsonNode recordRef, long occurredAt,
+            JsonNode recordRef, long sequence, long occurredAt,
             Function<String, StoredResource> resources) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
@@ -307,11 +328,38 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
-        if (domain.equals("mcp_configuration") || domain.equals("mcp_operation")) {
-            for (String field : List.of("catalogRef", "argsRef", "resultRef")) {
+        if (List.of("mcp_configuration", "mcp_operation", "hook_registration", "hook_execution").contains(domain)) {
+            for (String field : List.of("catalogRef", "argsRef", "resultRef", "planRef", "inputRef")) {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("hook_execution")) {
+            StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
+            if (plan.kind().equals("managed-hook-plan")) {
+                JsonNode messagesRef = readBody(plan).get("messagesRef");
+                if (messagesRef != null && !messagesRef.isNull()) {
+                    try {
+                        ManagedExtensionRecords.durableRef(messagesRef, "plan.messagesRef");
+                        StoredResource messages = resources.apply(messagesRef.get("resourceId").textValue());
+                        requireReference(messages, messagesRef);
+                        require(List.of("managed-hook-messages", "managed-hook-message-chunks").contains(messages.kind()),
+                                "The Hook plan must reference a messages snapshot or chunk manifest.");
+                        if (messages.kind().equals("managed-hook-message-chunks")) {
+                            JsonNode parts = readBody(messages).get("parts");
+                            require(parts != null && parts.isArray(), "The Hook messages manifest must contain parts.");
+                            for (JsonNode part : parts) {
+                                ManagedExtensionRecords.durableRef(part, "messages.parts");
+                                require("managed-hook-message-part".equals(part.get("kind").textValue()),
+                                        "The Hook messages manifest must reference message parts.");
+                                requireReference(resources.apply(part.get("resourceId").textValue()), part);
+                            }
+                        }
+                    } catch (InvalidRecordException error) {
+                        throw rejected(error.getMessage());
+                    }
                 }
             }
         }
@@ -320,6 +368,14 @@ public class ManagedExtensionRecordStore {
                 domain, recordId);
         String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
                 sessionId);
+        if (domain.equals("hook_registration")) {
+            for (String registration : domainResources(scopeKey, domain)) {
+                require(ManagedExtensionRecords.isDefinitionPinConsistent(
+                        readBody(resources.apply(registration)).get("run").get("definition"),
+                        record.get("run").get("definition")),
+                        "A Hook catalog revision cannot name two definition digests.");
+            }
+        }
         if (domain.equals("mcp_configuration")) {
             List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
                             + " qwen_managed_session_extension_record WHERE"
@@ -339,6 +395,31 @@ public class ManagedExtensionRecordStore {
                 .stream().findFirst().orElse(null);
         String operationHash = sha256(operationId);
         if (previous == null) {
+            if (domain.equals("hook_execution")) {
+                String registrationKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "hook_registration", record.get("registrationId").textValue());
+                String registrationResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, registrationKey).stream().findFirst().orElse(null);
+                require(registrationResource != null,
+                        "Hook execution must bind to its settled committed registration.");
+                JsonNode registration = readBody(resources.apply(registrationResource));
+                require("settled".equals(registration.get("run").get("state").textValue())
+                        && ManagedMcpRecords.same(registration.get("run").get("definition"), record.get("run").get("definition")),
+                        "Hook execution must bind to its settled committed registration.");
+                for (String execution : domainResources(scopeKey, domain)) {
+                    JsonNode other = readBody(resources.apply(execution));
+                    require(record.get("onceKey").isNull() || !record.get("onceKey").equals(other.get("onceKey")),
+                            "Hook onceKey is already consumed in this Session.");
+                    require(!record.get("occurrenceId").equals(other.get("occurrenceId"))
+                            || !ManagedMcpRecords.same(record.get("ordinal"), other.get("ordinal"))
+                                    && List.of("registrationId", "eventName", "planRef").stream()
+                                            .allMatch(key -> ManagedMcpRecords.same(record.get(key), other.get(key))),
+                            "Hook occurrence must keep its registration, event and plan, with unique ordinals.");
+                }
+            }
             if (domain.equals("mcp_operation")) {
                 String configKey = ManagedExtensionProjection.recordKey(sessionId,
                         "mcp_configuration", record.get("configurationId").textValue());
@@ -395,15 +476,15 @@ public class ManagedExtensionRecordStore {
                             + " task_kind, task_state, runtime_state,"
                             + " definition_revision, delivery_target,"
                             + " delivery_state, created_at, started_at,"
-                            + " settled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            + " settled_at, first_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     scopeKey, recordKey, tenantId, workspaceId, sessionId,
                     domain, recordId, operationHash, revision, resourceId,
                     body.taskKind(),
                     body.taskKind() == null ? null : projection.state(), projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.createdAt(),
-                    projection.startedAt(), projection.settledAt());
+                    projection.startedAt(), projection.settledAt(), sequence);
         } else {
             jdbc.update("UPDATE qwen_managed_session_extension_record SET"
                             + " revision = ?, record_resource_id = ?,"

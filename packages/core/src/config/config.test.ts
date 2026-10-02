@@ -313,6 +313,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
@@ -5674,6 +5675,22 @@ describe('Server Config (config.ts)', () => {
       expect(SkillManager).not.toHaveBeenCalled();
       expect(config.getSkillManager()).toBeNull();
       expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('installs a managed dispatcher while ambient Hook discovery is disabled', async () => {
+      const config = new Config({ ...baseParams });
+      const dispatcher = {
+        hasHooksForEvent: () => false,
+        execute: vi.fn(),
+      };
+      await config.initialize({
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        managedHookDispatcher: dispatcher,
+      });
+      expect(HookSystem).toHaveBeenCalledWith(config, dispatcher);
+      expect(config.getHookSystem()).toBeDefined();
     });
 
     it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
