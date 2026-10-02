@@ -83,6 +83,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
@@ -105,7 +106,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// SSE responses are still being written when MockMvc runs its result printer.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
@@ -943,6 +945,21 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
         exchange(drift, "getSessionMcpCatalog", 400,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
+        String hookCatalog = exchange(drift, "getSessionHookCatalog", 200,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(hookCatalog).path("catalogs")).isEmpty();
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionHookCatalog", 403,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionHookCatalog", 400,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
