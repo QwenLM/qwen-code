@@ -163,8 +163,12 @@ class DurableLocalRuntimeFaultGateTest {
             rig.killWorker(first);
             rig.killBroker(first);
             var second = rig.broker("second", rig.proxy(), FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
-            FaultGateRig.await(() -> second.warm(HARNESS).code(),
-                    "runtime_broker_runtime_lost"::equals, "original worker loss");
+            var warm = FaultGateRig.await(() -> second.warm(HARNESS),
+                    reply -> !"runtime_provision_fenced".equals(reply.code())
+                            && !"runtime_broker_reconcile_timeout".equals(reply.code()),
+                    "original worker loss after recovery fencing");
+            assertEquals("runtime_broker_runtime_lost", warm.code(),
+                    () -> warm.message() + rig.logs());
             assertEquals(ToolExecutionRecord.State.ABANDONED, rig.execution(execution).getState());
             assertEquals(original.getBindingId(), rig.activeBinding().getBindingId());
             assertNull(rig.activeBinding().getStopEvidence());

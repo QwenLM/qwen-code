@@ -946,6 +946,21 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
         exchange(drift, "getSessionMcpCatalog", 400,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
+        String hookCatalog = exchange(drift, "getSessionHookCatalog", 200,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(hookCatalog).path("catalogs")).isEmpty();
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionHookCatalog", 403,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionHookCatalog", 400,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
