@@ -777,6 +777,31 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
                 """.formatted(webSessionId));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            exchange(drift, "unarchiveWebShellSession", 200,
+                    post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                    """.formatted(webSessionId));
+        }
+        exchange(drift, "unarchiveWebShellSession", 409,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive-again"}
+                """.formatted(webSessionId));
+        exchange(drift, "unarchiveWebShellSession", 404,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                """.formatted(webSessionId));
+        exchange(drift, "unarchiveWebShellSession", 400,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant), "{}");
+        exchange(drift, "unarchiveWebShellSession", 403,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                """.formatted(webSessionId));
         exchange(drift, "deleteWebShellSession", 404,
                 post(WEB_SHELL + "/sessions/delete")
                         .header(TENANT, otherTenant),
@@ -1313,7 +1338,8 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
+                     "session_archive":true,"session_unarchive":true,"session_delete":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1329,7 +1355,10 @@ class ManagedAgentApiContractTest {
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true,\"artifacts\":false,\"actions\":false,\"sessionClose\":true}"));
+                        .isEqualTo(json("""
+                                {"tasks":true,"artifacts":false,"actions":false,"sessionClose":true,
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true}
+                                """));
             }
         }
 
