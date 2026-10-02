@@ -477,7 +477,7 @@ export interface components {
             /** @default false */
             actions: boolean;
             /**
-             * @description True when the caller may submit later Turns of this Workspace-bound Session and rename it: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on the Workspace generation the Session was bound to, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work that is already running, so the creator may cancel a running Turn even when this is false, as long as they can still read the Workspace. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on the Workspace generation and storage identity the Session was bound to, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work that is already running, so the creator may cancel a running Turn even when this is false, as long as they can still read the Workspace and the deployment still enables Workspace files. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
             workspaceTurns?: boolean;

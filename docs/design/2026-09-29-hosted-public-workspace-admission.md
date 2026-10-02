@@ -29,9 +29,10 @@ deployment without the opt-in, keeps the existing refusal:
 Admitting new work requires the creator's create grant on an `ACTIVE`
 Workspace at the generation and storage the Session was bound to, so a
 re-registration refuses submit and rename before any command is written.
-Cancelling only aborts work already running: the creator who can still read the
-Workspace may cancel even after the create grant is revoked, the Workspace
-starts draining or it is re-registered. A live cancel reuses the running
+Cancelling only aborts work already running: while the deployment still enables
+Workspace files, the creator who can still read the Workspace may cancel even
+after the create grant is revoked, the Workspace starts draining or it is
+re-registered. A live cancel reuses the running
 Turn's attachment without re-running the execution authority, and a cancel the
 Harness did not take is re-sent while the Turn is still cancelling. After each
 successful lease renewal, the running owner observes cancellation requested
