@@ -387,6 +387,8 @@ export interface ServeOptions {
    * integer. Default: 10000 (10 s).
    */
   initializeTimeoutMs?: number;
+  /** A remote Host executes assignments; it does not own local scheduling. */
+  agentHostWorker?: boolean;
   /**
    * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
    * to an explicitly set initialize timeout when that value is larger. An
@@ -510,6 +512,8 @@ export interface CapabilitiesEnvelope {
     ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
