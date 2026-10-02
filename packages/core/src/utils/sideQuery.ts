@@ -34,7 +34,9 @@ export interface SideQueryJsonOptions<TResponse> {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` is safe: `BaseLlmClient` budgets the
+   * request against the resolved context window (#13208). A value supplied
+   * here is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -81,7 +83,9 @@ export interface SideQueryTextOptions {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` is safe: `BaseLlmClient` budgets the
+   * request against the resolved context window (#13208). A value supplied
+   * here is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,

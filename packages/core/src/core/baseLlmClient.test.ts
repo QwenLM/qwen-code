@@ -1153,4 +1153,176 @@ describe('BaseLlmClient', () => {
       expectRetriedWith({ authType: AuthType.USE_ANTHROPIC });
     });
   });
+
+  describe('output budget is window-aware (issue #13208)', () => {
+    // `estimateContentTokens` counts chars/4 for ASCII text, so a prompt of
+    // `tokens` tokens is `tokens * 4` characters.
+    const promptOfTokens = (tokens: number) => [
+      userText('x'.repeat(tokens * 4)),
+    ];
+
+    // Pins the session model to `model` so `resolveForModel` takes the
+    // same-model path and hands this window back. Omitting
+    // `contextWindowSize` leaves it unconfigured, which is how the budget
+    // falls back to `tokenLimit(model, 'input')`.
+    function useWindow(model: string, contextWindowSize?: number) {
+      mockConfig.getModel.mockReturnValue(model);
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model,
+        authType: AuthType.USE_GEMINI,
+        ...(contextWindowSize === undefined ? {} : { contextWindowSize }),
+      });
+    }
+
+    // `maxOutputTokens` on the config actually handed to the generator.
+    const sentBudget = (generator = mockGenerateContent) =>
+      (
+        generator.mock.calls.at(-1)?.[0] as
+          | { config?: { maxOutputTokens?: number } }
+          | undefined
+      )?.config?.maxOutputTokens;
+
+    const askText = (
+      model: string,
+      tokens: number,
+      extra: Partial<GenerateTextOptions> = {},
+    ) => {
+      mockGenerateContent.mockResolvedValue(createMockTextResponse('ok'));
+      return client.generateText({
+        contents: promptOfTokens(tokens),
+        model,
+        abortSignal: abortController.signal,
+        promptId: 'p',
+        ...extra,
+      });
+    };
+
+    // `useWindow` replaces these implementations for good (`clearAllMocks`
+    // keeps implementations), so the rest of the file needs them back.
+    afterEach(() => {
+      mockConfig.getModel.mockReturnValue('test-model');
+    });
+
+    it('shrinks the request so a large prompt still fits the window', async () => {
+      useWindow('qwen3-coder-plus', 131_072);
+
+      await askText('qwen3-coder-plus', 100_000);
+
+      // 131_072 − 100_000 = 31_072 of room, under the model's 64_000 output
+      // ceiling: the budget is the room actually left, so
+      // prompt + max_tokens == window.
+      expect(sentBudget()).toBe(31_072);
+      expect(100_000 + 31_072).toBeLessThanOrEqual(131_072);
+    });
+
+    it('keeps a smaller caller-supplied maxOutputTokens', async () => {
+      useWindow('qwen3-coder-plus', 131_072);
+
+      await askText('qwen3-coder-plus', 100_000, {
+        config: { maxOutputTokens: 300 },
+      });
+
+      expect(sentBudget()).toBe(300);
+    });
+
+    it('sends a larger caller-supplied maxOutputTokens as given', async () => {
+      // Callers that set one have already budgeted it against the *receiving*
+      // model's window (compaction via `computeCompactionOutputBudget`,
+      // #7960). Re-clamping it here would shrink a request against a window
+      // it is not going to, so it passes through even when it exceeds the
+      // configured one.
+      useWindow('qwen3-coder-plus', 131_072);
+
+      await askText('qwen3-coder-plus', 100_000, {
+        config: { maxOutputTokens: 60_000 },
+      });
+
+      expect(sentBudget()).toBe(60_000);
+    });
+
+    it('applies the same budget in JSON mode', async () => {
+      useWindow('qwen3-coder-plus', 131_072);
+      answerWithJson({ ok: true });
+
+      await client.generateJson({
+        contents: promptOfTokens(100_000),
+        schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        model: 'qwen3-coder-plus',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(sentBudget()).toBe(31_072);
+    });
+
+    it('budgets the streaming request too', async () => {
+      useWindow('qwen3-coder-plus', 131_072);
+      streamYields(mockTextStream(['ok']));
+
+      await askText('qwen3-coder-plus', 100_000, { stream: true });
+
+      expect(sentBudget(mockGenerateContentStream)).toBe(31_072);
+    });
+
+    it('falls back to the model input limit when no window is configured', async () => {
+      // `deepseek-r1` is not in the catalog, so the curated tables apply:
+      // input 131_072, output 65_536 → `defaultOutputCeiling` 64_000.
+      useWindow('deepseek-r1');
+
+      await askText('deepseek-r1', 100_000);
+
+      expect(sentBudget()).toBe(31_072);
+    });
+
+    it('does not shrink the request when the window has room', async () => {
+      useWindow('deepseek-r1', 200_000);
+
+      await askText('deepseek-r1', 100_000);
+
+      // 200_000 − 100_000 = 100_000 of room, above the 64_000 ceiling.
+      expect(sentBudget()).toBe(64_000);
+    });
+
+    it('never requests a ceiling >= the window, even for a small prompt', async () => {
+      // The `deepseek-r1-distill-llama-8b` shape from the issue: a 32_768
+      // window against a 64_000 output ceiling. Without a window term the
+      // whole ceiling went on the wire, so any non-empty prompt overflowed.
+      useWindow('deepseek-r1', 32_768);
+
+      await askText('deepseek-r1', 100);
+
+      expect(sentBudget()).toBe(32_668);
+    });
+
+    it('keeps prompt + max_tokens inside a window smaller than the output floor', async () => {
+      // The issue's second scenario: on an 8_192 window with a 5_000-token
+      // prompt, `clampOutputTokensToWindow` floors the room at
+      // MIN_CLAMPED_OUTPUT_TOKENS (4_000) and still requests 9_000 total. The
+      // side-query budget floors at 1 instead, so the invariant holds.
+      useWindow('deepseek-r1', 8_192);
+
+      await askText('deepseek-r1', 5_000);
+
+      expect(sentBudget()).toBe(3_192);
+      expect(5_000 + 3_192).toBeLessThanOrEqual(8_192);
+    });
+
+    it('budgets against the session window when the target generator failed to build', async () => {
+      // Caveat, by design: `createRuntimeViewForModel` falls back to the main
+      // generator when the target model is not registered, returning the
+      // *session* config while `model` stays the resolved target. The window
+      // therefore describes the session model (8_192) and the ceiling the
+      // target (`qwen3-coder-plus`, 64_000) — the budget still fits the
+      // window it was handed.
+      useWindow('test-model', 8_192);
+
+      await askText('qwen3-coder-plus', 100);
+
+      expect(mockGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'qwen3-coder-plus' }),
+        'p',
+      );
+      expect(sentBudget()).toBe(8_092);
+    });
+  });
 });

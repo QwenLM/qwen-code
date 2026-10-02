@@ -40,6 +40,8 @@ import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { estimateContentTokens } from '../services/tokenEstimation.js';
+import { defaultOutputCeiling, tokenLimit } from './tokenLimits.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -53,6 +55,54 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
   return {
     model: modelPart,
     baseUrl: model.slice(idx + 1) || undefined,
+  };
+}
+
+/**
+ * Give a request an output budget that fits the window it is actually going
+ * to, so `prompt + max_tokens <= window` holds (#13208).
+ *
+ * Side queries reach the provider through `generateJson`/`generateText` and
+ * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
+ * never runs on them: with no budget the providers fall back to
+ * `defaultOutputCeiling(model)`, which has no window term, and a large prompt
+ * overflows. That helper is deliberately not reused here either — it floors at
+ * MIN_CLAMPED_OUTPUT_TOKENS (4K), a floor that can itself exceed a tight
+ * window, which is exactly the invariant this path must keep.
+ *
+ * A caller-supplied `maxOutputTokens` passes through untouched (`??`, so the
+ * prompt is not even measured): every caller that sets one has already
+ * budgeted it against the *receiving* model's window — compaction via
+ * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
+ * shrink it against a window it is not going to.
+ *
+ * Call after `resolveForModel` so `model` is the resolved target and
+ * `contents` is the slimmed payload actually sent. Caveat: on the
+ * generator-error fallback in `createRuntimeViewForModel`,
+ * `contentGeneratorConfig` is the *session* config while `model` is still the
+ * resolved target, so `contextWindowSize` can describe a different model's
+ * window than the ceiling does. That mismatch is inherent to the fallback
+ * (the target's own config could not be built); the budget still never
+ * exceeds the window it was handed.
+ */
+function budgetOutputTokensForWindow(
+  requestConfig: GenerateContentConfig,
+  contents: Content[],
+  model: string,
+  contentGeneratorConfig: ContentGeneratorConfig | undefined,
+): GenerateContentConfig {
+  return {
+    ...requestConfig,
+    maxOutputTokens:
+      requestConfig.maxOutputTokens ??
+      Math.max(
+        1,
+        Math.min(
+          defaultOutputCeiling(model),
+          (contentGeneratorConfig?.contextWindowSize ??
+            tokenLimit(model, 'input')) - estimateContentTokens(contents),
+        ),
+      ),
   };
 }
 
@@ -269,6 +319,12 @@ export class BaseLlmClient {
       contents,
       contentGeneratorConfig.modalities,
     ).slimmedHistory;
+    const budgetedConfig = budgetOutputTokensForWindow(
+      requestConfig,
+      requestContents,
+      requestModel,
+      contentGeneratorConfig,
+    );
 
     try {
       const apiCall = () =>
@@ -276,7 +332,7 @@ export class BaseLlmClient {
           {
             model: requestModel,
             config: {
-              ...requestConfig,
+              ...budgetedConfig,
               tools,
               // Force the model to call the respond_in_schema tool rather
               // than free-texting. Without this, Anthropic-native and
@@ -401,11 +457,17 @@ export class BaseLlmClient {
       contents,
       contentGeneratorConfig.modalities,
     ).slimmedHistory;
+    const budgetedConfig = budgetOutputTokensForWindow(
+      requestConfig,
+      requestContents,
+      requestModel,
+      contentGeneratorConfig,
+    );
 
     try {
       const request: PromptCacheSharingParameters = {
         model: requestModel,
-        config: requestConfig,
+        config: budgetedConfig,
         contents: requestContents,
         ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
