@@ -2547,6 +2547,7 @@ export async function loadCliConfig(
     eagerTools,
     codeModeOnly:
       !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
+    freeform: settings.tools?.freeform === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
