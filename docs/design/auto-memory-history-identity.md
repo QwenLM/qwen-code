@@ -2,7 +2,7 @@
 
 [English](auto-memory-history-identity.md) | [简体中文](auto-memory-history-identity.zh-CN.md)
 
-Status: implemented Critical fix for the default-off window experiment in #13158; controlled input verification remains separate from model acceptance.
+Status: implemented history-identity and ineligible-tail fixes for the default-off window experiment in #13158; controlled input verification remains separate from model acceptance.
 
 ## Problem and scope
 
@@ -20,12 +20,14 @@ Use `getStartupContextLength` with `includeCompressed: true` before history cura
 
 Compute the start and end hashes before invoking the asynchronous extractor. Persist the hash at the offset actually written, including the live-end zero-tool holdback and the no-user early return. Default-path writes omit the field, so enabling the experiment after a default run bootstraps rather than trusts an unattested index.
 
+Keep the fork's selected window capped, but consume its remaining tail in the same execution when that entire tail has no eligible user text and the selected window made genuine progress. Reuse the no-user gate's per-part classifier: tool responses, model text, runtime reminders, and hidden reasoning alone do not require another fork. The no-user early return may likewise consume such a tail. If any eligible user text remains, keep the existing window boundary and leave the entire remainder pending. A zero-tool completion retains its existing capped-window advancement or live-end holdback; the free tail must not convert it into a cooldown-arming no-op. Attest the consumable tail before the asynchronous fork, so changes to that content invalidate the cursor on the next execution.
+
 ## Constraints and risks
 
 Prefix validation costs CPU proportional to the processed raw content in the opt-in experiment. Structural startup refreshes do not invalidate the index, but changes to processed conversation content intentionally restart extraction and may repeat facts. The project cursor remains shared between sessions; session changes bootstrap the current user turn. Facts already discarded by compression cannot be recovered. Media-only prompt classification and synthetic-prefix recognition retain the existing helpers' limits.
 
 ## Validation and acceptance
 
-Regression tests must cover a legal new session inheriting long history, a fresh long tool turn, compressed summaries and attachments, shrink followed by regrowth, same-length replacement with an unchanged boundary entry, startup-reminder refresh, asynchronous mutation, and preserved call/response pairs. Existing empty-window and zero-tool holdback tests must still pass with an attested cursor.
+Regression tests must cover a legal new session inheriting long history, a fresh long tool turn, compressed summaries and attachments, shrink followed by regrowth, same-length replacement with an unchanged boundary entry, startup-reminder refresh, asynchronous mutation, and preserved call/response pairs. Verify ineligible-tail consumption with and without a fork, pre-fork tail attestation, retained later user facts, and no extra fork or larger agent budget. Existing empty-window and zero-tool holdback tests must still pass with an attested cursor.
 
 Build, bundle, typecheck, and run the affected extraction, planner, manager, and client tests. Repeat the controlled native-composer input-selection reproduction against the fixed source. Acceptance requires real post-compression facts to remain reachable, synthetic user context to stay out of the selected window, and default extraction behavior to remain unchanged. Controlled forks prove input selection only, not provider execution, memory quality, or cost reduction.

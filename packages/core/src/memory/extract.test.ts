@@ -665,11 +665,75 @@ describe('auto-memory extraction', () => {
         history.slice(0, 40),
         { windowAsOf: expect.any(String) },
       );
+      expect(first.cursor.processedOffset).toBe(history.length);
       expect(first.cursor.processedHistoryHash).toMatch(/^[a-f0-9]{64}$/);
       const second = await runAutoMemoryExtract({ ...params(), history });
       expect(second.extractorRan).toBeUndefined();
       expect(second.cursor.processedOffset).toBe(80);
       expect(second.cursor.processedHistoryHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('consumes an entirely ineligible tail without a fork', async () => {
+      await runAutoMemoryExtract({ ...params(), history: [] });
+      const history = toolPairs(45);
+      history
+        .at(-1)!
+        .parts!.push(
+          { text: '<system-reminder>Continue the task.</system-reminder>' },
+          { thought: true, text: 'Hidden reasoning.' },
+        );
+
+      const result = await runAutoMemoryExtract({ ...params(), history });
+
+      expect(result.cursor.processedOffset).toBe(history.length);
+      expect(result.extractorRan).toBeUndefined();
+      expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+    });
+
+    it('keeps the capped boundary when a zero-tool run leaves an ineligible tail', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+      });
+      const history = longTurn();
+
+      const result = await runAutoMemoryExtract({ ...params(), history });
+
+      expect(result.cursor.processedOffset).toBe(40);
+      expect(result.extractorRan).toBe(true);
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+    });
+
+    it('attests a freely consumed tail before an asynchronous extraction', async () => {
+      const history = longTurn();
+      const completion =
+        deferred<Awaited<ReturnType<typeof runAutoMemoryExtractionByAgent>>>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockReturnValueOnce(
+        completion.promise,
+      );
+      const pending = runAutoMemoryExtract({ ...params(), history });
+      await waitForMockCall(vi.mocked(runAutoMemoryExtractionByAgent));
+      const correction: Content = {
+        role: 'user',
+        parts: [{ text: 'Correction: prefer npm.' }],
+      };
+      history[60] = correction;
+      completion.resolve({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+
+      expect((await pending).cursor.processedOffset).toBe(80);
+      const restarted = await runAutoMemoryExtract({ ...params(), history });
+      expect(restarted.cursor.processedOffset).toBe(40);
+      await runAutoMemoryExtract({ ...params(), history });
+      expect(
+        vi.mocked(runAutoMemoryExtractionByAgent).mock.lastCall?.[2],
+      ).toContainEqual(correction);
     });
 
     it('excludes compressed summaries and full-file attachments with a legacy stale cursor', async () => {
@@ -692,7 +756,7 @@ describe('auto-memory extraction', () => {
         realHistory.slice(0, 40),
         { windowAsOf: expect.any(String) },
       );
-      expect(result.cursor.processedOffset).toBe(43);
+      expect(result.cursor.processedOffset).toBe(83);
     });
 
     it('keeps facts before the stale offset reachable after unobserved shrink and regrowth', async () => {

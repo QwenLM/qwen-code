@@ -276,7 +276,7 @@ export async function runAutoMemoryExtract(params: {
   }
   // With turn-skipping enabled, a large ending turn can evict skipped facts
   // from the usual tail. Process the oldest pending window instead, and never
-  // mark its unseen remainder as processed.
+  // mark its unseen user text as processed.
   let endOffset = params.preserveUnprocessedHistory
     ? Math.min(
         params.history.length,
@@ -302,6 +302,11 @@ export async function runAutoMemoryExtract(params: {
     }
   }
   const pendingHistory = params.history.slice(startOffset, endOffset);
+  const consumableEndOffset =
+    params.preserveUnprocessedHistory &&
+    !params.history.some((content, i) => i >= endOffset && hasUserText(content))
+      ? params.history.length
+      : endOffset;
   // Attest the selection before the fork awaits: the parent may mutate its
   // history while extraction runs. Holdback must retain the start identity.
   const startHistoryHash = params.preserveUnprocessedHistory
@@ -310,6 +315,10 @@ export async function runAutoMemoryExtract(params: {
   const endHistoryHash = params.preserveUnprocessedHistory
     ? hashProcessedHistory(params.history, historyFloor, endOffset)
     : undefined;
+  const consumableHistoryHash =
+    consumableEndOffset === endOffset
+      ? endHistoryHash
+      : hashProcessedHistory(params.history, historyFloor, consumableEndOffset);
 
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. Strip runtime reminders per part as the planner does, so a
@@ -318,8 +327,10 @@ export async function runAutoMemoryExtract(params: {
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: endOffset,
-      ...(endHistoryHash && { processedHistoryHash: endHistoryHash }),
+      processedOffset: consumableEndOffset,
+      ...(consumableHistoryHash && {
+        processedHistoryHash: consumableHistoryHash,
+      }),
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -395,9 +406,19 @@ export async function runAutoMemoryExtract(params: {
     // same slice freezes next turn. At the live end, keep the #6311 hold-back:
     // new turns grow this slice, and a zero-tool completion must not consume
     // it or arm the no-op cooldown.
-    processedOffset: advances ? endOffset : startOffset,
+    // Consume a tail that the no-user gate would skip without another fork,
+    // but don't let it turn a zero-tool completion into a live-end no-op.
+    processedOffset: madeGenuineProgress
+      ? consumableEndOffset
+      : advances
+        ? endOffset
+        : startOffset,
     ...(endHistoryHash && {
-      processedHistoryHash: advances ? endHistoryHash : startHistoryHash,
+      processedHistoryHash: madeGenuineProgress
+        ? consumableHistoryHash
+        : advances
+          ? endHistoryHash
+          : startHistoryHash,
     }),
     updatedAt: now.toISOString(),
   };
