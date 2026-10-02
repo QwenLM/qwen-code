@@ -56,6 +56,14 @@ No request body is read and no client id is used. The response is the trust
 status the workspace reports after the write, so a caller sees the decision it
 just recorded rather than a prediction.
 
+The ACP column on the Qualified row carries a precondition the REST route does
+not. A workspace-qualified ACP connection needs a secondary mount, and only
+trusted non-primary runtimes get one: an untrusted non-primary workspace is
+refused `403 untrusted_workspace` at the mount resolver, before any dispatcher
+exists, on both the HTTP and WS paths. So for the state this design exists to
+recover — a locked-out secondary workspace — the ACP method is undispatchable
+and recovery is REST-only. The Primary row is not trust-gated for this method.
+
 ### Authority and boundary
 
 The route is registered through the same strict mutation gate as the other
@@ -100,13 +108,20 @@ answering 500 until the daemon restarts.
 The already-trusted row likewise assumes an active runtime. A successful grant
 starts a rebuild that moves the entry to `transitioning`, and while it is there
 both grant routes answer 503 `workspace_runtime_unavailable` with
-`Retry-After: 1`, even though the trust record is already written. Clients must
-read that 503 as retryable-until-applied, not as a failed decision.
+`Retry-After: 1`, even though the trust record is already written. That 503 is
+retryable-until-applied rather than a failed decision, but the reference Web
+Shell panel does not read it that way yet: `handleGrantTrust` reports every
+rejection with the same "Could not trust the workspace" message and branches on
+neither status nor `code`. Clients should treat the 503 as retryable inside
+their own bounded wait, without re-arming the deadline indefinitely; aligning
+the panel is tracked in #13186.
 
 Writing the exact workspace path at the deepest matching depth also overrides
-a shallower `DO_NOT_TRUST` parent rule, and re-keying the same path replaces an
-equal-depth rule, so the grant recovers a workspace that was explicitly
-untrusted rather than only one that was never decided.
+a shallower `DO_NOT_TRUST` parent rule, and re-keying a path replaces an
+equal-depth rule recorded under that same spelling. A rule recorded under a
+different spelling of the same directory — a symlink alias — survives the write
+and wins the equal-depth tie, so such a grant is recorded but does not take
+effect, and answers 409 `trust_grant_ineffective`.
 
 The write itself is the existing primitive the terminal uses: it takes
 `proper-lockfile`, re-reads under the lock, preserves comments, and atomically
@@ -115,11 +130,13 @@ replaces a regular 0600 file without following symlinks.
 ### Advertising
 
 The daemon advertises `workspace_trust_grant` only when the runtime can pick up
-a trust change without a restart. Route registration is unconditional, so REST
-and ACP stay consistent — writing the file where hot reload is unavailable is
-already safe, it just needs a restart, exactly as `/permissions` does. The tag
-tells clients where the grant takes effect live. An older daemon omits the tag
-and clients must not offer the affordance.
+a trust change without a restart. Route registration is unconditional, so the
+tag and the REST surface stay consistent — writing the file where hot reload is
+unavailable is already safe, it just needs a restart, exactly as `/permissions`
+does. The ACP counterpart is not covered by that consistency: it needs a
+trusted secondary mount (see Endpoints). The tag tells clients where the grant
+takes effect live. An older daemon omits the tag and clients must not offer the
+affordance.
 
 ### Applying
 
