@@ -24,7 +24,12 @@ Build and test with:
 ```bash
 mvn test
 mvn checkstyle:check
+mvn verify
 ```
+
+`mvn verify` runs the SpotBugs high-confidence gate; a new warning fails the
+build, and a false positive needs an exclude filter plus a justification in
+the PR.
 
 ## Fault gates
 

@@ -35,7 +35,11 @@ jobs:
       - name: 'Initialize CodeQL'
         uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
         with:
-          languages: 'javascript'
+          languages: 'javascript,java'
+          # The Maven modules depend on each other through locally installed
+          # snapshots, so a real build here would duplicate sdk-java.yml's
+          # install dance. build-mode none extracts from source instead.
+          build-mode: 'none'
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
