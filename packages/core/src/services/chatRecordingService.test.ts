@@ -2771,6 +2771,83 @@ describe('ChatRecordingService', () => {
       expect(written().parentUuid).toBeNull();
     });
 
+    it('keeps a prompt id when the user record is dropped by a sync write failure', async () => {
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      writeSpy.mockImplementationOnce(throwFsError('ENOENT'));
+      writeSpy.mockImplementation(() => undefined);
+      const service = legacyRecorder();
+
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      await service.flush();
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      await service.flush();
+
+      expect(service.getRecordedUserTurnCount()).toBe(2);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(1);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a rebuilt prompt id after rewind into a transcript gap', async () => {
+      const service = legacyRecorder();
+      const rec = (
+        uuid: string,
+        parentUuid: string | null,
+        type: 'user' | 'assistant',
+        promptId?: string,
+      ) =>
+        ({
+          uuid,
+          parentUuid,
+          type,
+          sessionId: 'test-session-id',
+          timestamp: 't',
+          cwd: '/',
+          version: '1',
+          message: {
+            role: type === 'user' ? 'user' : 'model',
+            parts: [{ text: uuid }],
+          },
+          ...(promptId ? { promptId } : {}),
+        }) as unknown as ChatRecord;
+      service.rebuildTurnBoundaries([
+        rec('a', null, 'user', 'p1'),
+        rec('b', 'a', 'assistant'),
+        rec('c', 'gap-x', 'user', 'p2'),
+        rec('d', 'c', 'assistant'),
+      ]);
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      service.rewindRecording(1, { truncatedCount: 0 });
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+      await service.flush();
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(1);
+      expect(service.getRecordedUserTurnCount()).toBe(2);
+    });
+
+    it('does not map an abandoned prompt id after rewind write failures', async () => {
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      for (let i = 0; i < 4; i++) {
+        writeSpy.mockImplementationOnce(throwFsError('ENOENT'));
+      }
+      writeSpy.mockImplementation(() => undefined);
+      const service = legacyRecorder();
+
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      service.rewindRecording(0, { truncatedCount: 0 });
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+      service.recordUserMessage([{ text: 'p4' }], undefined, undefined, 'p4');
+      await service.flush();
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBeUndefined();
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p4')).toBe(1);
+      expect(service.getRecordedUserTurnCount()).toBe(2);
+    });
+
     it('does not notify for a synchronous conversation-file failure', () => {
       const listener = vi.fn();
       const service = new ChatRecordingService(mockConfig, listener, false);

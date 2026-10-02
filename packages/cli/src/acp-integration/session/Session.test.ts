@@ -8982,6 +8982,82 @@ describe('Session', () => {
       );
     });
 
+    it('advances the turn counter when the first prompt is a retry', async () => {
+      const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'rewind-first-'));
+      const recorder = newRecorder(dir);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as never,
+      );
+      const history: Content[] = [];
+      const snapshots: Array<{
+        promptId: string;
+        timestamp: Date;
+        trackedFileBackups: Record<string, never>;
+      }> = [];
+      useHistory(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
+        () => snapshots,
+      );
+      vi.mocked(mockFileHistoryService.makeSnapshot).mockImplementation(
+        async (id: string) => {
+          snapshots.push({
+            promptId: id,
+            timestamp: new Date('2026-06-13T00:00:00.000Z'),
+            trackedFileBackups: {},
+          });
+        },
+      );
+      vi.mocked(mockChat.truncateHistory).mockImplementation(
+        (index: number) => {
+          history.splice(index);
+          useHistory(history);
+        },
+      );
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(
+        async (_model, _request, promptId) => {
+          history.push(markedUser('first', promptId));
+          history.push({ role: 'model', parts: [{ text: 'ok' }] });
+          return createEmptyStream();
+        },
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'first' }],
+          retry: true,
+        } as PromptRequest);
+
+        const promptId = 'test-session-id########1';
+        expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[2]).toBe(
+          promptId,
+        );
+        expect(snapshots.map((snapshot) => snapshot.promptId)).toEqual([
+          promptId,
+        ]);
+        expect(
+          branchOf(recorder).filter(
+            (record) => record.type === 'user' && !record.subtype,
+          ),
+        ).toEqual([]);
+        expect(recorder.recordedTurnIndexForPrompt(promptId)).toBeUndefined();
+        expect(session.rewindToTurn(0)).toEqual({
+          targetTurnIndex: 0,
+          apiTruncateIndex: 0,
+        });
+        expect(history).toEqual([]);
+        expect(
+          branchOf(recorder).find((record) => record.subtype === 'rewind')
+            ?.parentUuid,
+        ).toBeNull();
+      } finally {
+        fsSync.rmSync(dir, { recursive: true, force: true });
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+          mockChatRecordingService as never,
+        );
+      }
+    });
+
     it('rewinds a retried prompt live and after resume on the original prompt id', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440001';
       const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'rewind-retry-'));
