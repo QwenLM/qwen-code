@@ -139,7 +139,6 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_retry',
   'agent_session_ready',
   'file_history_snapshot',
-  'absorbed_snapshot_offset',
   'session_source',
   'session_model',
   'omni_recall',

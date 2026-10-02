@@ -534,7 +534,6 @@ describe('Session', () => {
     recordNotificationStrict: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
-    recordAbsorbedSnapshotOffset: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
@@ -918,7 +917,6 @@ describe('Session', () => {
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
-      recordAbsorbedSnapshotOffset: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
@@ -6244,75 +6242,6 @@ describe('Session', () => {
       ];
     }
 
-    it('records the absorbed offset for a restored question without a +1', async () => {
-      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
-      const execute = vi.fn().mockResolvedValue({
-        llmContent: 'User answers:\nQuestion: Polling',
-        returnDisplay: 'answered',
-      });
-      mockToolRegistry.getTool.mockReturnValue(
-        mockConfirmingTool('ask_user_question', execute),
-      );
-      vi.mocked(mockClient.requestPermission).mockResolvedValue({
-        outcome: { outcome: 'selected', optionId: 'proceed_once' },
-        answers: { '0': 'Polling' },
-      });
-      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        ['p0', 'p1', 'p2'].map((promptId) => ({
-          promptId,
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        })),
-      );
-      const compressed: Content[] = [
-        {
-          role: 'user',
-          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-auq',
-                name: 'ask_user_question',
-                response: { answer: 'Polling' },
-              },
-            },
-          ],
-        },
-      ];
-      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () => {
-        vi.mocked(mockChat.getHistory).mockReturnValue(compressed);
-        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(compressed);
-        return createStreamWithChunks([
-          {
-            type: core.StreamEventType.COMPRESSED,
-            info: {
-              originalTokenCount: 40,
-              newTokenCount: 10,
-              compressionStatus: core.CompressionStatus.COMPRESSED,
-            },
-          },
-        ]) as Awaited<ReturnType<LlmChat['sendMessageStream']>>;
-      });
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [],
-        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
-      } as unknown as Parameters<typeof session.prompt>[0]);
-
-      const recorded = vi
-        .mocked(mockChatRecordingService.recordAbsorbedSnapshotOffset)
-        .mock.calls.at(-1)?.[0];
-      expect(recorded?.absorbedSnapshotCount).toBe(3);
-    });
-
     it('does not classify a restorable question as an interrupted tool turn', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(danglingAuqHistory());
 
@@ -8073,27 +8002,6 @@ describe('Session', () => {
       return content;
     }
 
-    const seedAbsorbedOffset = (
-      absorbed: number,
-      boundaryPromptId?: string,
-      extra?: { boundaryTurnIndex?: number },
-    ) => {
-      session.restoreRecordedRewindOffset([
-        chatRecord({
-          uuid: `offset-${absorbed}-${extra?.boundaryTurnIndex ?? 'x'}`,
-          type: 'system',
-          subtype: 'absorbed_snapshot_offset',
-          systemPayload: {
-            absorbedSnapshotCount: absorbed,
-            ...(boundaryPromptId ? { boundaryPromptId } : {}),
-            ...(extra?.boundaryTurnIndex !== undefined
-              ? { boundaryTurnIndex: extra.boundaryTurnIndex }
-              : {}),
-          },
-        }),
-      ]);
-    };
-
     it('lists and rewinds the absolute tail indexes after compression', () => {
       useHistory([
         ...compressedPrefix,
@@ -8105,7 +8013,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3']),
       );
-      seedAbsorbedOffset(2, 'p2');
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
       expect(session.rewindToTurn(2)).toEqual({
@@ -8142,7 +8049,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1']),
       );
-      seedAbsorbedOffset(2);
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
       expect(() => session.rewindToTurn(2)).toThrow(
@@ -8151,12 +8057,11 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('fail-closes when restored history cannot corroborate the offset', () => {
+    it('fail-closes when restored history has no live prompt ids', () => {
       useHistory(compressedPrefix);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3']),
       );
-      seedAbsorbedOffset(2, 'p2');
 
       session.restoreHistory(compressedPrefix);
 
@@ -8167,27 +8072,31 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('keeps a corroborated offset across restoreSessionHistory', () => {
+    it('keeps prompt ids across restoreSessionHistory', () => {
       const history: Content[] = [
         ...compressedPrefix,
         markedUser('third', 'p2'),
         { role: 'model', parts: [{ text: 'third reply' }] },
         markedUser('fourth', 'p3'),
       ];
-      useHistory(history);
+      vi.mocked(mockLlmClient.setHistory).mockImplementation(
+        (next: Content[]) => {
+          useHistory(next);
+        },
+      );
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3']),
       );
-      seedAbsorbedOffset(2, 'p2');
 
       session.restoreHistory(history);
 
+      const restored = session.captureHistorySnapshot();
+      expect(core.getApiHistoryPromptId(restored[2]!)).toBe('p2');
       expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
     });
 
-    it('drops the recorded offset when restored history is not compressed', () => {
+    it('publishes uncompressed history and fail-closes an unmarked compressed restore', () => {
       useHistory([{ role: 'user', parts: [{ text: 'only' }] }]);
-      seedAbsorbedOffset(2);
       session.restoreHistory([{ role: 'user', parts: [{ text: 'only' }] }]);
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
@@ -8209,33 +8118,7 @@ describe('Session', () => {
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
     });
 
-    it('restores the recorded offset from replayed history', async () => {
-      useHistory([
-        ...compressedPrefix,
-        markedUser('third', 'p2'),
-        { role: 'model', parts: [{ text: 'third reply' }] },
-        markedUser('fourth', 'p3'),
-      ]);
-      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        snapshotList(['p0', 'p1', 'p2', 'p3']),
-      );
-
-      await session.replayHistory([
-        chatRecord({
-          uuid: 'offset-resume',
-          type: 'system',
-          subtype: 'absorbed_snapshot_offset',
-          systemPayload: { absorbedSnapshotCount: 2, boundaryPromptId: 'p2' },
-        }),
-      ]);
-
-      expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
-      expect(() => session.rewindToTurn(1)).toThrow(
-        'Cannot rewind to the requested turn',
-      );
-    });
-
-    it('waits for snapshots before corroborating a resumed offset', () => {
+    it('waits for snapshots before publishing a resumed tail', () => {
       useHistory([
         ...compressedPrefix,
         markedUser('tail-a', 'p2'),
@@ -8243,7 +8126,6 @@ describe('Session', () => {
         markedUser('tail-b', 'p3'),
       ]);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([]);
-      seedAbsorbedOffset(2, 'p2');
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
 
@@ -8254,7 +8136,7 @@ describe('Session', () => {
       expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
     });
 
-    it('forgets the previous offset when the session is cleared', async () => {
+    it('rewinds the fresh turn after the session is cleared', async () => {
       useHistory([
         ...compressedPrefix,
         { role: 'user', parts: [{ text: 'third' }] },
@@ -8262,8 +8144,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1']),
       );
-      seedAbsorbedOffset(1, 'p1');
-      mockChatRecordingService.recordAbsorbedSnapshotOffset.mockClear();
       useHistory([]);
       session.rebindGoalRuntimeForNewSession();
       useHistory([{ role: 'user', parts: [{ text: 'fresh' }] }]);
@@ -8280,11 +8160,6 @@ describe('Session', () => {
       expect(mockChatRecordingService.rewindRecording.mock.calls[0]?.[0]).toBe(
         0,
       );
-      expect(
-        mockChatRecordingService.recordAbsorbedSnapshotOffset,
-      ).not.toHaveBeenCalledWith(
-        expect.objectContaining({ boundaryPromptId: 'p1' }),
-      );
     });
 
     it('fail-closes when restored history no longer matches the snapshot list', () => {
@@ -8297,7 +8172,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3', 'p4']),
       );
-      seedAbsorbedOffset(2, 'p2');
       session.restoreHistory(history);
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
@@ -8316,7 +8190,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['s0']),
       );
-      seedAbsorbedOffset(0);
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 1 });
       expect(() => session.rewindToTurn(1)).toThrow(
@@ -8353,7 +8226,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1']),
       );
-      seedAbsorbedOffset(1);
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
       expect(session.rewindToTurn(1)).toEqual({
@@ -8363,113 +8235,6 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind to the requested turn',
       );
-    });
-
-    it('records the absorbed snapshot offset when compression succeeds', async () => {
-      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        snapshotList(['p0', 'p1', 'p2', 'test-session-id########1']),
-      );
-      useHistory(compressedPrefix);
-      mockLlmClient.tryCompressChat.mockResolvedValue({
-        originalTokenCount: 100,
-        newTokenCount: 10,
-        compressionStatus: core.CompressionStatus.COMPRESSED,
-      });
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'next' }],
-      });
-
-      expect(
-        mockChatRecordingService.recordAbsorbedSnapshotOffset,
-      ).toHaveBeenCalledWith({
-        absorbedSnapshotCount: 3,
-        boundaryPromptId: 'test-session-id########1',
-      });
-    });
-
-    it('counts an in-flight lap-2 snapshot as absorbed', async () => {
-      const list = snapshotList(['p0', 'p1', 'p2']);
-      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
-        () => list,
-      );
-      vi.mocked(mockFileHistoryService.makeSnapshot).mockImplementation(
-        async (id: string) => {
-          list.push({
-            promptId: id,
-            timestamp: new Date(),
-            trackedFileBackups: {},
-          });
-        },
-      );
-      useHistory([
-        { role: 'user', parts: [{ text: 'a' }] },
-        { role: 'model', parts: [{ text: 'ra' }] },
-      ]);
-      const execute = vi.fn().mockResolvedValue({
-        llmContent: 'hi',
-        returnDisplay: 'hi',
-      });
-      mockToolRegistry.getTool.mockReturnValue({
-        name: 'run_shell_command',
-        kind: core.Kind.Execute,
-        build: vi.fn().mockReturnValue({
-          params: { command: 'echo hi' },
-          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-          getDescription: vi.fn().mockReturnValue('echo hi'),
-          toolLocations: vi.fn().mockReturnValue([]),
-          execute,
-        }),
-      });
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-      mockLlmClient.tryCompressChat
-        .mockResolvedValueOnce({
-          originalTokenCount: 0,
-          newTokenCount: 0,
-          compressionStatus: core.CompressionStatus.NOOP,
-        })
-        .mockImplementationOnce(async () => {
-          useHistory([...compressedPrefix]);
-          return {
-            originalTokenCount: 100,
-            newTokenCount: 10,
-            compressionStatus: core.CompressionStatus.COMPRESSED,
-          };
-        });
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'call-1',
-                    name: 'run_shell_command',
-                    args: { command: 'echo hi' },
-                  },
-                ],
-              },
-            },
-          ]),
-        )
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'next' }],
-      });
-
-      const recorded =
-        mockChatRecordingService.recordAbsorbedSnapshotOffset.mock.calls.at(
-          -1,
-        )?.[0];
-      expect(recorded?.absorbedSnapshotCount).toBe(4);
     });
 
     it('counts an in-stream compression without dropping the live prompt', async () => {
@@ -8512,11 +8277,6 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'next' }],
       });
 
-      const recorded =
-        mockChatRecordingService.recordAbsorbedSnapshotOffset.mock.calls.at(
-          -1,
-        )?.[0];
-      expect(recorded?.absorbedSnapshotCount).toBe(3);
       expect(session.getRewindableTurnRange()).toEqual({ start: 3, end: 4 });
     });
 
@@ -8580,7 +8340,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3']),
       );
-      seedAbsorbedOffset(2, 'p2', { boundaryTurnIndex: 2 });
 
       session.rewindToTurn(2);
       await recorder.flush();
@@ -8641,8 +8400,6 @@ describe('Session', () => {
       vi.mocked(mockChat.truncateHistory).mockImplementation(() => {
         useHistory(compressedPrefix);
       });
-      seedAbsorbedOffset(2, 'p2', { boundaryTurnIndex: 2 });
-      mockChatRecordingService.recordAbsorbedSnapshotOffset.mockClear();
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 3 });
       session.rewindToTurn(2, { rewindFiles: false });
@@ -8656,167 +8413,23 @@ describe('Session', () => {
       );
     });
 
-    it('refuses rewind when the boundary prompt is missing from the recorder', async () => {
+    it('refuses rewind before truncating when the recorder has no turn for the snapshot', () => {
       const recording =
         mockChatRecordingService as typeof mockChatRecordingService & {
-          getRecordedUserTurnCount: ReturnType<typeof vi.fn>;
           recordedTurnIndexForPrompt: ReturnType<typeof vi.fn>;
         };
-      recording.getRecordedUserTurnCount = vi.fn().mockReturnValue(3);
       recording.recordedTurnIndexForPrompt = vi.fn().mockReturnValue(undefined);
+      useHistory([...compressedPrefix, markedUser('live', 'p1')]);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        snapshotList(['p0', 'p1', 'test-session-id########1']),
+        snapshotList(['p0', 'p1']),
       );
-      useHistory(compressedPrefix);
-      mockLlmClient.tryCompressChat.mockResolvedValue({
-        originalTokenCount: 100,
-        newTokenCount: 10,
-        compressionStatus: core.CompressionStatus.COMPRESSED,
-      });
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'next' }],
-      });
-
-      expect(
-        mockChatRecordingService.recordAbsorbedSnapshotOffset,
-      ).not.toHaveBeenCalled();
-      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
-      expect(() => session.rewindToTurn(2)).toThrow(
+      expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
+      expect(() => session.rewindToTurn(1)).toThrow(
         'Cannot rewind to the requested turn',
       );
-    });
-
-    it('records the boundary turn through compression and syncs it on resume', async () => {
-      const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'rewind-offset-'));
-      const recorder = new core.ChatRecordingService(
-        {
-          getSessionId: () => 'test-session-id',
-          getCliVersion: () => 'test',
-          getProjectRoot: () => dir,
-          getResumedSessionData: () => undefined,
-          isInteractive: () => false,
-          getExperimentalZedIntegration: () => false,
-          isSessionWriterLeaseEnabled: () => false,
-          storage: { getProjectDir: () => dir },
-        } as unknown as core.Config,
-        undefined,
-        false,
-      );
-      const recordTurn = (text: string, promptId: string) => {
-        recorder.recordUserMessage([{ text }], undefined, undefined, promptId);
-        recorder.recordAssistantTurn({
-          model: 'test',
-          message: [{ text: `${text} reply` }],
-        });
-      };
-      recordTurn('t0', 'p0');
-      recordTurn('t1', 'p1');
-      const promptId = 'test-session-id########1';
-      const snapshots = snapshotList(['p0', 'p1']);
-      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
-        () => snapshots,
-      );
-      vi.mocked(mockFileHistoryService.makeSnapshot).mockImplementation(
-        async (id: string) => {
-          snapshots.push({
-            promptId: id,
-            timestamp: new Date('2026-06-13T00:00:00.000Z'),
-            trackedFileBackups: {},
-          });
-        },
-      );
-      useHistory([
-        { role: 'user', parts: [{ text: 't0' }] },
-        { role: 'model', parts: [{ text: 't0 reply' }] },
-        { role: 'user', parts: [{ text: 't1' }] },
-        { role: 'model', parts: [{ text: 't1 reply' }] },
-      ]);
-      mockLlmClient.tryCompressChat.mockImplementation(async () => {
-        useHistory(compressedPrefix);
-        return {
-          originalTokenCount: 100,
-          newTokenCount: 10,
-          compressionStatus: core.CompressionStatus.COMPRESSED,
-        };
-      });
-      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
-        useHistory([
-          ...compressedPrefix,
-          markedUser('next', promptId),
-          { role: 'model', parts: [{ text: 'next reply' }] },
-        ]);
-        return createEmptyStream();
-      });
-      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
-        recorder as never,
-      );
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'next' }],
-      });
-
-      const branch = () =>
-        (recorder as unknown as { activeBranchRecords: core.ChatRecord[] })
-          .activeBranchRecords;
-      const recorded = branch()
-        .filter((record) => record.subtype === 'absorbed_snapshot_offset')
-        .at(-1);
-      const payload = recorded?.systemPayload as
-        | {
-            absorbedSnapshotCount?: number;
-            boundaryPromptId?: string;
-            boundaryTurnIndex?: number;
-          }
-        | undefined;
-      expect(payload?.boundaryPromptId).toBe(promptId);
-      expect(payload?.boundaryTurnIndex).toBe(2);
-      expect(payload?.boundaryTurnIndex).toBe(
-        recorder.recordedTurnIndexForPrompt(promptId),
-      );
-      expect(payload?.absorbedSnapshotCount).toBe(2);
-
-      const recordedUuid = recorded?.uuid;
-      (
-        recorder as unknown as {
-          currentAbsorbedSnapshotOffset?: unknown;
-        }
-      ).currentAbsorbedSnapshotOffset = undefined;
-      session.applyRecordedRewindOffset(
-        payload as Parameters<Session['applyRecordedRewindOffset']>[0],
-      );
-      expect(
-        branch()
-          .filter((record) => record.subtype === 'absorbed_snapshot_offset')
-          .map((record) => record.uuid),
-      ).toEqual([recordedUuid]);
-
-      session.rewindToTurn(2);
-      const written = branch();
-      const rewind = written.find((record) => record.subtype === 'rewind');
-      const reappended = written
-        .filter((record) => record.subtype === 'absorbed_snapshot_offset')
-        .at(-1);
-      expect(rewind).toBeDefined();
-      expect(reappended?.uuid).toEqual(expect.any(String));
-      expect(reappended?.uuid).not.toBe(recordedUuid);
-      expect(written.indexOf(reappended as core.ChatRecord)).toBeGreaterThan(
-        written.indexOf(rewind as core.ChatRecord),
-      );
-      expect(reappended?.systemPayload).toMatchObject({
-        boundaryPromptId: promptId,
-        boundaryTurnIndex: 2,
-      });
-
-      fsSync.rmSync(dir, { recursive: true, force: true });
-      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
-        mockChatRecordingService as never,
-      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
     });
 
     it('fail-closes when the snapshot list is one ahead of the visible tail', () => {
@@ -8824,7 +8437,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2']),
       );
-      seedAbsorbedOffset(2, 'p2');
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
       expect(() => session.rewindToTurn(2)).toThrow(
@@ -8845,7 +8457,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(ids.slice(1)),
       );
-      seedAbsorbedOffset(99, 's99');
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 98, end: 100 });
       expect(session.rewindToTurn(99)).toEqual({
@@ -8910,7 +8521,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1']),
       );
-      seedAbsorbedOffset(1, 'p1', { boundaryTurnIndex: 1 });
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
       expect(session.rewindToTurn(1).apiTruncateIndex).toBeGreaterThan(
@@ -8973,7 +8583,191 @@ describe('Session', () => {
       );
     });
 
-    it('clears a seeded offset at install when the tail is not corroborated', () => {
+    it('marks the user-prompt lap and opens the window after compression', async () => {
+      const list = snapshotList(['p0']);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
+        () => list,
+      );
+      vi.mocked(mockFileHistoryService.makeSnapshot).mockImplementation(
+        async (id: string) => {
+          list.push({
+            promptId: id,
+            timestamp: new Date('2026-06-13T00:00:00.000Z'),
+            trackedFileBackups: {},
+          });
+        },
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'echo_tool',
+        kind: core.Kind.Other,
+        build: vi.fn().mockReturnValue({
+          params: {},
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('echo'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async (...args: unknown[]) => {
+          const request = args[1] as { message?: Part[] };
+          const options = args[4] as { promptId?: string } | undefined;
+          const parts = request.message ?? [];
+          const toolLap = parts.some((part) => part.functionResponse);
+          if (!toolLap) {
+            const live: Content = { role: 'user', parts };
+            if (options?.promptId) {
+              core.markApiHistoryPrompt(live, options.promptId);
+            }
+            useHistory([...compressedPrefix, live]);
+          }
+          if (toolLap) return createEmptyStream();
+          return createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-echo', name: 'echo_tool', args: {} },
+                ],
+              },
+            },
+          ]);
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next' }],
+      });
+
+      const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.[2]).toBe('test-session-id########1');
+      expect(calls[0]?.[4]).toEqual({ promptId: 'test-session-id########1' });
+      expect(calls[1]?.[4]).toBeUndefined();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(session.getRewindableTurnRange()).toEqual({ start: 1, end: 2 });
+    });
+
+    it('stops the rewind window at the first snapshot missing from the live tail', () => {
+      useHistory([
+        ...compressedPrefix,
+        markedUser('kept earlier', 'p0'),
+        markedUser('kept later', 'p2'),
+      ]);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        snapshotList(['p0', 'p1', 'p2']),
+      );
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 3 });
+    });
+
+    it('reads the recorder prompt index once per rewind window', () => {
+      const indexes = new Map<string, number>([
+        ['p2', 2],
+        ['p3', 3],
+      ]);
+      const recording =
+        mockChatRecordingService as typeof mockChatRecordingService & {
+          recordedRewindTurnIndexes: ReturnType<typeof vi.fn>;
+          recordedTurnIndexForPrompt: ReturnType<typeof vi.fn>;
+        };
+      recording.recordedRewindTurnIndexes = vi.fn().mockReturnValue(indexes);
+      recording.recordedTurnIndexForPrompt = vi.fn((id: string) =>
+        indexes.get(id),
+      );
+      useHistory([
+        ...compressedPrefix,
+        markedUser('third', 'p2'),
+        { role: 'model', parts: [{ text: 'third reply' }] },
+        markedUser('fourth', 'p3'),
+      ]);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        snapshotList(['p0', 'p1', 'p2', 'p3']),
+      );
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 2, end: 4 });
+      expect(recording.recordedRewindTurnIndexes).toHaveBeenCalledTimes(1);
+      expect(recording.recordedTurnIndexForPrompt).not.toHaveBeenCalled();
+    });
+
+    it('rewinds an uncompressed later prompt by recorder index and refuses the Goal snapshot first', () => {
+      const dir = fsSync.mkdtempSync(
+        path.join(os.tmpdir(), 'rewind-uncompressed-'),
+      );
+      const recorder = new core.ChatRecordingService(
+        {
+          getSessionId: () => 'test-session-id',
+          getCliVersion: () => 'test',
+          getProjectRoot: () => dir,
+          getResumedSessionData: () => undefined,
+          isInteractive: () => false,
+          getExperimentalZedIntegration: () => false,
+          isSessionWriterLeaseEnabled: () => false,
+          storage: { getProjectDir: () => dir },
+        } as unknown as core.Config,
+        undefined,
+        false,
+      );
+      recorder.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      recorder.recordGoalRuntimeMessage(
+        [{ text: 'Continue working on the active Goal.' }],
+        { goalId: 'g', revision: 1, turnId: 'gt' } as never,
+      );
+      recorder.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as never,
+      );
+      useHistory([
+        { role: 'user', parts: [{ text: 'p1' }] },
+        { role: 'model', parts: [{ text: 'r1' }] },
+        {
+          role: 'user',
+          parts: [{ text: 'Continue working on the active Goal.' }],
+        },
+        { role: 'model', parts: [{ text: 'rg' }] },
+        { role: 'user', parts: [{ text: 'p3' }] },
+        { role: 'model', parts: [{ text: 'r3' }] },
+      ]);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        snapshotList(['p1', 'pG', 'p3']),
+      );
+      const branch = () =>
+        (recorder as unknown as { activeBranchRecords: core.ChatRecord[] })
+          .activeBranchRecords;
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 3 });
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(branch().some((record) => record.subtype === 'rewind')).toBe(
+        false,
+      );
+      const p3Parent = branch().find(
+        (record) => record.promptId === 'p3',
+      )?.parentUuid;
+      expect(p3Parent).toEqual(expect.any(String));
+
+      expect(session.rewindToTurn(2)).toEqual({
+        targetTurnIndex: 2,
+        apiTruncateIndex: 4,
+      });
+      const rewind = branch().find((record) => record.subtype === 'rewind');
+      expect(rewind?.parentUuid).toBe(p3Parent);
+
+      fsSync.rmSync(dir, { recursive: true, force: true });
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        mockChatRecordingService as never,
+      );
+    });
+
+    it('does not publish snapshots whose ids are absent from the tail', () => {
       useHistory([
         ...compressedPrefix,
         { role: 'user', parts: [{ text: 'a' }] },
@@ -8986,7 +8780,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'pa', 'pb']),
       );
-      seedAbsorbedOffset(2, 'pa');
 
       expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 0 });
       expect(() => session.rewindToTurn(3)).toThrow(
@@ -9004,7 +8797,6 @@ describe('Session', () => {
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         snapshotList(['p0', 'p1', 'p2', 'p3']),
       );
-      seedAbsorbedOffset(2, 'p2');
       const live = session.getRewindableTurnRange();
 
       await session.replayHistory([
@@ -9014,54 +8806,10 @@ describe('Session', () => {
           subtype: 'slash_command',
           message: { role: 'user', parts: [{ text: '/help' }] },
         }),
-        chatRecord({
-          uuid: 'offset-slash',
-          type: 'system',
-          subtype: 'absorbed_snapshot_offset',
-          systemPayload: {
-            absorbedSnapshotCount: 2,
-            boundaryPromptId: 'p2',
-          },
-        }),
       ]);
 
       expect(session.getRewindableTurnRange()).toEqual(live);
       expect(live).toEqual({ start: 2, end: 4 });
-    });
-
-    it('records the absorbed offset for a continue replay without a +1', async () => {
-      useHistory([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
-      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        snapshotList(['p0', 'p1', 'p2', 'p3']),
-      );
-      const compressed: Content[] = [
-        ...compressedPrefix,
-        markedUser('live', 'p3'),
-      ];
-      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () => {
-        useHistory(compressed);
-        return createStreamWithChunks([
-          {
-            type: core.StreamEventType.COMPRESSED,
-            info: {
-              originalTokenCount: 40,
-              newTokenCount: 10,
-              compressionStatus: core.CompressionStatus.COMPRESSED,
-            },
-          },
-        ]) as Awaited<ReturnType<LlmChat['sendMessageStream']>>;
-      });
-
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [],
-        _meta: { 'qwen.daemon.continueLastTurn': true },
-      });
-
-      const recorded = vi
-        .mocked(mockChatRecordingService.recordAbsorbedSnapshotOffset)
-        .mock.calls.at(-1)?.[0];
-      expect(recorded?.absorbedSnapshotCount).toBe(3);
     });
 
     it('counts only real user prompts as rewindable turns', () => {
@@ -47408,74 +47156,6 @@ describe('Session', () => {
         )
         .mockResolvedValue(createEmptyStream());
     }
-
-    it('records the absorbed offset for a todo-stop-guard continuation without a +1', async () => {
-      rebuildSessionWithGuard();
-      installPendingTodoTool();
-      const compressed: Content[] = [
-        {
-          role: 'user',
-          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
-        },
-      ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(compressed);
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(compressed);
-      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
-        ['p0', 'p1', 'p2', 'bare-snapshot'].map((promptId) => ({
-          promptId,
-          timestamp: new Date('2026-06-13T00:00:00.000Z'),
-          trackedFileBackups: {},
-        })),
-      );
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'todo-1',
-                    name: core.ToolNames.TODO_WRITE,
-                    args: { todos: pendingTodos },
-                  },
-                ],
-              },
-            },
-          ]),
-        )
-        .mockResolvedValueOnce(createEmptyStream())
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.COMPRESSED,
-              info: {
-                originalTokenCount: 40,
-                newTokenCount: 10,
-                compressionStatus: core.CompressionStatus.COMPRESSED,
-              },
-            },
-          ]),
-        )
-        .mockResolvedValue(createEmptyStream());
-
-      await runGuardPrompt();
-
-      const recorded = vi
-        .mocked(mockChatRecordingService.recordAbsorbedSnapshotOffset)
-        .mock.calls.at(-1)?.[0];
-      expect(recorded).toEqual(
-        expect.objectContaining({
-          absorbedSnapshotCount: 4,
-          boundaryPromptId: 'bare-snapshot',
-        }),
-      );
-    });
 
     async function runGuardPrompt(perTask = false) {
       lastGuardPromptId = `test-session-id########guard-${++guardPromptCounter}`;

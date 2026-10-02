@@ -6238,11 +6238,6 @@ class QwenAgent implements Agent {
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
                 );
-                // Snapshots are restored after primeSession. An empty list
-                // defers corroboration instead of dropping the offset.
-                createdSession.applyRecordedRewindOffset?.(
-                  projection.runtime.absorbedSnapshotOffset,
-                );
                 copyCumulativeUsage(
                   createdSession.cumulativeUsage,
                   replayUsage,
@@ -6287,11 +6282,6 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-              }
-              if (projection) {
-                createdSession.applyRecordedRewindOffset?.(
-                  projection.runtime.absorbedSnapshotOffset,
-                );
               }
               try {
                 for (const update of streamGoalUpdates) {
@@ -6562,10 +6552,6 @@ class QwenAgent implements Agent {
                 createdSession.primeTurnState(
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
-                );
-                // Same deferral as load: file history is restored after this.
-                createdSession.applyRecordedRewindOffset?.(
-                  projection.runtime.absorbedSnapshotOffset,
                 );
               });
             },

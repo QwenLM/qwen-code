@@ -4763,22 +4763,6 @@ function remapSystemPayloadForFork(
       ),
     } as ChatRecord['systemPayload'];
   }
-  if (record.subtype === 'absorbed_snapshot_offset') {
-    const payload = record.systemPayload as
-      | { boundaryPromptId?: string }
-      | undefined;
-    if (typeof payload?.boundaryPromptId !== 'string') {
-      return record.systemPayload;
-    }
-    return {
-      ...payload,
-      boundaryPromptId: remapForkPromptId(
-        payload.boundaryPromptId,
-        sourceSessionId,
-        newSessionId,
-      ),
-    } as ChatRecord['systemPayload'];
-  }
   if (record.subtype === 'file_history_snapshot') {
     return remapFileHistorySnapshotPayload(
       record.systemPayload,

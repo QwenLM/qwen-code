@@ -1187,6 +1187,21 @@ describe('ChatRecordingService', () => {
       expect(service.recordedTurnIndexForPrompt('p3')).toBe(3);
     });
 
+    it('refuses a prompt index when the mirror is not the projected suffix', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      expect(service.getRecordedUserTurnCount()).toBe(1);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+
+      const parents = (
+        service as unknown as { turnParentUuids: Array<string | null> }
+      ).turnParentUuids;
+      parents[0] = 'wrong-parent';
+
+      expect(service.recordedRewindTurnIndexes()).toBeUndefined();
+      expect(service.recordedTurnIndexForPrompt('p1')).toBeUndefined();
+    });
+
     it('refuses a rewind index past the recorded turns', async () => {
       user('a');
       user('b');
@@ -1295,63 +1310,6 @@ describe('ChatRecordingService', () => {
 
       await expect(svc.flush()).rejects.toThrow('disk full');
       expect(svc.getTranscriptCursor()).toEqual({ recordId: 'persisted-tail' });
-    });
-  });
-
-  describe('recordAbsorbedSnapshotOffset', () => {
-    it('re-appends an offset restored after resume', async () => {
-      svc.restoreAbsorbedSnapshotOffset({
-        absorbedSnapshotCount: 2,
-        boundaryPromptId: 'p2',
-        boundaryTurnIndex: 2,
-      });
-      user('keep');
-      svc.rewindRecording(0, { truncatedCount: 1 });
-      await svc.flush();
-      expect(
-        writes().filter(
-          (record) => record.subtype === 'absorbed_snapshot_offset',
-        ),
-      ).toEqual([
-        expect.objectContaining({
-          systemPayload: {
-            absorbedSnapshotCount: 2,
-            boundaryPromptId: 'p2',
-            boundaryTurnIndex: 2,
-          },
-        }),
-      ]);
-    });
-
-    it('does not keep a rejected offset for rewind to re-append', async () => {
-      svc.recordAbsorbedSnapshotOffset({
-        absorbedSnapshotCount: 2,
-        boundaryPromptId: 'p2',
-      });
-      user('keep');
-      svc.rewindRecording(0, { truncatedCount: 1 });
-      await svc.flush();
-      const offsets = () =>
-        writes().filter(
-          (record) => record.subtype === 'absorbed_snapshot_offset',
-        );
-      expect(offsets()).toHaveLength(2);
-      expect(offsets().at(-1)?.systemPayload).toEqual({
-        absorbedSnapshotCount: 2,
-        boundaryPromptId: 'p2',
-      });
-
-      svc.recordAbsorbedSnapshotOffset({
-        absorbedSnapshotCount: -1,
-      } as Parameters<ChatRecordingService['recordAbsorbedSnapshotOffset']>[0]);
-      const afterReject = offsets().length;
-      svc.rewindRecording(0, { truncatedCount: 1 });
-      await svc.flush();
-      expect(offsets()).toHaveLength(afterReject);
-      expect(
-        (svc as unknown as { currentAbsorbedSnapshotOffset?: unknown })
-          .currentAbsorbedSnapshotOffset,
-      ).toBeUndefined();
     });
   });
 

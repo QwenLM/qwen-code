@@ -2459,7 +2459,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
         getRewindableTurnRange: ReturnType<typeof vi.fn>;
-        applyRecordedRewindOffset: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
@@ -5355,7 +5354,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
           beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
           getRewindableTurnRange: vi.fn().mockReturnValue({ start: 0, end: 8 }),
-          applyRecordedRewindOffset: vi.fn(),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
           getDefaultReasoningConfig: vi.fn(() =>
@@ -27866,9 +27864,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const lastSessionApprovalMode = [...messages]
           .reverse()
           .find((message) => message['subtype'] === 'session_approval_mode');
-        const lastAbsorbedOffset = [...messages]
-          .reverse()
-          .find((message) => message['subtype'] === 'absorbed_snapshot_offset');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -27895,11 +27890,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             goalRecords: messages,
             initialTurn: 0,
             backgroundNotificationTaskIds: [],
-            ...(lastAbsorbedOffset?.['systemPayload']
-              ? {
-                  absorbedSnapshotOffset: lastAbsorbedOffset['systemPayload'],
-                }
-              : {}),
           },
           replay: selectRestoreReplay(messages, restoreOptions),
         };
@@ -27982,7 +27972,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
         primeRecoveredGoalPublication: vi.fn(),
         primeTurnState: vi.fn(opts.primeTurnStateImpl),
-        applyRecordedRewindOffset: vi.fn(),
         getRewindableTurnRange: vi.fn().mockReturnValue({ start: 0, end: 8 }),
         cumulativeUsage: {
           promptTokens: 7,
@@ -28108,54 +28097,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             }
           ).sessionApprovalModeConverged.get('persisted-1'),
         ).toBe(ApprovalMode.DEFAULT);
-      } finally {
-        mockConnectionState.resolve();
-        await agentPromise;
-      }
-    },
-  );
-
-  it.each(['load', 'resume'] as const)(
-    'installs the projected rewind offset on %s',
-    async (action) => {
-      const offset = {
-        absorbedSnapshotCount: 2,
-        boundaryPromptId: 'p2',
-      };
-      bindRestoreMocks({
-        sessionExists: true,
-        resumedConversation: {
-          messages: [
-            {
-              uuid: 'offset-1',
-              type: 'system',
-              subtype: 'absorbed_snapshot_offset',
-              systemPayload: offset,
-            },
-            { uuid: 'user-1', type: 'user', message: { text: 'hello' } },
-          ],
-        },
-      });
-      const { agent, agentPromise } = await spawnAgent();
-      const request = {
-        cwd: '/tmp',
-        sessionId: 'persisted-1',
-        mcpServers: [],
-      };
-
-      try {
-        if (action === 'load') {
-          await agent.loadSession(request);
-        } else {
-          await agent.unstable_resumeSession(request);
-        }
-        const created = vi.mocked(Session).mock.results.at(-1)?.value as {
-          applyRecordedRewindOffset: ReturnType<typeof vi.fn>;
-        };
-        expect(created.applyRecordedRewindOffset).toHaveBeenCalledTimes(
-          action === 'load' ? 2 : 1,
-        );
-        expect(created.applyRecordedRewindOffset).toHaveBeenCalledWith(offset);
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

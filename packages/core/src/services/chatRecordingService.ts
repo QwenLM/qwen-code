@@ -374,7 +374,6 @@ export interface ChatRecord {
     | 'agent_retry'
     | 'agent_session_ready'
     | 'file_history_snapshot'
-    | 'absorbed_snapshot_offset'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
@@ -450,7 +449,6 @@ export interface ChatRecord {
     | AgentRetryRecordPayload
     | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
-    | AbsorbedSnapshotOffsetRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
@@ -812,21 +810,6 @@ export interface RewindRecordPayload {
   truncatedCount: number;
 }
 
-/**
- * Snapshot prefix compression removed from the rewindable list.
- * `boundaryPromptId` is the first live snapshot, or the last absorbed
- * snapshot when the live tail is empty.
- */
-export interface AbsorbedSnapshotOffsetRecordPayload {
-  absorbedSnapshotCount: number;
-  /** First live snapshot, or the last absorbed snapshot when `boundaryExclusive` is set. */
-  boundaryPromptId?: string;
-  /** Live tail starts one past `boundaryPromptId`. */
-  boundaryExclusive?: boolean;
-  /** `rewindRecording` index of the first live user turn. */
-  boundaryTurnIndex?: number;
-}
-
 function isRewindUserTurn(record: ChatRecord): boolean {
   return (
     record.type === 'user' &&
@@ -835,37 +818,6 @@ function isRewindUserTurn(record: ChatRecord): boolean {
     record.subtype !== 'cron' &&
     record.subtype !== 'mid_turn_user_message' &&
     record.subtype !== 'realtime_message'
-  );
-}
-
-export function isAbsorbedSnapshotOffsetPayload(
-  payload: unknown,
-): payload is AbsorbedSnapshotOffsetRecordPayload {
-  if (typeof payload !== 'object' || payload === null) return false;
-  const record = payload as AbsorbedSnapshotOffsetRecordPayload;
-  if (
-    !Number.isInteger(record.absorbedSnapshotCount) ||
-    record.absorbedSnapshotCount < 0
-  ) {
-    return false;
-  }
-  if (
-    record.boundaryPromptId !== undefined &&
-    (typeof record.boundaryPromptId !== 'string' ||
-      record.boundaryPromptId.length === 0)
-  ) {
-    return false;
-  }
-  if (
-    record.boundaryExclusive !== undefined &&
-    typeof record.boundaryExclusive !== 'boolean'
-  ) {
-    return false;
-  }
-  return (
-    record.boundaryTurnIndex === undefined ||
-    (Number.isInteger(record.boundaryTurnIndex) &&
-      record.boundaryTurnIndex >= 0)
   );
 }
 
@@ -1196,10 +1148,6 @@ export class ChatRecordingService {
   /** Last-wins daemon session approval state, used to skip duplicate writes. */
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
-    | undefined;
-  /** Last accepted compression rewind offset. Invalid writes clear it. */
-  private currentAbsorbedSnapshotOffset:
-    | AbsorbedSnapshotOffsetRecordPayload
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
@@ -2979,9 +2927,9 @@ export class ChatRecordingService {
         this.currentSessionApprovalMode =
           normalizeSessionApprovalModePayload(sessionApprovalMode);
       }
-      if (targetTurnIndex >= this.turnParentUuids.length) {
+      if (!this.isRewindRecordingIndex(targetTurnIndex)) {
         debugLogger.error(
-          `Refusing rewind past the recorded turns: ${targetTurnIndex} >= ${this.turnParentUuids.length}`,
+          `Refusing rewind past the recorded turns: ${targetTurnIndex} of ${this.turnParentUuids.length}`,
         );
         return;
       }
@@ -3031,17 +2979,6 @@ export class ChatRecordingService {
         });
       }
 
-      // The offset record is last-wins on the active chain. One written before
-      // this re-root is not an ancestor of the new leaf, so resume cannot see it.
-      if (this.currentAbsorbedSnapshotOffset) {
-        this.appendRecord({
-          ...this.createBaseRecord('system'),
-          type: 'system',
-          subtype: 'absorbed_snapshot_offset',
-          systemPayload: this.currentAbsorbedSnapshotOffset,
-        });
-      }
-
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -3052,15 +2989,28 @@ export class ChatRecordingService {
     }
   }
 
-  /**
-   * Persists the compression rewind offset so resume does not infer it
-   * from the live snapshot and prompt counts.
-   */
   getRecordedUserTurnCount(): number {
     return this.turnParentUuids.length;
   }
 
+  /**
+   * `0` is a root rewind when nothing has been recorded. Any other index
+   * must name an existing turn; `length` would re-root the chain at null.
+   */
+  isRewindRecordingIndex(targetTurnIndex: number): boolean {
+    if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
+      return false;
+    }
+    const length = this.turnParentUuids.length;
+    if (length === 0) return targetTurnIndex === 0;
+    return targetTurnIndex < length;
+  }
+
   recordedTurnIndexForPrompt(promptId: string): number | undefined {
+    return this.recordedRewindTurnIndexes()?.get(promptId);
+  }
+
+  recordedRewindTurnIndexes(): Map<string, number> | undefined {
     const mirror: ChatRecord[] = [];
     for (const record of this.activeBranchRecords) {
       if (isRewindUserTurn(record)) mirror.push(record);
@@ -3072,45 +3022,12 @@ export class ChatRecordingService {
     if (mirror.length > 0 && mirrorParent !== boundaryParent) {
       return undefined;
     }
+    const indexes = new Map<string, number>();
     for (let index = 0; index < mirror.length; index++) {
-      if (mirror[index]?.promptId === promptId) return base + index;
+      const id = mirror[index]?.promptId;
+      if (id) indexes.set(id, base + index);
     }
-    return undefined;
-  }
-
-  /**
-   * Remembers the offset after resume without appending another record.
-   * Later rewinds re-append whatever this holds.
-   */
-  restoreAbsorbedSnapshotOffset(
-    payload: AbsorbedSnapshotOffsetRecordPayload | undefined,
-  ): void {
-    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
-      this.currentAbsorbedSnapshotOffset = undefined;
-      return;
-    }
-    this.currentAbsorbedSnapshotOffset = payload;
-  }
-
-  recordAbsorbedSnapshotOffset(
-    payload: AbsorbedSnapshotOffsetRecordPayload,
-  ): void {
-    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
-      debugLogger.error('Rejected absorbed snapshot offset payload');
-      this.currentAbsorbedSnapshotOffset = undefined;
-      return;
-    }
-    this.currentAbsorbedSnapshotOffset = payload;
-    try {
-      this.appendRecord({
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'absorbed_snapshot_offset',
-        systemPayload: payload,
-      });
-    } catch (error) {
-      debugLogger.error('Error saving absorbed snapshot offset:', error);
-    }
+    return indexes;
   }
 
   /**

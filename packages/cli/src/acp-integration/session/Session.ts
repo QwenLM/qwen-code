@@ -143,9 +143,8 @@ import {
   isApiUserPrompt,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
+  markApiHistoryPrompt,
   getStartupContextLength,
-  isAbsorbedSnapshotOffsetPayload,
-  type AbsorbedSnapshotOffsetRecordPayload,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -2213,14 +2212,6 @@ export class Session implements SessionContext {
   // the chat-instance check alone never invalidates the count on a route
   // change (#9529, follow-up to #9454/#9506).
   private lastPromptTokenCountRouteKey: string | undefined = undefined;
-  #absorbedSnapshotOffset: number | null = null;
-  #boundaryPromptId: string | null = null;
-  #boundaryExclusive = false;
-  #boundaryTurnIndex: number | null = null;
-  #activeCompressionPromptId: string | undefined;
-  #activeCompressionStream: AsyncGenerator<StreamEvent> | undefined;
-  #userPromptInHistory = false;
-  #userPromptInHistoryFor: string | undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -2605,8 +2596,6 @@ export class Session implements SessionContext {
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
     this.#bindGoalRuntime();
-    // /clear rebinds onto a fresh recorder. Drop the previous session's offset.
-    this.#reconcileRewindOffset([], 'restore');
   }
 
   /**
@@ -4567,14 +4556,6 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
-    const compressionStream = this.#activeCompressionStream;
-    this.#activeCompressionStream = undefined;
-    this.#activeCompressionPromptId = undefined;
-    // A caller that never iterates the send stream never runs its finally.
-    // Closing it here still clears the prompt id on dispose.
-    if (compressionStream) {
-      void compressionStream.return(undefined);
-    }
     this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -4719,7 +4700,6 @@ export class Session implements SessionContext {
     gaps?: HistoryGap[],
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
-    this.restoreRecordedRewindOffset(records);
     this.primeTurnFromHistory(records);
     const skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
@@ -4770,37 +4750,41 @@ export class Session implements SessionContext {
     const apiHistory = chat.getHistoryShallow();
     const rewindWindow = this.#rewindOffsetState(apiHistory);
     const compressed = this.#historyHasCompressedPrefix(apiHistory);
-    const targetPromptId = compressed
-      ? this.#snapshotList()[targetTurnIndex]?.promptId
-      : undefined;
+    const targetPromptId = this.#snapshotList()[targetTurnIndex]?.promptId;
     const recorder = this.config.getChatRecordingService();
+    const lookup = recorder?.recordedTurnIndexForPrompt;
     let recorderIndex = targetTurnIndex;
-    let apiTruncateIndex = -1;
+    let recorderRefused = false;
+    if (lookup) {
+      if (!targetPromptId) {
+        recorderRefused = true;
+      } else {
+        const found = lookup.call(recorder, targetPromptId);
+        if (found === undefined) recorderRefused = true;
+        else recorderIndex = found;
+      }
+    }
     if (
+      !recorderRefused &&
+      recorder?.isRewindRecordingIndex &&
+      !recorder.isRewindRecordingIndex(recorderIndex)
+    ) {
+      recorderRefused = true;
+    }
+    const inWindow =
       !rewindWindow.failClosed &&
       targetTurnIndex >= rewindWindow.start &&
-      targetTurnIndex < rewindWindow.end
-    ) {
-      if (!compressed) {
-        apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
-          apiHistory,
-          targetTurnIndex,
-        );
-      } else if (targetPromptId) {
-        apiTruncateIndex = findApiHistoryPromptIndex(
-          apiHistory,
-          targetPromptId,
-        );
-        const lookup = recorder?.recordedTurnIndexForPrompt;
-        if (lookup) {
-          const found = lookup.call(recorder, targetPromptId);
-          if (found === undefined) {
-            apiTruncateIndex = -1;
-          } else {
-            recorderIndex = found;
-          }
-        }
-      }
+      targetTurnIndex < rewindWindow.end;
+    let apiTruncateIndex = -1;
+    if (inWindow && !recorderRefused) {
+      apiTruncateIndex = compressed
+        ? targetPromptId
+          ? findApiHistoryPromptIndex(apiHistory, targetPromptId)
+          : -1
+        : this.#computeApiTruncationIndexForUserTurn(
+            apiHistory,
+            targetTurnIndex,
+          );
     }
 
     if (apiTruncateIndex < 0) {
@@ -4885,43 +4869,6 @@ export class Session implements SessionContext {
     return { start: window.start, end: window.end };
   }
 
-  /**
-   * Installs the offset from a restore projection. A missing payload does
-   * not reset a live value, so a partial replay cannot wipe it.
-   */
-  applyRecordedRewindOffset(
-    payload: AbsorbedSnapshotOffsetRecordPayload | undefined,
-  ): void {
-    if (!isAbsorbedSnapshotOffsetPayload(payload)) return;
-    this.#absorbedSnapshotOffset = payload.absorbedSnapshotCount;
-    this.#boundaryPromptId = payload.boundaryPromptId ?? null;
-    this.#boundaryExclusive = payload.boundaryExclusive === true;
-    this.#boundaryTurnIndex =
-      typeof payload.boundaryTurnIndex === 'number'
-        ? payload.boundaryTurnIndex
-        : null;
-    this.#reconcileRewindOffset(this.captureHistorySnapshot(), 'install');
-    this.config
-      .getChatRecordingService()
-      ?.restoreAbsorbedSnapshotOffset?.(this.#offsetPayload());
-  }
-
-  restoreRecordedRewindOffset(records: readonly ChatRecord[]): void {
-    let payload: AbsorbedSnapshotOffsetRecordPayload | undefined;
-    for (const record of records) {
-      if (
-        record.type !== 'system' ||
-        record.subtype !== 'absorbed_snapshot_offset' ||
-        !isAbsorbedSnapshotOffsetPayload(record.systemPayload)
-      ) {
-        continue;
-      }
-      payload = record.systemPayload;
-    }
-    if (!payload) return;
-    this.applyRecordedRewindOffset(payload);
-  }
-
   restoreHistory(history: Content[]): void {
     if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
@@ -4930,8 +4877,13 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
-    this.#reconcileRewindOffset(history, 'restore');
+    const cloned = structuredClone(history);
+    for (let index = 0; index < history.length; index++) {
+      const promptId = getApiHistoryPromptId(history[index]!);
+      const copy = cloned[index];
+      if (promptId && copy) markApiHistoryPrompt(copy, promptId);
+    }
+    this.config.getLlmClient()!.setHistory(cloned);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4958,93 +4910,12 @@ export class Session implements SessionContext {
     );
   }
 
-  #clearRewindOffset(): void {
-    this.#absorbedSnapshotOffset = null;
-    this.#boundaryPromptId = null;
-    this.#boundaryExclusive = false;
-    this.#boundaryTurnIndex = null;
-  }
-
-  #offsetPayload(): AbsorbedSnapshotOffsetRecordPayload | undefined {
-    if (this.#absorbedSnapshotOffset === null) return undefined;
-    return {
-      absorbedSnapshotCount: this.#absorbedSnapshotOffset,
-      ...(this.#boundaryPromptId
-        ? { boundaryPromptId: this.#boundaryPromptId }
-        : {}),
-      ...(this.#boundaryExclusive ? { boundaryExclusive: true } : {}),
-      ...(this.#boundaryTurnIndex !== null
-        ? { boundaryTurnIndex: this.#boundaryTurnIndex }
-        : {}),
-    };
-  }
-
-  #persistRewindOffset(): void {
-    const payload = this.#offsetPayload();
-    if (!payload) return;
-    this.config
-      .getChatRecordingService()
-      ?.recordAbsorbedSnapshotOffset(payload);
-  }
-
   #snapshotList(): ReadonlyArray<{ promptId: string }> {
     try {
       return this.config.getFileHistoryService().getSnapshots();
     } catch {
       return [];
     }
-  }
-
-  /**
-   * Subtract the in-flight snapshot only when this prompt has not yet been
-   * pushed into model history. Later tool-loop laps and in-stream compaction
-   * already include that prompt in the absorbed prefix.
-   */
-  #noteAbsorbedSnapshotsAfterCompression(
-    promptId: string,
-    promptNotYetInHistory: boolean,
-  ): void {
-    const history = this.#getCurrentChat().getHistoryShallow();
-    if (!this.#historyHasCompressedPrefix(history)) return;
-    const snapshots = this.#snapshotList();
-    const liveIds = this.#countedPromptIds(history);
-    if (promptNotYetInHistory) liveIds.add(promptId);
-    const recorder = this.config.getChatRecordingService();
-    const lookup = recorder?.recordedTurnIndexForPrompt?.bind(recorder);
-    let boundaryIndex = -1;
-    for (let index = 0; index < snapshots.length; index++) {
-      const id = snapshots[index]?.promptId;
-      if (!id || !liveIds.has(id)) continue;
-      if (lookup && lookup(id) === undefined) continue;
-      boundaryIndex = index;
-      break;
-    }
-    if (boundaryIndex < 0) {
-      if (
-        !promptNotYetInHistory &&
-        liveIds.size === 0 &&
-        snapshots.length > 0
-      ) {
-        const boundaryPromptId = snapshots[snapshots.length - 1]?.promptId;
-        const turnCount = recorder?.getRecordedUserTurnCount?.();
-        this.#absorbedSnapshotOffset = snapshots.length;
-        this.#boundaryPromptId = boundaryPromptId ?? null;
-        this.#boundaryExclusive = true;
-        this.#boundaryTurnIndex =
-          typeof turnCount === 'number' ? turnCount : null;
-        this.#persistRewindOffset();
-        return;
-      }
-      this.#clearRewindOffset();
-      return;
-    }
-    const boundaryPromptId = snapshots[boundaryIndex]?.promptId;
-    this.#absorbedSnapshotOffset = boundaryIndex;
-    this.#boundaryPromptId = boundaryPromptId ?? null;
-    this.#boundaryExclusive = false;
-    this.#boundaryTurnIndex =
-      boundaryPromptId && lookup ? (lookup(boundaryPromptId) ?? null) : null;
-    this.#persistRewindOffset();
   }
 
   #countedPromptIds(apiHistory: Content[]): Set<string> {
@@ -5067,12 +4938,19 @@ export class Session implements SessionContext {
     const snapshots = this.#snapshotList();
     const liveIds = this.#countedPromptIds(apiHistory);
     const recorder = this.config.getChatRecordingService();
-    const lookup = recorder?.recordedTurnIndexForPrompt?.bind(recorder);
+    const tracksRecorder =
+      typeof recorder?.recordedRewindTurnIndexes === 'function';
+    const indexes = tracksRecorder
+      ? recorder.recordedRewindTurnIndexes()
+      : undefined;
+    if (tracksRecorder && !indexes) {
+      return { start: snapshots.length, end: snapshots.length };
+    }
     let start = snapshots.length;
     for (let index = snapshots.length - 1; index >= 0; index--) {
       const id = snapshots[index]?.promptId;
       if (!id || !liveIds.has(id)) break;
-      if (lookup && lookup(id) === undefined) break;
+      if (tracksRecorder && !indexes?.has(id)) break;
       start = index;
     }
     return { start, end: snapshots.length };
@@ -5100,34 +4978,6 @@ export class Session implements SessionContext {
       return { start: 0, end: 0, failClosed: true };
     }
     return { start: suffix.start, end: suffix.end, failClosed: false };
-  }
-
-  #reconcileRewindOffset(
-    apiHistory: Content[],
-    mode: 'install' | 'restore',
-  ): void {
-    const snapshots = this.#snapshotList();
-    if (!this.#historyHasCompressedPrefix(apiHistory)) {
-      if (
-        mode === 'install' &&
-        apiHistory.length === 0 &&
-        snapshots.length === 0 &&
-        (this.#absorbedSnapshotOffset !== null || this.#boundaryPromptId)
-      ) {
-        return;
-      }
-      this.#clearRewindOffset();
-      return;
-    }
-    if (
-      snapshots.length > 0 &&
-      this.#boundaryPromptId &&
-      !snapshots.some(
-        (snapshot) => snapshot.promptId === this.#boundaryPromptId,
-      )
-    ) {
-      this.#clearRewindOffset();
-    }
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -9013,17 +8863,10 @@ export class Session implements SessionContext {
       consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
-    if (this.#userPromptInHistoryFor !== promptId) {
-      this.#userPromptInHistoryFor = promptId;
-      this.#userPromptInHistory = false;
-    }
-    const promptNotYetInHistory = !this.#userPromptInHistory;
-    this.#activeCompressionPromptId = promptId;
     const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
       if (decision.kind === 'stop') {
-        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: decision.stopReason };
       }
       message = decision.message;
@@ -9033,7 +8876,6 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after pre-compression preparation for prompt ${promptId}`,
       );
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -9085,11 +8927,9 @@ export class Session implements SessionContext {
       } catch (compressionError) {
         if (abortSignal.aborted) {
           debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
-          this.#activeCompressionPromptId = undefined;
           return { responseStream: null, stopReason: 'cancelled' };
         }
         if (this.#isAbortError(compressionError)) {
-          this.#activeCompressionPromptId = undefined;
           throw compressionError;
         }
         debugLogger.warn(
@@ -9102,7 +8942,6 @@ export class Session implements SessionContext {
 
     if (abortSignal.aborted) {
       debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -9115,18 +8954,13 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after request route key resolution for prompt ${promptId}`,
       );
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
     // Recorded with the resolved request route key: a COMPRESSED result
     // must invalidate every retained route count, not just the active
     // route's (see #invalidateRouteTokenCountsForCompression).
     if (compressionInfo) {
-      this.#recordCompressionTokenCount(
-        compressionInfo,
-        requestRouteKey,
-        promptNotYetInHistory,
-      );
+      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
     } else {
       this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
@@ -9149,7 +8983,6 @@ export class Session implements SessionContext {
             'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           `Failed to emit token limit diagnostic for prompt ${promptId}`,
         );
-        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: 'max_tokens' };
       }
     }
@@ -9165,14 +8998,12 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after compression diagnostic for prompt ${promptId}`,
       );
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
     if (options.beforeSend) {
       const decision = await options.beforeSend({ compressionFailed });
       if (decision.kind === 'stop') {
-        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: decision.stopReason };
       }
       message = decision.message;
@@ -9182,7 +9013,6 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after pre-send validation for prompt ${promptId}`,
       );
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -9205,26 +9035,26 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    const markHistoryPrompt = !message.some(
+      (part) => 'functionResponse' in part && part.functionResponse,
+    );
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream = await chat.sendMessageStream(
+        model,
+        request,
+        promptId,
+        goalPermit,
+        markHistoryPrompt ? { promptId } : undefined,
+      );
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
-      this.#activeCompressionPromptId = undefined;
       throw error;
     }
     if (!sourceStream) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
-      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'end_turn' };
     }
-    this.#userPromptInHistory = true;
-    const clearCompressionPromptId = () => {
-      this.#activeCompressionPromptId = undefined;
-      this.#activeCompressionStream = undefined;
-    };
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
@@ -9261,10 +9091,8 @@ export class Session implements SessionContext {
         if (!committed) {
           llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
         }
-        clearCompressionPromptId();
       }
     })();
-    this.#activeCompressionStream = responseStream;
     return { responseStream, requestRouteKey };
   }
 
@@ -9596,16 +9424,9 @@ export class Session implements SessionContext {
   #recordCompressionTokenCount(
     info: ChatCompressionInfo,
     requestRouteKey: string,
-    promptNotYetInHistory = false,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
-      if (this.#activeCompressionPromptId !== undefined) {
-        this.#noteAbsorbedSnapshotsAfterCompression(
-          this.#activeCompressionPromptId,
-          promptNotYetInHistory,
-        );
-      }
       return;
     }
     this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);

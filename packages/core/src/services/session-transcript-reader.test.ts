@@ -1115,37 +1115,6 @@ describe('SessionTranscriptReader', () => {
     expect(uuids(page.records)).toEqual(['source', 'parent-u1', 'u1']);
   });
 
-  it('projects the latest absorbed snapshot offset onto runtime resume state', async () => {
-    const user = record('u1', null, 'first prompt');
-    const stale = sys('offset-old', 'u1', 'absorbed_snapshot_offset', {
-      absorbedSnapshotCount: 1,
-      boundaryPromptId: 'p1',
-    });
-    const answer = record('a1', 'offset-old', 'answer');
-    const latest = sys('offset-new', 'a1', 'absorbed_snapshot_offset', {
-      absorbedSnapshotCount: 4,
-      boundaryPromptId: 'p4',
-    });
-    const tail = record('u2', 'offset-new', 'later prompt');
-    const invalid = sys('offset-bad', 'u2', 'absorbed_snapshot_offset', {
-      absorbedSnapshotCount: -1,
-    });
-    await writeRecords([user, stale, answer, latest, tail, invalid]);
-
-    for (const replay of [
-      { kind: 'none' as const },
-      { kind: 'recent' as const, limit: 1, hideInheritedHistory: false },
-    ]) {
-      const projection = await new SessionTranscriptReader(
-        workspaceDir,
-      ).readRestoreProjection(sessionId, { replay });
-      expect(projection?.runtime.absorbedSnapshotOffset).toEqual({
-        absorbedSnapshotCount: 4,
-        boundaryPromptId: 'p4',
-      });
-    }
-  });
-
   it('builds a cold runtime projection with full-loader parity', async () => {
     const uiEvent = { prompt_id: `${sessionId}########7`, duration_ms: 12 };
     const attributionSnapshot = { v: 1, commits: [] };
