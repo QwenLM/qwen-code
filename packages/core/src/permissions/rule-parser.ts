@@ -1689,6 +1689,23 @@ export interface McpToolIdentity {
   serverToolName: string;
 }
 
+/**
+ * The spellings a rule may use for one segment of an MCP name — a server key
+ * or a server tool name: the operator's own string, the provider-safe
+ * rendering the UI and the model show, and the legacy substitution a
+ * pre-normalization entry was persisted in. Each is the character half of a
+ * registration rendering, read off the producer's own field — never re-split
+ * from a flattened tool name, which cannot tell server `foo` from `foo_`
+ * (R4-2).
+ */
+function mcpSegmentSpellings(serverName: string): string[] {
+  return [
+    serverName,
+    serverName.replace(/[^A-Za-z0-9_-]/g, '_'),
+    serverName.replace(/[^A-Za-z0-9_.-]/g, '_'),
+  ];
+}
+
 export function matchesMcpPattern(
   pattern: string,
   toolName: string,
@@ -1783,21 +1800,36 @@ export function matchesMcpPattern(
       // The boundary comes from the producer, not from a flattened spelling:
       // `mcp__foo_` + `__*` (server `foo_`) and `mcp__foo` + `__*` (server
       // `foo`) are the same string family under startsWith, and a tool whose
-      // name starts with '_' reads as separator continuation there.
-      const serverPrefix = `mcp__${mcpIdentity.serverName}__`;
-      if (prefix === serverPrefix) {
-        return true;
+      // name starts with '_' reads as separator continuation there. The rule
+      // may name its server in any of that key's own spellings.
+      const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
+      const segments = prefix.split('__');
+      const boundary = serverSpellings
+        .map((spelling) => `mcp__${spelling}__`)
+        .find((serverPrefix) => prefix.startsWith(serverPrefix));
+      if (boundary === undefined) {
+        // A prefix that closes a server segment names a different server, so
+        // it must not reach this tool (R4-2). One that never closes a segment
+        // (`mcp__*`, `mcp__git*`) is coarser than any boundary the producer
+        // can speak to, and keeps matching on the advertised spellings.
+        return segments.length > 2 ? false : matchesPrefixLiterally(prefix);
       }
-      if (!prefix.startsWith(serverPrefix)) {
-        return false;
-      }
-      const toolPrefix = prefix.slice(serverPrefix.length);
+      const toolPrefix = prefix.slice(boundary.length);
       // A prefix of pure underscores is separator continuation, not a tool
       // filter — otherwise a sibling server's whole-server spelling leaks in.
-      if (!/[^_]/.test(toolPrefix)) {
-        return false;
+      // It reads as this server's own tool only when the rule's own server
+      // segment is this key.
+      if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
+        return serverSpellings.includes(segments[1] ?? '');
       }
-      return mcpIdentity.serverToolName.startsWith(toolPrefix);
+      // The rule's tool side is written in a rendering too, so compare against
+      // the producer's own renderings of its tool name.
+      return (
+        toolPrefix === '' ||
+        mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
+          spelling.startsWith(toolPrefix),
+        )
+      );
     }
     return matchesPrefixLiterally(prefix);
   }
@@ -1819,7 +1851,11 @@ export function matchesMcpPattern(
     if (mcpIdentity !== undefined) {
       // Exact producer compare: no split of the tool side, so a rule for
       // server `foo` can never reach server `foo_`'s tools and vice versa.
-      return patternParts[1] === mcpIdentity.serverName;
+      // The rule may name the server in any of that key's own spellings — the
+      // config key, the registered provider-safe rendering, or the legacy one.
+      return mcpSegmentSpellings(mcpIdentity.serverName).includes(
+        patternParts[1] ?? '',
+      );
     }
     // A server name containing '__' makes this split unreliable, but that is
     // the accepted provider-safe-name residual (see mcp-tool.ts). The tool

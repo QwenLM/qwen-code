@@ -13861,9 +13861,16 @@ export class Session implements SessionContext {
                 policyToolName,
                 // Mirror the scheduler's L1 gate: a legacy-spelled MCP deny
                 // can only name the registered tool through its advertised
-                // aliases (#10199).
+                // aliases (#10199), and the server boundary only comes from
+                // the producer's own identity (R4-2).
                 tool instanceof DiscoveredMCPTool
                   ? tool.permissionAliases
+                  : undefined,
+                tool instanceof DiscoveredMCPTool
+                  ? {
+                      serverName: tool.serverName,
+                      serverToolName: tool.serverToolName,
+                    }
                   : undefined,
               )
             : true;

@@ -1804,4 +1804,136 @@ describe('the producer-carried identity channel (R4-2)', () => {
       ),
     ).toBe('disabled');
   });
+
+  it('keeps the documented match-all and partial-key wildcards working (R13-1)', () => {
+    const identity = { serverName: 'foo_bar', serverToolName: 'evil' };
+    // A prefix that closes no server segment is coarser than any boundary the
+    // producer can speak to, so it still matches every MCP tool.
+    expect(
+      matchesMcpPattern(
+        'mcp__*',
+        SAFE_SERVER_TOOL,
+        undefined,
+        undefined,
+        identity,
+      ),
+    ).toBe(true);
+    expect(
+      matchesToolPattern('mcp__*', SAFE_SERVER_TOOL, undefined, identity),
+    ).toBe(true);
+    expect(
+      matchesMcpPattern(
+        'mcp__foo*',
+        SAFE_SERVER_TOOL,
+        undefined,
+        undefined,
+        identity,
+      ),
+    ).toBe(true);
+    // A prefix that does close a segment still names its own server only.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo__*',
+        SAFE_SERVER_TOOL,
+        undefined,
+        undefined,
+        identity,
+      ),
+    ).toBe(false);
+  });
+
+  it('matches a rule written in the registered spelling of an unsafe key (R13-1)', async () => {
+    const tool = prodTool('foo:bar', 'a.b');
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+    // The registered provider-safe spelling is what the UI and the model show,
+    // so a server-level or wildcard rule copied from there keeps matching.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_bar',
+        tool.name,
+        undefined,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_bar__*',
+        tool.name,
+        undefined,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+    // The tool side of a rule is written in a rendering as well.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_bar__a_b*',
+        tool.name,
+        undefined,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+    expect(
+      matchesMcpPattern(
+        'mcp__foo:bar',
+        tool.name,
+        undefined,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__foo_bar'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: tool.name,
+        toolAliases: tool.permissionAliases,
+        mcpIdentity: identity,
+      }),
+    ).toBe('deny');
+  });
+
+  it('reads an all-underscore tool prefix as this server own tool (R13-1)', async () => {
+    const tool = prodTool('github', '__debug');
+    expect(tool.name).toBe('mcp__github____debug');
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+    expect(
+      matchesMcpPattern(
+        'mcp__github____*',
+        tool.name,
+        undefined,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+
+    // The guard that keeps a sibling key out stays: `mcp__foo____*` was
+    // written for server `foo`, so it must not auto-approve `foo_`'s tool.
+    const sibling = prodTool('foo_', '_internal');
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['mcp__foo____*'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: sibling.name,
+        toolAliases: sibling.permissionAliases,
+        mcpIdentity: {
+          serverName: sibling.serverName,
+          serverToolName: sibling.serverToolName,
+        },
+      }),
+    ).toBe('default');
+  });
 });

@@ -34405,6 +34405,7 @@ describe('Session', () => {
       expect(isToolEnabled).toHaveBeenCalledWith(
         mcpTool.name,
         mcpTool.permissionAliases,
+        { serverName: 'foo.bar', serverToolName: 'search' },
       );
       // The L1 gate refused up front: the invocation was never built.
       expect(buildSpy).not.toHaveBeenCalled();
