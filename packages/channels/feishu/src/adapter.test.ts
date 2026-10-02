@@ -724,6 +724,7 @@ describe('FeishuChannel', () => {
 
   it.each([
     { contentType: 'image/png', mimeType: 'image/png' },
+    { contentType: 'image/webp', mimeType: 'image/webp' },
     { contentType: undefined, mimeType: 'image/jpeg' },
   ])('dispatches $mimeType media and text', async (testCase) => {
     const { contentType, mimeType } = testCase;
