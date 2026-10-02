@@ -396,7 +396,11 @@ describe('managed session assembly', () => {
 
     await expect(
       session.replaceActivation(undefined, 'named-1'),
-    ).rejects.toThrow(ManagedSessionConflictError);
+    ).rejects.toThrow(
+      new ManagedSessionConflictError(
+        'activation named-1 was already installed.',
+      ),
+    );
     expect(session.authority.committedSequence).toBe(committed);
     expect(session.activation).toEqual(current);
     expect(session.authority.currentActivation).toMatchObject({

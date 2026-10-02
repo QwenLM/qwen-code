@@ -269,7 +269,8 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
   }
 }
 
-function activationAlreadyInstalled(
+/** The refusal for an activation ID the log already holds. */
+export function activationAlreadyInstalledError(
   activationId: string,
 ): ManagedSessionConflictError {
   return new ManagedSessionConflictError(
@@ -2029,7 +2030,7 @@ export class LocalManagedSessionAuthority {
     // would name an activation the log never recorded. Refuse it before the
     // body is published; the replay check covers a concurrent repeat.
     if (this.hasInstalledActivation(input.activationId)) {
-      throw activationAlreadyInstalled(input.activationId);
+      throw activationAlreadyInstalledError(input.activationId);
     }
     const epoch = (this.activation?.epoch ?? 0) + 1;
     const installRef = await this.publishActivationBody(
@@ -2055,7 +2056,9 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
-    if (receipt.replayed) throw activationAlreadyInstalled(input.activationId);
+    if (receipt.replayed) {
+      throw activationAlreadyInstalledError(input.activationId);
+    }
     return { activationId: input.activationId, epoch };
   }
 

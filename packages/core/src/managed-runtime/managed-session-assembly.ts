@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   LocalManagedSessionAuthority,
-  ManagedSessionConflictError,
+  activationAlreadyInstalledError,
 } from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
@@ -233,9 +233,7 @@ export async function openManagedSession(
         activationId !== undefined &&
         authority.hasInstalledActivation(activationId)
       ) {
-        throw new ManagedSessionConflictError(
-          `activation ${activationId} was already installed.`,
-        );
+        throw activationAlreadyInstalledError(activationId);
       }
       await authority.releaseActivation();
       activation = await authority.installActivation({

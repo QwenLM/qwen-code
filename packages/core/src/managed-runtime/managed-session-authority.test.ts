@@ -791,7 +791,11 @@ describe('managed session authority activation fences', () => {
         'publish',
       );
 
-      await expect(install()).rejects.toThrow(ManagedSessionConflictError);
+      await expect(install()).rejects.toThrow(
+        new ManagedSessionConflictError(
+          'activation act-once was already installed.',
+        ),
+      );
       expect(publish).not.toHaveBeenCalled();
       publish.mockRestore();
       expect(opened.authority.committedSequence).toBe(committed);
@@ -824,7 +828,11 @@ describe('managed session authority activation fences', () => {
           result.status === 'rejected',
       );
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].reason).toBeInstanceOf(ManagedSessionConflictError);
+      expect(rejected[0].reason).toEqual(
+        new ManagedSessionConflictError(
+          'activation act-twice was already installed.',
+        ),
+      );
       expect(
         opened.authority
           .readEvents()
