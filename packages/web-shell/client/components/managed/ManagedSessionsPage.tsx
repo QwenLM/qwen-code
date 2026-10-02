@@ -583,10 +583,17 @@ function ManagedSessionsContent({
               </Button>
             </div>
           )}
-          {approvals.answerError !== undefined && (
-            <p role="alert" className="text-sm text-destructive">
+          {(approvals.answerError !== undefined ||
+            approvals.respondForbidden) && (
+            <p
+              // The first refusal is news; the latch that keeps every later
+              // approval of this Session disabled only restates it, so it is a
+              // status line rather than a second alert.
+              role={approvals.answerError !== undefined ? 'alert' : 'status'}
+              className="text-sm text-destructive"
+            >
               {t(
-                approvalForbidden
+                approvals.respondForbidden || approvalForbidden
                   ? 'managed.approval.forbidden'
                   : 'managed.approval.failed',
               )}

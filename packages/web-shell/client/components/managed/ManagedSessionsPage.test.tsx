@@ -576,9 +576,17 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(1);
-    // The per-Action warning left with the Action it described; the disabled
-    // card itself is what tells the viewer the next one is refused too.
+    // The per-Action alert left with the Action it described, but a dead card
+    // with no stated reason is indistinguishable from a stuck one — and the
+    // disabled options also drop out of sequential focus navigation — so the
+    // latch keeps the reason on screen. It is a status line, not a second
+    // alert, because it restates what the viewer was already told.
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[role="status"]')).map(
+        (node) => node.textContent,
+      ),
+    ).toContain('Only the Session creator can answer this approval.');
   });
 
   it('keeps a coded but retryable answer failure answerable', async () => {
