@@ -1222,7 +1222,13 @@ try {
       replacementHarnessPort = harnessPort;
       replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
     } else {
-      const replacementSpringPort = await freePort();
+      // Under --freeze the original Spring is dead, but the frozen Harness
+      // still holds the session-store URL the original Spring handed it at
+      // load (immutable after load). The replacement must answer on the
+      // original Spring port so the woken former writer's store calls meet
+      // a live, fencing control plane instead of a dead socket — otherwise
+      // every post-wake assertion would hold by disconnection, not fencing.
+      const replacementSpringPort = freeze ? springPort : await freePort();
       replacementHarnessPort = await freePort();
       const replacementBrokerPort = await freePort();
       replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
@@ -1547,7 +1553,10 @@ try {
             continuationModelRequests: continuationRequests.length,
             visibleText,
             terminalTurns: terminalCount,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
+            // The frozen-owner arm keeps the home on purpose (the wake
+            // needs it), so one key cannot mean both arms' intent.
+            oldHarnessDiskDeleted: !freeze && !existsSync(harnessHome),
+            harnessHomeRetainedForWake: freeze && existsSync(harnessHome),
           },
           null,
           2,
@@ -1558,11 +1567,25 @@ try {
         // Wake the frozen Harness only after the replacement finished: the
         // journal writer fence the takeover installed must hold against a
         // very alive former writer. The Turn is terminal by now, so nothing
-        // but a fencing defect could mutate the binding or the journal.
+        // but a fencing defect could mutate the binding or the journal. The
+        // resumed Harness still needs its home, so it must exist too.
+        if (!existsSync(harnessHome)) {
+          throw new Error(
+            'Frozen owner arm lost the Harness home the wake depends on',
+          );
+        }
         const headBeforeWake = runMysql(
           mysqlPort,
           `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
         );
+        // The rest of the wake block proves the fence holds; this line
+        // proves there IS a fence: the head must sit on the replacement's
+        // writer generation, past the frozen owner's.
+        if (Number(headBeforeWake.split('\t')[0]) <= firstHead[0]) {
+          throw new Error(
+            `The takeover did not advance the journal head past the frozen owner's writer generation: head=${headBeforeWake} first=${firstHead.join(',')}`,
+          );
+        }
         const oldGenerationTxBeforeWake = runMysql(
           mysqlPort,
           `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
@@ -1618,10 +1641,11 @@ try {
           mysqlPort,
           `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
         );
-        // The fencing claim the exit check words: no transaction out of the
-        // old writer generation after it wakes. The head's revision moves
-        // with the replacement's own legal writes (heartbeats, lifecycle),
-        // so identity, not revision, is what fencing proofs may freeze on.
+        // The fencing claim the exit check words: no transaction out of
+        // the old writer generation after it wakes. Lease renewal touches
+        // writer_lease_until only, so the head's revision moves with real
+        // commits; identity, not revision, is what a fencing proof may
+        // freeze on.
         const oldGenerationTxAfterWake = runMysql(
           mysqlPort,
           `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,

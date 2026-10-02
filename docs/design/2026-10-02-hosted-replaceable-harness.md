@@ -240,11 +240,18 @@ from `/proc` liveness via the trusted host identity, and a SIGSTOPped JVM
 still reads as alive there — so with a merely-stopped Spring the
 replacement's reconcile times out (`runtime_broker_reconcile_timeout`) and
 the Turn never completes. Resource-level (Broker/worker) takeover of a
-surviving owner is therefore structurally out of reach today, exactly the
-"two live owner pairs" this issue excludes; the arm fences at the journal
-writer level instead, which is what G3's exit check words. Teardown needs
-no special signal ordering (the Harness is already continued). The same PR
-also wires `npm run test:e2e:managed-session-failover` into the
+surviving owner is therefore structurally out of reach today; the arm
+fences at the journal writer level instead. That discharges the exit
+check's journal half — a fenced former owner cannot mutate the journal —
+but not its binding half: `managed_agent_session` is written only by a
+Spring, and this arm's former Spring is dead by construction, so "cannot
+mutate the newer binding" is not proven by this gate (see Boundaries).
+The replacement Spring inherits the original's port, because the frozen
+Harness's journal-store URL was fixed at load: on wake its store calls
+meet a live, fencing control plane rather than a dead socket — otherwise
+the post-wake assertions would hold by disconnection, not fencing.
+Teardown needs no special signal ordering (the Harness is already
+continued). The same PR also wires `npm run test:e2e:managed-session-failover` into the
 `hosted-harness-mysql` CI job, where it was previously absent by omission.
 
 ### D8 — E2E: the Harness-only restart arm
@@ -380,14 +387,27 @@ by `ManagedSessionStoreIntegrationTest`.
 
 Acceptance = the #12952 G3 exit check: two successive owner generations
 serve one Session with no operator-chosen affinity (D8 arms); a fenced
-former owner cannot mutate the newer binding or journal (D7 arm); a Session
-with no runnable engine still fails closed and a Managed failure still
-causes no Legacy replay (unchanged tests).
+former owner cannot mutate the journal (D7 arm — the binding half is
+scoped into Boundaries); a Session with no runnable engine still fails
+closed and a Managed failure still causes no Legacy replay (unchanged
+tests).
 
 ## Boundaries and open questions
 
 - Sequential generations only. Two live owner pairs, graceful handoff,
   cross-host takeover → separate tracker (multi-instance control plane).
+- The binding half of the Q2 exit check is unproven by D7:
+  `managed_agent_session.harness_boot_id` moves only through a Spring,
+  and D7's former Spring must die (the `/proc`-liveness reason in D7), so
+  no current gate exercises a surviving former control plane trying to
+  re-assert the older binding. Same follow-up tracker as the
+  multi-instance work; #12952's Q2 stays open on this half.
+- A Harness answer of 404 without the boot-ID header means the bootstrap
+  delegating app has no runtime yet, so `HostedHarnessClient` classifies
+  it as transport (transient), not a protocol defect. A permanently
+  unstarted runtime therefore spends the pre-admission retry budget and
+  the Turn ends `hosted_harness_unavailable`; Sessions already admitted
+  keep the existing transport-retry semantics.
 - The Broker side of a frozen former owner: #12964 tests and Broker fault
   gates, not D7.
 - `#13054`: D5's pattern (typed decline → typed terminal turn outcome) is

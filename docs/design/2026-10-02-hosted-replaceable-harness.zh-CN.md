@@ -213,11 +213,16 @@ workspace 绑定时需要通过可信宿主身份从 `/proc` 存活取证，而
 SIGSTOP 的 JVM 在那里仍然读作活着——所以只冻结 Spring 时 replacement
 的 reconcile 会超时（`runtime_broker_reconcile_timeout`），Turn 永远
 完不成。也就是说，资源级（Broker/worker）的「前 owner 还活着」
-接管今天在结构上不可达——这正是本 issue 排除的「两对 owner 同时
-在线」；
-本支路因此在 journal writer 层面做 fencing 断言，与 G3
-退出检查的措辞一致。teardown 不需要额外信号顺序（Harness 已经被
-SIGCONT 过）。同一个 PR 把
+接管今天在结构上不可达；本支路因此在 journal writer 层面做
+fencing 断言。这履行了退出检查的 journal 半边——被 fence 的前
+writer 无法改动 journal——但不是 binding 半边：
+`managed_agent_session` 只能由 Spring 写，而本支路的前任 Spring 按
+构造必死，所以「无法改动更新的绑定」不由本门禁证明（见「边界与
+开放问题」）。replacement Spring 继承原来的端口，因为被冻结
+Harness 的 journal store URL 在 load 时已经固定：苏醒后它的 store
+调用遇到的是活着的、会 fence 的控制面，而不是死 socket——否则
+苏醒后的断言靠断连成立，而不是靠 fencing 成立。teardown 不需要
+额外信号顺序（Harness 已经被 SIGCONT 过）。同一个 PR 把
 `npm run test:e2e:managed-session-failover` 接进 `hosted-harness-mysql`
 CI 任务——它此前是遗漏而非刻意缺席。
 
@@ -339,13 +344,24 @@ Spring 与 Harness 之间挂一个丢 submit 回复的代理，runner 目前还�
 
 验收 = #12952 的 G3 退出检查：两个先后接手的 owner 代数服务同一个
 Session 且不依赖运维选定粘性（D8 各支路）；被 fence 的前 owner 无法
-改动更新的绑定或其 journal（D7 支路）；没有可运行引擎的 Session 仍
-fail closed，且 Managed 失败仍不导致 Legacy 重放（既有测试不变）。
+改动其 journal（D7 支路——binding 半边已划入「边界与开放问题」）；
+没有可运行引擎的 Session 仍 fail closed，且 Managed 失败仍不导致
+Legacy 重放（既有测试不变）。
 
 ## 边界与开放问题
 
 - 只支持先后接手的代数。两对 owner 同时在线、优雅交接、跨主机接管 →
   另开 tracker（多实例控制面）。
+- Q2 退出检查的 binding 半边不被 D7 证明：
+  `managed_agent_session.harness_boot_id` 只能经 Spring 移动，而 D7
+  的前任 Spring 必须死（D7 里的 `/proc` 存活取证原因），所以目前
+  没有任何门禁演练「仍存活的前控制面试图夺回旧绑定」。与多实例
+  工作同一个后续 tracker；#12952 的 Q2 在这一半边保持开放。
+- Harness 返回不带 boot-ID 响应头的 404 表示 bootstrap 委托应用还没
+  有 runtime，`HostedHarnessClient` 因此把它归类为传输层（瞬态），
+  而不是协议缺陷。于是 runtime 永久不起时，准入前的 Turn 耗完重试
+  预算并以 `hosted_harness_unavailable` 终结；已准入的 Session 保持
+  既有的传输重试语义。
 - 被冻结前 owner 的 Broker 一侧：归 #12964 测试与 Broker fault
   gates，不在 D7。
 - `#13054`：D5 的范式（类型化 decline → 类型化终态 Turn

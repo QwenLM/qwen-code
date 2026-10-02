@@ -178,18 +178,25 @@ public class HarnessCoordinator {
             terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
         } catch (HostedHarnessRecoveryDeclinedException error) {
+            // The reason is remote-supplied; the terminal write lands in
+            // managed_agent_turn.error_message VARCHAR(2048), so bound it
+            // instead of letting one oversized body throw the terminal
+            // write itself.
+            String declineReason = error.getReason().length() > 1024
+                    ? error.getReason().substring(0, 1024)
+                    : error.getReason();
             terminal = failTerminally(claimed,
                     "managed_runtime_recovery_blocked",
                     "The prior Harness generation parked a Turn this"
                             + " Harness cannot take over ("
-                            + error.getReason() + ").", error);
+                            + declineReason + ").", error);
         } catch (HostedHarnessGenerationException error) {
             // G3: a generation change is adopted, not failed. The next
-            // dispatch attempt re-attaches through the takeover load; the
-            // wait is bounded by the prior generation's lease, so the
-            // pre-admission retry budget does not apply.
+            // dispatch attempt re-attaches through the takeover load; on a
+            // bound Session the wait is bounded by the prior generation's
+            // lease, so only that path escapes the retry budget.
             terminal = transientFailure(claimed,
-                    submissionAttempted.get(), error, true);
+                    submissionAttempted.get(), error, recoveryPath.get());
         } catch (DaemonProtocolException error) {
             terminal = failTerminally(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.",
@@ -211,7 +218,8 @@ public class HarnessCoordinator {
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
-                    ? fail(claimed, error.getCode(), error.getMessage())
+                    ? failTerminally(claimed, error.getCode(),
+                            error.getMessage(), error)
                     : transientFailure(claimed, submissionAttempted.get(),
                             error, false);
         } catch (RuntimeException error) {
@@ -358,7 +366,23 @@ public class HarnessCoordinator {
                 // withdraw it so the adopted generation may submit. A lost
                 // old-generation admission replays idempotently on the
                 // journal under the same commandId.
+                LOG.info("Withdrew the submission mark of a never-admitted"
+                                + " Turn tenant={} session={} turn={}"
+                                + " formerGeneration={} adoptedGeneration={}",
+                        claimed.tenantId(), claimed.sessionId(),
+                        claimed.turnId(), session.harnessBootId(),
+                        attachment.bootId());
                 submissionAttempted.set(false);
+                if ("CANCELLING".equals(claimed.status())) {
+                    // Cancelled before any generation admitted durably:
+                    // with the mark withdrawn the Turn is exactly the case
+                    // the early gate fast-cancels, so it must not be
+                    // re-dispatched into a live execution at the adopted
+                    // generation first.
+                    store.cancelBeforeAdmission(claimed.tenantId(),
+                            claimed.sessionId(), claimed.turnId(), owner);
+                    return true;
+                }
                 bound = store.bindHarness(session.tenantId(),
                         session.sessionId(), claimed.turnId(), owner,
                         attachment.bootId());
