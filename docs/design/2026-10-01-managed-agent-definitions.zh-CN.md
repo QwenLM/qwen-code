@@ -67,10 +67,11 @@ Workspace 路由；而某个方法没有字面兄弟路由的保留名（如 `PO
 - **回放。** 相同键与相同请求 digest 应答已记录的 revision，并带
   `X-Qwen-Idempotent-Replay: true`。相同键配不同请求（包括把创建用过的键用于
   更新）应答 `409 idempotency_conflict`。
-- **并发。** revision 行与命令在同一事务中提交。并发请求先提交时，落败的写入
-  回滚，并读取该键下已提交的命令：相同请求回放其结果。否则，若并发更新先占用了
-  revision 号，应答 `409 agent_revision_conflict` 且不记录命令，可以用原键重试；
-  同一键下的不同请求应答 `409 idempotency_conflict`。
+- **并发。** revision 行与命令在同一事务中提交。更新以行锁读取头部 revision，
+  因此同一定义的并发更新串行执行、各自存储自己的 revision，摘要比较读到的是
+  已提交的头部而不是过期快照。并发请求先提交时，落败的写入回滚，并读取该键
+  下已提交的命令：相同请求回放其结果，同一键下的不同请求应答
+  `409 idempotency_conflict`。
 - **读取** 读取最新 revision，或 `revision` 指定的那个（从 `1` 开始的十进制数）。
   其他值一律应答 `404 agent_not_found`。
 - 响应包含 `id`、`object: "agent"`、`revision`、`digest`、`created_at` 以及请求的
