@@ -110,6 +110,18 @@ class ProviderRuntimeTransportTest {
         assertEquals(2, requests.size());
     }
 
+    @Test
+    void workspaceContextDoesNotAcquireAProviderSession() {
+        result = Map.of("files", List.of(Map.of("name", "QWEN.md", "text", "rules")));
+        Map<String, Object> read = Map.of("kind", "workspace-context");
+        assertEquals(result, transport.control(lease, session, read).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(read, requests.getFirst().get("operation"));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "workspace-context", "path", "/etc/passwd")));
+        assertEquals(1, requests.size());
+    }
+
     @AfterEach
     void stop() {
         server.stop(0);

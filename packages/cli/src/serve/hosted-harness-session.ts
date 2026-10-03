@@ -82,11 +82,12 @@ import {
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import {
-  HOSTED_WORKSPACE_FILE_PROFILE,
-  HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
+  type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
@@ -147,6 +148,8 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  /** Fetched Workspace instructions; undefined until the first fetch. */
+  workspaceContext?: string;
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
    * teardown hand it back; retry-inviting refusals deliberately leave it
@@ -1154,6 +1157,12 @@ async function executeHostedTurn(
           parentUuid = message.uuid;
           return message.uuid;
         };
+        const workspaceContext: HostedWorkspaceContextSlot = {
+          read: () => session.workspaceContext,
+          write: (context) => {
+            session.workspaceContext = context;
+          },
+        };
         toolTurn =
           session.toolProfile && brokerOptions
             ? new HostedWorkspaceToolTurn(
@@ -1173,8 +1182,12 @@ async function executeHostedTurn(
                   settings: session.approval,
                   waiters: session.waiters,
                 },
-                session.mcp,
-                session.hooks,
+                {
+                  mcp: session.mcp,
+                  hooks: session.hooks,
+                  profile: session.toolProfile,
+                  context: workspaceContext,
+                },
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1183,7 +1196,7 @@ async function executeHostedTurn(
               'Tool turn is unavailable.',
             );
           try {
-            await toolTurn.resumeCommittedResults();
+            await toolTurn.resumeCommittedResults(abort.signal);
           } catch (cause) {
             if (isRetryableWorkspaceAcquisition(cause)) throw cause;
             throw new HostedToolRecoveryRequiredError(cause);
@@ -1201,6 +1214,7 @@ async function executeHostedTurn(
             promptId,
             signal: abort.signal,
             modelScope,
+            workspaceContext,
             ...(session.hooks ? { hooks: session.hooks } : {}),
             ...(toolTurn ? { toolTurn } : {}),
             ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
@@ -1271,8 +1285,7 @@ export function registerHostedHarnessSessionRoutes(
     let captureBytes = body?.['captureBytes'];
     if (
       toolProfile !== undefined &&
-      ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+      ((!isHostedWorkspaceProfile(toolProfile) &&
         toolProfile !== HOSTED_MCP_PROFILE) ||
         !brokerOptions)
     ) {
@@ -1320,7 +1333,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (
-      toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+      isHostedWorkspaceShellProfile(toolProfile) &&
       captureBytes !== undefined &&
       (!Number.isSafeInteger(captureBytes) ||
         (captureBytes as number) < 1 ||
@@ -1377,7 +1390,7 @@ export function registerHostedHarnessSessionRoutes(
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
-                  ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+                  ...(isHostedWorkspaceShellProfile(toolProfile)
                     ? { captureBytes }
                     : {}),
                   ...(approval ? hostedApprovalDefinition(approval) : {}),
@@ -1423,8 +1436,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         !create &&
         toolProfile === undefined &&
-        (savedProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
-          savedProfile === HOSTED_WORKSPACE_SHELL_PROFILE)
+        isHostedWorkspaceProfile(savedProfile)
       )
         toolProfile = savedProfile;
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
@@ -1438,18 +1450,15 @@ export function registerHostedHarnessSessionRoutes(
       }
       if (
         !create &&
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes === undefined
       )
         captureBytes = definition?.['captureBytes'];
-      const workspaceProfile =
-        toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE;
+      const workspaceProfile = isHostedWorkspaceProfile(toolProfile);
       if (
         (hookCatalog !== undefined && (!toolProfile || !brokerOptions)) ||
         (toolProfile !== undefined &&
-          ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-            toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+          ((!isHostedWorkspaceProfile(toolProfile) &&
             toolProfile !== HOSTED_MCP_PROFILE) ||
             !brokerOptions))
       ) {
@@ -1458,7 +1467,7 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       if (
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined &&
         (!Number.isSafeInteger(captureBytes) ||
           (captureBytes as number) < 1 ||
@@ -1477,7 +1486,7 @@ export function registerHostedHarnessSessionRoutes(
         blocked: false,
         waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
-        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
           ? {
               publication: {
@@ -1486,7 +1495,7 @@ export function registerHostedHarnessSessionRoutes(
               },
             }
           : {}),
-        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes === undefined
           ? {
               shell: {
@@ -1504,7 +1513,7 @@ export function registerHostedHarnessSessionRoutes(
         JSON.stringify(definition?.['mcpServers']) !==
           JSON.stringify(mcpServers) ||
         !isDeepStrictEqual(definition?.['hookCatalog'], hookCatalog) ||
-        (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        (isHostedWorkspaceShellProfile(toolProfile) &&
           definition?.['captureBytes'] !== captureBytes) ||
         (toolProfile && !pinned)
       ) {
@@ -2680,6 +2689,12 @@ export function registerHostedHarnessSessionRoutes(
           parentUuid = message.uuid;
           return message.uuid;
         };
+        const workspaceContext: HostedWorkspaceContextSlot = {
+          read: () => session.workspaceContext,
+          write: (context) => {
+            session.workspaceContext = context;
+          },
+        };
         toolTurn = new HostedWorkspaceToolTurn(
           brokerOptions,
           session.managed,
@@ -2696,7 +2711,11 @@ export function registerHostedHarnessSessionRoutes(
             settings: session.approval,
             waiters: session.waiters,
           },
-          session.mcp,
+          {
+            mcp: session.mcp,
+            profile: session.toolProfile,
+            context: workspaceContext,
+          },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
@@ -2704,7 +2723,7 @@ export function registerHostedHarnessSessionRoutes(
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
           // wedges every later cold load.
-          await toolTurn.resumeCommittedResults();
+          await toolTurn.resumeCommittedResults(abort.signal);
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -2712,6 +2731,7 @@ export function registerHostedHarnessSessionRoutes(
             prompt: '',
             promptId,
             signal: abort.signal,
+            workspaceContext,
             toolTurn,
             resumeFromToolResults: resumeParts,
             textDeltas: deltas,

@@ -13,6 +13,20 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -81,8 +95,17 @@ import {
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
-export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
-export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+};
+
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -94,13 +117,20 @@ export function isRetryableWorkspaceAcquisition(
     (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
   );
 }
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
 
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+}
+
+/**
+ * The attached Session's fetched Workspace project instructions. `read`
+ * returns undefined until the first fetch attempt completes; '' means the
+ * Workspace has none. Written at most once per attached Session.
+ */
+export interface HostedWorkspaceContextSlot {
+  read(): string | undefined;
+  write(context: string): void;
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -197,6 +227,33 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_GLOB_TOOL: FunctionDeclaration = {
+  name: 'glob',
+  description:
+    'Find files by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string' },
+      path: {
+        type: 'string',
+        description:
+          'Directory to search, relative to the saved Session working directory. Omit to search the whole working directory.',
+      },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+};
+export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -236,6 +293,10 @@ export class HostedWorkspaceToolTurn {
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
+  private readonly mcp?: HostedMcpSession;
+  private readonly hooks?: HostedHookSession;
+  private readonly profile?: string;
+  private readonly context?: HostedWorkspaceContextSlot;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -258,9 +319,21 @@ export class HostedWorkspaceToolTurn {
       | HostedShellTurnOptions,
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
-    private readonly mcp?: HostedMcpSession,
-    private readonly hooks?: HostedHookSession,
+    // The trailing optional dependencies travel as one named bag: at five
+    // positional slots a dropped or mis-ordered argument still typechecks
+    // (R1-2/R1-3 were exactly that), while a missing object field is named
+    // at every call site.
+    extras?: {
+      mcp?: HostedMcpSession;
+      hooks?: HostedHookSession;
+      profile?: string;
+      context?: HostedWorkspaceContextSlot;
+    },
   ) {
+    this.mcp = extras?.mcp;
+    this.hooks = extras?.hooks;
+    this.profile = extras?.profile;
+    this.context = extras?.context;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -270,14 +343,14 @@ export class HostedWorkspaceToolTurn {
         ? publicationOrShell
         : shell;
     this.broker =
-      mcp?.broker ??
-      hooks?.broker ??
+      this.mcp?.broker ??
+      this.hooks?.broker ??
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
         promptId,
       );
-    this.warmed = mcp ? mcp.ensureReady() : this.broker.warm();
+    this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -285,10 +358,15 @@ export class HostedWorkspaceToolTurn {
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
+    const search = isHostedWorkspaceSearchProfile(this.profile);
     this.advertised = [
       ...(this.publication || this.shell
-        ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS
+        ? search
+          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+          : HOSTED_WORKSPACE_SHELL_TOOLS
+        : search
+          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+          : HOSTED_WORKSPACE_FILE_TOOLS
       ).map((tool) =>
         ['write_file', 'edit'].includes(tool.name ?? '')
           ? {
@@ -306,7 +384,7 @@ export class HostedWorkspaceToolTurn {
     return this.advertised;
   }
 
-  async resumeCommittedResults(): Promise<void> {
+  async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
     const saved = await readHostedFileHistory(this.session);
@@ -387,17 +465,25 @@ export class HostedWorkspaceToolTurn {
         if (original === this.broker) {
           this.acquired = true;
           this.uncertain = false;
+          // The acquire() path this bypasses is the context slot's writer: a
+          // takeover-built Session holds no text yet, so read once here under
+          // the same latch. A read failure never blocks the turn.
+          if (this.context?.read() === undefined && signal)
+            await this.fetchWorkspaceContext(signal);
           return;
         }
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    await this.acquire(true);
+    await this.acquire(true, signal);
     this.uncertain = false;
   }
 
-  private async acquire(recovering = false): Promise<void> {
+  private async acquire(
+    recovering = false,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.uncertain = true;
     try {
       if (this.hooks && !this.mcp) await this.hooks.acquire();
@@ -424,6 +510,15 @@ export class HostedWorkspaceToolTurn {
             cause.reason ?? cause.message,
           );
         }
+        // The Workspace is reachable exactly here, before the first dispatch:
+        // read its project instructions once, so this turn's later requests
+        // and every later turn start with them. A read failure never blocks
+        // the tool turn it rode in on. The latch alone gates the read: a
+        // recovered attachment whose slot is still undefined (a takeover
+        // builds a fresh one) reads here too, while an attachment already
+        // holding text never re-reads.
+        if (this.context?.read() === undefined && signal)
+          await this.fetchWorkspaceContext(signal);
       }
     } catch (cause) {
       if (
@@ -434,6 +529,39 @@ export class HostedWorkspaceToolTurn {
         throw cause;
       }
       throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  /**
+   * Reads the Workspace's project instruction files through the acquired
+   * Runtime and offers them to the Session's context slot. The read is a
+   * Runtime control, not a tool execution: it reserves nothing in the
+   * execution ledger, so a failure leaves nothing to cancel or recover.
+   * Best-effort: any failure leaves the slot untouched and is logged, never
+   * thrown into the turn.
+   */
+  private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
+    const slot = this.context;
+    if (!slot) return;
+    try {
+      const files = await waitForTurn(this.broker.workspaceContext(), signal);
+      // `''` means "the Workspace has none", so an aborted turn must not
+      // latch it: the slot stays undefined and a later turn retries.
+      if (signal.aborted) return;
+      slot.write(
+        files
+          .map(({ name, text }) => ({ name, text: text.trim() }))
+          .filter(({ text }) => text)
+          .map(
+            ({ name, text }) =>
+              `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
+          )
+          .join('\n\n'),
+      );
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Hosted Workspace context read failed: ' + String(cause),
+      );
     }
   }
 
@@ -771,6 +899,53 @@ export class HostedWorkspaceToolTurn {
           input = this.publication
             ? { ...args }
             : { ...args, is_background: false };
+        } else if (call.name === 'glob') {
+          input = { ...call.args };
+          const globError =
+            'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
+          const requestedPattern = call.args['pattern'];
+          const directory = call.args['path'];
+          // A pattern is a second search root: refuse the absolute/`..` and
+          // oversized shapes here, pre-acquisition, with the identical check
+          // the worker applies after dispatch — a refusal before acquisition
+          // stays model-correctable and costs no durable Runtime work
+          // (#13030). Validate the value that gets dispatched, never the raw
+          // one: glob treats an untrimmed pattern as a literal, so it matches
+          // nothing and the false negative is persisted.
+          const pattern =
+            typeof requestedPattern === 'string' ? requestedPattern.trim() : '';
+          const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
+          if (check === 'too-complex') {
+            validationError = HOSTED_GLOB_TOO_COMPLEX;
+          } else if (check === 'escapes') {
+            validationError = globError;
+          } else {
+            input['pattern'] = pattern;
+          }
+          if (!validationError && directory !== undefined) {
+            if (
+              directory === null ||
+              (typeof directory === 'string' && directory.trim() === '')
+            ) {
+              // A blank or `null` path is the omitted case: the declaration
+              // marks it optional, and the executor maps a missing key to the
+              // Session root — refusing it as traversal would also poison every
+              // valid sibling call in the batch.
+              delete input['path'];
+            } else if (typeof directory !== 'string') {
+              validationError = globError;
+            } else {
+              try {
+                input['path'] = normalizeWorkspaceRelativePath(
+                  directory.trim(),
+                );
+              } catch (cause) {
+                if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                  throw cause;
+                validationError = globError;
+              }
+            }
+          }
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -856,7 +1031,11 @@ export class HostedWorkspaceToolTurn {
     await waitForTurn(this.warmed, signal);
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
-      await this.acquire();
+      await this.acquire(false, signal);
+    }
+    if (signal.aborted) {
+      this.uncertain = false;
+      signal.throwIfAborted();
     }
     const shellBindings = new Map<
       string,
@@ -1455,6 +1634,28 @@ export class HostedWorkspaceToolTurn {
         let outcome = Buffer.from(
           JSON.stringify({ executionCallId, ...converted[0] }),
         );
+        if (
+          outcome.byteLength >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        ) {
+          // A glob result is a path list: keep the prefix that fits rather
+          // than omitting the whole result, so the model can narrow and retry.
+          if (request.call.name === 'glob') {
+            const fits = (candidate: Part[]) =>
+              Buffer.byteLength(
+                JSON.stringify({ executionCallId, ...candidate[0] }),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+              this.messageFitsInline('tool_result', candidate, model);
+            const truncated = truncateHostedGlobResponse(converted, fits);
+            if (truncated) {
+              converted = truncated;
+              outcome = Buffer.from(
+                JSON.stringify({ executionCallId, ...converted[0] }),
+              );
+            }
+          }
+        }
         if (
           outcome.byteLength >
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
@@ -2072,4 +2273,43 @@ export class HostedWorkspaceToolTurn {
   async close(): Promise<void> {
     await this.publisher?.close();
   }
+}
+
+const HOSTED_GLOB_TRUNCATION_HINT =
+  '\n---\n[Result truncated to fit the durable Session limit. Narrow the pattern or path.]';
+
+/**
+ * Keeps the longest whole-line prefix of a glob result that fits, followed by
+ * a narrowing hint. Returns undefined when the response has no text output to
+ * truncate or even the empty list does not fit.
+ */
+function truncateHostedGlobResponse(
+  parts: Part[],
+  fits: (candidate: Part[]) => boolean,
+): Part[] | undefined {
+  const functionResponse = parts[0]?.functionResponse;
+  const response = functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  const output = response?.['output'];
+  if (!functionResponse || !response || typeof output !== 'string')
+    return undefined;
+  const lines = output.split('\n');
+  while (lines.length > 0) {
+    const candidate: Part[] = [
+      {
+        functionResponse: {
+          ...functionResponse,
+          response: {
+            ...response,
+            output: lines.join('\n') + HOSTED_GLOB_TRUNCATION_HINT,
+            outputTruncated: true,
+          },
+        },
+      },
+    ];
+    if (fits(candidate)) return candidate;
+    lines.pop();
+  }
+  return undefined;
 }

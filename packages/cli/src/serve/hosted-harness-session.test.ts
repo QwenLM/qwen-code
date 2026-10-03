@@ -78,6 +78,7 @@ const state = vi.hoisted(() => ({
       promptId?: string;
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
+      workspaceContext?: { read(): string | undefined };
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -343,6 +344,10 @@ async function hookApp() {
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
       ownerSessionId: SESSION_ID,
@@ -2929,6 +2934,107 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('pins the /2 file profile through create and load and advertises glob', async () => {
+    const body = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/2',
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send(
+      body,
+    );
+    expect(created.status).toBe(200);
+    let createDeclarations: string[] | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn }) => {
+      // Capture, don't assert: an AssertionError inside this callback is
+      // swallowed by executeHostedTurn's catch, so only an assertion after
+      // the turn settles can fail the test.
+      createDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
+      return { text: 'text without side effects', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const clientId = created.body.clientId as string;
+    expect(
+      (
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+      ).status,
+    ).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(createDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+    ]);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+    expect(
+      (
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+      ).status,
+    ).toBe(409);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    let resumedDeclarations: string[] | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      resumedDeclarations = (await toolTurn!.declarations(signal)).map(
+        (tool) => tool.name!,
+      );
+      return { text: 'resumed', model: 'test-model' };
+    });
+    const nextPrompt = [{ type: 'text', text: 'again' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        prompt: nextPrompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(resumedDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+    ]);
+    expect(state.model).toHaveBeenCalledTimes(2);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId as string,
+    );
+  });
+
   it('requires the saved explicit Shell profile and advertises it only with a Broker', async () => {
     const body = {
       sessionId: SESSION_ID,
@@ -5174,6 +5280,10 @@ describe('Hosted Harness tool approvals', () => {
     vi.waitFor(check, { timeout: 10_000 });
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
@@ -6399,6 +6509,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
   let acquireSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
@@ -6456,7 +6570,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
    * execute hangs until the owner is "crashed" via cancel, leaving the turn
    * unsettled in the journal.
    */
-  async function parkToolTurn() {
+  async function parkToolTurn(toolProfile = FILE_PROFILE) {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     acquireSpy = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
@@ -6484,7 +6598,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       sessionId: SESSION_ID,
       sessionScope: 'thread',
       managedSessionStore: store(),
-      toolProfile: FILE_PROFILE,
+      toolProfile,
     });
     expect(created.status).toBe(200);
     state.model.mockImplementationOnce(
@@ -6538,13 +6652,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
     acquireSpy.mockClear();
   }
 
-  async function loadReplacement(passive = false) {
+  async function loadReplacement(passive = false, toolProfile = FILE_PROFILE) {
     const server = replacementApp();
     const loaded = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({
       managedSessionStore: storeFor(BOOT_ID_2),
-      toolProfile: FILE_PROFILE,
+      toolProfile,
       // Only the coordinator's takeover may drive or report a parked Turn.
       [passive ? 'passiveManagedRuntimeRecovery' : 'driveRuntimeRecovery']:
         true,
@@ -6670,94 +6784,134 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(acquireSpy).not.toHaveBeenCalled();
   });
 
-  it('settles the parked execution on load and continues the turn', async () => {
-    await parkToolTurn();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
-      executionStatus: 'success',
-      responseParts: [{ text: 'written' }],
-    } as never);
-    const release = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'release')
-      .mockResolvedValue();
-    const { server, loaded } = await loadReplacement();
-    expect(loaded.status).toBe(200);
-    // The takeover holds the lease until the continued Turn settles.
-    expect(release).not.toHaveBeenCalled();
-    const recovery = loaded.body._meta?.[
-      'qwen.daemon.managedRuntimeRecovery'
-    ] as {
-      phase: string;
-      checkpointId: string;
-      activationId: string;
-      executions: Array<Record<string, unknown>>;
-    };
-    expect(recovery.phase).toBe('results_ready');
-    expect(recovery.executions).toEqual([
-      expect.objectContaining({
-        executionCallId: '66666666-6666-4666-8666-666666666666',
-        outcome: 'known',
-        status: { state: 'settled' },
-      }),
-    ]);
-    const clientId = loaded.body.clientId as string;
-    const continued = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
-      });
-    expect(continued.status).toBe(200);
-    expect(continued.body.accepted).toBe(true);
-    await vi.waitFor(
-      async () => {
-        const status = await replacementHeaders(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
-    const transcript = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(transcript.body.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
-      ]),
-    );
-    expect(
-      state.model.mock.calls.some(
-        (call) =>
-          (call[0] as { resumeFromToolResults?: unknown[] })
-            .resumeFromToolResults?.length === 1,
-      ),
-    ).toBe(true);
-    // The recovered turn's Runtime Session is released once it settles — one
-    // release for the tool turn's own reconciliation acquire, one for the
-    // recovered lease.
-    expect(release).toHaveBeenCalledTimes(2);
-    // A replayed continuation for the settled Turn replays the receipt
-    // without driving the model again.
-    const modelCallsBeforeReplay = state.model.mock.calls.length;
-    const replayed = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
-      });
-    expect(replayed.status).toBe(200);
-    expect(replayed.body.accepted).toBe(true);
-    expect(state.model.mock.calls.length).toBe(modelCallsBeforeReplay);
-    await replacementHeaders(
-      supertest(server).delete(`/session/${SESSION_ID}`),
-    );
-  });
+  it.each([FILE_PROFILE, 'hosted-workspace-files/2'])(
+    'settles the parked execution on load and continues the turn (%s)',
+    async (toolProfile) => {
+      await parkToolTurn(toolProfile);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      // Non-empty so "fetched" is distinguishable from "never fetched": an
+      // empty read assembles to '', which the slot already looks like.
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([{ name: 'AGENTS.md', text: 'never touch prod' }]);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const { server, loaded } = await loadReplacement(false, toolProfile);
+      expect(loaded.status).toBe(200);
+      // The takeover holds the lease until the continued Turn settles.
+      expect(release).not.toHaveBeenCalled();
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as {
+        phase: string;
+        checkpointId: string;
+        activationId: string;
+        executions: Array<Record<string, unknown>>;
+      };
+      expect(recovery.phase).toBe('results_ready');
+      expect(recovery.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: '66666666-6666-4666-8666-666666666666',
+          outcome: 'known',
+          status: { state: 'settled' },
+        }),
+      ]);
+      let declarations: string[] | undefined;
+      let recoveredContext: string | undefined;
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal, workspaceContext }) => {
+          // The takeover-built attachment must have read the Workspace
+          // instructions before this recovered turn drives the model.
+          recoveredContext = workspaceContext?.read();
+          declarations = (await toolTurn!.declarations(signal)).map(
+            (tool) => tool.name!,
+          );
+          return { text: 'continued', model: 'test-model' };
+        },
+      );
+      const clientId = loaded.body.clientId as string;
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      expect(continued.body.accepted).toBe(true);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(declarations).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        ...(toolProfile.endsWith('/2') ? ['glob'] : []),
+      ]);
+      // The takeover-built attachment starts with an undefined slot: the
+      // recovered turn must have populated it before driving the model, or
+      // the user-visible answer is synthesized with no project instructions.
+      expect(recoveredContext).toContain('--- Context from: AGENTS.md ---');
+      expect(recoveredContext).toContain('never touch prod');
+      const transcript = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+          }),
+        ]),
+      );
+      expect(
+        state.model.mock.calls.some(
+          (call) =>
+            (call[0] as { resumeFromToolResults?: unknown[] })
+              .resumeFromToolResults?.length === 1,
+        ),
+      ).toBe(true);
+      // The recovered turn's Runtime Session is released once it settles — one
+      // release for the tool turn's own reconciliation acquire, one for the
+      // recovered lease.
+      expect(release).toHaveBeenCalledTimes(2);
+      // A replayed continuation for the settled Turn replays the receipt
+      // without driving the model again.
+      const modelCallsBeforeReplay = state.model.mock.calls.length;
+      const replayed = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(replayed.status).toBe(200);
+      expect(replayed.body.accepted).toBe(true);
+      expect(state.model.mock.calls.length).toBe(modelCallsBeforeReplay);
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    },
+  );
 
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
