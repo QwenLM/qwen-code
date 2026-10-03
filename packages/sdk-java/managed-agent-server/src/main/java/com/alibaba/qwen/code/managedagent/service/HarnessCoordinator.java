@@ -45,12 +45,16 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessCoordinator {
-    // 409 bodies whose wait is bounded by the predecessor's writer lease;
-    // every other body shape (configuration, conflicts with no lease
-    // semantics, code-blind) meets the pre-admission budget instead.
+    // 409 bodies whose wait is bounded by the predecessor's writer lease,
+    // and which may therefore stretch past the pre-admission budget. Every
+    // other body shape meets it — including `hosted_session_already_attached`,
+    // which looks transient but is not: the daemon drops an attachment only
+    // on an explicit detach or delete, and this control plane never detaches,
+    // so a Spring restart against a surviving Harness would otherwise retry
+    // a permanent refusal forever instead of ending the Turn.
     private static final Set<String> LEASE_BOUNDED_409_CODES = Set.of(
-            "hosted_turn_recovery_required", "hosted_prompt_recovery_required",
-            "hosted_session_already_attached");
+            "hosted_turn_recovery_required",
+            "hosted_prompt_recovery_required");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -382,7 +386,13 @@ public class HarnessCoordinator {
                         claimed.turnId(), session.harnessBootId(),
                         attachment.bootId());
                 submissionAttempted.set(false);
-                if ("CANCELLING".equals(claimed.status())) {
+                // Read the row again: a cancel that landed after the claim
+                // is invisible in `claimed`, and acting on that stale status
+                // would submit a live execution only to cancel it below.
+                TurnRecord afterWithdraw = store.findTurn(claimed.tenantId(),
+                        claimed.sessionId(), claimed.turnId())
+                        .orElse(claimed);
+                if ("CANCELLING".equals(afterWithdraw.status())) {
                     // Cancelled before any generation admitted durably:
                     // with the mark withdrawn the Turn is exactly the case
                     // the early gate fast-cancels, so it must not be

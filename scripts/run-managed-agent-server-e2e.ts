@@ -1177,17 +1177,20 @@ try {
       // binding requires death evidence from /proc liveness, and a
       // SIGSTOPped JVM still reads as alive there.
       await signalProcessTree(harness.child, 'SIGSTOP');
-      await crashProcess(spring.child, 'Spring Managed Agent Server A');
+      await crashProcess(
+        spring.child,
+        'Spring Managed Agent Server (original)',
+      );
     } else if (harnessOnly) {
       // Kill only the Harness: a live control plane must adopt the next
       // generation instead of failing every bound Session (G3).
-      await crashChild(harness.child, 'Hosted Harness A');
+      await crashChild(harness.child, `${hostedHarnessLabel} (original)`);
     } else {
       await Promise.all([
-        crashChild(harness.child, 'Hosted Harness A'),
+        crashChild(harness.child, `${hostedHarnessLabel} (original)`),
         inflightFailover || continuationFailover
-          ? crashProcess(spring.child, 'Spring Managed Agent Server A')
-          : crashChild(spring.child, 'Spring Managed Agent Server A'),
+          ? crashProcess(spring.child, 'Spring Managed Agent Server (original)')
+          : crashChild(spring.child, 'Spring Managed Agent Server (original)'),
       ]);
     }
     acceptReplacementContinuation = true;

@@ -1620,15 +1620,18 @@ export function registerHostedHarnessSessionRoutes(
       }
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
-        await managed.close();
-        // The bundle only carries the ok/blocked verdict; the verdict's
-        // reason decides the refusal: a durable parse/identity failure can
-        // never change on retry, so it declines with its typed reason,
-        // while transport shape (erased store failures) keeps the
-        // retriable 409.
+        // Read the verdict BEFORE close(): sealing the journal makes every
+        // later store read fail as "writer is not active", which the
+        // authority erases into missing_state — reading after close would
+        // leave only the retriable refusal and hide the durable reasons.
+        // The bundle carries the ok/blocked verdict but not its reason, and
+        // the reason is what decides the refusal: a durable parse/identity
+        // failure can never change on retry, so it declines with its typed
+        // reason, while transport shape keeps the retriable 409.
         const verdict = await managed.authority
           .harnessRunAuthorization()
           .catch(() => undefined);
+        await managed.close();
         if (
           verdict?.status === 'blocked' &&
           (verdict.reason === 'opaque_state' ||

@@ -230,37 +230,53 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain('failsafe-reports');
   });
 
+  it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const summed = job.steps.reduce(
+      (total, step) => total + (step['timeout-minutes'] ?? 0),
+      0,
+    );
+    // Nine ceilinged steps today (12 + 8x10); the uncapped setup steps need
+    // their own allowance, which is exactly what the job comment claims.
+    expect(summed).toBe(92);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+  });
+
   it.each([
     [
       'Run in-flight owner failover E2E',
       'test:e2e:managed-inflight-failover',
-      [],
+      ['--inflight-failover'],
     ],
     [
       'Run continuation owner failover E2E',
       'test:e2e:managed-continuation-failover',
-      [],
+      ['--continuation-failover'],
     ],
-    ['Run session owner failover E2E', 'test:e2e:managed-session-failover', []],
+    [
+      'Run session owner failover E2E',
+      'test:e2e:managed-session-failover',
+      ['--session-failover'],
+    ],
     [
       'Run Harness-restart session failover E2E',
       'test:e2e:managed-harness-restart-failover',
-      ['--harness-only'],
+      ['--session-failover', '--harness-only'],
     ],
     [
       'Run Harness-restart in-flight failover E2E',
       'test:e2e:managed-harness-restart-inflight-failover',
-      ['--harness-only'],
+      ['--inflight-failover', '--harness-only'],
     ],
     [
       'Run Harness-restart continuation failover E2E',
       'test:e2e:managed-harness-restart-continuation-failover',
-      ['--harness-only'],
+      ['--continuation-failover', '--harness-only'],
     ],
     [
       'Run frozen former-owner fencing E2E',
       'test:e2e:managed-continuation-frozen-owner-failover',
-      ['--freeze'],
+      ['--continuation-failover', '--freeze'],
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
@@ -288,7 +304,15 @@ describe('Hosted real-process gates', () => {
     for (const flag of flags) {
       expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(flag);
     }
-    for (const flag of ['--harness-only', '--freeze']) {
+    // Each row must also be the only row with its mode flag, or two CI
+    // steps silently run the same arm.
+    for (const flag of [
+      '--session-failover',
+      '--inflight-failover',
+      '--continuation-failover',
+      '--harness-only',
+      '--freeze',
+    ]) {
       if (!flags.includes(flag)) {
         expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
           flag,

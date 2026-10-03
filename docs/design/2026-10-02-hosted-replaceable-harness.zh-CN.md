@@ -97,16 +97,21 @@ client 异常与 325 行的 DB 拒绝绑定）。只有第一个可以触发接�
 
 ### D1 —— 接纳集中在 connector，只发生在重试边界
 
-任何 `HostedHarnessGenerationException` 到来时，connector 执行一次同步
-接纳：**丢弃全部缓存的 Attachment 与全部 `pendingRecovery` 条目**——
-它们可按需重建，一个在其他线程完成重建之后被用出去的过期 ref 不得
-对着自己空转重试。当异常携带的实际 boot ID 与当前 client 不同时，
-再关闭旧 client 并清空字段，下一次调用重建（重新协商即应用
-digest 门禁，D2）。随后把异常重新抛出，让调用方走既有的重试机制。
+任何 `HostedHarnessGenerationException` 到来时，connector 执行一次
+接纳：monitor 只用于 client 交接，缓存清理在 monitor 之外做
+（`computeIfAbsent` 的 bin 锁会跨一次在飞 load 持有，所以在 monitor
+里动 map 会反转锁序）。**缓存的 Attachment 按 boot 身份淘汰——只留下
+在当前服务的那一代下铸造的条目——每个 `pendingRecovery` 标记跟随它的
+attachment。** 它们可按需重建，一个在其他线程完成重建之后被用出去的
+过期 ref 不会对着自己空转重试，而并发重建已经在新代下铸造的条目会
+保留。当异常携带的实际 boot ID 与当前 client 不同时，再关闭旧
+client 并清空字段，下一次调用重建（重新协商即应用 digest 门禁，D2）。随后把异常重新抛出，让调用方走既有的重试机制。
 流中途不接纳：`consumeStream` 把附着时的 boot ID 编进每条事件
 source key（`HarnessCoordinator.java:398-401`），撕裂的流以异常结束，
-Turn 在下一次派发时被接纳。`HostedHarnessClient` 本身除按请求的 load
-超时（D9b）外不改动。
+Turn 在下一次派发时被接纳。`HostedHarnessClient` 在本切片里新增了：
+只用于恢复 load 的超时（D9b）、journal 契约的 feature 检查（D9c）、
+D5 解析用的错误体访问器，以及记在「边界与开放问题」里的无 boot 头
+404 归类。
 
 ### D2 —— digest 门禁保持终态
 
@@ -122,8 +127,11 @@ Turn 在下一次派发时被接纳。`HostedHarnessClient` 本身除按请求�
 附着：`session.harnessBootId() != null` 选择 `recoverManagedRuntime`
 （接管 load），用重建后的 client；成功后
 `bindRecoveredHarness(expected = 旧 boot ID)` 把行 CAS 到新代。
-`bindHarness` 拒绝与准入后的 Turn 仍只走恢复分支——「绑定拒绝」这条
-路径形状不变，只是在接纳流程里不再被触发（D4 去掉了它的触发条件）。
+`bindHarness` 拒绝与准入后的 Turn 仍只走恢复分支。「绑定拒绝」这条
+路径形状不变，而且仍然会被走到——它正是 D4 的触发条件：一个已标记但
+从未准入的 Turn 在拒绝时撤回标记并重绑；终态的
+`hosted_harness_generation_mismatch` 保留给重绑也失败、或撤回 CAS
+输掉的情形。
 
 ### D4 —— 已标记但从未准入的 Turn 撤回提交标记
 
@@ -189,9 +197,12 @@ Java：除一个调用点外保持 code 不可辨别。connector 的
 
 TS 把恢复报告保留在已附着的 session 上，直到该 prompt 的
 continue/cancel 准入把它消费掉。满足以下全部条件的重复 load：(a) 指向已
-附着 session，(b) 带 takeover 标志，(c) 恢复仍未完成——返回 200 与
-同一份快照，而不是 409 `hosted_session_already_attached`。重复的普通
-load 保持 409。这关闭了 2026-09-30 设计记录的丢回复 follow-up；
+附着 session，(b) 带 takeover 标志，(c) 与铸造该快照的请求同形——
+passive 只回放给 passive、drive 只回放给 drive，因为 passive 报告停靠的
+正是 drive load 本该结算的状态，永远不会 continuation-ready——
+(d) 恢复仍未完成——返回 200 与同一份快照，而不是 409
+`hosted_session_already_attached`。重复的普通 load、以及换成另一形态的
+重复 takeover，都保持 409。这关闭了 2026-09-30 设计记录的丢回复 follow-up；
 `opening.has(sessionId)` 的拒绝（一次接管正在进行中）不变，仍可重试。
 
 ### D7 —— Q2 门禁：冻结变体（纯测试，除非测出缺陷）
@@ -204,9 +215,10 @@ Harness 的 home，等 lease 过期（现有 SQL 等待对冻结的 writer 照�
 SIGCONT 并断言：
 
 - 苏醒后**旧 writer 代数零新增事务**（直接数
-  `qwen_managed_session_journal_tx` 的行；journal head 的 revision 与
-  sequence 会随 replacement 自己的合法写入（心跳等）继续走，所以
-  fencing 的度量是身份而不是 revision）；
+  `qwen_managed_session_journal_tx` 的行；lease 续期只改
+  `writer_lease_until`，heartbeat 路由什么都不写，所以 head 的
+  revision 只随真实提交移动——fencing 的度量是 writer 身份，而不是
+  head 的 revision）；
 - 公开 transcript 仍然只有 replacement 的回答和一个终态事件；
 - `managed_agent_session.harness_boot_id` 仍是 replacement 的。
 
@@ -257,10 +269,12 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
 
 - **D9a，重试预算对 writer lease。** 已绑定 Session 的恢复附着路径
   上，一个 body 带 lease 形态 code（`hosted_turn_recovery_required`、
-  `hosted_prompt_recovery_required`、`hosted_session_already_attached`）
-  的 409 豁免于准入前上限——该等待以前任自己的 lease 为上界。其他
-  一切——传输失败与配置形态的 4xx/409——都计入预算，所以 Harness
-  永久缺席的 Turn 仍以 `hosted_harness_unavailable` 终结。
+  `hosted_prompt_recovery_required`）的 409 豁免于准入前上限——该等待
+  以前任自己的 lease 为上界。其余一律计入预算，其中也包括
+  `hosted_session_already_attached`：它看着像瞬时冲突，实际是永久的——
+  daemon 只在显式 detach 或 delete 时才丢弃 attachment，而本控制面从不
+  detach，所以豁免它会让「Spring 重启而 Harness 存活」无限空转。因此
+  Harness 永久缺席的 Turn 仍以 `hosted_harness_unavailable` 终结。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
   只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
   `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，
@@ -295,6 +309,7 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 | Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch 改动、D4 撤回的使用、D9a 豁免                                                                |
 | Java managed-agent-server | `ManagedAgentStore.java`、`AgentStateStore.java`                                            | `withdrawSubmissionAttempted` CAS 及其 store 接口签名（D4）                                           |
 | Java managed-agent-server | `ActionResponseCoordinator.java`                                                            | capability 不匹配的终态 catch：action outbox 记为带 code 的 FAILED（诚实终态，区别于生命周期 outbox） |
+| Java managed-agent-server | `SessionLifecycleCoordinator.java`                                                          | 仅注释：capability 不匹配为何继续重试而不终结（生命周期 outbox 没有 FAILED 词表）                     |
 | Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` 标志访问器（D9b）                                                           |
 | Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）                                                                                 |
 | TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、快照保留与幂等重复 load（D6）                                                |
@@ -319,12 +334,14 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 单元测试（collocated）：
 
-- connector：并发不一致下接纳只重建一次；boot 相同的不一致只丢过期
-  条目；`recoverManagedRuntime` 把 `hosted_turn_recovery_declined` +
-  reason 映射为类型化异常，其余 409 保持 code 不可辨别。digest 门禁在
-  它的两个调用点处由测试钉住——client 构造时的协商检查
-  （`HostedHarnessClientTest`）与各 coordinator 的终态 catch——而不是
-  由 connector 级测试钉住，因为 connector 没有添加第三道门禁。
+- connector：并发不一致下过期 client 恰好被关闭一次，且竞态期间不会
+  构建真实 client（replacement 是注入的）；boot 相同的不一致只淘汰在
+  另一 boot 下铸造的条目，并保留活着的 client 的恢复标记；
+  `recoverManagedRuntime` 把 `hosted_turn_recovery_declined` + reason
+  映射为类型化异常，其余 409 保持 code 不可辨别。digest 门禁在它真正
+  所在处被钉住——client 构造时的协商检查（`HostedHarnessClientTest`）；
+  各 coordinator 针对它的终态 catch 没有测试，connector 也没有添加
+  第三道门禁。
 - coordinator：线上不一致排重试而非失败；已绑定 Session 的恢复附着在
   除 lease 形态 code 的 409 之外都计入准入前预算，未绑定 Session 的
   409 一律不豁免；decline → `managed_runtime_recovery_blocked`。
@@ -339,15 +356,15 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 E2E（runner 支路，全部对着打包后的栈）：
 
-1. `main` 上的 baseline：D8 支路必须以 README（`:185`）记录的
-   generation error 失败，证明测试承重。
+1. `main` 上的 baseline：D8 支路必须以本 PR 删掉那句之前 README 所
+   记录的 generation error 失败，证明测试承重。
 2. D8 只重启 Harness × 三个场景：空闲 Session 下一 Turn 的上下文、
    in-flight、continuation —— 现有断言成立，`harness_boot_id` 在
    Spring 不重启下移动。
 3. D7 冻结支路：SIGCONT 后的断言如上。删掉任一断言该支路必须失败。
 4. CI：`hosted-harness-mysql` 增加 D7 支路、D8 各支路与
    `--session-failover`，任务上限随之从 60 分钟放宽到 105 分钟，让
-   九条步骤上限之和（12+10+8×10 = 92）加上不设上限的安装准备步骤
+   九条步骤上限之和（12 + 8×10 = 92）加上不设上限的安装准备步骤
    保留余量。
 
 D4 背后的丢回复竞态（旧代准入、202 回复被丢、Harness 重启后 Turn 必须
@@ -389,7 +406,7 @@ Legacy 重放（既有测试不变）。
 - darwin 上的只重启 Harness 支路：代码里已解除 Linux 门禁且预期不经
   W0e reclaim 即可通过，但运行它的所有 lane 都是 Linux，所以 darwin
   未经验证——作为留白记录于此，不做任何门禁。
-- 映射时发现的 nit（不做 G3 工作）：`sdk-java.yml:273-274` 的步骤分解
-  陈旧（写的是 `12+10+20`，实际 `12+10+10+10`）；runner 的 Linux 门禁
-  文案说「死掉的 worker」，而 reclaim 实际退的是一个仍活着的孤儿
-  worker 的归属权。
+- 映射时发现的 nit（不做 G3 工作）：runner 的 Linux 门禁文案说
+  「死掉的 worker」，而 reclaim 实际退的是一个仍活着的孤儿 worker 的
+  归属权。（另一条 nit——`sdk-java.yml` 里陈旧的步骤分解——已不适用：
+  本 PR 重写了那段注释。）

@@ -379,7 +379,13 @@ export async function recoverHostedRuntimeTurn(input: {
         authorization.message ??
           `Checkpoint read was transiently blocked (${authorization.reason})`,
       );
-    return declined('checkpoint_blocked');
+    // A reason this file does not know is not proven durable, and only a
+    // durable verdict may end a Turn: stay retriable so a reason core adds
+    // later cannot silently become a terminal failure.
+    throw new Error(
+      authorization.message ??
+        `Checkpoint read was blocked (${authorization.reason})`,
+    );
   }
   const checkpoint = authorization.checkpoint;
   if (checkpoint.identity.turnId !== promptId)
@@ -604,6 +610,15 @@ export async function recoverHostedRuntimeTurn(input: {
         finalAuthorization.message ??
           `Checkpoint re-read was transiently blocked (${finalAuthorization.reason})`,
       );
+    }
+    // A durable verdict re-read after settling is the same fact as the
+    // pre-settle one, so it carries the same reason instead of blaming the
+    // settlement for a checkpoint that no longer parses.
+    if (
+      finalAuthorization.status === 'blocked' &&
+      isDurableBlockedVerdict(finalAuthorization)
+    ) {
+      return declined('checkpoint_blocked');
     }
     return declined('unresolved_after_settle');
   }

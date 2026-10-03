@@ -6864,6 +6864,29 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(passiveRetry.status).toBe(200);
   });
 
+  it('declines a durably blocked restore, reading the verdict before close', async () => {
+    // The reason must be read BEFORE close(): sealing the journal makes
+    // every later store read fail as "writer is not active", which the
+    // authority erases into missing_state — reading after close leaves only
+    // the retriable refusal and silently hides the durable verdict.
+    await parkToolTurn();
+    const authorization = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'opaque_state',
+      } as never);
+    const close = vi.spyOn(LocalManagedSessionAuthority.prototype, 'close');
+    const { loaded } = await loadReplacement();
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
+    expect(loaded.body.reason).toBe('checkpoint_blocked');
+    expect(close).toHaveBeenCalled();
+    expect(authorization.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      close.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
     let stopConfirmed = false;

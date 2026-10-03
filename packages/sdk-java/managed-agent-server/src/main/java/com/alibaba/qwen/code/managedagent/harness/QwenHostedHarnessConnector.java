@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import java.net.URI;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,6 +69,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     + " token and capability digest");
         }
         URI.create(this.properties.getBaseUrl());
+        // The load timeout is operator-settable, so a bad value must fail
+        // here: the client builder rejects it, and failing lazily inside
+        // client() would surface as an endless transient retry that logs
+        // only the exception class.
+        Duration loadTimeout = this.properties.getLoadTimeout();
+        if (loadTimeout == null || loadTimeout.isZero()
+                || loadTimeout.isNegative()) {
+            throw new IllegalStateException("Enabled Hosted Harness requires"
+                    + " a positive load-timeout");
+        }
         if (sessionStore.isEnabled()
                 && (sessionStore.getBaseUrl() == null
                         || sessionStore.getBaseUrl().isBlank()
@@ -548,41 +559,50 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      * only guards the client handoff and never wraps the map churn (a
      * {@code ConcurrentHashMap.computeIfAbsent} bin lock is held across an
      * in-flight load, so clearing maps under the monitor would invert the
-     * lock order and could deadlock). Cached Attachments re-mint on
-     * demand: a differing generation loses the client and every entry;
-     * an equal-boot exception only evicts entries minted under an older
-     * boot, so Sessions the live client still heartbeats keep working —
-     * and its recovery markers stay, because they were minted by loads
-     * this same live client served.
+     * lock order and could deadlock). The handoff does build the
+     * replacement under the monitor, so a renegotiation blocks other
+     * Sessions' attaches for at most its connect + request timeouts —
+     * bounded, unlike the in-flight load it replaced.
+     * <p>
+     * Cached Attachments re-mint on demand, and both branches evict by
+     * boot identity rather than by clearing: only entries
+     * minted under the boot now serving stay, so a stale ref cannot
+     * retry-loop on itself, entries a concurrent rebuild already minted
+     * survive, and Sessions the live client still heartbeats keep working.
+     * Recovery markers follow their attachment, because a marker outliving
+     * an evicted attachment is what makes the recovery path hand out a
+     * null report.
      */
     private void adoptGeneration(HostedHarnessGenerationException error) {
         HostedHarnessClient stale = null;
-        String currentBootId = null;
+        boolean dropped = false;
         synchronized (this) {
             HostedHarnessClient current = client;
             if (current == null) {
                 return;
             }
-            if (error.getActualBootId().equals(
+            if (!error.getActualBootId().equals(
                     current.capabilities().getBootId())) {
-                currentBootId = current.capabilities().getBootId();
-            } else {
                 client = null;
                 stale = current;
+                dropped = true;
             }
         }
         // No map work under the monitor: a computeIfAbsent bin lock is
         // held across an in-flight load elsewhere, so touching either map
-        // while holding `this` inverts the lock order.
-        if (currentBootId != null) {
-            String bootId = currentBootId;
-            attachments.entrySet().removeIf(entry ->
-                    !bootId.equals(entry.getValue().getHarnessBootId()));
-            return;
+        // while holding `this` inverts the lock order. Evicting by boot
+        // identity instead of clearing also keeps whatever a concurrent
+        // rebuild already minted under the generation now serving, and
+        // dropping the markers of evicted entries keeps the two maps in
+        // agreement (a marker outliving its attachment is what made the
+        // recovery path hand out a null report).
+        String liveBootId = error.getActualBootId();
+        attachments.entrySet().removeIf(entry ->
+                !liveBootId.equals(entry.getValue().getHarnessBootId()));
+        pendingRecovery.retainAll(attachments.keySet());
+        if (dropped) {
+            stale.close();
         }
-        attachments.clear();
-        pendingRecovery.clear();
-        stale.close();
     }
 
     private static DaemonApprovalMode parseApprovalMode(String value) {

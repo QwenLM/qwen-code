@@ -108,19 +108,26 @@ refusal" below.
 
 ### D1 — Adoption is centralized in the connector, at retry boundaries
 
-On any `HostedHarnessGenerationException`, one synchronized adoption runs
-in the connector: **every cached Attachment and every `pendingRecovery`
-entry is dropped** — they re-mint on demand, and a stale ref observed
-after another thread's rebuild must not retry-loop on itself. When the
-exception's actual boot ID differs from the client's, the old client is
+On any `HostedHarnessGenerationException`, one adoption runs in the
+connector: the monitor is taken only for the client handoff and the cache
+churn happens outside it (a `computeIfAbsent` bin lock is held across an
+in-flight load, so map work under the monitor would invert the lock order).
+**Cached Attachments are evicted by boot identity — only entries minted
+under the boot now serving stay — and each `pendingRecovery` marker follows
+its attachment.** They re-mint on demand, a stale ref observed after
+another thread's rebuild cannot retry-loop on itself, and entries a
+concurrent rebuild already minted under the new generation survive. When
+the exception's actual boot ID differs from the client's, the old client is
 also closed and the field cleared; the next call rebuilds (renegotiation
 applies the digest gate, D2). The exception is then rethrown so callers
 reach their existing retry mechanics. Nothing adopts mid-stream:
 `consumeStream` embeds the attach-time boot ID in every recorded event
 source key (`HarnessCoordinator.java:398-401`),
 so a torn stream dies by exception and the Turn is adopted at its next
-dispatch attempt. `HostedHarnessClient` itself is unchanged except a
-per-request load timeout (D9b).
+dispatch attempt. In `HostedHarnessClient` this slice adds the
+recovery-only load timeout (D9b), the journal-contract feature check
+(D9c), the error-body accessors D5 parses, and the header-less-404
+classification recorded in Boundaries.
 
 ### D2 — The digest gate stays terminal
 
@@ -137,9 +144,11 @@ attempt goes through the existing recovery attach: `session.harnessBootId()
 != null` selects `recoverManagedRuntime` (the takeover load) with the rebuilt
 client; on success `bindRecoveredHarness(expected = old boot ID)` CASes the
 row to the new generation. `bindHarness` refusals and post-admission turns
-keep moving through the recovery branch only — the "bind refusal" code path
-is unchanged in shape, it simply stops being reached in adoption flows
-(D4 removes its trigger).
+keep moving through the recovery branch only. The "bind refusal" path
+keeps its shape and is still reached — it is D4's trigger: a refusal on a
+marked but never-admitted Turn withdraws the mark and rebinds, and the
+terminal `hosted_harness_generation_mismatch` remains for the case where
+the rebind also loses, or the withdrawal CAS does.
 
 ### D4 — A marked-but-never-admitted Turn withdraws its submission mark
 
@@ -214,9 +223,13 @@ asks for. No global HTTP-code table is introduced.
 
 TS retains the recovery report on the attached session until a
 continue/cancel admission for that prompt consumes it. A repeated load that
-(a) names an attached session, (b) sets a takeover flag, and (c) finds the
-recovery still pending returns 200 with the stored snapshot instead of 409
-`hosted_session_already_attached`. Repeated plain loads keep the 409. This
+(a) names an attached session, (b) sets a takeover flag, (c) asks in the
+same shape that minted the snapshot — passive replays to passive, drive to
+drive, because a passive report parks what a drive load would settle and
+would never be continuation-ready — and (d) finds the recovery still
+pending returns 200 with the stored snapshot instead of 409
+`hosted_session_already_attached`. Repeated plain loads, and a repeated
+takeover in the other shape, keep the 409. This
 closes the lost-reply follow-up recorded by the 2026-09-30 design; the
 `opening.has(sessionId)` refusal (a takeover currently in flight) is
 unchanged and stays retriable.
@@ -231,9 +244,10 @@ unchanged against a frozen writer), let the replacement finish the Turn,
 then SIGCONT the frozen Harness and assert:
 
 - no journal transaction from the _old writer generation_ after the wake
-  (counted straight off `qwen_managed_session_journal_tx`; the head's
-  revision and sequence keep moving with the replacement's own legal
-  writes such as heartbeats, so identity, not revision, is the fence),
+  (counted straight off `qwen_managed_session_journal_tx`; lease renewal
+  touches `writer_lease_until` only and the heartbeat route writes
+  nothing, so the head's revision moves only with real commits — the fence
+  metric is the writer's identity, not the head's revision),
 - the public transcript still holds only the replacement's answer and one
   terminal event,
 - `managed_agent_session.harness_boot_id` is still the replacement's.
@@ -293,12 +307,14 @@ happen.
 - **D9a, retry budget vs writer lease.** A 409 on the recovery attach
   path of a bound Session is exempt from the pre-admission retry cap only
   when its body carries a lease-shaped code
-  (`hosted_turn_recovery_required`, `hosted_prompt_recovery_required`,
-  `hosted_session_already_attached`) — that wait is bounded by the
-  predecessor's own lease. Everything else — transport failures and
-  configuration-shaped 4xx/409s alike — always meets the budget, so a
-  permanently absent Harness still ends a Turn as
-  `hosted_harness_unavailable`.
+  (`hosted_turn_recovery_required`, `hosted_prompt_recovery_required`) —
+  that wait is bounded by the predecessor's own lease. Everything else
+  meets the budget, including `hosted_session_already_attached`, which
+  reads as a transient conflict but is permanent: the daemon drops an
+  attachment only on an explicit detach or delete and this control plane
+  never detaches, so exempting it would spin forever on a Spring restart
+  against a surviving Harness. A permanently absent Harness therefore
+  still ends a Turn as `hosted_harness_unavailable`.
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag
@@ -336,6 +352,7 @@ when the model-round slice lands.
 | Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch change, D4 withdrawal use, D9a exemption                                                                                               |
 | Java managed-agent-server | `ManagedAgentStore.java`, `AgentStateStore.java`                                            | `withdrawSubmissionAttempted` CAS and its store-interface signature (D4)                                                                        |
 | Java managed-agent-server | `ActionResponseCoordinator.java`                                                            | terminal capability-mismatch catch completing the action outbox as FAILED with the mismatch code (honest terminal, unlike the lifecycle outbox) |
+| Java managed-agent-server | `SessionLifecycleCoordinator.java`                                                          | comment only: why a capability mismatch keeps retrying instead of completing (the lifecycle outbox has no FAILED vocabulary)                    |
 | Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` flag accessor (D9b)                                                                                                   |
 | Java managed-agent-server | `ManagedAgentProperties.java`, `application.yml`                                            | `load-timeout` (D9b)                                                                                                                            |
 | TS CLI                    | `hosted-harness-session.ts`                                                                 | decline-code mapping (D5), retained snapshot + idempotent repeat load (D6)                                                                      |
@@ -361,13 +378,15 @@ next attempt lands on the adopted (or realigned) generation.
 
 Unit tests (collocated):
 
-- Connector: adoption rebuilds once under concurrent mismatches; equal-boot
-  mismatch drops only the stale entry; `recoverManagedRuntime` maps
+- Connector: concurrent mismatches close the stale client exactly once and
+  build no real client during the race (the replacement is injected); an
+  equal-boot mismatch evicts only entries minted under another boot and
+  keeps the live client's recovery markers; `recoverManagedRuntime` maps
   `hosted_turn_recovery_declined` + reason to the typed exception and
-  leaves other 409s code-blind. The digest gate is pinned at its two call
-  sites — the client's construction-time negotiation check
-  (`HostedHarnessClientTest`) and the coordinators' terminal catches — not
-  by a connector-level test, because the connector adds no third gate.
+  leaves other 409s code-blind. The digest gate is pinned where it lives —
+  the client's construction-time negotiation check
+  (`HostedHarnessClientTest`); the coordinators' terminal catches for it
+  have no test, and the connector adds no third gate.
 - Coordinator: wire mismatch schedules a retry, not a fail; a bound
   Session's recovery attach meets the pre-admission budget on everything
   but a lease-coded 409, and the same 409 exempts nothing on an unbound
@@ -386,8 +405,9 @@ Unit tests (collocated):
 
 E2E (runner arms, all against the packaged stack):
 
-1. Baseline on `main`: the D8 arm fails with the documented generation
-   error (README `:185`), proving the test is load-bearing.
+1. Baseline on `main`: the D8 arm fails with the generation error the
+   README documented before this PR deleted that sentence, proving the test
+   is load-bearing.
 2. D8 Harness-only restart × three scenarios: idle next-Turn context,
    in-flight, continuation — existing assertions hold, `harness_boot_id`
    moves without a Spring restart.
@@ -395,7 +415,7 @@ E2E (runner arms, all against the packaged stack):
    fails the arm.
 4. CI: `hosted-harness-mysql` gains the D7 arm, the D8 arms and
    `--session-failover`, and the job ceiling moves from 60 to 105 minutes
-   so the nine summed step ceilings (12+10+8×10 = 92) plus the uncapped
+   so the nine summed step ceilings (12 + 8×10 = 92) plus the uncapped
    setup steps keep headroom.
 
 The lost-reply race behind D4 (the old generation admits, its 202 reply is
@@ -444,7 +464,8 @@ tests).
   arm is expected to pass without the W0e reclaim, but every lane that
   runs it is Linux, so darwin stays unverified — recorded here as a gap,
   not gating anything.
-- Nits found while mapping (not G3 work): `sdk-java.yml:273-274` stale step
-  decomposition `12+10+20` (actual `12+10+10+10`); the runner's Linux-guard
-  message says "dead worker" where the reclaim actually retires an orphaned,
-  still-alive worker's ownership.
+- Nit found while mapping (not G3 work): the runner's Linux-guard message
+  says "dead worker" where the reclaim actually retires an orphaned,
+  still-alive worker's ownership. (The sibling nit — the stale step
+  decomposition in `sdk-java.yml` — no longer applies: this PR rewrote that
+  comment.)

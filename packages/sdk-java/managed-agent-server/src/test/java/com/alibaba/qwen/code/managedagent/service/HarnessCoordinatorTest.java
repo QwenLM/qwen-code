@@ -295,6 +295,85 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // `hosted_session_already_attached` reads like a transient conflict but
+    // is permanent: the daemon drops an attachment only on an explicit
+    // detach or delete, and this control plane never detaches. A Spring
+    // restart against a surviving Harness must end the Turn, not spin.
+    @Test
+    void boundSessionMeetsRetryBudgetOnAlreadyAttached409() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException attached = mock(DaemonHttpException.class);
+        when(attached.getStatusCode()).thenReturn(409);
+        when(attached.getErrorCode())
+                .thenReturn("hosted_session_already_attached");
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(attached);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // The withdrawal is a CAS: losing it (the mark is gone, or the lease
+    // was lost) must end the Turn terminally rather than resubmit a prompt
+    // another owner may already have admitted.
+    @Test
+    void lostWithdrawalCasFailsTheTurnTerminally() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, 0L,
+                        "epoch-new"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(false);
+        when(store.withdrawSubmissionAttempted(eq("tenant"), eq("session"),
+                eq("turn"), anyString())).thenReturn(false);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_generation_mismatch"),
+                anyString());
+        verify(harness, never()).submit(anyString(), anyString(),
+                anyString(), any(), anyString());
+    }
+
     // An unbound Session has no prior generation whose lease bounds the
     // wait, so even a generation exception meets the pre-admission budget.
     @Test
@@ -374,20 +453,26 @@ class HarnessCoordinatorTest {
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(runtimeWarmer.isEnabled()).thenReturn(false);
         TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
-                null, 0, "CANCELLING", true, 0);
+                null, 0, "RUNNING", true, 0);
+        // The cancel lands after the claim: only the re-read row shows it,
+        // so this pins the decision on fresh state rather than on `claimed`.
+        TurnRecord cancelledAfterClaim = turn("tenant", "session", "turn",
+                "prompt", null, 0, "CANCELLING", false, 0);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
-        when(harness.recoverManagedRuntime("tenant", "session", true))
+        when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenReturn(new Attachment("boot-new", null, 0L,
                         "epoch-new"));
         when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("boot-new"))).thenReturn(false);
         when(store.withdrawSubmissionAttempted(eq("tenant"), eq("session"),
                 eq("turn"), anyString())).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(cancelledAfterClaim));
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), runtimeWarmer,
                 directExecutor(), Clock.systemUTC(),
@@ -511,7 +596,11 @@ class HarnessCoordinatorTest {
         when(store.withdrawSubmissionAttempted(eq("tenant"), eq("session"),
                 eq("turn"), anyString())).thenReturn(true);
         when(store.findTurn("tenant", "session", "turn"))
-                .thenReturn(Optional.of(claimed), Optional.of(admitted));
+                // Three reads: the withdraw branch re-reads the status, the
+                // post-bind read must still see no epoch so the submit runs,
+                // then the post-admission read sees the admitted row.
+                .thenReturn(Optional.of(claimed), Optional.of(claimed),
+                        Optional.of(admitted));
         when(harness.submit(eq("tenant"), eq("session"), eq("prompt"),
                 any(), anyString())).thenReturn(new Admission(5,
                         "epoch-new"));
