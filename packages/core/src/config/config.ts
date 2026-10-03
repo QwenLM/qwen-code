@@ -147,6 +147,7 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
+import { isResourceExhaustion } from '../skills/skill-load.js';
 import {
   authoredSkillName,
   skillRestrictionNames,
@@ -207,6 +208,7 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
+import { refreshExtensionRuntime } from '../extension/extension-runtime-refresh.js';
 import {
   HookSystem,
   createHookOutput,
@@ -4113,20 +4115,22 @@ export class Config {
           (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
+    let initialExtensionRefreshSucceeded = false;
     if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
-      await this.extensionManager.refreshCache();
+      initialExtensionRefreshSucceeded =
+        await this.refreshExtensionsAtStartup();
     } else if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       explicitExtensionNames.length > 0
     ) {
-      await this.extensionManager.refreshCache({
+      initialExtensionRefreshSucceeded = await this.refreshExtensionsAtStartup({
         names: explicitExtensionNames,
       });
     }
@@ -4474,7 +4478,10 @@ export class Config {
     recordStartupEvent('config_initialize_hooks_end');
     options?.signal?.throwIfAborted();
 
-    this.subagentManager = new SubagentManager(this);
+    this.subagentManager = new SubagentManager(this, {
+      getPendingExtensionRefusals: () =>
+        this.extensionManager.getPendingScanRefusals().values(),
+    });
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
       if (
@@ -4575,7 +4582,12 @@ export class Config {
       !this.getBareMode() &&
       !this.isSafeMode()
     ) {
-      await this.extensionManager.refreshCache();
+      const refreshed = await this.refreshExtensionsAtStartup();
+      if (refreshed && !initialExtensionRefreshSucceeded) {
+        await this.hookSystem?.reload();
+        await this.skillManager?.refreshCache({ throwOnError: true });
+        this.startupExtensionRecoveryPending = false;
+      }
     }
     recordStartupEvent('config_initialize_extensions_final_end');
     options?.signal?.throwIfAborted();
@@ -10708,6 +10720,57 @@ export class Config {
 
   getListExtensions(): boolean {
     return this.listExtensions;
+  }
+
+  /**
+   * Startup refresh: the extension loaders fail a refresh closed on
+   * resource exhaustion. Retry once, then keep the previous complete cache
+   * (empty on the first attempt). Report success so a later startup refresh
+   * can synchronize consumers if the initial refresh gave up.
+   */
+  private async refreshExtensionsAtStartup(options?: {
+    names?: string[];
+  }): Promise<boolean> {
+    try {
+      await this.extensionManager.refreshCache(options);
+      return true;
+    } catch (error) {
+      if (!isResourceExhaustion(error)) throw error;
+      this.debugLogger.warn(
+        `Extension load hit resource exhaustion; retrying once: ${getErrorMessage(error)}`,
+      );
+    }
+    try {
+      await this.extensionManager.refreshCache(options);
+      return true;
+    } catch (error) {
+      if (!isResourceExhaustion(error)) throw error;
+      this.debugLogger.warn(
+        `Extension load still exhausted; continuing without it: ${getErrorMessage(error)}`,
+      );
+      // The cache was committed empty and its fingerprint never stamped, so
+      // a later recovery (the daemon's source revalidation) will silently
+      // repopulate the cache. Consumers built from the empty startup set —
+      // hooks, MCP servers, context — must resync when that happens (R18-1).
+      this.startupExtensionRecoveryPending = true;
+      return false;
+    }
+  }
+
+  // True once a startup refresh gave up unstamped; consumed by the first
+  // successful post-startup refresh to resync consumers exactly once.
+  private startupExtensionRecoveryPending = false;
+
+  /** True (and resets) exactly once per startup give-up. */
+  consumePendingStartupExtensionRecovery(): boolean {
+    const pending = this.startupExtensionRecoveryPending;
+    this.startupExtensionRecoveryPending = false;
+    return pending;
+  }
+
+  /** Resyncs every extension-derived consumer after a recovered refresh. */
+  async syncExtensionConsumers(): Promise<void> {
+    await refreshExtensionRuntime(this);
   }
 
   getExtensionManager(): ExtensionManager {

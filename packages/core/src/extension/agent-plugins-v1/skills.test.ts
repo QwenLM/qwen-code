@@ -10,6 +10,56 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadAgentPluginSkills, parseAgentPluginSkill } from './skills.js';
 
+// R3 pin: an EMFILE mid-scan must reject the whole load instead of resolving
+// with the surviving skills. The failing path is toggled per-test; the real
+// implementation is re-attached whenever the toggle is off. skills.ts reads
+// through `fs.promises.readFile` (the `node:fs` namespace), so mock there.
+const emfileProbe = vi.hoisted(() => ({
+  failReadOf: undefined as string | undefined,
+  failReaddirOf: undefined as string | undefined,
+  failStatOf: undefined as string | undefined,
+}));
+const emfileError = (): Error =>
+  Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    statSync: (...args: Parameters<typeof actual.statSync>) => {
+      if (
+        emfileProbe.failStatOf !== undefined &&
+        String(args[0]).includes(emfileProbe.failStatOf)
+      ) {
+        throw emfileError();
+      }
+      return actual.statSync(...args);
+    },
+    promises: {
+      ...actual.promises,
+      readdir: async (...args: Parameters<typeof actual.promises.readdir>) => {
+        if (
+          emfileProbe.failReaddirOf !== undefined &&
+          String(args[0]).includes(emfileProbe.failReaddirOf)
+        ) {
+          throw emfileError();
+        }
+        return actual.promises.readdir(...args);
+      },
+      readFile: async (
+        ...args: Parameters<typeof actual.promises.readFile>
+      ) => {
+        if (
+          emfileProbe.failReadOf !== undefined &&
+          String(args[0]).includes(emfileProbe.failReadOf)
+        ) {
+          throw emfileError();
+        }
+        return actual.promises.readFile(...args);
+      },
+    },
+  };
+});
+
 describe('Agent Plugins v1 skills', () => {
   let pluginRoot: string;
 
@@ -120,4 +170,69 @@ describe('Agent Plugins v1 skills', () => {
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content);
   }
+
+  it('rejects the whole load when a skill read hits resource exhaustion', async () => {
+    // An EMFILE mid-scan must fail the refresh closed (rethrown), not resolve
+    // with the surviving skills — a truncated set committed as successful
+    // would stick until restart.
+    writeSkill(
+      'direct',
+      '---\nname: direct\ndescription: Direct skill\n---\nDo work.',
+    );
+    emfileProbe.failReadOf = 'direct';
+    try {
+      await expect(loadAgentPluginSkills(pluginRoot)).rejects.toThrow('EMFILE');
+    } finally {
+      emfileProbe.failReadOf = undefined;
+    }
+  });
+
+  it('rejects the whole load when only some skill reads hit resource exhaustion', async () => {
+    // The production case is one fd-exhausted read among many successful
+    // ones: a survivor-tolerant loader (rethrow only when NOTHING loaded)
+    // would commit the truncated set and pass an all-fail fixture green.
+    writeSkill(
+      'first',
+      '---\nname: first\ndescription: First skill\n---\nDo work.',
+    );
+    writeSkill(
+      'second',
+      '---\nname: second\ndescription: Second skill\n---\nDo work.',
+    );
+    emfileProbe.failReadOf = 'second';
+    try {
+      await expect(loadAgentPluginSkills(pluginRoot)).rejects.toThrow('EMFILE');
+    } finally {
+      emfileProbe.failReadOf = undefined;
+    }
+  });
+
+  it('rejects the whole load when the skills directory listing hits resource exhaustion', async () => {
+    // A readdir needs a descriptor too, so under a low RLIMIT_NOFILE it is a
+    // likelier exhaustion point than the per-file reads; it must fail closed
+    // rather than silently disable every skill in the plugin.
+    writeSkill(
+      'direct',
+      '---\nname: direct\ndescription: Direct skill\n---\nDo work.',
+    );
+    emfileProbe.failReaddirOf = `${path.sep}skills`;
+    try {
+      await expect(loadAgentPluginSkills(pluginRoot)).rejects.toThrow('EMFILE');
+    } finally {
+      emfileProbe.failReaddirOf = undefined;
+    }
+  });
+
+  it('rejects the whole load when the skills directory stat hits resource exhaustion', async () => {
+    writeSkill(
+      'direct',
+      '---\nname: direct\ndescription: Direct skill\n---\nDo work.',
+    );
+    emfileProbe.failStatOf = `${path.sep}skills`;
+    try {
+      await expect(loadAgentPluginSkills(pluginRoot)).rejects.toThrow('EMFILE');
+    } finally {
+      emfileProbe.failStatOf = undefined;
+    }
+  });
 });

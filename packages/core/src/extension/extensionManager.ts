@@ -69,7 +69,6 @@ import {
   parseInstallSource,
 } from './marketplace.js';
 import { convertCompatibleExtension } from './extension-converter.js';
-import { glob } from 'glob';
 import { createHash, randomBytes } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
 import {
@@ -100,7 +99,12 @@ import {
   ExtensionUninstallEvent,
   ExtensionUpdateEvent,
 } from '../telemetry/types.js';
-import { loadSkillsFromDir } from '../skills/skill-load.js';
+import {
+  EXTENSION_SCAN_CONCURRENCY,
+  isResourceExhaustion,
+  loadSkillsFromDir,
+  scheduleWithConcurrency,
+} from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import {
   loadExtensionWorkflows,
@@ -449,6 +453,23 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   return Object.freeze(rest);
 }
 
+/**
+ * `fs.existsSync` folds every failure into `false`, laundering resource
+ * exhaustion into "absent" — the guarded resource would silently drop out of
+ * a load reported as successful, and the pre-load fingerprint would stamp the
+ * truncation as up to date (R1-3). Keep the existsSync contract for genuine
+ * absence, but let EMFILE/ENFILE/… propagate.
+ */
+function existsSyncOrThrow(target: string): boolean {
+  try {
+    fs.accessSync(target);
+    return true;
+  } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
+    return false;
+  }
+}
+
 function getContextFileNames(config: ExtensionConfig): string[] {
   if (!config.contextFileName || config.contextFileName.length === 0) {
     return ['QWEN.md'];
@@ -459,39 +480,147 @@ function getContextFileNames(config: ExtensionConfig): string[] {
 }
 
 async function loadCommandsFromDir(dir: string): Promise<string[]> {
-  const globOptions = {
-    nodir: true,
-    dot: true,
-    follow: true,
-  };
-
-  try {
-    const allFiles = await glob('**/*.{md,toml}', {
-      ...globOptions,
-      cwd: dir,
-    });
-
-    const commandNames = allFiles.map((file) => {
-      const ext = path.extname(file);
-      const relativePath = file.substring(0, file.length - ext.length);
-      const commandName = relativePath
-        .split(/[/\\]/)
-        .map((segment) => segment.replaceAll(':', '_'))
-        .join(':');
-
-      return commandName;
-    });
-
-    return commandNames;
-  } catch (error) {
-    const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
-    const isAbortError = error instanceof Error && error.name === 'AbortError';
-    if (!isEnoent && !isAbortError) {
-      debugLogger.error(`Error loading commands from ${dir}:`, error);
+  // Per-directory walk with an explicit stack — neither one recursive
+  // readdir nor glob:
+  //
+  // - glob's path-scurry swallows readdir errors internally and resolves an
+  //   empty or short listing, so under descriptor pressure the refresh would
+  //   commit a truncated command set and stamp it up to date. Every readdir
+  //   leg below surfaces its errno, and resource exhaustion is rethrown so
+  //   the refresh fails closed instead.
+  // - A single recursive readdir rejects the WHOLE walk when any one
+  //   subdirectory is unreadable (EACCES on a foreign-owned subtree), which
+  //   the non-exhaustion path would launder into `[]` for the extension.
+  //   Reading each directory separately keeps glob's old short-listing
+  //   behavior: an unreadable subdirectory loses only its own subtree.
+  //
+  // The removed glob ran with `follow: true`, so symlinked directories are
+  // descended into explicitly — an ancestry-local target set cuts cycles instead
+  // of recursing until the kernel's ELOOP limit — and a symlinked command
+  // file is matched on the link's own name, as glob matched it. Broken or
+  // unreadable links are skipped.
+  //
+  // The extension match is case-insensitive exactly where glob's
+  // platform-default `nocase` is (macOS/Windows), so the discovered set
+  // stays identical to what FileCommandLoader registers on each platform.
+  //
+  // This traversal is NOT admitted through the shared descriptor gate
+  // (SKILL_LOAD_CONCURRENCY in skill-load.ts): it holds at most one
+  // directory handle at a time per in-flight extension
+  // (EXTENSION_SCAN_CONCURRENCY at most), each opened, drained and closed
+  // inside a single libuv threadpool task.
+  const ignoreCase =
+    process.platform === 'darwin' || process.platform === 'win32';
+  const commandNames: string[] = [];
+  const pending = [{ directory: dir, symlinkAncestors: new Set<string>() }];
+  while (pending.length > 0) {
+    const { directory: currentDir, symlinkAncestors } = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(currentDir, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      if (isResourceExhaustion(error)) throw error;
+      if (currentDir === dir) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          debugLogger.error(`Error loading commands from ${dir}:`, error);
+        }
+        return [];
+      }
+      debugLogger.error(`Error loading commands from ${currentDir}:`, error);
+      continue;
     }
-    return [];
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      let isDirectory = entry.isDirectory();
+      let isSymbolicLink = entry.isSymbolicLink();
+      let isFile = entry.isFile();
+      if (
+        !isDirectory &&
+        !isSymbolicLink &&
+        !isFile &&
+        !entry.isBlockDevice() &&
+        !entry.isCharacterDevice() &&
+        !entry.isFIFO() &&
+        !entry.isSocket()
+      ) {
+        // DT_UNKNOWN: this filesystem's readdir reported no d_type (FUSE
+        // without readdirplus, XFS without ftype, some NFS servers), so
+        // resolve the type from the filesystem — the glob this walk
+        // replaced lstat'ed unknown entries the same way. lstat, not stat:
+        // a symlink must stay a symlink so the branch below stats its
+        // target under the cycle rules.
+        let resolved: fs.Stats;
+        try {
+          resolved = await fs.promises.lstat(fullPath);
+        } catch (error) {
+          if (isResourceExhaustion(error)) throw error;
+          continue;
+        }
+        isDirectory = resolved.isDirectory();
+        isSymbolicLink = resolved.isSymbolicLink();
+        isFile = resolved.isFile();
+      }
+      if (isDirectory) {
+        pending.push({ directory: fullPath, symlinkAncestors });
+        continue;
+      }
+      if (isSymbolicLink) {
+        let target: fs.Stats;
+        try {
+          target = await fs.promises.stat(fullPath);
+        } catch (error) {
+          if (isResourceExhaustion(error)) throw error;
+          // Dangling or unreadable link — not a command.
+          continue;
+        }
+        if (target.isDirectory()) {
+          let realPath: string;
+          try {
+            realPath = await fs.promises.realpath(fullPath);
+          } catch (error) {
+            if (isResourceExhaustion(error)) throw error;
+            continue;
+          }
+          if (!symlinkAncestors.has(realPath)) {
+            pending.push({
+              directory: fullPath,
+              symlinkAncestors: new Set([...symlinkAncestors, realPath]),
+            });
+          }
+          continue;
+        }
+        isFile = target.isFile();
+      }
+      if (!isFile) continue;
+      const ext = path.extname(entry.name);
+      const normalizedExt = ignoreCase ? ext.toLowerCase() : ext;
+      if (normalizedExt !== '.md' && normalizedExt !== '.toml') continue;
+      const relativePath = path.relative(dir, fullPath);
+      commandNames.push(
+        relativePath
+          .substring(0, relativePath.length - ext.length)
+          .split(/[/\\]/)
+          .map((segment) => segment.replaceAll(':', '_'))
+          .join(':'),
+      );
+    }
   }
+  return commandNames;
 }
+
+/** Refusals observed during one refresh, including loads that later fail. */
+type ScanRefusalCollector = Map<
+  string,
+  {
+    extensionDir: string;
+    refusals: Map<string, SubagentError>;
+    // Agents-dir file each refusal name came from; staleness is judged per
+    // name against the next scan's damaged-file set (R17-1).
+    refusalFiles: Map<string, string>;
+  }
+>;
 
 // ============================================================================
 // ExtensionManager Class
@@ -517,6 +646,20 @@ export class ExtensionManager {
   /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
+  // Pending refusals gate dispatch without publishing incomplete extensions.
+  // Superseded per name by a committed scan that re-refused the name or saw
+  // its file clean/absent, per extension by removal.
+  private readonly pendingScanRefusals: ScanRefusalCollector = new Map();
+  // Agents-dir-level failures (unreadable directory) mark the whole scan
+  // incomplete: nothing per-file is known, so EVERY pending name is kept.
+  private readonly incompleteAgentScans = new WeakSet<Extension>();
+  // Agents-dir entries that failed to parse this scan, per committed object.
+  // A per-file failure can only hide ITS OWN declared name, so pending
+  // refusals survive per name only while their file stays damaged (R17-1).
+  private readonly agentScanDamagedFiles = new WeakMap<
+    Extension,
+    Set<string>
+  >();
 
   private withNetworkPolicy(
     installMetadata: ExtensionInstallMetadata | undefined,
@@ -1437,42 +1580,83 @@ export class ExtensionManager {
   async refreshCacheWithSnapshot(options?: {
     names?: string[];
   }): Promise<ExtensionStoreSnapshot> {
+    // A refresh opts into runtime loading even if its first scan fails.
+    // Installation alone must not opt in modes that deliberately skip it.
+    this.extensionCache ??= new Map();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     // Captured before the load, not after: an install landing mid-refresh must
     // leave the committed fingerprint stale so the next check still sees it.
     // Stamping post-load would mask that change until something else moved.
+    // The residual "truncated load sticks" concern is closed at the loader
+    // entrances and the commit boundaries instead: resource-exhaustion errors
+    // (EMFILE/ENFILE/…, see `isResourceExhaustion` in skill-load.ts) are
+    // rethrown by the per-entry loaders, by the extensions-root readdir
+    // below, and by loadExtension's catch-all, so a load that died mid-scan
+    // rejects the refresh and never reaches this stamp.
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
+    // The ledger is meaningful within this one refresh attempt: recorded by
+    // loadExtension as the attempt scans, folded into pending refusals by the
+    // rejection callback below if the refresh rejects. The callback runs
+    // before `readConsistent` releases the store lock, so the merge is atomic
+    // with every other store mutation — a merge running after the release
+    // would let a concurrent uninstall or successful refresh commit in the
+    // gap and then be overwritten by the stale records (R9-1).
+    const scanRefusals: ScanRefusalCollector = new Map();
     const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(async () => {
-        let loaded: Extension[];
-        if (requestedNames.length > 0) {
-          loaded = (
-            await Promise.all(
-              requestedNames.map((name) => this.loadExtensionByName(name)),
-            )
-          ).filter((extension): extension is Extension => extension !== null);
-        } else {
-          // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-          loaded = await this.loadExtensionsFromExtensionsDir(
-            this.configDir,
-            this.workspaceDir,
-          );
-        }
-        return {
-          value: loaded,
-          extensions: loaded.map((extension) => ({
-            id: extension.id,
-            name: extension.name,
-          })),
-        };
-      });
+      await this.extensionStore.readConsistent(
+        async () => {
+          let loaded: Extension[];
+          if (requestedNames.length > 0) {
+            loaded = (
+              await scheduleWithConcurrency(
+                requestedNames,
+                EXTENSION_SCAN_CONCURRENCY,
+                (name) =>
+                  this.loadExtensionByName(name, undefined, scanRefusals),
+              )
+            ).filter((extension): extension is Extension => extension !== null);
+          } else {
+            // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+            loaded = await this.loadExtensionsFromExtensionsDir(
+              this.configDir,
+              this.workspaceDir,
+              { scanRefusals },
+            );
+          }
+          return {
+            value: loaded,
+            extensions: loaded.map((extension) => ({
+              id: extension.id,
+              name: extension.name,
+            })),
+          };
+        },
+        async () => {
+          this.mergeScanRefusals(scanRefusals, requestedNames);
+        },
+      );
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
     });
     this.extensionCache = nextCache;
     this.applyStoreActivation(snapshot);
+    this.mergeScanRefusals(scanRefusals, requestedNames);
+    for (const extension of extensions) {
+      this.reconcilePendingScanRefusals(extension);
+    }
+    if (dirFingerprintBeforeLoad !== undefined) {
+      for (const [name, { extensionDir }] of this.pendingScanRefusals) {
+        try {
+          fs.statSync(extensionDir);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            this.pendingScanRefusals.delete(name);
+          }
+        }
+      }
+    }
     // Only a full refresh establishes a baseline. A name-filtered refresh leaves
     // the cache partial, so claiming the whole directory is up to date would let
     // `refreshCacheIfSourcesChanged` report "unchanged" over a partial set.
@@ -1482,6 +1666,87 @@ export class ExtensionManager {
       );
     }
     return snapshot;
+  }
+
+  getPendingScanRefusals(): ReadonlyMap<
+    string,
+    ReadonlyMap<string, SubagentError>
+  > {
+    // Only a committed inactive entry can suppress a pending refusal; failed
+    // or skipped scans without a cache entry must still refuse dispatch.
+    return new Map(
+      [...this.pendingScanRefusals]
+        .filter(([name]) => this.extensionCache?.get(name)?.isActive !== false)
+        .map(([name, { refusals }]) => [name, refusals]),
+    );
+  }
+
+  private clearPendingScanRefusals(extension: Extension): void {
+    if (this.incompleteAgentScans.has(extension)) return;
+    // Damage-aware supersede (R18-2): a commit reload that could not READ an
+    // agent file has no evidence about its refusal — the per-file damage it
+    // just recorded must retain the pending name, exactly like a damaged
+    // refresh. Only a reload with no per-file damage supersedes wholesale:
+    // an unreadable file is neither clean nor absent.
+    if (!this.agentScanDamagedFiles.get(extension)?.size) {
+      this.pendingScanRefusals.delete(extension.name);
+      return;
+    }
+    this.reconcilePendingScanRefusals(extension);
+  }
+
+  /**
+   * Per-name supersede after a committed refresh (R17-1). Fresh refusals and
+   * names whose recorded file this scan still damaged stay; a name whose file
+   * now parses clean, parses into a different refusal, or is gone has its
+   * evidence withdrawn — a refusal must not outlive the file that caused it,
+   * and parse noise from a DIFFERENT file must not pin it. A directory-level
+   * agents failure (incompleteAgentScans) knows nothing per file, so it keeps
+   * every name; a record without a known source file is kept conservatively.
+   */
+  private reconcilePendingScanRefusals(extension: Extension): void {
+    const pending = this.pendingScanRefusals.get(extension.name);
+    if (!pending || this.incompleteAgentScans.has(extension)) {
+      return;
+    }
+    const damaged = this.agentScanDamagedFiles.get(extension);
+    const fresh = new Set(
+      [...(extension.agentExecutorRefusals?.keys() ?? [])].map((name) =>
+        name.toLowerCase(),
+      ),
+    );
+    for (const agentName of [...pending.refusals.keys()]) {
+      if (fresh.has(agentName)) continue;
+      const file = pending.refusalFiles.get(agentName);
+      if (file === undefined || damaged?.has(file)) continue;
+      pending.refusals.delete(agentName);
+      pending.refusalFiles.delete(agentName);
+    }
+    if (pending.refusals.size === 0) {
+      this.pendingScanRefusals.delete(extension.name);
+    }
+  }
+
+  private mergeScanRefusals(
+    scanRefusals: ScanRefusalCollector,
+    requestedNames: string[],
+  ): void {
+    const requested = new Set(requestedNames.map((name) => name.toLowerCase()));
+    for (const [
+      name,
+      { extensionDir, refusals, refusalFiles },
+    ] of scanRefusals) {
+      if (requested.size > 0 && !requested.has(name.toLowerCase())) continue;
+      const previous = this.pendingScanRefusals.get(name);
+      this.pendingScanRefusals.set(name, {
+        extensionDir,
+        refusals: new Map([...(previous?.refusals ?? []), ...refusals]),
+        refusalFiles: new Map([
+          ...(previous?.refusalFiles ?? []),
+          ...refusalFiles,
+        ]),
+      });
+    }
   }
 
   /**
@@ -1715,10 +1980,11 @@ export class ExtensionManager {
   async loadExtensionByName(
     name: string,
     workspaceDir?: string,
+    scanRefusals?: ScanRefusalCollector,
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
     const userExtensionsDir = this.configDir;
-    if (!fs.existsSync(userExtensionsDir)) {
+    if (!existsSyncOrThrow(userExtensionsDir)) {
       return null;
     }
 
@@ -1727,10 +1993,13 @@ export class ExtensionManager {
       if (!fs.statSync(extensionDir).isDirectory()) {
         continue;
       }
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir: cwd,
-      });
+      const extension = await this.loadExtension(
+        {
+          extensionDir,
+          workspaceDir: cwd,
+        },
+        { scanRefusals },
+      );
       if (
         extension &&
         extension.config.name.toLowerCase() === name.toLowerCase()
@@ -1753,27 +2022,51 @@ export class ExtensionManager {
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
-    options: { manifestOnly?: boolean; detailName?: string } = {},
+    options: {
+      manifestOnly?: boolean;
+      detailName?: string;
+      scanRefusals?: ScanRefusalCollector;
+    } = {},
   ): Promise<Extension[]> {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
-    } catch {
+    } catch (error) {
+      // A missing or unreadable extensions directory stays an empty set (the
+      // first-run shape), but resource exhaustion must fail the refresh
+      // closed: swallowing it here would commit an empty cache and stamp it
+      // as up to date, silently uninstalling every extension for the
+      // session.
+      if (isResourceExhaustion(error)) throw error;
       return [];
     }
 
-    const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension(
-        { extensionDir, workspaceDir },
-        options,
-      );
-      if (extension != null) {
-        extensions.push(extension);
-      }
-    }
-    return extensions;
+    // Scheduling-only fan-out: this level opens no descriptors itself, so its
+    // items must not hold gate permits while the nested loaders run — a level
+    // that holds a permit across nested gated acquisitions stacks orphans when
+    // a sibling fails (e.g. the dangling-symlink statSync below), permanently
+    // draining the shared pool. Promise.allSettled semantics here: the whole
+    // batch settles before the first original rejection reason is rethrown, so
+    // a failing scan never abandons siblings mid-flight. An entry whose stat
+    // itself throws (dangling symlink) still propagates and fails the whole
+    // load — read-only consumers rely on that fail-closed signal.
+    const extensions = await scheduleWithConcurrency(
+      subdirs,
+      EXTENSION_SCAN_CONCURRENCY,
+      (subdir) =>
+        this.loadExtension(
+          {
+            extensionDir: path.join(extensionsDir, subdir),
+            workspaceDir,
+          },
+          {
+            manifestOnly: options.manifestOnly,
+            detailName: options.detailName,
+            scanRefusals: options.scanRefusals,
+          },
+        ),
+    );
+    return extensions.filter((extension) => extension != null);
   }
 
   /**
@@ -1902,6 +2195,7 @@ export class ExtensionManager {
       throwOnError?: boolean;
       manifestOnly?: boolean;
       detailName?: string;
+      scanRefusals?: ScanRefusalCollector;
     } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
@@ -1910,6 +2204,12 @@ export class ExtensionManager {
     }
 
     let extension: Extension | undefined;
+    // The finally block preserves refusals even if a later loader fails.
+    let agentExecutorRefusals: Map<string, SubagentError> | undefined;
+    // Same hoisting reason: refusal sources and damaged agent files must stay
+    // visible to the finally when a sibling leg rejects mid-scan.
+    const agentRefusalFiles = new Map<string, string>();
+    const damagedAgentFiles = new Set<string>();
     try {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
@@ -1949,23 +2249,46 @@ export class ExtensionManager {
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
         extension.contextFiles = getContextFileNames(config)
           .map((contextFileName) =>
             path.join(effectiveExtensionPath, contextFileName),
           )
-          .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-          onSkillsDiscoveryError,
-        );
-        const agentExecutorRefusals = new Map<string, SubagentError>();
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-          agentExecutorRefusals,
-        );
+          .filter((contextFilePath) => existsSyncOrThrow(contextFilePath));
+        agentExecutorRefusals = new Map<string, SubagentError>();
+        // commands / skills / agents live in disjoint directories with no
+        // shared state, so their directory scans run concurrently; each
+        // loader already swallows its own per-entry failures. The three legs
+        // must SETTLE before any rejection is rethrown: loadSubagentFromDir
+        // folds executor refusals into agentExecutorRefusals only after its
+        // batch settles, and a Promise.all fast-reject would read the map
+        // before that fold ran, dropping the refusals a dying sibling
+        // recorded.
+        const [commandsResult, skillsResult, agentsResult] =
+          await Promise.allSettled([
+            loadCommandsFromDir(path.join(effectiveExtensionPath, 'commands')),
+            loadSkillsFromDir(
+              `${effectiveExtensionPath}/skills`,
+              onSkillsDiscoveryError,
+            ),
+            loadSubagentFromDir(
+              `${effectiveExtensionPath}/agents`,
+              agentExecutorRefusals,
+              (file) => {
+                if (file === undefined) {
+                  this.incompleteAgentScans.add(head.extension);
+                } else {
+                  damagedAgentFiles.add(file);
+                }
+              },
+              agentRefusalFiles,
+            ),
+          ]);
+        if (commandsResult.status === 'rejected') throw commandsResult.reason;
+        if (skillsResult.status === 'rejected') throw skillsResult.reason;
+        if (agentsResult.status === 'rejected') throw agentsResult.reason;
+        extension.commands = commandsResult.value;
+        extension.skills = skillsResult.value;
+        extension.agents = agentsResult.value;
         extension.agentExecutorRefusals = agentExecutorRefusals;
         extension.workflows = await loadExtensionWorkflows(
           effectiveExtensionPath,
@@ -1999,11 +2322,11 @@ export class ExtensionManager {
             : null;
 
         if (
-          fs.existsSync(hooksJsonPath) ||
-          (configHooksPath && fs.existsSync(configHooksPath))
+          existsSyncOrThrow(hooksJsonPath) ||
+          (configHooksPath && existsSyncOrThrow(configHooksPath))
         ) {
           const hooksFilePath =
-            configHooksPath && fs.existsSync(configHooksPath)
+            configHooksPath && existsSyncOrThrow(configHooksPath)
               ? configHooksPath
               : hooksJsonPath;
 
@@ -2029,6 +2352,10 @@ export class ExtensionManager {
               effectiveExtensionPath,
             );
           } catch (error) {
+            // A missing or unparsable hooks file stays warn-and-continue
+            // (hooks are optional), but resource exhaustion must fail the
+            // load closed — same carve-out as loadInstallMetadata.
+            if (isResourceExhaustion(error)) throw error;
             debugLogger.warn(
               `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
             );
@@ -2038,13 +2365,26 @@ export class ExtensionManager {
 
       return extension;
     } catch (e) {
-      if (options.throwOnError) throw e;
+      if (options.throwOnError || isResourceExhaustion(e)) {
+        throw e;
+      }
       debugLogger.warn(
         `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
         )}`,
       );
       return null;
+    } finally {
+      if (extension && agentExecutorRefusals?.size) {
+        options.scanRefusals?.set(extension.name, {
+          extensionDir,
+          refusals: agentExecutorRefusals,
+          refusalFiles: agentRefusalFiles,
+        });
+      }
+      if (extension && damagedAgentFiles.size > 0) {
+        this.agentScanDamagedFiles.set(extension, damagedAgentFiles);
+      }
     }
   }
 
@@ -2066,7 +2406,12 @@ export class ExtensionManager {
       const configContent = fs.readFileSync(metadataFilePath, 'utf-8');
       const metadata = JSON.parse(configContent) as ExtensionInstallMetadata;
       return metadata;
-    } catch (_e) {
+    } catch (error) {
+      // A missing or unparsable sidecar means "no install metadata";
+      // resource exhaustion must fail the load closed instead of being
+      // laundered into absent metadata — which would make a linked
+      // extension silently vanish from the refresh.
+      if (isResourceExhaustion(error)) throw error;
       return undefined;
     }
   }
@@ -2087,6 +2432,11 @@ export class ExtensionManager {
           config: loadAgentPluginManifest(extensionDir),
         };
       } catch (error) {
+        // Keep the errno object for resource exhaustion: loadExtension's
+        // fail-closed classification keys off `error.code`, which the
+        // rewrap below would drop — an EMFILE here must not be laundered
+        // into a skipped extension.
+        if (isResourceExhaustion(error)) throw error;
         throw new Error(
           `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
         );
@@ -2094,7 +2444,7 @@ export class ExtensionManager {
     }
 
     const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-    if (!fs.existsSync(configFilePath)) {
+    if (!existsSyncOrThrow(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
     try {
@@ -2121,6 +2471,8 @@ export class ExtensionManager {
       validateExtensionSettingEnvVars(config.settings);
       return { format: 'qwen', config };
     } catch (e) {
+      // Same errno preservation as the Agent Plugins branch above.
+      if (isResourceExhaustion(e)) throw e;
       throw new Error(
         `Failed to load extension config from ${configFilePath}: ${getErrorMessage(
           e,
@@ -2574,7 +2926,7 @@ export class ExtensionManager {
 
         const commands = isAgentPlugin
           ? []
-          : await loadCommandsFromDir(`${localSourcePath}/commands`);
+          : await loadCommandsFromDir(path.join(localSourcePath, 'commands'));
         const previousCommands = previous?.commands ?? [];
 
         const skills = isAgentPlugin
@@ -2861,6 +3213,7 @@ export class ExtensionManager {
 
         if (this.extensionCache) {
           this.extensionCache.set(extension.name, extension);
+          this.clearPendingScanRefusals(extension);
         }
 
         if (isUpdate) {
@@ -3105,7 +3458,10 @@ export class ExtensionManager {
             { throwOnError: true },
           )) ?? undefined;
         if (!extension) throw new Error('Extension not found after commit.');
-        this.extensionCache?.set(extension.name, extension);
+        if (this.extensionCache) {
+          this.extensionCache.set(extension.name, extension);
+          this.clearPendingScanRefusals(extension);
+        }
         this.applyStoreActivation(snapshot);
       } catch (error) {
         this.extensionCache?.delete(prepared.identity.name);
@@ -3316,6 +3672,7 @@ export class ExtensionManager {
     });
     onCommitted?.(snapshot.generation);
     this.extensionCache?.delete(identity.name);
+    this.pendingScanRefusals.delete(identity.name);
     if (isUpdate) return snapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     if (deleteGitCredential) {
@@ -3444,7 +3801,17 @@ export class ExtensionManager {
       return undefined;
     }
     callback(extension.name, ExtensionUpdateState.UPDATING);
-    const installMetadata = this.loadInstallMetadata(extension.path);
+    let installMetadata: ExtensionInstallMetadata | undefined;
+    try {
+      installMetadata = this.loadInstallMetadata(extension.path);
+    } catch (error) {
+      // loadInstallMetadata rethrows resource exhaustion; every other
+      // failure path in this function emits a terminal callback before
+      // throwing, and this one must too — otherwise the update row stays
+      // pinned at UPDATING for the rest of the session.
+      callback(extension.name, ExtensionUpdateState.ERROR);
+      throw error;
+    }
 
     if (!installMetadata?.type) {
       callback(extension.name, ExtensionUpdateState.ERROR);

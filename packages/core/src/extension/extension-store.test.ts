@@ -1047,6 +1047,80 @@ describe('ExtensionStore', () => {
     await expect(mutation).resolves.toMatchObject({ generation: 1 });
   });
 
+  it('readConsistent surfaces the primary rejection when the rejection callback itself fails', async () => {
+    // The callback folds the failed attempt's records into shared state; a
+    // throw from it must be logged and the original rejection still
+    // surface — otherwise the refresh reports an errno that never killed
+    // the scan (R9-2).
+    const store = makeStore();
+    const primary = Object.assign(new Error('scan died'), {
+      code: 'EMFILE',
+    });
+    const callbackFailure = Object.assign(new Error('callback died'), {
+      code: 'ENOTDIR',
+    });
+    let callbackRan = false;
+    await expect(
+      store.readConsistent(
+        async () => {
+          throw primary;
+        },
+        async () => {
+          callbackRan = true;
+          throw callbackFailure;
+        },
+      ),
+    ).rejects.toBe(primary);
+    expect(callbackRan).toBe(true);
+  });
+
+  it.each(['scan', 'commit'])(
+    'runs the %s rejection callback before releasing the lock',
+    async (phase) => {
+      const store = makeStore();
+      const identity = { id: 'd4'.repeat(32), name: 'demo' };
+      await store.ensureInitialized([identity]);
+      let releaseCallback!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      let startCallback!: () => void;
+      const started = new Promise<void>((resolve) => {
+        startCallback = resolve;
+      });
+      const reading = store.readConsistent(
+        async () => {
+          if (phase === 'scan') throw new Error('scan died');
+          return {
+            value: null,
+            extensions: [identity, { id: 'd5'.repeat(32), name: 'demo' }],
+          };
+        },
+        async () => {
+          startCallback();
+          await held;
+        },
+      );
+      // Attach the rejection handler before testing the competing mutation.
+      // eslint-disable-next-line vitest/valid-expect
+      const rejection = expect(reading).rejects.toThrow(
+        phase === 'scan' ? 'scan died' : 'conflicts',
+      );
+      await started;
+      let mutationSettled = false;
+      const mutation = store
+        .setDefaultActivation(identity, 'disabled')
+        .finally(() => {
+          mutationSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(mutationSettled).toBe(false);
+      releaseCallback();
+      await rejection;
+      await expect(mutation).resolves.toMatchObject({ generation: 1 });
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'uses one workspace key for symlink and real paths',
     async () => {

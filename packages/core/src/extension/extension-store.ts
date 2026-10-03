@@ -720,16 +720,33 @@ export class ExtensionStore {
     );
   }
 
+  /** Runs the rejection callback under the lock, preserving the original error. */
   async readConsistent<T>(
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
     }>,
+    onArtifactsRejected?: () => Promise<void>,
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions } = await readArtifacts();
-      const snapshot = await this.ensureInitializedUnlocked(extensions);
-      return { value, snapshot };
+      try {
+        const { value, extensions } = await readArtifacts();
+        const snapshot = await this.ensureInitializedUnlocked(extensions);
+        return { value, snapshot };
+      } catch (error) {
+        // The callback folds the failed attempt's records into shared state;
+        // it must never replace the primary rejection. Callback failures
+        // are logged and the original error still surfaces (R9-2).
+        try {
+          await onArtifactsRejected?.();
+        } catch (callbackError) {
+          debugLogger.warn(
+            'extension store rejection callback failed; surfacing the primary error:',
+            callbackError,
+          );
+        }
+        throw error;
+      }
     });
   }
 

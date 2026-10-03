@@ -35,6 +35,11 @@ import {
 } from './types.js';
 import { SubagentValidator } from './validation.js';
 import {
+  SKILL_LOAD_CONCURRENCY,
+  isResourceExhaustion,
+  mapWithConcurrency,
+} from '../skills/skill-load.js';
+import {
   parseAgentExecutionBackend,
   probeMatchInsideBlockScalar,
   resolveAgentExecutionBackend,
@@ -127,16 +132,20 @@ function isNamedExecutionRefusal(error: unknown): error is SubagentError {
 
 const acceptedRefusalNames = new WeakMap<SubagentError, readonly string[]>();
 
+/** Lowercased declared names a refusal records for; [] for non-refusals. */
+function refusalNames(error: unknown): string[] {
+  if (!isNamedExecutionRefusal(error)) return [];
+  return [error.subagentName, ...(acceptedRefusalNames.get(error) ?? [])]
+    .filter((name): name is string => Boolean(name))
+    .map((name) => name.toLowerCase());
+}
+
 function recordExecutionRefusal(
   refusals: Map<string, SubagentError>,
   error: unknown,
 ): void {
-  if (!isNamedExecutionRefusal(error)) return;
-  for (const name of [
-    error.subagentName,
-    ...(acceptedRefusalNames.get(error) ?? []),
-  ]) {
-    if (name) refusals.set(name.toLowerCase(), error);
+  for (const name of refusalNames(error)) {
+    refusals.set(name, error as SubagentError);
   }
 }
 
@@ -157,9 +166,30 @@ export class SubagentManager {
   >();
   private readonly changeListeners: Set<() => void> = new Set();
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    options: {
+      /**
+       * Extension executor refusals recorded by refresh attempts that
+       * rejected before committing. The committed refusal records ride on
+       * active extensions (`agentExecutorRefusals`), while uncommitted
+       * or incomplete scans reach dispatch through this channel. The daemon's
+       * CRUD-scoped manager and other Config-stub constructions omit it
+       * and see committed records only.
+       */
+      getPendingExtensionRefusals?: () => Iterable<
+        ReadonlyMap<string, SubagentError>
+      >;
+    } = {},
+  ) {
     this.validator = new SubagentValidator();
+    this.getPendingExtensionRefusals =
+      options.getPendingExtensionRefusals ?? (() => []);
   }
+
+  private readonly getPendingExtensionRefusals: () => Iterable<
+    ReadonlyMap<string, SubagentError>
+  >;
 
   addChangeListener(listener: () => void): () => void {
     this.changeListeners.add(listener);
@@ -1863,6 +1893,16 @@ export class SubagentManager {
           merged.set(name, error);
         }
       }
+      // Refusals a REJECTED refresh recorded never committed onto the
+      // active set above; they stay pending at the extension manager until
+      // a complete committed agent rescan and gate dispatch from here. The
+      // manager excludes committed inactive extensions. Same scan scoping
+      // as the committed records: only names a scan actually refused.
+      for (const refusals of this.getPendingExtensionRefusals()) {
+        for (const [name, error] of refusals) {
+          merged.set(name, error);
+        }
+      }
       this.executorRefusals.set('extension', merged);
       return extensions.flatMap((extension) => extension.agents || []);
     }
@@ -1990,35 +2030,98 @@ export async function loadSubagentFromDir(
   // name, so a by-name dispatch can refuse instead of falling through to a
   // builtin of the same name.
   refusals?: Map<string, SubagentError>,
+  // file: the agents-dir entry a per-file failure damaged, so the caller can
+  // retain pending refusals per name/file instead of per extension; omitted
+  // on directory-level failure (a readdir that genuinely could not complete),
+  // where no per-name evidence exists.
+  onDiscoveryError?: (file?: string) => void,
+  // Records which agents-dir file each freshly recorded refusal name came
+  // from, so staleness is provable per name (R17-1).
+  refusalFiles?: Map<string, string>,
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
-    const subagents: SubagentConfig[] = [];
+    const loaded = await mapWithConcurrency(
+      files.filter((file) => file.endsWith('.md')),
+      SKILL_LOAD_CONCURRENCY,
+      async (
+        file,
+      ): Promise<
+        | { config: SubagentConfig }
+        | { refusal: unknown; file: string }
+        | { exhaustion: unknown }
+      > => {
+        const filePath = path.join(baseDir, file);
 
-    for (const file of files) {
-      if (!file.endsWith('.md')) continue;
+        try {
+          const content = await fs.readFile(filePath, 'utf8');
+          return {
+            config: parseSubagentContent(
+              content,
+              filePath,
+              'extension',
+              new SubagentValidator(),
+            ),
+          };
+        } catch (error) {
+          // Defer the resource-exhaustion rethrow until the batch has
+          // settled and the refusals below are folded: failing the refresh
+          // closed must not discard the refusals the scan already produced.
+          if (isResourceExhaustion(error)) return { exhaustion: error };
+          // A named execution refusal is evidence, not damage. A vanished
+          // file (deleted between readdir and readFile) explains nothing —
+          // reporting it as damage would pin the pending refusal that file
+          // caused after the file is gone (R17-1). Only an unreadable file
+          // that is still there counts as damage, keyed by its own name.
+          if (
+            !isNamedExecutionRefusal(error) &&
+            (error as NodeJS.ErrnoException).code !== 'ENOENT'
+          ) {
+            onDiscoveryError?.(file);
+          }
+          warnInvalidSubagentFile(filePath, error);
+          return { refusal: error, file };
+        }
+      },
+    );
 
-      const filePath = path.join(baseDir, file);
-
-      try {
-        const content = await fs.readFile(filePath, 'utf8');
-        const config = parseSubagentContent(
-          content,
-          filePath,
-          'extension',
-          new SubagentValidator(),
-        );
-        subagents.push(config);
-      } catch (error) {
-        warnInvalidSubagentFile(filePath, error);
-        if (refusals) recordExecutionRefusal(refusals, error);
+    // Fold refusals into the caller's map in input (readdir) order rather
+    // than from inside the concurrent items: recordExecutionRefusal keys the
+    // map by lowercased DECLARED name, so two files declaring the same name
+    // share a key — folding in input order keeps the winner the last file in
+    // readdir order (the pre-concurrency serial behavior) instead of
+    // whichever read happened to finish last.
+    let firstExhaustion: unknown;
+    for (const item of loaded) {
+      if ('exhaustion' in item) {
+        firstExhaustion ??= item.exhaustion;
         continue;
       }
+      if ('refusal' in item && refusals) {
+        recordExecutionRefusal(refusals, item.refusal);
+        for (const name of refusalNames(item.refusal)) {
+          refusalFiles?.set(name, item.file);
+        }
+      }
+    }
+    if (firstExhaustion !== undefined) {
+      // Fail the whole refresh closed so a later refresh retries, instead of
+      // committing a truncated agent set as successful.
+      throw firstExhaustion;
     }
 
-    return subagents;
-  } catch (_error) {
-    // Directory doesn't exist or can't be read
+    return loaded
+      .filter((item): item is { config: SubagentConfig } => 'config' in item)
+      .map((item) => item.config);
+  } catch (error) {
+    // Resource exhaustion at the directory level (e.g. readdir EMFILE) fails
+    // the whole refresh; a missing or unreadable directory stays an empty set.
+    if (isResourceExhaustion(error)) {
+      throw error;
+    }
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      onDiscoveryError?.();
+    }
     return [];
   }
 }

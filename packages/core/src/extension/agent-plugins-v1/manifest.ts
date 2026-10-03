@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isResourceExhaustion } from '../../skills/skill-load.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { resolveContainedExistingPath } from './paths.js';
 
@@ -50,6 +51,7 @@ export function getAgentPluginSchemaStatus(
       manifestPath,
     );
   } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ENOTDIR' ? 'unrelated' : 'supported';
   }
@@ -60,7 +62,12 @@ export function getAgentPluginSchemaStatus(
     value = JSON.parse(
       fs.readFileSync(resolvedManifestPath, 'utf8'),
     ) as unknown;
-  } catch {
+  } catch (error) {
+    // A missing, unreadable or corrupt plugin.json means "not an Agent
+    // Plugins extension", but resource exhaustion must fail the load
+    // closed — laundering the errno into 'unrelated' would drop the whole
+    // extension from a load reported as successful.
+    if (isResourceExhaustion(error)) throw error;
     return 'unrelated';
   }
   if (!isRecord(value) || typeof value['$schema'] !== 'string') {

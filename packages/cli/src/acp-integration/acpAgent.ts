@@ -8242,6 +8242,13 @@ class QwenAgent implements Agent {
         .refreshCacheIfSourcesChanged();
       if (!changed) return;
       await config.getSkillManager()?.refreshCache();
+      // A startup that gave up unstamped recovers here with an empty-startup
+      // consumer set: hooks, MCP servers and context must resync too (R18-1),
+      // not just the skill cache this branch always rebuilds. Stays inside
+      // the try — status reads must not fail because the resync failed.
+      if (config.consumePendingStartupExtensionRecovery()) {
+        await config.syncExtensionConsumers();
+      }
     } catch (error) {
       debugLogger.warn('Extension source revalidation failed:', error);
     }
