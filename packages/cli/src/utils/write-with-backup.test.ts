@@ -21,6 +21,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     writeFileSync: vi.fn(actual.writeFileSync),
+    chmodSync: vi.fn(actual.chmodSync),
     copyFileSync: vi.fn(actual.copyFileSync),
     renameSync: vi.fn(actual.renameSync),
     readFileSync: vi.fn(actual.readFileSync),
@@ -35,6 +36,7 @@ describe('writeWithBackup', () => {
 
   beforeEach(() => {
     vi.mocked(fs.writeFileSync).mockImplementation(nativeFs.writeFileSync);
+    vi.mocked(fs.chmodSync).mockImplementation(nativeFs.chmodSync);
     vi.mocked(fs.copyFileSync).mockImplementation(nativeFs.copyFileSync);
     vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
     vi.mocked(fs.readFileSync).mockImplementation(nativeFs.readFileSync);
@@ -64,6 +66,66 @@ describe('writeWithBackup', () => {
       expect(fs.readFileSync(targetPath, 'utf8')).toBe(content);
       expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
     }
+  });
+
+  describe.skipIf(process.platform === 'win32')('POSIX permissions', () => {
+    it.each([0o022, 0o077])(
+      'preserves existing modes under umask %o',
+      (mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          for (const mode of [0o600, 0o640, 0o644]) {
+            nativeFs.writeFileSync(targetPath, 'old');
+            nativeFs.chmodSync(targetPath, mode);
+            vi.mocked(fs.renameSync).mockImplementation((...args) => {
+              expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(mode);
+              expect(nativeFs.statSync(targetPath).mode & 0o777).toBe(mode);
+              nativeFs.renameSync(...args);
+            });
+
+            writeWithBackupSync(targetPath, 'new');
+
+            expect(fs.statSync(targetPath).mode & 0o777).toBe(mode);
+            expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+            expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+          }
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it.each([0o022, 0o077])(
+      'keeps default new-file permissions under umask %o',
+      (mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          writeWithBackupSync(targetPath, 'new');
+          expect(fs.statSync(targetPath).mode & 0o777).toBe(0o666 & ~mask);
+          expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+          expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it('preserves the target when setting staging permissions fails', () => {
+      nativeFs.writeFileSync(targetPath, 'old');
+      nativeFs.chmodSync(targetPath, 0o600);
+      vi.mocked(fs.chmodSync).mockImplementation(() => {
+        throw new Error('chmod failed');
+      });
+
+      expect(() => writeWithBackupSync(targetPath, 'new')).toThrow(
+        'chmod failed',
+      );
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+      expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
+      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+      expect(fs.copyFileSync).not.toHaveBeenCalled();
+      expect(fs.renameSync).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps the sandbox policy and loaded scope readable until publication', () => {

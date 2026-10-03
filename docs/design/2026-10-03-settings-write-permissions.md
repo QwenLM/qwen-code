@@ -1,0 +1,21 @@
+# Preserve settings permissions during replacement
+
+[English](2026-10-03-settings-write-permissions.md) | [简体中文](2026-10-03-settings-write-permissions.zh-CN.md)
+
+## Problem
+
+Replacing an existing settings file creates a new inode with default permissions. Under umask 022, a private 0600 or 0640 file becomes 0644 during ordinary startup migration or settings saves. Private staging protects intermediate bytes, but the final file can become readable to additional local users when its parent directories allow traversal. This predates the atomic-save fix in #13119.
+
+## Decision and scope
+
+Capture an existing target's ordinary POSIX permission bits (0777) before staging. Create the staged file with those bits and apply the exact mode after writing, before backup and publication. Creation alone is insufficient: umask 077 would otherwise remove the group-read bit from an existing 0640 file. A mode-setting failure aborts through the existing cleanup path, leaving the committed target intact. Preserve the single replacement rename, private backup, failure recovery and overlapping-writer behavior.
+
+New files keep the existing policy: default 0666 filtered by the caller's umask. Do not add a mode option or change settings schemas. The shared writer serves JSONC creation/updates (including startup migration and ordinary saves), transaction snapshot restoration, and its async wrapper. No sandbox authorization changes are needed.
+
+## Constraints
+
+Preserve ordinary permission bits, not setuid, setgid or sticky bits. Replacement continues to create an inode owned by the writer; preserving owner/group identity, per-file ACLs, extended attributes and Windows ACLs is outside this change. Node's Windows chmod behavior is limited; POSIX modes are not a Windows access-control guarantee. Concurrent external permission changes and file replacement between inspection and publication remain outside the existing last-publication-wins contract. This does not add power-loss durability guarantees.
+
+## Validation
+
+Reproduce and verify offline startup migration with isolated User/Workspace files and fake tokens. Native POSIX tests cover 0600, 0640 and 0644 under umask 022 and 077, exact bytes and staged/final modes. New-file tests retain default umask behavior. Inject chmod failure and require unchanged target bytes/mode with no staging artifacts. Re-run existing reader-policy, overlap, publication-refusal, JSONC and snapshot tests. Build, bundle, typecheck, two clean self-audits and independent review precede submission. Native Windows replacement tests remain platform-gated; do not count their local skips as verification.
