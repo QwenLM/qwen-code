@@ -475,11 +475,17 @@ describe('onResponseChunk', () => {
     // the chain whose send is still in flight may release it.
     expect(flushingSessions.has('sess-1')).toBe(true);
 
-    // Clean up the still-pending turn-1 send; its own chain releases the
-    // marker on settle.
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // Clean up the still-pending turn-1 send; its own chain releases both
+    // the marker and the superseded turn's msg_seq counter on settle.
     resolveSend!(mockResponse(true));
     await drain();
     expect(flushingSessions.has('sess-1')).toBe(false);
+    // The superseded turn's counter was released by the in-flight chain's
+    // own settle, not by the superseded branch (its release was vetoed by
+    // the live flush marker).
+    expect(seqMap.has('msg-1')).toBe(false);
   });
 });
 
@@ -1673,6 +1679,12 @@ describe('streaming guards', () => {
     await drain();
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // A residual arrives while that send is still in flight, so the manual
+    // idleFlush below reaches the flushingSessions guard instead of
+    // returning early on an empty buffer.
+    onResponseChunk(ch, 'test-chat', ' residual', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.buffer).toBe(' residual');
 
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Map<
