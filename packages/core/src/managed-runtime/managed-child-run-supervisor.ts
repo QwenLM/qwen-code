@@ -1,0 +1,133 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { spawn, type ChildProcess } from 'node:child_process';
+import {
+  HookCommandCgroup,
+  HookCommandIsolationUnavailableError,
+} from '../hooks/hook-command-cgroup.js';
+
+// H3 of #12827: the per-process supervisor for a managed background Shell.
+// Each process lives in its own delegated cgroup v2 unit whose name derives
+// from the execution identity, so a replacement worker re-attaches by name
+// across its own restarts. Exit is claimed only with evidence; a unit that
+// cannot be proven empty keeps the hold instead. See
+// docs/design/2026-10-03-managed-shell-monitor-runtime.md.
+
+export { HookCommandIsolationUnavailableError };
+
+export interface ChildRunExitEvidence {
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+}
+
+export interface ChildRunSpawnSpec {
+  /** The unit's stable name, derived from the execution identity. */
+  readonly unitName: string;
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly env: NodeJS.ProcessEnv;
+  readonly cwd: string;
+  /** The caller's bounded capture sink, one call per pipe chunk. */
+  readonly onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
+}
+
+export class ManagedChildRunProcess {
+  private exitEvidence: ChildRunExitEvidence | null = null;
+  private settled = false;
+
+  constructor(
+    readonly unitName: string,
+    private readonly unit: HookCommandCgroup,
+    readonly child: ChildProcess,
+  ) {
+    child.on('error', () => undefined);
+    child.on('exit', (code, signal) => {
+      this.exitEvidence = {
+        exitCode: code,
+        exitSignal: typeof signal === 'string' ? signal : null,
+      };
+    });
+  }
+
+  get exited(): boolean {
+    return this.exitEvidence !== null;
+  }
+
+  get evidence(): ChildRunExitEvidence | null {
+    return this.exitEvidence;
+  }
+
+  /**
+   * Drains output, then TERM, then `cgroup.kill` after the grace window, and
+   * settles only once the unit is proven empty via `cgroup.events` — never on
+   * the root process's exit alone. Answers the exit evidence on success and
+   * `null` while nothing is proven, in which case the caller keeps the hold.
+   */
+  async terminate(graceMs: number): Promise<ChildRunExitEvidence | null> {
+    if (this.settled) return this.exitEvidence;
+    if (this.exited && this.unit.empty()) {
+      this.unit.remove();
+      this.settled = true;
+      return this.exitEvidence;
+    }
+    await this.unit.terminate(graceMs);
+    if (!this.unit.empty()) return null;
+    this.unit.remove();
+    this.settled = true;
+    return this.exitEvidence;
+  }
+}
+
+export class ManagedChildRunSupervisor {
+  private readonly processes = new Map<string, ManagedChildRunProcess>();
+
+  private constructor(private readonly cgroupRoot: string) {}
+
+  static create(options: { cgroupRoot: string | undefined }) {
+    if (options.cgroupRoot === undefined)
+      throw new HookCommandIsolationUnavailableError();
+    return new ManagedChildRunSupervisor(options.cgroupRoot);
+  }
+
+  get size(): number {
+    return this.processes.size;
+  }
+
+  process(unitName: string): ManagedChildRunProcess | undefined {
+    return this.processes.get(unitName);
+  }
+
+  /** Starts a new process under a fresh unit named after the execution. */
+  start(spec: ChildRunSpawnSpec): ManagedChildRunProcess {
+    const unit = HookCommandCgroup.create(this.cgroupRoot, spec.unitName);
+    // The launcher joins the unit before the command exists, so no
+    // deployment-provided executable or environment is read outside it.
+    const launch = unit.launch(spec.executable, [...spec.args], spec.env);
+    const child = spawn(launch.executable, launch.args, {
+      cwd: spec.cwd,
+      env: launch.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout?.on('data', (chunk: Buffer) => spec.onOutput('stdout', chunk));
+    child.stderr?.on('data', (chunk: Buffer) => spec.onOutput('stderr', chunk));
+    const process_ = new ManagedChildRunProcess(spec.unitName, unit, child);
+    this.processes.set(spec.unitName, process_);
+    return process_;
+  }
+
+  /**
+   * Re-attaches a unit that a previous incarnation of this worker started:
+   * nothing spawns, and the caller verifies the membership evidence itself.
+   */
+  attach(unitName: string): HookCommandCgroup | undefined {
+    return HookCommandCgroup.attach(this.cgroupRoot, unitName);
+  }
+
+  forget(unitName: string): void {
+    this.processes.delete(unitName);
+  }
+}
