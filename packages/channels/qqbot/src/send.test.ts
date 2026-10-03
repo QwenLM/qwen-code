@@ -1008,18 +1008,32 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(readFileSync).mockReturnValue(
-      JSON.stringify({
-        'test-bot:__single__': {
-          sessionId: 'single-era-1',
-          target: { channelName: 'test-bot' },
-          cwd: '/work/standalone',
-        },
-      }),
+    const sharedSessionsPath = join(
+      '/tmp/test-qwen',
+      'channels',
+      'sessions.json',
     );
+    const readPaths: string[] = [];
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Path-aware: only the shared sessions file carries the cwd, so a lookup
+    // that fell back to any other path would produce no cwd at all (a blanket
+    // mockReturnValue made every path look alike and could not tell them
+    // apart).
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) => {
+      readPaths.push(String(path));
+      return String(path) === sharedSessionsPath
+        ? JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/standalone',
+            },
+          })
+        : '{}';
+    }) as never);
     callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
 
+    expect(readPaths).toContain(sharedSessionsPath);
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
       String(c[0]).includes('test-bot-sessions-purged.json'),
@@ -1218,14 +1232,26 @@ describe('purgeSingleScopeOrphans', () => {
           sessionId: 'single-era-1',
           target: { channelName: 'test-bot' },
         },
-        // Sibling channel's live user-scope route: owned-by-name guard must
-        // keep it — the key shape alone is not enough to call it an orphan
-        // (thread 60).
+        // Sibling channel's live user-scope route: the owned-by-name guard
+        // must keep it — the key shape alone is not enough to call it an
+        // orphan.
         {
           key: 'other-bot:user-9:chat-9',
           sessionId: 'sibling-3part',
           target: {
             channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+        // A sibling whose channel NAME has ours as a prefix: the ownership
+        // check compares channelName exactly, so a prefix match must not
+        // claim this route.
+        {
+          key: 'test-bot-2:user-9:chat-9',
+          sessionId: 'prefix-sibling-3part',
+          target: {
+            channelName: 'test-bot-2',
             senderId: 'user-9',
             chatId: 'chat-9',
           },
@@ -1258,6 +1284,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+    expect(removeSessionId).not.toHaveBeenCalledWith('prefix-sibling-3part');
     // Both purged entries also release their daemon-side sessions.
     expect(discardSession).toHaveBeenCalledTimes(2);
     expect(discardSession).toHaveBeenCalledWith('user-scope-1');
@@ -1325,7 +1352,10 @@ describe('purgeSingleScopeOrphans', () => {
         {
           key: 'test-bot:u1:c1',
           sessionId: 'live-user-session',
-          target: { channelName: 'test-bot' },
+          // Complete target: under 'user' scope this key is exactly what the
+          // router builds, so only the scope guard keeps it alive — an
+          // incomplete target would save it for the wrong reason.
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
         },
         // Under 'user' scope the single-era `channel:__single__` key is
         // still dead weight: the single-scope router re-keys the global
