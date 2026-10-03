@@ -1985,6 +1985,10 @@ describe('群管理事件', () => {
         { msgId: string; timestamp: number }
       >;
       const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
       const streamState = chp['streamState'] as Map<
         string,
         {
@@ -2007,9 +2011,17 @@ describe('群管理事件', () => {
         timestamp: Date.now(),
       });
       msgSeqMap.set('msg-X', 3);
-      // No routing entry and no session anchor names msg-X: the buffered
-      // streamState entry is the only holder, so this pins isMsgSeqStillInUse's
-      // streamState clause rather than the routing-map fallback.
+      // This routing entry is only the trigger: handleGroupDelRobot's context
+      // loop matches it by chatId, deletes it, then calls reclaimMsgSeq('msg-X').
+      // Because the loop drops the entry before reclaiming, by the time
+      // isMsgSeqStillInUse runs the buffered streamState entry below is the
+      // only holder left — so this pins the streamState clause and not the
+      // routing-map fallback.
+      replyContextByMessageId.set('msg-X', {
+        chatId: groupId,
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
       streamState.set('sid-1', {
         chatId: otherGroupId,
         buffer: 'pending tail',
@@ -2026,9 +2038,10 @@ describe('群管理事件', () => {
       };
       pvt['handleGroupDelRobot'](evt);
 
-      // The context loop's guard saw the buffered entry and kept the counter
-      // (if the entry's buffer no longer counted as a holder, the counter would
-      // have been reclaimed here).
+      // The context loop reclaimed msg-X, and the guard saw the buffered entry
+      // (whose chatId is another group, so this teardown leaves it in place) and
+      // kept the counter. Dropping `s.buffer ||` from the streamState clause
+      // makes reclaimMsgSeq('msg-X') succeed here and this assertion red.
       expect(msgSeqMap.get('msg-X')).toBe(3);
       expect(streamState.get('sid-1')!.buffer).toBe('pending tail');
     });
