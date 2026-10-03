@@ -272,6 +272,7 @@ export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
   executionSandboxBackend?: 'bwrap' | 'landlock';
+  executionSandboxNetwork?: 'open' | 'closed';
 }
 
 /**
@@ -595,13 +596,13 @@ ${(function () {
     if (surface?.executionSandboxBackend === 'landlock') {
       return `
 # Tool Execution Sandbox (Landlock, partial)
-Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
+Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Command network policy is ${surface.executionSandboxNetwork ?? 'open'}. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
 A refused pathname write can fail with 'Permission denied' (EACCES), which can also come from ordinary file permissions. Treat EACCES as a possible sandbox refusal: report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
 `;
     }
     return `
 # Tool Execution Sandbox (bwrap)
-Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and command network access follows the operator policy. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
+Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and ${surface?.executionSandboxNetwork ? `command network policy is ${surface.executionSandboxNetwork}` : 'command network access follows the operator policy'}. ${surface?.executionSandboxNetwork === 'closed' ? 'Closed networking prevents new ordinary IP connections, not access through existing caller-provided standard streams. ' : ''}A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
 When a write fails with EROFS, report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
 `;
   } else if (isSandboxExec) {
