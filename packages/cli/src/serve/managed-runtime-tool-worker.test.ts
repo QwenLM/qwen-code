@@ -182,6 +182,13 @@ describe('Managed Runtime tool worker', () => {
             });
           }
           expect(response.headers.get('cache-control')).toBe('no-store');
+          // A request without the token never learns the worker's
+          // incarnation.
+          if (fixture.expected.status === 401) {
+            expect(
+              response.headers.get('x-qwen-managed-runtime-incarnation'),
+            ).toBeNull();
+          }
         });
       }
     }
@@ -201,6 +208,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(executeResponse.status).toBe(200);
+    expect(
+      executeResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const settled = (await executeResponse.json()) as {
       state: string;
       result: { executionStatus: string; responseParts: unknown[] };
@@ -224,6 +234,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(statusResponse.status).toBe(200);
+    expect(
+      statusResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const view = (await statusResponse.json()) as {
       state: string;
       lastSequence: number;
@@ -813,6 +826,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(cancelResponse.status).toBe(200);
+    expect(
+      cancelResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     expect(await cancelResponse.json()).toMatchObject({
       state: 'cancel_requested',
     });

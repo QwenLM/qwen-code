@@ -51,8 +51,15 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   可运行（`await_runtime` 或 `results_ready`）且带 Workspace 工具 profile 的会话，Harness
   按原 `executionCallId` 逐个向 Broker 解决在途执行。continuation load 经 `execute` 重派发
   每个挂起执行 —— Broker 的持久记录保证恰好一次 —— 提交工具结果并在应答前把 checkpoint
-  推进到 `results_ready`。passive load（协调器的取消路径）只读执行状态并上报
-  `known`/`unknown`，不派发。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  推进到 `results_ready`。passive load（协调器的取消路径）先接管已 dead 的 owner
+  留下的 Runtime Session —— acquire 不派发任何东西 —— 然后读取执行状态并上报
+  `known`/`unknown`。load 持有该接管、自身从不释放：成功时由终结的 cancel
+  路由交还租约；失败时留作欠账——因为一次 release 会持久化为 RELEASED，而搁浅的
+  READY 身份仍然可用：重驱动的 cancel 会按当前 checkpoint 被重新接纳（daemon
+  不会对已 attach 的会话重新 load），owner 变更后的接管则幂等重 acquire。
+  在已接管、但会话尚未注册成功就被拒绝的 load 上，欠账的接管会被按身份记录并报告——
+  因为不存在可供退役的已注册会话；该记录在下一次成功加载同一会话时清除，其余情形仍只有
+  会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
   `managed_runtime_recovery_blocked`，什么都不重放。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入
@@ -72,7 +79,8 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 - **E2E 把 Workspace 准入当部署数据种子化**（registry 行、access 授权、Broker mount），并在
   两个 Spring owner 上都开启 `harness.workspace-files-enabled` 与可信 actor 头。物理副作用是
   固定的 `write_file`；恰好一次断言由持久执行记录、dispatch generation 与模型请求次数承载，
-  而不是文件字节。`--session-failover` 保持非绑定、不改动。
+  而不是文件字节。`--session-failover` 仍创建非绑定 Session，但这套准入接线不再按模式
+  门控：每个模式的 owner 都携带它(#13258)，其配置与其他模式一致。
 - **两个模式并入 `hosted-harness-mysql` 任务**，该任务安装 runner 私有 `mysqld` 所需的
   MySQL 二进制。
 
@@ -82,7 +90,7 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 | ------------ | --------------------------------------------------------------------- | ------------------------- |
 | core journal | `message.delta` 事件类型（schema、harness actor、activation subject） | Managed Session 日志      |
 | CLI Harness  | load 恢复快照与结算；continue/cancel 路由；delta 流式提交             | Hosted Harness 会话       |
-| CLI Broker   | 供 passive 上报的 `status` 读取                                       | Workspace Broker          |
+| CLI Broker   | 供 passive 上报的 acquire + `status` 读取 + release                   | Workspace Broker          |
 | Java API     | `TrustedActorHeaderFilter` 与属性，默认关闭                           | 部署 opt-in               |
 | E2E runner   | 解禁；Workspace 种子、mount 与 actor 接线；`write_file` 副作用        | 本地与 CI 验证            |
 | CI workflow  | MySQL 二进制 + 两个 failover 模式进 `hosted-harness-mysql`            | Hosted MySQL 任务         |

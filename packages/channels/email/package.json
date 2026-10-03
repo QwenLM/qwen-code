@@ -21,7 +21,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.24.6",
+    "@qwen-code/channel-base": "0.24.7",
     "imapflow": "^1.7.8",
     "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",

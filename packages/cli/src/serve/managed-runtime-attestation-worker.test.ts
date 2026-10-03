@@ -456,4 +456,78 @@ describe('Managed Runtime attestation worker', () => {
     },
     30_000,
   );
+
+  it('leaves the environment of a worker started without a channel to its launcher', async () => {
+    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx/esm', cliEntry, 'managed-runtime-worker'],
+      {
+        cwd: packageRoot,
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          NODE_OPTIONS: '--max-old-space-size=2048',
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    onTestFinished(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.stdin?.end(JSON.stringify(boot));
+    await waitForReady(child);
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    child.kill('SIGTERM');
+    await exited;
+    expect(stderr).not.toContain('scrubbed inherited loader env vars');
+  }, 30_000);
+
+  it('stops when the parent that started it with a channel goes away', async () => {
+    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx/esm', cliEntry, 'managed-runtime-worker'],
+      {
+        cwd: packageRoot,
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          NODE_OPTIONS: '--max-old-space-size=2048',
+        },
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      },
+    );
+    onTestFinished(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.stdin?.end(JSON.stringify(boot));
+    const ready = await waitForReady(child);
+    expect(await attestationRequest(ready.url)).toHaveProperty('status', 200);
+
+    const exited = new Promise<[number | null, string | null]>((resolve) =>
+      child.once('exit', (code, signal) => resolve([code, signal])),
+    );
+    // What the channel's peer sees when the parent ends, however it ends.
+    child.disconnect();
+    expect(await exited).toEqual([0, null]);
+    // The loader vars only booted it; the commands it runs do not see them.
+    expect(stderr).toMatch(
+      /scrubbed inherited loader env vars from the Managed Runtime worker process;.*NODE_OPTIONS/u,
+    );
+  }, 30_000);
 });

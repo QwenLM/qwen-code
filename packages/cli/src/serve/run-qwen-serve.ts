@@ -8245,10 +8245,22 @@ async function runQwenServeImpl(
           import('./channel-management-service.js'),
           import('./channel-settings-store.js'),
         ]);
+        const manager = await ensureChannelWorkerManager();
+        const workerRuntime = await ensureChannelRuntime();
+        const settingsRuntime = await loadSettingsRuntimeModules();
         return createChannelManagementService({
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
-          manager: await ensureChannelWorkerManager(),
+          manager,
+          loadChannelsConfig: (cwd) =>
+            workerRuntime.loadChannelsConfig(
+              cwd,
+              settingsRuntime.settings.loadSettings(cwd, {
+                skipLoadEnvironment: true,
+                skipWorkspaceSettings: !targetRuntime.trusted,
+                workspaceTrusted: targetRuntime.trusted,
+              }),
+            ),
           restoreFailures: channelRestoreFailures,
         });
       })();
