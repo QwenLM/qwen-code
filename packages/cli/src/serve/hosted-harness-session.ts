@@ -29,6 +29,7 @@ import {
 import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
@@ -76,9 +77,11 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  isDurableBlockedVerdict,
   recoverHostedRuntimeTurn,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
+  type HostedRecoveryDeclineReason,
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import {
@@ -155,6 +158,24 @@ interface HostedSession {
    * re-acquired idempotently. The continuation route keeps its #13083
    * handback discipline (a recorded follow-up). */
   runtimeLeaseHeld?: string;
+  /** The snapshot a takeover load answered, kept until its prompt's
+   * continue/cancel is admitted, so a repeated takeover load that lost the
+   * original reply can fetch it again instead of meeting a bare
+   * `hosted_session_already_attached`. The snapshot is valid only for a
+   * retry of the same request shape: a passive load parks what a drive
+   * load would settle, so a drive request must not be replayed a passive
+   * report (its phase would never be continuation-ready). */
+  recoverySnapshot?: {
+    promptId: string;
+    passive: boolean;
+    report: HostedRuntimeRecoveryReport;
+    /** The store the snapshot is anchored to: replaying it hands over the
+     * attached session's client id, so the replaying request must re-prove
+     * the same store identity, not merely carry any takeover flag. */
+    tenantId: string;
+    workspaceId: string;
+    storeBaseUrl: string;
+  };
 }
 
 async function runHostedLifecycleHook(
@@ -203,6 +224,19 @@ function error(res: Response, status: number, code: string): void {
   res.status(status).json({ error: code, code });
 }
 
+/** A takeover refusal that cannot change under retry: distinct from
+ * `hosted_turn_recovery_required`, which stays retriable. */
+function recoveryDeclined(
+  res: Response,
+  reason: HostedRecoveryDeclineReason,
+): void {
+  res.status(409).json({
+    error: 'hosted_turn_recovery_declined',
+    code: 'hosted_turn_recovery_declined',
+    reason,
+  });
+}
+
 function identity(
   req: Request,
   sessions: Map<string, HostedSession>,
@@ -239,14 +273,28 @@ function record(
 }
 
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
+  return acceptedInputSequence(session, promptId) !== undefined;
+}
+
+/** The journal sequence of the input's own admission event: the watermark
+ * from which every event of that input's Turn follows. */
+function acceptedInputSequence(
+  session: HostedSession,
+  promptId: string,
+): number | undefined {
   const authority = session.managed.authority;
-  return authority
-    .eventsInSequenceRange(1, authority.committedSequence)
-    .some(
-      (event) =>
-        event.kind === 'input.accepted' &&
-        event.payload['inputId'] === promptId,
-    );
+  let sequence: number | undefined;
+  for (const event of authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  )) {
+    if (
+      event.kind === 'input.accepted' &&
+      event.payload['inputId'] === promptId
+    )
+      sequence = event.sequence;
+  }
+  return sequence;
 }
 
 function unsettledInputsThrough(
@@ -1348,7 +1396,48 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
-    if (sessions.has(sessionId) || opening.has(sessionId)) {
+    // Cold loads stay inert: only an explicit takeover request may touch
+    // the Broker or settle anything.
+    const takeoverFlags =
+      body?.['passiveManagedRuntimeRecovery'] === true ||
+      body?.['driveRuntimeRecovery'] === true;
+    const attached = sessions.get(sessionId);
+    if (attached) {
+      // An idempotent takeover reload: the original reply was presumably
+      // lost after attach, so hand the same snapshot back while the parked
+      // prompt is still unsettled. Compare against the PARSED store: the
+      // snapshot carries the parsed baseUrl, so a raw-body read would
+      // refuse a syntactically different spelling of the same store.
+      const snapshot = attached.recoverySnapshot;
+      if (
+        takeoverFlags &&
+        snapshot &&
+        snapshot.passive ===
+          (body?.['passiveManagedRuntimeRecovery'] === true) &&
+        store.tenantId === snapshot.tenantId &&
+        store.workspaceId === snapshot.workspaceId &&
+        store.baseUrl === snapshot.storeBaseUrl
+      ) {
+        if (unsettledPromptId(attached) === snapshot.promptId) {
+          res.status(200).json({
+            sessionId,
+            clientId: attached.clientId,
+            workspaceCwd: attached.cwd,
+            lastEventId: attached.managed.authority.committedSequence,
+            eventEpoch: epoch,
+            ...(attached.approval
+              ? { approvalMode: attached.approval.mode }
+              : {}),
+            _meta: { 'qwen.daemon.managedRuntimeRecovery': snapshot.report },
+          });
+          return;
+        }
+        attached.recoverySnapshot = undefined;
+      }
+      error(res, 409, 'hosted_session_already_attached');
+      return;
+    }
+    if (opening.has(sessionId)) {
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
@@ -1524,14 +1613,13 @@ export function registerHostedHarnessSessionRoutes(
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
+      // A bare load of a parked Session keeps refusing with 409 so it never
+      // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
-      const takeover =
-        !session.hooks &&
-        (body?.['passiveManagedRuntimeRecovery'] === true ||
-          body?.['driveRuntimeRecovery'] === true);
+      const takeover = !session.hooks && takeoverFlags;
       const fileHistory = await readHostedFileHistory(managed);
       if (
         fileHistory?.pendingUndo ||
@@ -1551,7 +1639,22 @@ export function registerHostedHarnessSessionRoutes(
       }
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
+        // Read the verdict BEFORE close(): sealing the journal makes every
+        // later store read fail as "writer is not active", which the
+        // authority erases into missing_state — reading after close would
+        // leave only the retriable refusal and hide the durable reasons.
+        // The bundle carries the ok/blocked verdict but not its reason, and
+        // the reason is what decides the refusal: a durable parse/identity
+        // failure can never change on retry, so it declines with its typed
+        // reason, while transport shape keeps the retriable 409.
+        const verdict = await managed.authority
+          .harnessRunAuthorization()
+          .catch(() => undefined);
         await managed.close();
+        if (verdict?.status === 'blocked' && isDurableBlockedVerdict(verdict)) {
+          recoveryDeclined(res, 'checkpoint_blocked');
+          return;
+        }
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
@@ -1581,14 +1684,17 @@ export function registerHostedHarnessSessionRoutes(
       ) {
         // A parked Runtime turn is taken over, not refused: settle its
         // executions under their original ids (or report them for a
-        // cancellation) and answer with the recovery snapshot.
+        // cancellation) and answer with the recovery snapshot. A Turn with
+        // no Runtime work (a model round, or every Turn of a no-tool
+        // Session) cannot be driven here: refuse it with a typed terminal
+        // decline rather than a refusal the coordinator retries forever.
         if (toolProfile === undefined || !brokerOptions) {
           await managed.close();
-          error(res, 409, 'hosted_turn_recovery_required');
+          recoveryDeclined(res, 'model_start');
           return;
         }
         try {
-          const recovered = await recoverHostedRuntimeTurn({
+          const outcome = await recoverHostedRuntimeTurn({
             session: managed,
             sessionId,
             cwd,
@@ -1596,16 +1702,28 @@ export function registerHostedHarnessSessionRoutes(
             brokerOptions,
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
-          if (recovered === undefined) {
+          if (outcome.kind === 'declined') {
             await managed.close();
-            error(res, 409, 'hosted_turn_recovery_required');
+            recoveryDeclined(res, outcome.reason);
             return;
+          } else if (outcome.kind === 'recovered') {
+            recovery = outcome.turn.report;
+            session.recoverySnapshot = {
+              passive: body?.['passiveManagedRuntimeRecovery'] === true,
+              promptId: outcome.turn.promptId,
+              report: outcome.turn.report,
+              tenantId: store.tenantId,
+              workspaceId: store.workspaceId,
+              storeBaseUrl: store.baseUrl,
+            };
+            if (outcome.turn.acquiredRuntime)
+              session.runtimeLeaseHeld =
+                outcome.turn.report.executions[0]?.runtimeSessionId ??
+                outcome.turn.promptId;
           }
-          recovery = recovered.report;
-          if (recovered.acquiredRuntime)
-            session.runtimeLeaseHeld =
-              recovered.report.executions[0]?.runtimeSessionId ??
-              recovered.promptId;
+          // inapplicable: nothing a takeover owes this payload — the load
+          // continues as the plain attach it was before G3, so a requested
+          // approval or a cancellation-only load meets its own path.
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
@@ -1851,6 +1969,14 @@ export function registerHostedHarnessSessionRoutes(
       await stores.close().catch(() => undefined);
       if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
+      } else if (
+        cause instanceof ManagedSessionStoreHttpError &&
+        cause.remoteCode === 'managed_session_writer_conflict'
+      ) {
+        // A fenced-but-alive predecessor's writer lease is the one 409 whose
+        // wait self-heals when the lease lapses; it must not collapse into
+        // the generic open failure, or the wait dies at the budget instead.
+        error(res, 409, cause.remoteCode);
       } else if (cause instanceof ManagedSessionAlreadyExistsError) {
         error(res, 409, 'managed_session_already_exists');
       } else if (cause instanceof ManagedSessionNotFoundError) {
@@ -1944,7 +2070,21 @@ export function registerHostedHarnessSessionRoutes(
       session.hooks?.hasPendingOperations
     )
       return error(res, 409, 'hosted_turn_recovery_required');
-    if (hasAcceptedInput(session, promptId)) {
+    const acceptedSequence = acceptedInputSequence(session, promptId);
+    if (acceptedSequence !== undefined) {
+      if (!unsettledInputs(session).has(promptId)) {
+        // The journal already accepted and settled this prompt — replay is
+        // the point of the journal's commandId idempotency, so answer the
+        // original admission with the watermark its own Turn flows from
+        // (the sequence of input.accepted itself), rather than a
+        // hint that loops the destination unboundedly.
+        res.status(202).json({
+          promptId,
+          lastEventId: acceptedSequence,
+          eventEpoch: epoch,
+        });
+        return;
+      }
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
     const abort = new AbortController();
@@ -2586,6 +2726,8 @@ export function registerHostedHarnessSessionRoutes(
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
     });
+    if (session.recoverySnapshot?.promptId === promptId)
+      session.recoverySnapshot = undefined;
     res.status(200).json({
       accepted: true,
       promptId,
@@ -2844,6 +2986,15 @@ export function registerHostedHarnessSessionRoutes(
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
     });
+    // Consumption rolls back symmetric with the admission: an unconfirmed
+    // cancellation is re-driven, and the re-drive needs the load-time
+    // snapshot again — not a hosted_session_already_attached while the
+    // Turn is still unsettled (D6).
+    const consumedSnapshot =
+      session.recoverySnapshot?.promptId === promptId
+        ? session.recoverySnapshot
+        : undefined;
+    if (consumedSnapshot) session.recoverySnapshot = undefined;
     session.active = { promptId, digest: '', abort: new AbortController() };
     void (async () => {
       try {
@@ -2926,8 +3077,11 @@ export function registerHostedHarnessSessionRoutes(
           `qwen serve: Hosted Harness turn ${promptId} could not settle the cancellation: ${String(cause)}`,
         );
         // The cancellation never confirmed: drop the admission so the
-        // coordinator's retry re-drives instead of replaying the watermark.
+        // coordinator's retry re-drives instead of replaying the watermark
+        // — and hand its consumed snapshot back with it, so the retrying
+        // takeover load replays instead of being refused already-attached.
         session.admissions.delete(promptId);
+        if (consumedSnapshot) session.recoverySnapshot = consumedSnapshot;
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {
         // No handback here: the coordinator retries a failed cancel, and a

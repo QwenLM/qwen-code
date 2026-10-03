@@ -127,6 +127,11 @@ public class SessionLifecycleCoordinator {
                         tenantId, sessionId, operationId);
             }
         } catch (RuntimeException error) {
+            // A capability digest mismatch lands here too: nothing may be
+            // completed honestly (completing unconfirmed would flip the
+            // session while skipping the drain and record a clean row),
+            // so the reason-loud retry below is deliberately the end of
+            // the line until an operator realigns the versions.
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             Throwable cause = error;

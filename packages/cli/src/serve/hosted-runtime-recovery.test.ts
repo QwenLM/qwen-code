@@ -19,6 +19,8 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import {
   stopParkedRuntimeExecutions,
   recoverHostedRuntimeTurn,
+  type HostedRecoveryTurn,
+  type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 
@@ -26,6 +28,16 @@ const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 const EXECUTION_ID = 'exec-1';
 const DIGEST = 'a'.repeat(64);
+
+function mustRecover(
+  outcome: HostedRuntimeRecoveryOutcome,
+): HostedRecoveryTurn {
+  if (outcome.kind !== 'recovered')
+    throw new Error(
+      `expected a recovery, got ${outcome.kind} (${outcome.kind === 'declined' ? outcome.reason : ''})`,
+    );
+  return outcome.turn;
+}
 
 describe('recoverHostedRuntimeTurn', () => {
   let root: string;
@@ -263,14 +275,16 @@ describe('recoverHostedRuntimeTurn', () => {
       } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0]?.[0]).toBe(EXECUTION_ID);
@@ -321,14 +335,16 @@ describe('recoverHostedRuntimeTurn', () => {
       } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       // Each execution re-dispatches under its own id with its own arguments.
       expect(execute.mock.calls.map((call) => call[0])).toEqual([
@@ -364,14 +380,16 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       // Nothing to re-dispatch, but the dead owner's Runtime Session still
       // pins the Workspace — the takeover must hold it so the terminal route
       // can hand it back.
@@ -398,14 +416,16 @@ describe('recoverHostedRuntimeTurn', () => {
     });
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       expect(recovered).toBeDefined();
       expect(execute).not.toHaveBeenCalled();
@@ -454,14 +474,16 @@ describe('recoverHostedRuntimeTurn', () => {
       );
       const replacement = await open('boot-2', false);
       try {
-        const recovered = await recoverHostedRuntimeTurn({
-          session: replacement,
-          sessionId: SESSION_ID,
-          cwd: root,
-          promptId: PROMPT_ID,
-          brokerOptions,
-          passive: true,
-        });
+        const recovered = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: true,
+          }),
+        );
         expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
         expect(release).not.toHaveBeenCalled();
         expect(recovered!.report.executions).toEqual([
@@ -484,10 +506,10 @@ describe('recoverHostedRuntimeTurn', () => {
     },
   );
 
-  it('refuses a turn whose checkpoint is not a Runtime wait', async () => {
+  it('declines a turn without a Runtime checkpoint as model_start', async () => {
     const session = await open('boot-1', true);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session,
         sessionId: SESSION_ID,
         cwd: root,
@@ -495,9 +517,304 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
     } finally {
       await session.close();
+    }
+  });
+
+  it('declines a turn_settled checkpoint with its own typed reason', async () => {
+    // Settled in the journal with the terminal record still unprojected:
+    // rebind-and-keep-reading is Step 3's row, so this slice declines the
+    // verdict with a typed reason instead of fabricating a settlement
+    // tail on phase alone.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'runnable',
+      checkpoint: {
+        identity: {
+          turnId: PROMPT_ID,
+          promptId: PROMPT_ID,
+          checkpointId: 'checkpoint-turn-settled',
+        },
+        attempt: {},
+        continuation: { phase: 'turn_settled' },
+        approval: null,
+        output: {},
+        followUp: {},
+        runtime: {},
+        tools: { items: [] },
+      },
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'turn_settled',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('rejects a transiently blocked checkpoint instead of declining it', async () => {
+    // A store blip while reading the timed checkpoint erases into the
+    // same `blocked` status as a durable parse verdict; only the durable
+    // verdicts may go terminal.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    const authorization = vi
+      .spyOn(replacement.authority, 'harnessRunAuthorization')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'missing_state',
+        message: 'the HTTP Managed Session writer is not active.',
+      } as never);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      ).rejects.toThrow();
+      expect(authorization).toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'a checkpoint-less journal stays terminal',
+      authorization: { status: 'blocked', reason: 'missing_checkpoint' },
+    },
+    {
+      name: 'a durably absent checkpoint state stays terminal',
+      authorization: { status: 'blocked', reason: 'missing_state' },
+    },
+  ])('declines $name', async ({ authorization: blockedVerdict }) => {
+    // missing_checkpoint is only produced by a permanent journal shape,
+    // and a bare missing_state (no store-error message) is a durable
+    // absence — neither can change on retry, so both decline; only an
+    // erased store failure (missing_state WITH the authority's message)
+    // may stay retriable.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue(blockedVerdict as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([true, false])(
+    'answers inapplicable for an approval wait the user owns (passive=%s)',
+    async (passive) => {
+      // The decision belongs to the user, never to a takeover: declining
+      // would write the Turn failed while the answer is still deliverable
+      // (G3), so BOTH loads answer inapplicable and let the plain attach
+      // carry the approval flow (bounded by the approval timeout).
+      await parkAtAwaitRuntime();
+      const replacement = await open('boot-2', false);
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue({
+        status: 'runnable',
+        checkpoint: {
+          identity: {
+            turnId: PROMPT_ID,
+            promptId: PROMPT_ID,
+            checkpointId: 'checkpoint-await-action',
+          },
+          attempt: {},
+          continuation: { phase: 'await_action' },
+          approval: { state: 'requested', requestId: 'request-1' },
+          output: {},
+          followUp: {},
+          runtime: {},
+          tools: { items: [] },
+        },
+      } as never);
+      try {
+        const outcome = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        expect(outcome.kind).toBe('inapplicable');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('answers inapplicable for a model-round wait on a cancellation load', async () => {
+    // A cancellation-only load needs no Runtime bookkeeping for a Turn
+    // parked in its first model round: declining would fail a Turn the
+    // user asked to CANCEL. The plain attach proceeds to the cancel path.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({ status: 'initial' } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(outcome.kind).toBe('inapplicable');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    { passive: false, expected: 'throw' },
+    { passive: true, expected: 'inapplicable' },
+  ])(
+    'stays retriable for an unproven blocked reason at the final re-read (passive=$passive)',
+    async ({ passive, expected }) => {
+      // A reason this file does not know is not proven durable: the drive
+      // side may only keep its retriable refusal, mirroring the pre-settle
+      // read — a cause erased into 'unresolved_after_settle' would
+      // terminalize what could be a transient store glitch.
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      if (!passive)
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'written' }],
+        } as never);
+      const replacement = await open('boot-2', false);
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let calls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        calls += 1;
+        if (calls === 2)
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'a_future_blocked_reason',
+          } as never);
+        return original();
+      });
+      try {
+        const outcome = recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        if (expected === 'throw')
+          // A throw, never a terminal decline: the exact producer's text
+          // may vary (the handle re-checks too), the retriable semantics
+          // may not.
+          await expect(outcome).rejects.toThrow('a_future_blocked_reason');
+        else expect((await outcome).kind).toBe('inapplicable');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('answers inapplicable for a durable verdict on a cancellation load', async () => {
+    // The cancellation route settles through its own fences even for a
+    // checkpoint inapplicable parses cannot prove; the takeover load may
+    // only refuse retriably (baseline parity), never terminally.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'opaque_state',
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(outcome.kind).toBe('inapplicable');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('declines a durable blocked checkpoint verdict deterministically', async () => {
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'opaque_state',
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
+    } finally {
+      await replacement.close();
     }
   });
 
@@ -510,7 +827,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -518,7 +835,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'unresolved_after_settle',
+      });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     } finally {
@@ -537,7 +857,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -545,7 +865,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'batch_not_durable',
+      });
       expect(execute).not.toHaveBeenCalled();
       // Missing ownership evidence is refused before acquiring a Runtime.
       expect(release).not.toHaveBeenCalled();
@@ -621,7 +944,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -629,7 +952,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'shell_in_flight',
+      });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     } finally {
@@ -646,14 +972,16 @@ describe('recoverHostedRuntimeTurn', () => {
     } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       expect(recovered!.report.phase).toBe('results_ready');
       const projected = await replacement.sink.project();
@@ -714,14 +1042,16 @@ describe('recoverHostedRuntimeTurn', () => {
     } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       // The retry skipped only the duplicate write: the resolve still ran, so
       // the checkpoint reached results_ready and the report says so.
@@ -776,14 +1106,16 @@ describe('recoverHostedRuntimeTurn', () => {
         });
       const replacement = await open('boot-2', false);
       try {
-        const recovered = await recoverHostedRuntimeTurn({
-          session: replacement,
-          sessionId: SESSION_ID,
-          cwd: root,
-          promptId: PROMPT_ID,
-          brokerOptions,
-          passive,
-        });
+        const recovered = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive,
+          }),
+        );
         expect(recovered?.report.executions[0]?.runtimeSessionId).toBe(
           'hooks-old-owner',
         );
@@ -809,14 +1141,16 @@ describe('recoverHostedRuntimeTurn', () => {
     });
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       // The adoption is held for the cancel route: loading never releases it.
       expect(release).not.toHaveBeenCalled();
@@ -852,18 +1186,20 @@ describe('recoverHostedRuntimeTurn', () => {
       .mockResolvedValue();
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(acquire).toHaveBeenCalledOnce();
       expect(recovered).toBeDefined();
-      expect(recovered!.acquiredRuntime).toBe(true);
-      expect(recovered!.report.phase).toBe('results_ready');
+      expect(recovered.acquiredRuntime).toBe(true);
+      expect(recovered.report.phase).toBe('results_ready');
       expect(release).not.toHaveBeenCalled();
     } finally {
       await replacement.close();
@@ -904,18 +1240,20 @@ describe('recoverHostedRuntimeTurn', () => {
     // server-side — and produces the report.
     const second = await open('boot-3', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: second,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: second,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(acquire).toHaveBeenCalledTimes(2);
       expect(recovered).toBeDefined();
-      expect(recovered!.acquiredRuntime).toBe(true);
-      expect(recovered!.report.executions).toEqual([
+      expect(recovered.acquiredRuntime).toBe(true);
+      expect(recovered.report.executions).toEqual([
         expect.objectContaining({
           executionCallId: EXECUTION_ID,
           outcome: 'known',
@@ -1001,17 +1339,19 @@ describe('recoverHostedRuntimeTurn', () => {
     // server-side — and produces the report.
     const second = await open('boot-3', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: second,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: second,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(acquire).toHaveBeenCalledTimes(2);
       expect(recovered).toBeDefined();
-      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(recovered.acquiredRuntime).toBe(true);
       expect(release).not.toHaveBeenCalled();
     } finally {
       await second.close();
@@ -1037,23 +1377,26 @@ describe('recoverHostedRuntimeTurn', () => {
       vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
         authorizationCalls += 1;
         if (authorizationCalls === 2)
-          // A transiently blocked authorization is not a reason to release:
+          // A transiently blocked authorization (the erased store read,
+          // carrying the authority's message) is not a reason to release:
           // the coordinator retries the load, and a release would wedge it.
           return Promise.resolve({
             status: 'blocked',
             reason: 'missing_state',
+            message: 'the HTTP Managed Session writer is not active.',
           } as never);
         return original();
       });
-      const recovered = await recoverHostedRuntimeTurn({
-        session: first,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
-      expect(recovered).toBeUndefined();
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: first,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('the HTTP Managed Session writer is not active.');
       expect(acquire).toHaveBeenCalledOnce();
       expect(release).not.toHaveBeenCalled();
     } finally {
@@ -1061,17 +1404,19 @@ describe('recoverHostedRuntimeTurn', () => {
     }
     const second = await open('boot-3', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: second,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: second,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(acquire).toHaveBeenCalledTimes(2);
       expect(recovered).toBeDefined();
-      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(recovered.acquiredRuntime).toBe(true);
       expect(release).not.toHaveBeenCalled();
     } finally {
       await second.close();
@@ -1139,7 +1484,9 @@ describe('recoverHostedRuntimeTurn', () => {
           } as never);
         return original();
       });
-      const recovered = await recoverHostedRuntimeTurn({
+      // A bare missing_state is the durable absence: the lease is handed
+      // back BEFORE the classification, so the decline is the answer.
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -1147,7 +1494,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
       expect(acquire).toHaveBeenCalledOnce();
       expect(release).toHaveBeenCalledOnce();
     } finally {

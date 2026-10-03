@@ -206,6 +206,9 @@ public interface AgentStateStore {
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 

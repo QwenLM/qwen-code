@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.ManagedSessionStoreConnection;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
@@ -19,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import java.net.URI;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -67,6 +69,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     + " token and capability digest");
         }
         URI.create(this.properties.getBaseUrl());
+        // The load timeout is operator-settable, so a bad value must fail
+        // here: the client builder rejects it, and failing lazily inside
+        // client() would surface as an endless transient retry that logs
+        // only the exception class.
+        Duration loadTimeout = this.properties.getLoadTimeout();
+        if (loadTimeout == null || loadTimeout.isZero()
+                || loadTimeout.isNegative()) {
+            throw new IllegalStateException("Enabled Hosted Harness requires"
+                    + " a positive load-timeout");
+        }
         if (sessionStore.isEnabled()
                 && (sessionStore.getBaseUrl() == null
                         || sessionStore.getBaseUrl().isBlank()
@@ -104,6 +116,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public Attachment createOrLoad(String tenantId, String sessionId,
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
+        try {
+            return doCreateOrLoad(tenantId, sessionId, loadExisting,
+                    passiveManagedRuntimeRecovery);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Attachment doCreateOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
@@ -143,6 +166,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
+        try {
+            return doSubmit(tenantId, sessionId, promptId, input,
+                    payloadDigest);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Admission doSubmit(String tenantId, String sessionId,
+            String promptId,
+            List<Map<String, Object>> input, String payloadDigest) {
         requireReadyForNewWork(tenantId, sessionId);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
@@ -158,10 +193,26 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission continueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
+        try {
+            return doContinueManagedRuntime(tenantId, sessionId, promptId,
+                    checkpointId, activationId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Admission doContinueManagedRuntime(String tenantId,
+            String sessionId, String promptId, String checkpointId,
+            String activationId) {
         requireReadyForNewWork(tenantId, sessionId);
+        // Resolve the attachment BEFORE fetching the client: the resolution
+        // may block on a create/load round trip, and an adoption closing the
+        // captured client during that window would strand this call on a
+        // dead instance instead of the rebuilt one.
+        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         PromptReceipt receipt = client().continueManagedRuntime(
-                attachment(tenantId, sessionId, true), promptId, checkpointId,
-                activationId);
+                ref, promptId, checkpointId, activationId);
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
@@ -170,8 +221,21 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public Admission cancelManagedRuntime(String tenantId, String sessionId,
             String promptId, String checkpointId, String activationId) {
+        try {
+            return doCancelManagedRuntime(tenantId, sessionId, promptId,
+                    checkpointId, activationId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Admission doCancelManagedRuntime(String tenantId,
+            String sessionId, String promptId, String checkpointId,
+            String activationId) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         PromptReceipt receipt = client().cancelManagedRuntime(
-                new CancelManagedRuntime(attachment(tenantId, sessionId, false),
+                new CancelManagedRuntime(ref,
                         promptId, checkpointId, activationId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         return new Admission(receipt.getLastEventId(),
@@ -182,9 +246,20 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public SourceStream stream(String tenantId, String sessionId,
             long lastEventId,
             String eventEpoch) {
+        try {
+            return doStream(tenantId, sessionId, lastEventId, eventEpoch);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private SourceStream doStream(String tenantId, String sessionId,
+            long lastEventId, String eventEpoch) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         HarnessEventStream stream = client().streamEvents(
                 StreamHarnessEvents.builder()
-                        .session(attachment(tenantId, sessionId, false))
+                        .session(ref)
                         .lastEventId(lastEventId)
                         .eventEpoch(eventEpoch)
                         .build());
@@ -215,9 +290,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
+        try {
+            doResolveAction(tenantId, sessionId, actionId, response);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private void doResolveAction(
+            String tenantId,
+            String sessionId,
+            String actionId,
+            JsonNode response) {
         requireReadyForNewWork(tenantId, sessionId);
+        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         client().resolveAction(
-                        attachment(tenantId, sessionId, true),
+                        ref,
                         actionId,
                         response.path("optionId").asText(),
                         response.path("inputRevision").asLong(),
@@ -226,16 +315,45 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void cancel(String tenantId, String sessionId) {
-        client().cancelTurn(attachment(tenantId, sessionId, false));
+        try {
+            doCancel(tenantId, sessionId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private void doCancel(String tenantId, String sessionId) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        client().cancelTurn(ref);
     }
 
     @Override
     public void rename(String tenantId, String sessionId, String title) {
-        client().updateSessionTitle(attachment(tenantId, sessionId, false), title);
+        try {
+            doRename(tenantId, sessionId, title);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private void doRename(String tenantId, String sessionId, String title) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        client().updateSessionTitle(ref, title);
     }
 
     @Override
     public String closeSession(String tenantId, String sessionId) {
+        try {
+            return doCloseSession(tenantId, sessionId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private String doCloseSession(String tenantId, String sessionId) {
         attachments.remove(new AttachmentKey(tenantId, sessionId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         HostedHarnessClient current = client();
@@ -325,6 +443,27 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public Attachment recoverManagedRuntime(String tenantId, String sessionId,
             boolean cancellation) {
+        try {
+            return doRecoverManagedRuntime(tenantId, sessionId,
+                    cancellation);
+        } catch (DaemonHttpException error) {
+            // The one place a daemon error code is read: a takeover refusal
+            // that can never change under retry is terminal, not retriable.
+            if (error.getStatusCode() == 409
+                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
+                            error.getErrorCode())) {
+                throw new HostedHarnessRecoveryDeclinedException(
+                        error.getBodyField("reason"));
+            }
+            throw error;
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Attachment doRecoverManagedRuntime(String tenantId,
+            String sessionId, boolean cancellation) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -400,17 +539,78 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         synchronized (this) {
             current = client;
             if (current == null) {
-                current = HostedHarnessClient.builder()
-                        .baseUri(URI.create(properties.getBaseUrl()))
-                        .bearerToken(properties.getToken())
-                        .capabilityDigest(properties.getCapabilityDigest())
-                        .connectTimeout(properties.getConnectTimeout())
-                        .requestTimeout(properties.getRequestTimeout())
-                        .heartbeatInterval(properties.getHeartbeatInterval())
-                        .build();
+                current = createClient();
                 client = current;
             }
             return current;
+        }
+    }
+
+    // Package-private so the adoption race test substitutes the
+    // replacement instead of standing up a live /capabilities call.
+    HostedHarnessClient createClient() {
+        return HostedHarnessClient.builder()
+                .baseUri(URI.create(properties.getBaseUrl()))
+                .bearerToken(properties.getToken())
+                .capabilityDigest(properties.getCapabilityDigest())
+                .connectTimeout(properties.getConnectTimeout())
+                .requestTimeout(properties.getRequestTimeout())
+                .loadTimeout(properties.getLoadTimeout())
+                .heartbeatInterval(properties.getHeartbeatInterval())
+                .build();
+    }
+
+    /**
+     * G3: instead of pinning every bound Session to one dead Harness
+     * process, a live control plane adopts the next generation. The next
+     * {@link #client()} call renegotiates, so a capability change fails
+     * closed at the boundary instead of masking it. The connector monitor
+     * only guards the client handoff and never wraps the map churn (a
+     * {@code ConcurrentHashMap.computeIfAbsent} bin lock is held across an
+     * in-flight load, so clearing maps under the monitor would invert the
+     * lock order and could deadlock). The handoff does build the
+     * replacement under the monitor, so a renegotiation blocks other
+     * Sessions' attaches for at most its connect + request timeouts —
+     * bounded, unlike the in-flight load it replaced.
+     * <p>
+     * Cached Attachments re-mint on demand, and both branches evict by
+     * boot identity rather than by clearing: only entries
+     * minted under the boot now serving stay, so a stale ref cannot
+     * retry-loop on itself, entries a concurrent rebuild already minted
+     * survive, and Sessions the live client still heartbeats keep working.
+     * Recovery markers follow their attachment, because a marker outliving
+     * an evicted attachment is what makes the recovery path hand out a
+     * null report.
+     */
+    private void adoptGeneration(HostedHarnessGenerationException error) {
+        HostedHarnessClient stale = null;
+        boolean dropped = false;
+        synchronized (this) {
+            HostedHarnessClient current = client;
+            if (current == null) {
+                return;
+            }
+            if (!error.getActualBootId().equals(
+                    current.capabilities().getBootId())) {
+                client = null;
+                stale = current;
+                dropped = true;
+            }
+        }
+        // No map work under the monitor: a computeIfAbsent bin lock is
+        // held across an in-flight load elsewhere, so touching either map
+        // while holding `this` inverts the lock order. Evicting by boot
+        // identity instead of clearing also keeps whatever a concurrent
+        // rebuild already minted under the generation now serving, and
+        // dropping the markers of evicted entries keeps the two maps in
+        // agreement (a marker outliving its attachment is what made the
+        // recovery path hand out a null report).
+        String liveBootId = error.getActualBootId();
+        attachments.entrySet().removeIf(entry ->
+                !liveBootId.equals(entry.getValue().getHarnessBootId()));
+        pendingRecovery.retainAll(attachments.keySet());
+        if (dropped) {
+            stale.close();
         }
     }
 

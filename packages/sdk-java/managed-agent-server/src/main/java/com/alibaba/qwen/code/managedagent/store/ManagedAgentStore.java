@@ -1484,6 +1484,29 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    /**
+     * G3: back out a submission mark whose attempt provably never admitted
+     * the prompt (the Turn still has no event epoch), so a new Harness
+     * generation may bind and submit it. A lost old-generation admission is
+     * absorbed by the journal's commandId idempotency when the Turn
+     * re-submits. Refuses under the same lease guards as the mark.
+     */
+    @Transactional
+    public boolean withdrawSubmissionAttempted(String tenantId,
+            String sessionId, String turnId, String owner) {
+        long now = clock.millis();
+        int updated = jdbc.update("UPDATE managed_agent_turn SET"
+                        + " submission_attempted = FALSE, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until"
+                        + " >= ? AND submission_attempted = TRUE AND"
+                        + " harness_event_epoch IS NULL AND status IN"
+                        + " ('ACCEPTED','RUNNING','CANCELLING')",
+                now, tenantId, sessionId, turnId, owner, now);
+        return updated == 1;
+    }
+
     @Transactional
     public void recordAdmission(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
