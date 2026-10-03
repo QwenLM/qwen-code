@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { MockInstance } from 'vitest';
 import {
   existsSync,
   mkdtempSync,
@@ -922,8 +923,8 @@ describe('FeishuChannel', () => {
       'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file';
     let directory: string;
     let channel: FeishuChannel;
-    let dispatch: ReturnType<typeof vi.spyOn<FeishuChannel, 'handleInbound'>>;
-    let fetchSpy: ReturnType<typeof vi.spyOn<typeof global, 'fetch'>>;
+    let dispatch: MockInstance<FeishuChannel['handleInbound']>;
+    let fetchSpy: MockInstance<typeof fetch>;
 
     beforeEach(() => {
       directory = mkdtempSync(join(systemTmpDir, 'feishu-inbound-file-'));
@@ -942,7 +943,7 @@ describe('FeishuChannel', () => {
           throw new Error(`Unexpected request: ${String(input)}`);
         }
         return new Response(bytes, {
-          headers: { 'Content-Type': 'application/octet-stream' },
+          headers: { 'Content-Type': 'application/pdf' },
         });
       });
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -956,8 +957,8 @@ describe('FeishuChannel', () => {
       rmSync(directory, { recursive: true, force: true });
     });
 
-    function receive(fileName: string) {
-      const event = feishuDmMessage('inbound-file');
+    function receive(fileName: string | undefined, messageId = 'inbound-file') {
+      const event = feishuDmMessage(messageId);
       Object.assign(event['message'] as Record<string, unknown>, {
         message_type: 'file',
         content: JSON.stringify({ file_key: 'file_1', file_name: fileName }),
@@ -973,6 +974,8 @@ describe('FeishuChannel', () => {
       { incoming: '../report\0.txt', saved: 'report.txt' },
       { incoming: '...', saved: '_' },
       { incoming: '\0', saved: 'feishu_file_1790985600000' },
+      { incoming: 'my report (final).pdf', saved: 'my_report__final_.pdf' },
+      { incoming: 'a\nb.txt', saved: 'a_b.txt' },
     ])(
       'persists $incoming and dispatches its attachment',
       async ({ incoming, saved }) => {
@@ -986,9 +989,10 @@ describe('FeishuChannel', () => {
             type: 'file',
             filePath: expect.any(String),
             fileName: saved,
-            mimeType: 'application/octet-stream',
+            mimeType: 'application/pdf',
           },
         ]);
+        expect(envelope.syntheticText).toBe(true);
         const childDirectories = readdirSync(join(directory, 'channel-files'));
         expect(childDirectories).toHaveLength(1);
         const fileDirectory = join(
@@ -1021,7 +1025,65 @@ describe('FeishuChannel', () => {
       const envelope = dispatch.mock.calls[0]![0];
       expect(envelope.text).toContain('report.txt');
       expect(envelope.attachments).toBeUndefined();
+      expect(envelope.syntheticText).toBe(true);
       expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+    });
+
+    it('dispatches the text fallback when the event omits file_name', async () => {
+      receive(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const envelope = dispatch.mock.calls[0]![0];
+      expect(envelope.text).toBe('(file: file)');
+      expect(envelope.attachments).toBeUndefined();
+      expect(envelope.syntheticText).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+    });
+
+    it('keeps two messages with the same filename in separate directories', async () => {
+      fetchSpy.mockImplementation(async (input) => {
+        if (
+          ![
+            resourceUrl,
+            resourceUrl.replace('/inbound-file/', '/inbound-file-2/'),
+          ].includes(String(input))
+        ) {
+          throw new Error(`Unexpected request: ${String(input)}`);
+        }
+        return new Response(bytes);
+      });
+      receive('report.txt');
+      receive('report.txt', 'inbound-file-2');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      const paths = dispatch.mock.calls.map(
+        ([envelope]) => envelope.attachments![0]!.filePath!,
+      );
+      expect(new Set(paths).size).toBe(2);
+      expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(2);
+      for (const path of paths) {
+        expect(readFileSync(path)).toEqual(Buffer.from(bytes));
+      }
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    });
+
+    it('starts the 60-second cleanup countdown only after dispatch settles', async () => {
+      const pending = deferred<void>();
+      dispatch.mockReturnValue(pending.promise);
+      receive('report.txt');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const filePath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
+      await vi.advanceTimersByTimeAsync(70_000);
+      expect(existsSync(filePath)).toBe(true);
+      pending.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(existsSync(filePath)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(existsSync(filePath)).toBe(false);
     });
 
     it('removes a downloaded file immediately when stopped during preparation', async () => {
