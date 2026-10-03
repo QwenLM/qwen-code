@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-base",
-  "version": "0.24.7",
+  "version": "0.24.7-nightly.20261003.2c591ecc08",
   "description": "Base channel infrastructure for Qwen Code",
   "repository": {
     "type": "git",

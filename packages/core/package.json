@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
   "private": true,
-  "version": "0.24.7",
+  "version": "0.24.7-nightly.20261003.2c591ecc08",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
