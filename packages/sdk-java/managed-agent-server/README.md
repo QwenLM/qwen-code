@@ -193,7 +193,9 @@ the takeover load as their retries come due, and the Session's bound boot ID
 moves to the new generation without a Java restart. A takeover load that can
 never continue (its parked state is not one a replacement can drive) ends the
 Turn as `managed_runtime_recovery_blocked` with a typed reason instead of
-retrying forever. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+retrying forever — in this slice that includes a Turn parked mid model round,
+whose safe reissue is the named Step 3 follow-up; the Session itself keeps
+serving new Turns on the adopted generation. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`, and a failed rename leaves a `PENDING` command that the
