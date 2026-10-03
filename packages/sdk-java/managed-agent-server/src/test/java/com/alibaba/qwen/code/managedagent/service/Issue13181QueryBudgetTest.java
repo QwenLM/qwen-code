@@ -1,30 +1,30 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ACTIVATION_ID;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 
+import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,7 +42,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -80,26 +79,17 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
  *   <li>Tool-publication authorization reads the activation state from the
- *       journal head, rescanning the journal only for pre-migration heads
+ *       journal head when journal-head-authorization is enabled (the flag
+ *       ships false), rescanning the journal only for pre-migration heads
  *       (and backfilling them).</li>
  * </ol>
  */
 class Issue13181QueryBudgetTest {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String WRITER_TOKEN = "a".repeat(32);
-    private static final String PUBLICATION_TOKEN = Base64.getUrlEncoder()
-            .withoutPadding().encodeToString(new byte[32]);
-    private static final long CAPTURE_BYTES = 1024;
-    private static final long ALLOCATION = CAPTURE_BYTES
-            + ToolPublicationContract.PRODUCER_BYTES
-            + ToolPublicationContract.ADMISSION_BYTES;
 
+    private PublicationJournalFixture journal;
     private ObjectNode binding;
     private ObjectNode checkpoint;
-    private String activationId = "activation-1";
-    private long revision;
-    private long sequence;
-    private String commitDigest;
 
     @Test
     void materializationRewritesTheSnapshotOnCatchUpOnly() {
@@ -116,14 +106,20 @@ class Issue13181QueryBudgetTest {
                     Map.of("callId", "call-" + index, "status", "completed"),
                     false, "mat-src-" + index);
         }
+        // One text delta gives the assistant item a part, so the parts read
+        // returns a row and its per-batch counts are pinned too.
+        fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
+                "item.output_text.delta", Map.of("text", "part"), false,
+                "mat-part");
         // The burst ends with a terminal event, so the batch that covers it
         // rewrites the snapshot even though the snapshot is fresh.
         fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
                 "turn.completed", Map.of(), true, "mat-terminal");
-        // 82 events with the session's own; the last batch covers the tail.
+        // 83 events with the session's own; the last batch covers the tail.
         int batches = 9;
         List<Long> itemRowsRead = new ArrayList<>();
         List<Long> itemReads = new ArrayList<>();
+        List<Long> partReads = new ArrayList<>();
         List<Long> snapshotWrites = new ArrayList<>();
         for (int batch = 0; batch < batches; batch++) {
             fixture.ledger.reset();
@@ -133,12 +129,15 @@ class Issue13181QueryBudgetTest {
                     "from managed_agent_item where", "order by first_sequence"));
             itemReads.add(fixture.ledger.count(
                     "from managed_agent_item where", "order by first_sequence"));
+            partReads.add(fixture.ledger.count(
+                    "from managed_agent_item_part where"));
             snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
                     + fixture.ledger.count("update managed_agent_snapshot set"));
         }
         System.out.println("[issue-13181] materializeNextBatch per batch:"
                 + " itemRowsRead=" + itemRowsRead
                 + " itemReads=" + itemReads
+                + " partReads=" + partReads
                 + " snapshotRewrites=" + snapshotWrites);
         // The first batch inserts the snapshot row; the intermediate batches
         // leave it alone; the batch carrying the terminal event rewrites it.
@@ -146,20 +145,25 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // The whole item table is read exactly once per writing batch — the
         // count (not only the row total) is pinned, so an N+1 decomposition
-        // of allItems would show here.
+        // of allItems would show here. The parts read rides the same
+        // discipline.
         assertThat(itemReads)
                 .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
+        // The parts read rides the same discipline; the last batch also
+        // projects the text delta, which reads the part it continues.
+        assertThat(partReads)
+                .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 2L);
         // Batch 1 covers session.created plus nine tool events; the last
-        // batch sees all 80 items.
+        // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
-                .containsExactly(9L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 80L);
+                .containsExactly(9L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 81L);
         // The caught-up snapshot is complete and self-consistent.
         assertThat(fixture.store.findSnapshot(tenant, sessionId)).get()
                 .satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence()).isEqualTo(fixture
                             .store.requireSession(tenant, sessionId)
                             .lastSequence());
-                    assertThat(snapshot.items()).hasSize(80);
+                    assertThat(snapshot.items()).hasSize(81);
                 });
     }
 
@@ -200,7 +204,10 @@ class Issue13181QueryBudgetTest {
 
     @Test
     void deferredSnapshotConvergesOnTheAgedOutReselection() {
-        Fixture fixture = new Fixture();
+        // A frozen clock: the deferral and the reselection both key off the
+        // 5s age floor, which the test ages explicitly by SQL.
+        Fixture fixture = new Fixture(
+                Clock.fixed(Instant.now(), java.time.ZoneOffset.UTC));
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "converge-" + UUID.randomUUID(), "digest",
@@ -232,6 +239,10 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("UPDATE managed_agent_snapshot SET updated_at ="
                         + " updated_at - 6000 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
+        fixture.jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " snapshot_stale_since = snapshot_stale_since - 6000"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                tenant, sessionId);
         assertThat(fixture.store.findMaterializationTargets(32))
                 .contains(new MaterializationTarget(tenant, sessionId));
         // The re-selected tick has no new events; it converges the snapshot.
@@ -698,6 +709,54 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void transcriptTailIsBoundedByTheCallerLimit() {
+        Fixture fixture = new Fixture();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = fixture.store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "tail-" + UUID.randomUUID(), "digest",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        // Five events materialize so a snapshot exists; 150 more are
+        // appended and only partially materialized, leaving the snapshot
+        // behind with a long tail.
+        for (int index = 0; index < 5; index++) {
+            fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
+                    "turn-1", "item.tool_call.updated",
+                    Map.of("callId", "call-" + index, "status", "completed"),
+                    false, "tail-" + index);
+        }
+        fixture.tx.executeWithoutResult(status -> fixture.store
+                .materializeNextBatch(tenant, sessionId, 100));
+        for (int index = 0; index < 150; index++) {
+            fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
+                    "turn-1", "item.tool_call.updated",
+                    Map.of("callId", "call-b-" + index, "status",
+                            "completed"),
+                    false, "tail-b-" + index);
+        }
+        fixture.tx.executeWithoutResult(status -> fixture.store
+                .materializeNextBatch(tenant, sessionId, 100));
+        long snapshotCovered = fixture.store
+                .findSnapshotCoveredSequences(tenant, List.of(sessionId))
+                .getOrDefault(sessionId, 0L);
+        assertThat(snapshotCovered).isLessThan(fixture.store
+                .requireSession(tenant, sessionId).lastSequence());
+        fixture.ledger.reset();
+        var transcript = fixture.service.transcript(tenant, null, sessionId,
+                null, 10);
+        // The tail is capped at the caller's limit, newest events kept,
+        // with the truncation reported for paging. The tail read is one
+        // bounded query (plus the control-event read), not a page loop.
+        assertThat(transcript.events().stream()
+                .filter(event -> event.sequence()
+                        > transcript.coveredSequence())
+                .count()).isEqualTo(10);
+        assertThat(transcript.hasMore()).isTrue();
+        assertThat(transcript.olderCursor()).isNotNull();
+        assertThat(fixture.ledger.count("from managed_agent_event"))
+                .isEqualTo(2);
+    }
+
+    @Test
     void batchTurnReadsFollowAdmissionOrderNotCreatedAt() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
@@ -752,104 +811,13 @@ class Issue13181QueryBudgetTest {
 
     private PublicationFixture publicationFixture(Fixture fixture,
             boolean journalHeadAuthorization) {
-        ManagedSessionStore sessions = new ManagedSessionStore(fixture.jdbc);
-        JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(
-                fixture.dataSource,
-                new AesGcmSecretProtector("key", new byte[32]),
-                () -> "binding-1");
-        JdbcToolExecutionRepository executions =
-                new JdbcToolExecutionRepository(fixture.dataSource);
-        ToolPublicationStore store = new ToolPublicationStore(fixture.jdbc,
-                fixture.manager, sessions, executions, bindings,
-                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2,
-                        10 * ALLOCATION, 10 * ALLOCATION, 10),
+        journal = PublicationJournalFixture.create(fixture.dataSource,
                 journalHeadAuthorization);
-        var runtime = bindings.findOrCreate(new RuntimeProvisionRequest(
-                new RuntimeScope("tenant-1", "workspace-1", "generation-1",
-                        "/workspace", "capability", "workspace"), null));
-        runtime = bindings.claimOperation(runtime.getBindingId(), "owner",
-                Duration.ofMinutes(1));
-        assertThat(bindings.compareAndSet(runtime, runtime.withState(
-                RuntimeBindingRecord.State.READY, null, Instant.now())))
-                .isNotNull();
-        binding = JSON.createObjectNode()
-                .put("publication", ToolPublicationContract.PROTOCOL)
-                .put("publicationId", "pub-1").put("turnId", "turn-1")
-                .put("executionCallId", "execution-1")
-                .put("modelCallId", "model-1")
-                .put("runtimeBindingId", "binding-1")
-                .put("bindingGeneration", "1").put("captureId", "capture-1")
-                .put("revision", 1).put("captureScope", "process_pipes")
-                .put("capturePolicy", "complete_required")
-                .put("writerId", "writer-1").put("writerGeneration", 1)
-                .put("activationId", activationId).put("activationEpoch", 1)
-                .put("intentSequence", 2);
-        binding.set("sessionKey", JSON.createObjectNode()
-                .put("tenantId", "tenant-1").put("workspaceId", "workspace-1")
-                .put("sessionId", "session-1"));
-        String payload =
-                "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
-        binding.put("requestDigest", "sha256:" + digest(payload));
-        binding.set("reference", JSON.createObjectNode()
-                .put("sessionId", "runtime-1")
-                .put("promptId", "runtime-prompt-1")
-                .put("callId", "runtime-call-1")
-                .put("argsDigest",
-                        "sha256:" + digest("{\"command\":\"printf hi\"}")));
-        ObjectNode args = JSON.createObjectNode()
-                .put("harnessSessionId", "session-1")
-                .put("runtimeSessionId", "runtime-1")
-                .put("payloadJson", payload);
-        binding.set("argsRef", ref("args-1", "managed-tool-input", args));
-        checkpoint = JSON.createObjectNode();
-        checkpoint.set("identity", JSON.createObjectNode()
-                .put("schemaVersion", 1).put("engine", "managed")
-                .put("turnId", "turn-1").put("promptId", "runtime-prompt-1")
-                .put("activationId", activationId)
-                .put("coveredSequence", 2)
-                .set("sessionKey", binding.get("sessionKey")));
-        checkpoint.set("continuation",
-                JSON.createObjectNode().put("phase", "await_runtime"));
-        checkpoint.set("tools", JSON.createObjectNode().set("items",
-                JSON.createArrayNode().add(JSON.createObjectNode()
-                        .put("executionCallId", "execution-1")
-                        .put("functionCallId", "model-1")
-                        .put("toolName", "run_shell_command")
-                        .put("state", "in_progress")
-                        .put("outcomeSource", "runtime")
-                        .put("inputDigest",
-                                digest("{\"command\":\"printf hi\"}")))));
-        binding.set("checkpointRef",
-                ref("checkpoint-1", "managed-checkpoint", checkpoint));
-        executions.findOrCreate(ToolExecutionRecord.prepared("execution-1",
-                "idempotency-1", "binding-1", 1, "session-1", "runtime-1",
-                "runtime-prompt-1", "runtime-call-1",
-                "sha256:" + digest(payload),
-                Map.of("sessionId", "runtime-1", "promptId",
-                        "runtime-prompt-1", "callId", "runtime-call-1",
-                        "argsDigest",
-                        "sha256:" + digest("{\"command\":\"printf hi\"}"),
-                        "payloadDigest", "sha256:" + digest(payload),
-                        "dispatchMode", "deferred_v3", "publicationId",
-                        "pub-1")));
-        new TransactionTemplate(fixture.manager).executeWithoutResult(status ->
-                sessions.acquireWriter("tenant-1", "session-1", WRITER_TOKEN,
-                        new ManagedSessionStoreModels.AcquireWriterRequest(
-                                "workspace-1", "writer-1", 300000L)));
-        append(sessions, fixture.manager, "session.create", "{}\n{}\n", 0,
-                List.of(), null);
-        ObjectNode intent = JSON.createObjectNode()
-                .put("executionCallId", "execution-1")
-                .put("outcomeSource", "runtime");
-        intent.set("argsRef", binding.get("argsRef"));
-        append(sessions, fixture.manager, "tool.dispatch",
-                event(1, "activation.changed", activation("active"))
-                        + event(2, "tool.intent", intent) + "{}\n", 2,
-                List.of(resource(binding.get("argsRef"), args),
-                        resource(binding.get("checkpointRef"), checkpoint)),
-                "checkpoint-1");
-        store.apply(request("reserve"), WRITER_TOKEN, PUBLICATION_TOKEN);
-        return new PublicationFixture(sessions, bindings, executions, store);
+        binding = journal.binding;
+        checkpoint = journal.checkpoint;
+        journal.reserve();
+        return new PublicationFixture(journal.sessions, journal.bindings,
+                journal.executions, journal.store);
     }
 
     @Test
@@ -872,8 +840,8 @@ class Issue13181QueryBudgetTest {
 
         int filler = 30;
         for (int index = 0; index < filler; index++) {
-            append(sessions, fixture.manager, "tool.dispatch",
-                    event(sequence + 1, "tool.progress",
+            append("tool.dispatch",
+                    event(journal.sequence + 1, "tool.progress",
                             JSON.createObjectNode()) + "{}\n",
                     1, List.of(), null);
         }
@@ -920,6 +888,12 @@ class Issue13181QueryBudgetTest {
         // the activation state from the head row.
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
                 "for update")).isZero();
+        // Positive control: the two authorizations each lock the head row
+        // twice (the liveness probe plus the FOR UPDATE read), so the zero
+        // above cannot pass vacuously on a broken store.
+        assertThat(fixture.ledger.count(
+                "from qwen_managed_session_journal_head", "for update"))
+                .isEqualTo(4);
     }
 
     @Test
@@ -927,8 +901,8 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         // A release committed after the reserve updates the head columns.
-        append(publication.sessions(), fixture.manager, "activation.release",
-                event(sequence + 1, "activation.changed",
+        append("activation.release",
+                event(journal.sequence + 1, "activation.changed",
                         activation("released")) + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
@@ -949,35 +923,105 @@ class Issue13181QueryBudgetTest {
         // The head columns hold the active activation from the dispatch
         // commit. A pre-V34 binary then commits a release: the journal gains
         // the row and the revision bumps, but the columns stay untouched.
-        // Reproduce that exact skew by restoring the columns after a real
-        // release commit.
+        // Reproduce that exact skew by restoring the columns and their stamp
+        // after a real release commit.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
-                + " activation_expires_at"
+                + " activation_expires_at, activation_head_revision"
                 + " FROM qwen_managed_session_journal_head");
-        append(publication.sessions(), fixture.manager, "activation.release",
-                event(sequence + 1, "activation.changed",
+        append("activation.release",
+                event(journal.sequence + 1, "activation.changed",
                         activation("released")) + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
-                        + " activation_expires_at = ?",
+                        + " activation_expires_at = ?,"
+                        + " activation_head_revision = ?",
                 head.get("activation_id"), head.get("activation_phase"),
                 head.get("activation_event_epoch"),
-                head.get("activation_expires_at"));
+                head.get("activation_expires_at"),
+                head.get("activation_head_revision"));
         // The gate ships off: authorization reads the journal and fences
         // the release instead of trusting the stale active head.
+        fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
+        // The legacy path's cost is explicit: one locked journal read (the
+        // release sits at the latest revision), no head write.
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isEqualTo(1);
+        assertThat(fixture.ledger.count("update qwen_managed_session_journal_head"))
+                .isZero();
         // The renew path's evidence read must not trust the stale head
         // either.
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
+    }
+
+    @Test
+    void staleHeadStampRescansInsteadOfTrustingTheColumns() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        // The rolling-window residue: columns backfilled active, then a
+        // pre-V34 binary commits a release, bumping journal_revision without
+        // touching the columns. Reproduce by restoring the columns and their
+        // stamp after a real release commit, with the gate ON.
+        var head = fixture.jdbc.queryForMap("SELECT activation_id,"
+                + " activation_phase, activation_event_epoch,"
+                + " activation_expires_at, activation_head_revision"
+                + " FROM qwen_managed_session_journal_head");
+        append("activation.release",
+                event(journal.sequence + 1, "activation.changed",
+                        activation("released")) + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " activation_id = ?, activation_phase = ?,"
+                        + " activation_event_epoch = ?,"
+                        + " activation_expires_at = ?,"
+                        + " activation_head_revision = ?",
+                head.get("activation_id"), head.get("activation_phase"),
+                head.get("activation_event_epoch"),
+                head.get("activation_expires_at"),
+                head.get("activation_head_revision"));
+        // The stamp lags journal_revision, so the head is not trusted: the
+        // legacy scan fences the released activation even with the gate on.
+        fixture.ledger.reset();
+        assertThatThrownBy(() -> publication.store().verifyDispatch(
+                publication.executions().findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isGreaterThan(0);
+    }
+
+    @Test
+    void staleHeadStampRebackfillsAndRejoinsTheHeadPath() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        // The self-heal arm: the columns are current but the stamp lags, so
+        // the first authorization scans and re-stamps; the next reads the
+        // head again.
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                + " activation_head_revision = activation_head_revision - 1");
+        publication.store().verifyDispatch(publication.executions()
+                .findByExecutionCallId("execution-1"), "pub-1",
+                PUBLICATION_TOKEN);
+        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
+                + " journal_revision FROM qwen_managed_session_journal_head");
+        assertThat(head.get("activation_head_revision"))
+                .isEqualTo(head.get("journal_revision"));
+        fixture.ledger.reset();
+        publication.store().verifyDispatch(publication.executions()
+                .findByExecutionCallId("execution-1"), "pub-1",
+                PUBLICATION_TOKEN);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isZero();
     }
 
     @Test
@@ -988,10 +1032,10 @@ class Issue13181QueryBudgetTest {
         // column stays NULL, and the head branch must refuse cleanly (a
         // missing expiry fails exactly like the scan's absent read).
         ObjectNode noExpiry = JSON.createObjectNode()
-                .put("activationId", activationId).put("epoch", 1)
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active");
-        append(publication.sessions(), fixture.manager, "activation.no-expiry",
-                event(sequence + 1, "activation.changed", noExpiry) + "{}\n",
+        append("activation.no-expiry",
+                event(journal.sequence + 1, "activation.changed", noExpiry) + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
@@ -1006,11 +1050,11 @@ class Issue13181QueryBudgetTest {
         // An overflowing string expiresAt is likewise absent, never a
         // truncated timestamp.
         ObjectNode overflowing = JSON.createObjectNode()
-                .put("activationId", activationId).put("epoch", 1)
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
                 .put("expiresAt", "99999999999999999999999999");
-        append(publication.sessions(), fixture.manager, "activation.overflow",
-                event(sequence + 1, "activation.changed", overflowing)
+        append("activation.overflow",
+                event(journal.sequence + 1, "activation.changed", overflowing)
                         + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
@@ -1020,6 +1064,27 @@ class Issue13181QueryBudgetTest {
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
+        // An exponent-form string is rejected by the width pre-check without
+        // materializing the giant integer (measured ~65s/1GB per call before
+        // the pre-check existed).
+        ObjectNode exponent = JSON.createObjectNode()
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
+                .put("phase", "active").put("expiresAt", "1e100000000");
+        append("activation.exponent",
+                event(journal.sequence + 1, "activation.changed", exponent) + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
+                        + " FROM qwen_managed_session_journal_head",
+                Long.class)).isNull();
+        fixture.ledger.reset();
+        assertThatThrownBy(() -> publication.store().apply(request("renew"),
+                WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        // The head answers before the intent read: a fenced renew pays no
+        // journal statement.
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx"))
+                .isZero();
     }
 
     @Test
@@ -1030,21 +1095,21 @@ class Issue13181QueryBudgetTest {
         // paths must refuse through the head columns, exactly as the scan
         // would refuse the same payload.
         ObjectNode expired = JSON.createObjectNode()
-                .put("activationId", activationId).put("epoch", 1)
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
                 .put("expiresAt", System.currentTimeMillis() - 1000);
-        append(publication.sessions(), fixture.manager, "activation.expired",
-                event(sequence + 1, "activation.changed", expired) + "{}\n",
+        append("activation.expired",
+                event(journal.sequence + 1, "activation.changed", expired) + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
-        // The head answered the activation term: only the intent's own
-        // revision was read (3 statements), never the scan.
+        // The head answers the activation term before the intent is read:
+        // a fenced renew pays no journal statement at all.
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx"))
-                .isEqualTo(3);
+                .isZero();
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
@@ -1064,7 +1129,8 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL");
+                + " activation_expires_at = NULL,"
+                + " activation_head_revision = NULL");
         publication.store().apply(request("renew"), WRITER_TOKEN,
                 PUBLICATION_TOKEN);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
@@ -1086,8 +1152,8 @@ class Issue13181QueryBudgetTest {
         PublicationFixture publication = publicationFixture(fixture);
         // A non-conforming writer commits an activation.changed wider than
         // the V34 columns; the commit blanks the head columns.
-        append(publication.sessions(), fixture.manager, "activation.oversize",
-                event(sequence + 1, "activation.changed",
+        append("activation.oversize",
+                event(journal.sequence + 1, "activation.changed",
                         JSON.createObjectNode()
                                 .put("activationId",
                                         "activation-" + "a".repeat(600))
@@ -1111,13 +1177,12 @@ class Issue13181QueryBudgetTest {
     void publicationAuthorizationRescansAndBackfillsPreMigrationHeads() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        ManagedSessionStore sessions = publication.sessions();
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         int filler = 30;
         for (int index = 0; index < filler; index++) {
-            append(sessions, fixture.manager, "tool.dispatch",
-                    event(sequence + 1, "tool.progress",
+            append("tool.dispatch",
+                    event(journal.sequence + 1, "tool.progress",
                             JSON.createObjectNode()) + "{}\n",
                     1, List.of(), null);
         }
@@ -1125,7 +1190,8 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL");
+                + " activation_expires_at = NULL,"
+                + " activation_head_revision = NULL");
 
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
@@ -1152,11 +1218,10 @@ class Issue13181QueryBudgetTest {
     void renewReadsTheIntentAtItsOwnRevision() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        ManagedSessionStore sessions = publication.sessions();
         int filler = 30;
         for (int index = 0; index < filler; index++) {
-            append(sessions, fixture.manager, "tool.dispatch",
-                    event(sequence + 1, "tool.progress",
+            append("tool.dispatch",
+                    event(journal.sequence + 1, "tool.progress",
                             JSON.createObjectNode()) + "{}\n",
                     1, List.of(), null);
         }
@@ -1168,9 +1233,10 @@ class Issue13181QueryBudgetTest {
         System.out.println("[issue-13181] renew with the intent " + filler
                 + " revisions behind the head: " + reads
                 + " journal statements");
-        // The revision range read plus the one verified page: constant,
-        // independent of the filler depth, and none of them locked.
-        assertThat(reads).isEqualTo(3);
+        // The revision range read, the chain-contiguity count, and the one
+        // verified page: constant, independent of the filler depth, and none
+        // of them locked.
+        assertThat(reads).isEqualTo(4);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
                 "for update")).isZero();
     }
@@ -1179,7 +1245,6 @@ class Issue13181QueryBudgetTest {
     void stringExpiresAtReadsConsistentlyAcrossTheScanAndTheHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        ManagedSessionStore sessions = publication.sessions();
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         long expiry = System.currentTimeMillis() + 180000;
@@ -1187,11 +1252,11 @@ class Issue13181QueryBudgetTest {
         // commit must store what the scans have always parsed, or the head
         // would fence what the scan authorizes.
         ObjectNode stringExpiry = JSON.createObjectNode()
-                .put("activationId", activationId).put("epoch", 1)
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active")
                 .put("expiresAt", String.valueOf(expiry));
-        append(sessions, fixture.manager, "activation.string-expiry",
-                event(sequence + 1, "activation.changed", stringExpiry)
+        append("activation.string-expiry",
+                event(journal.sequence + 1, "activation.changed", stringExpiry)
                         + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
@@ -1209,7 +1274,8 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
-                + " activation_expires_at = NULL");
+                + " activation_expires_at = NULL,"
+                + " activation_head_revision = NULL");
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
@@ -1223,83 +1289,21 @@ class Issue13181QueryBudgetTest {
     }
 
     private ObjectNode request(String operation) {
-        ObjectNode result = JSON.createObjectNode()
-                .put("publication", ToolPublicationContract.PROTOCOL)
-                .put("operation", operation);
-        result.set("sessionKey", binding.get("sessionKey").deepCopy());
-        result.set("owner", JSON.createObjectNode().put("writerId", "writer-1")
-                .put("writerGeneration", 1));
-        if ("reserve".equals(operation)) {
-            result.set("binding", binding.deepCopy());
-            result.put("captureBytes", CAPTURE_BYTES);
-        } else {
-            result.put("publicationId", "pub-1");
-        }
-        return result;
+        return journal.request(operation);
     }
 
     private ObjectNode activation(String phase) {
-        return JSON.createObjectNode().put("activationId", activationId)
-                .put("epoch", 1).put("phase", phase)
-                .put("expiresAt", System.currentTimeMillis() + 180000);
+        return journal.activation(phase);
     }
 
     private String event(long number, String kind, JsonNode payload) {
-        ObjectNode event = JSON.createObjectNode().put("v", 1)
-                .put("sequence", number).put("kind", kind);
-        event.set("sessionKey", binding.get("sessionKey"));
-        event.set("payload", payload);
-        event.set("subject", JSON.createObjectNode().put("type", "activation")
-                .put("activationId", activationId).put("epoch", 1));
-        return JSON.createObjectNode()
-                .put("subtype", "managed_session_event_v1")
-                .set("managedSession", event) + "\n";
+        return journal.event(number, kind, payload);
     }
 
-    private void append(ManagedSessionStore sessions,
-            DataSourceTransactionManager manager, String operation,
-            String records, int events,
+    private void append(String operation, String records, int events,
             List<ManagedSessionStoreModels.CommitResource> resources,
             String checkpointId) {
-        String nextDigest = events == 0 ? null : digest(records);
-        var request = new ManagedSessionStoreModels.CommitTransactionRequest(
-                "workspace-1", "writer-1", 1, revision, sequence,
-                "transaction-" + revision, operation, "command-" + revision,
-                digest(records), events == 0 ? 0 : sequence + 1,
-                sequence + events, events, nextDigest, commitDigest,
-                nextDigest, events == 0 ? 0 : 1, checkpointId,
-                events == 0 ? 2 : events + 1,
-                Base64.getEncoder().encodeToString(
-                        records.getBytes(StandardCharsets.UTF_8)),
-                digest(records), resources);
-        new TransactionTemplate(manager).executeWithoutResult(status ->
-                sessions.commit("tenant-1", "session-1", WRITER_TOKEN,
-                        request));
-        revision++;
-        sequence += events;
-        commitDigest = nextDigest;
-    }
-
-    private static ObjectNode ref(String id, String kind, JsonNode body) {
-        return JSON.createObjectNode().put("resourceId", id).put("kind", kind)
-                .put("schemaVersion", 1)
-                .put("byteLength",
-                        body.toString().getBytes(StandardCharsets.UTF_8).length)
-                .put("digest", digest(body.toString()));
-    }
-
-    private static ManagedSessionStoreModels.CommitResource resource(
-            JsonNode ref, JsonNode body) {
-        return new ManagedSessionStoreModels.CommitResource(
-                ref.path("resourceId").asText(), ref.path("kind").asText(), 1,
-                ref.path("byteLength").asLong(), ref.path("digest").asText(),
-                Base64.getEncoder().encodeToString(
-                        body.toString().getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String digest(String value) {
-        return ToolPublicationContract.sha256(
-                value.getBytes(StandardCharsets.UTF_8));
+        journal.append(operation, records, events, resources, checkpointId);
     }
 
     /** Wires the production stores over a query-recording H2 DataSource. */
@@ -1335,7 +1339,6 @@ class Issue13181QueryBudgetTest {
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     mock(HarnessConnector.class), registry);
-            service.setActions(new ManagedActionStore(jdbc, store));
         }
     }
 

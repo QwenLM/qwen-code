@@ -582,8 +582,9 @@ class ManagedAgentServerIntegrationTest {
         }
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                assertThat(store.findActiveTurn(tenant, sessionId))
-                        .isEmpty());
+                assertThat(store.findActiveTurns(tenant,
+                        java.util.List.of(sessionId)))
+                        .doesNotContainKey(sessionId));
         String closeId = objectMapper.readTree(lifecycle(
                         post("/v1/agents/sessions/{id}/close", sessionId),
                         tenant, "close-active")
@@ -610,7 +611,9 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
-            assertThat(store.findActiveTurn(tenant, sessionId)).isEmpty();
+            assertThat(store.findActiveTurns(tenant,
+                    java.util.List.of(sessionId)))
+                    .doesNotContainKey(sessionId);
             assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                     .isNotNull();
         });
@@ -1248,8 +1251,10 @@ class ManagedAgentServerIntegrationTest {
                 Map.of("code", "runtime_warm_failed"), false,
                 "environment:first:failed");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant,
-                session.sessionId())).get().satisfies(event -> {
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant,
+                        java.util.List.of(session.sessionId())))
+                        .get(session.sessionId())).satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo(second.turnId());
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });

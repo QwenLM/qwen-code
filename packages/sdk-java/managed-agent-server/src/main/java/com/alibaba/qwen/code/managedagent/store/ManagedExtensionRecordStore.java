@@ -204,6 +204,8 @@ public class ManagedExtensionRecordStore {
             JsonNode payload = event.path("payload");
             if ("activation.changed".equals(event.path("kind")
                     .textValue())) {
+                require(index < eventCount,
+                        "Activation change has an invalid journal position");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(event.path("kind").asText())) {

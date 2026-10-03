@@ -615,9 +615,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?"
-                + " AND session_id = ? AND operation_kind = 'CLOSE' AND state = 'COMPLETED' AND receipt_id IS NOT NULL",
-                Integer.class, tenantId, sessionId) > 0;
+        return completedWorkspaceCloses(tenantId, List.of(sessionId))
+                .contains(sessionId);
     }
 
     /** The given Sessions with a completed workspace close, in one read. */
@@ -627,7 +626,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (sessionIds.isEmpty()) {
             return Set.of();
         }
-        List<Object> arguments = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
@@ -1067,19 +1066,13 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
-    public Optional<TurnSummary> findActiveTurn(String tenantId,
-            String sessionId) {
-        return Optional.ofNullable(findActiveTurns(tenantId,
-                List.of(sessionId)).get(sessionId));
-    }
-
     /** The active Turn of each given Session, in one round trip. */
     public Map<String, TurnSummary> findActiveTurns(String tenantId,
             List<String> sessionIds) {
         if (sessionIds.isEmpty()) {
             return Map.of();
         }
-        List<Object> arguments = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
         List<TurnSummary> rows = jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS
@@ -1089,17 +1082,12 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING') ORDER BY"
                         + " created_at DESC",
                 turnSummaryMapper, arguments.toArray());
-        Map<String, TurnSummary> result = new HashMap<>();
+        Map<String, TurnSummary> result = new HashMap<>(
+                sessionIds.size() * 2);
         for (TurnSummary row : rows) {
             result.putIfAbsent(row.sessionId(), row);
         }
         return result;
-    }
-
-    public Optional<TurnSummary> findLatestTurn(String tenantId,
-            String sessionId) {
-        return Optional.ofNullable(findLatestTurns(tenantId,
-                List.of(sessionId)).get(sessionId));
     }
 
     /** The latest Turn of each given Session, in one round trip. */
@@ -1108,7 +1096,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (sessionIds.isEmpty()) {
             return Map.of();
         }
-        List<Object> arguments = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 3);
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
         arguments.add(tenantId);
@@ -1130,7 +1118,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " turn_record.turn_id WHERE turn_record.tenant_id ="
                         + " ?",
                 turnSummaryMapper, arguments.toArray());
-        Map<String, TurnSummary> result = new HashMap<>();
+        Map<String, TurnSummary> result = new HashMap<>(
+                sessionIds.size() * 2);
         for (TurnSummary row : rows) {
             result.put(row.sessionId(), row);
         }
@@ -1185,18 +1174,6 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, afterSequence, limit);
     }
 
-    public Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
-            String sessionId) {
-        requireSession(tenantId, sessionId);
-        TurnSummary latest = findLatestTurns(tenantId, List.of(sessionId))
-                .get(sessionId);
-        if (latest == null) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(findLatestEnvironmentEvents(tenantId,
-                Map.of(sessionId, latest)).get(sessionId));
-    }
-
     /**
      * The latest environment event of each Session's latest Turn, in one
      * round trip; the Turns are already loaded, so the turn-row join of the
@@ -1207,26 +1184,34 @@ public class ManagedAgentStore implements AgentStateStore {
         if (latestTurns.isEmpty()) {
             return Map.of();
         }
-        List<Object> arguments = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>(latestTurns.size() * 2 + 2);
         arguments.add(tenantId);
         StringBuilder pairs = new StringBuilder();
         for (TurnSummary turn : latestTurns.values()) {
             if (pairs.length() > 0) {
-                pairs.append(" OR");
+                pairs.append(",");
             }
-            pairs.append(" (event.session_id = ? AND event.turn_id = ?)");
+            pairs.append(" (?, ?)");
             arguments.add(turn.sessionId());
             arguments.add(turn.turnId());
         }
+        arguments.add(tenantId);
+        // One row per session: the latest environment event of its latest
+        // Turn, selected in SQL instead of shipping every match per pair.
         List<EventRecord> rows = jdbc.query("SELECT event.* FROM"
-                        + " managed_agent_event event WHERE event.tenant_id = ?"
-                        + " AND event.event_type IN ('environment.provisioning',"
-                        + " 'environment.ready', 'environment.failed') AND ("
-                        + pairs + ") ORDER BY event.sequence_id DESC",
+                        + " managed_agent_event event JOIN (SELECT session_id,"
+                        + " MAX(sequence_id) AS max_sequence FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " event_type IN ('environment.provisioning',"
+                        + " 'environment.ready', 'environment.failed') AND"
+                        + " (session_id, turn_id) IN (" + pairs + ")"
+                        + " GROUP BY session_id) latest ON latest.session_id ="
+                        + " event.session_id AND latest.max_sequence ="
+                        + " event.sequence_id WHERE event.tenant_id = ?",
                 eventMapper, arguments.toArray());
-        Map<String, EventRecord> result = new HashMap<>();
+        Map<String, EventRecord> result = new HashMap<>(latestTurns.size() * 2);
         for (EventRecord row : rows) {
-            result.putIfAbsent(row.sessionId(), row);
+            result.put(row.sessionId(), row);
         }
         return result;
     }
@@ -1242,6 +1227,22 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
                         + " ASC",
                 eventMapper, tenantId, sessionId, throughSequence);
+    }
+
+    /** The newest events of a Session past a sequence, capped at the limit,
+     *  in ascending order; hasMore reports that the tail continues. */
+    public EventPage findNewestTailEvents(String tenantId, String sessionId,
+            long afterSequence, int limit) {
+        requireSession(tenantId, sessionId);
+        List<EventRecord> rows = jdbc.query("SELECT * FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id > ? ORDER BY"
+                        + " sequence_id DESC LIMIT ?",
+                eventMapper, tenantId, sessionId, afterSequence, limit + 1);
+        boolean hasMore = rows.size() > limit;
+        rows = new ArrayList<>(hasMore ? rows.subList(0, limit) : rows);
+        java.util.Collections.reverse(rows);
+        return new EventPage(List.copyOf(rows), hasMore);
     }
 
     public EventPage findTranscriptEvents(String tenantId, String sessionId,
@@ -1292,10 +1293,10 @@ public class ManagedAgentStore implements AgentStateStore {
         if (sessionIds.isEmpty()) {
             return Map.of();
         }
-        List<Object> arguments = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
-        Map<String, Long> result = new HashMap<>();
+        Map<String, Long> result = new HashMap<>(sessionIds.size() * 2);
         RowCallbackHandler reader = row -> result.put(
                 row.getString("session_id"), row.getLong("covered_sequence"));
         jdbc.query("SELECT session_id, covered_sequence FROM"
@@ -1346,18 +1347,17 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public List<MaterializationTarget> findMaterializationTargets(int limit) {
         // The second disjunct re-selects a session whose drained batch
-        // deferred the snapshot rewrite, once the snapshot is old enough;
-        // without it a caught-up idle session would stay stale forever.
+        // deferred the snapshot rewrite, once the deferral marker is old
+        // enough; without it a caught-up idle session would stay stale
+        // forever.
         return jdbc.query("SELECT s.tenant_id, s.session_id FROM"
                         + " managed_agent_session s JOIN"
                         + " managed_agent_consumer_progress p ON"
                         + " p.tenant_id = s.tenant_id AND p.session_id ="
                         + " s.session_id AND p.consumer_name = ? WHERE"
-                        + " s.last_sequence > p.covered_sequence OR EXISTS"
-                        + " (SELECT 1 FROM managed_agent_snapshot snap WHERE"
-                        + " snap.tenant_id = s.tenant_id AND snap.session_id"
-                        + " = s.session_id AND snap.covered_sequence <"
-                        + " p.covered_sequence AND snap.updated_at <= ?)"
+                        + " s.last_sequence > p.covered_sequence"
+                        + " OR (p.snapshot_stale_since IS NOT NULL"
+                        + " AND p.snapshot_stale_since <= ?)"
                         + " ORDER BY p.updated_at ASC LIMIT ?",
                 (result, row) -> new MaterializationTarget(
                         result.getString("tenant_id"),
@@ -1401,25 +1401,30 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();
-        jdbc.update("UPDATE managed_agent_consumer_progress SET"
-                        + " covered_sequence = ?, updated_at = ? WHERE"
-                        + " tenant_id = ? AND session_id = ? AND"
-                        + " consumer_name = ?",
-                nextCovered, now, tenantId, sessionId, MESSAGE_PROJECTION);
         List<SnapshotState> snapshots = snapshotForUpdate(tenantId,
                 sessionId);
         // A full rewrite costs O(items) under the session row lock, so it
         // runs at creation, every SNAPSHOT_REFRESH_EVENTS behind, on the
         // batch that ends a Turn, and on a drained batch at most once per
-        // SNAPSHOT_REFRESH_MILLIS — a deferred drained batch is re-selected
-        // by findMaterializationTargets once the snapshot ages out.
-        if (!snapshots.isEmpty()
+        // SNAPSHOT_REFRESH_MILLIS — a deferred drained batch marks the
+        // progress row so findMaterializationTargets re-selects the session
+        // once the snapshot ages out.
+        boolean defer = !snapshots.isEmpty()
                 && nextCovered - snapshots.get(0).coveredSequence()
                         < SNAPSHOT_REFRESH_EVENTS
                 && events.stream().noneMatch(EventRecord::terminal)
                 && !(nextCovered >= session.lastSequence()
                         && now - snapshots.get(0).updatedAt()
-                                >= SNAPSHOT_REFRESH_MILLIS)) {
+                                >= SNAPSHOT_REFRESH_MILLIS);
+        jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " covered_sequence = ?, updated_at = ?,"
+                        + " snapshot_stale_since = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " consumer_name = ?",
+                nextCovered, now,
+                defer ? snapshots.get(0).updatedAt() : null,
+                tenantId, sessionId, MESSAGE_PROJECTION);
+        if (defer) {
             return new MaterializationResult(true, nextCovered);
         }
         writeSnapshot(tenantId, sessionId, snapshots, nextCovered, now);
@@ -1436,12 +1441,24 @@ public class ManagedAgentStore implements AgentStateStore {
                 sessionId);
         long now = clock.millis();
         if (snapshots.isEmpty()
-                || snapshots.get(0).coveredSequence() >= covered
-                || now - snapshots.get(0).updatedAt()
-                        < SNAPSHOT_REFRESH_MILLIS) {
+                || snapshots.get(0).coveredSequence() >= covered) {
+            // No longer lagging (e.g. recreated by a retraction): drop any
+            // stale deferral marker.
+            jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                            + " snapshot_stale_since = NULL WHERE tenant_id = ?"
+                            + " AND session_id = ? AND consumer_name = ?"
+                            + " AND snapshot_stale_since IS NOT NULL",
+                    tenantId, sessionId, MESSAGE_PROJECTION);
+            return;
+        }
+        if (now - snapshots.get(0).updatedAt() < SNAPSHOT_REFRESH_MILLIS) {
             return;
         }
         writeSnapshot(tenantId, sessionId, snapshots, covered, now);
+        jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " snapshot_stale_since = NULL WHERE tenant_id = ?"
+                        + " AND session_id = ? AND consumer_name = ?",
+                tenantId, sessionId, MESSAGE_PROJECTION);
     }
 
     private List<SnapshotState> snapshotForUpdate(String tenantId,

@@ -39,7 +39,7 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void relaxationDefaultsMatchTheShippedConfiguration() {
+    void relaxationDefaultsMatchTheShippedConfiguration() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         assertThat(properties.getEvents().getReadGrantRecheckInterval())
                 .isEqualTo(java.time.Duration.ofSeconds(5));
@@ -47,6 +47,27 @@ class ManagedAgentPropertiesTest {
                 .isEqualTo(java.time.Duration.ofSeconds(5));
         assertThat(properties.getToolPublication()
                 .isJournalHeadAuthorization()).isFalse();
+        // ... and the shipped application.yml mirrors the same values.
+        var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml",
+                        new org.springframework.core.io.ClassPathResource(
+                                "application.yml"));
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withInitializer(ctx -> yaml.forEach(
+                        ctx.getEnvironment().getPropertySources()::addLast))
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    ManagedAgentProperties bound = started
+                            .getBean(ManagedAgentProperties.class);
+                    assertThat(bound.getEvents().getReadGrantRecheckInterval())
+                            .isEqualTo(java.time.Duration.ofSeconds(5));
+                    assertThat(bound.getArtifacts()
+                            .getReadRevalidationInterval())
+                            .isEqualTo(java.time.Duration.ofSeconds(5));
+                    assertThat(bound.getToolPublication()
+                            .isJournalHeadAuthorization()).isFalse();
+                });
     }
 
     @Test

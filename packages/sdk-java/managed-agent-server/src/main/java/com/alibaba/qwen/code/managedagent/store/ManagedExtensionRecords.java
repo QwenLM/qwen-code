@@ -668,20 +668,25 @@ public final class ManagedExtensionRecords {
      * extraction and the authorization journal scans: an integral number or
      * an integral numeric string, else absent. Anything fractional, out of
      * range, or otherwise shaped is absent, so the scans and the head columns
-     * can never disagree about whether a payload was representable.
+     * can never disagree about whether a payload was representable. The width
+     * pre-check runs before any BigInteger materialization, so an
+     * exponent-form string cannot tax the reader.
      */
     public static Long millisLenient(JsonNode node) {
         if (node == null || node.isNull()) {
             return null;
         }
         try {
-            if (node.isNumber()) {
-                return node.decimalValue().toBigIntegerExact()
-                        .longValueExact();
-            }
-            if (node.isTextual()) {
-                return new BigDecimal(node.textValue().trim())
-                        .toBigIntegerExact().longValueExact();
+            if (node.isNumber() || node.isTextual()) {
+                BigDecimal value = node.isTextual()
+                        ? new BigDecimal(node.textValue().trim())
+                        : node.decimalValue();
+                // A long holds at most 19 integer digits; never materialize
+                // anything wider.
+                if (value.precision() - value.scale() > 19) {
+                    return null;
+                }
+                return value.toBigIntegerExact().longValueExact();
             }
         } catch (ArithmeticException | NumberFormatException error) {
             return null;

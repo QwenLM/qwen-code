@@ -278,8 +278,11 @@ public class ManagedEventStreamService {
     /**
      * A stream's read grant, re-verified against the database at most once
      * per recheck interval instead of before every delivered event; a
-     * revocation takes effect within the interval, and a session.deleted
-     * event still ends the stream immediately.
+     * revocation stops event delivery within the interval, and a
+     * session.deleted event still ends the stream immediately. The recheck
+     * runs when the stream loop iterates, so an idle stream closes at its
+     * next wake: closure takes at most the interval plus
+     * events.poll-interval.
      */
     private final class ReadGrant {
         private final SseEmitter emitter;

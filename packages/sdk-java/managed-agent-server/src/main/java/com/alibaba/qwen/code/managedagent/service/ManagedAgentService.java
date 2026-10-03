@@ -55,7 +55,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
@@ -82,7 +81,6 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
-    private ManagedActionStore actions;
     private RuntimeWarmer runtimeWarmer;
 
     @Autowired(required = false)
@@ -95,14 +93,8 @@ public class ManagedAgentService {
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
     }
 
-    @Autowired
-    void setActions(ManagedActionStore actions) {
-        this.actions = actions;
-    }
-
     private boolean hasActions(SessionRecord session) {
         return session.workspace() != null
-                && actions != null
                 && !"yolo".equals(session.approvalMode());
     }
 
@@ -472,13 +464,19 @@ public class ManagedAgentService {
                 List<EventRecord> events = new ArrayList<>(
                         store.findControlEvents(tenantId, sessionId,
                                 snapshot.coveredSequence()));
-                events.addAll(tailEvents(tenantId, sessionId,
-                        snapshot.coveredSequence(), visibleSequence));
+                // A lagging snapshot's tail is capped at the caller's limit,
+                // newest events kept; the client pages the rest.
+                EventPage tail = store.findNewestTailEvents(tenantId,
+                        sessionId, snapshot.coveredSequence(), limit);
+                events.addAll(tail.events());
+                String olderCursor = tail.hasMore() && !tail.events().isEmpty()
+                        ? Long.toString(tail.events().get(0).sequence())
+                        : null;
                 return new WebShellTranscript(snapshot.items().stream()
                         .map(this::webShellItem).toList(),
                         events.stream().map(this::webShellEvent).toList(),
-                        snapshot.coveredSequence(), null, false,
-                        visibleSequence);
+                        snapshot.coveredSequence(), olderCursor,
+                        tail.hasMore(), visibleSequence);
             }
         }
         EventPage page = store.findTranscriptEvents(tenantId, sessionId,
@@ -531,8 +529,7 @@ public class ManagedAgentService {
                 .map(session -> publicSession(session,
                         activeTurns.get(session.sessionId()),
                         coveredSequences.getOrDefault(session.sessionId(), 0L),
-                        session.workspace() == null
-                                || closed.contains(session.sessionId())))
+                        retention(session, closed)))
                 .toList();
     }
 
@@ -544,6 +541,12 @@ public class ManagedAgentService {
                 .map(SessionRecord::sessionId).toList();
         return bound.isEmpty() ? Set.of()
                 : store.completedWorkspaceCloses(tenantId, bound);
+    }
+
+    private static boolean retention(SessionRecord session,
+            Set<String> closed) {
+        return session.workspace() == null
+                || closed.contains(session.sessionId());
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -598,8 +601,7 @@ public class ManagedAgentService {
                 .map(session -> webShellSession(session,
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
-                        session.workspace() == null
-                                || closed.contains(session.sessionId())))
+                        retention(session, closed)))
                 .toList();
     }
 
@@ -727,27 +729,6 @@ public class ManagedAgentService {
     private WebShellContentPart webShellContentPart(ItemPartRecord part) {
         return new WebShellContentPart(part.partId(), part.type(), part.text(),
                 part.firstSequence(), part.lastSequence());
-    }
-
-    private List<EventRecord> tailEvents(String tenantId, String sessionId,
-            long afterSequence, long throughSequence) {
-        List<EventRecord> result = new ArrayList<>();
-        long cursor = afterSequence;
-        while (cursor < throughSequence) {
-            List<EventRecord> page = store.findEvents(tenantId, sessionId,
-                    cursor, 100);
-            if (page.isEmpty()) {
-                break;
-            }
-            for (EventRecord event : page) {
-                if (event.sequence() > throughSequence) {
-                    return List.copyOf(result);
-                }
-                result.add(event);
-                cursor = event.sequence();
-            }
-        }
-        return List.copyOf(result);
     }
 
     private void dispatch(String tenantId, Admission admission) {

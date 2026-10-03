@@ -18,7 +18,7 @@ Registry 由管理员填充 SQL，按租户隔离，并以精确的 Workspace ID
 
 ## 访问权限与执行门禁
 
-绑定 Session 的 GET/list、事件、item、transcript 和 SSE 要求当前读权限。列表在分页之前过滤。SSE 在打开时保存已授权且不可变的 Session 绑定，并在每个事件（包括终态事件）投递前重新检查当前读权限。未绑定流不会在每次投递时查询 Session。已有流可读取已提交事件直到 `session.deleted`，随后立即正常结束；新打开流或读取已删除 Session 仍返回 404。撤权会正常结束流，不再投递事件。无读权限的直接请求返回 404。绑定 Turn 的提交/取消和 Session 生命周期修改继续不可用，不写命令，也不调用 Hosted Harness/Broker。Store 拒绝直接写入绑定 Turn 和生命周期命令；恢复调度在调用 Hosted Harness 前使任何已持久化的绑定 Turn 失败；嵌入式 Broker 拒绝把绑定 Session 解析到全局 Workspace。无读权限的 actor 在这些不可用 HTTP 操作上也得到 404。未绑定旧路径行为不变。（2026-10-02 由 issue #13181 取代：复检改为窗口化——至多每个 `qwen.managed-agent.events.read-grant-recheck-interval`（默认 5 秒）一次——撤权在窗口到期时生效，而非在下一个事件之前；`session.deleted` 仍立即终止流。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.md) §4。）
+绑定 Session 的 GET/list、事件、item、transcript 和 SSE 要求当前读权限。列表在分页之前过滤。SSE 在打开时保存已授权且不可变的 Session 绑定，并在每个事件（包括终态事件）投递前重新检查当前读权限。未绑定流不会在每次投递时查询 Session。已有流可读取已提交事件直到 `session.deleted`，随后立即正常结束；新打开流或读取已删除 Session 仍返回 404。复检失败会结束流且不投递该事件；复检窗口未到期前提交的事件仍会先投递，因此撤权在一个 `read-grant-recheck-interval` 内生效。无读权限的直接请求返回 404。绑定 Turn 的提交/取消和 Session 生命周期修改继续不可用，不写命令，也不调用 Hosted Harness/Broker。Store 拒绝直接写入绑定 Turn 和生命周期命令；恢复调度在调用 Hosted Harness 前使任何已持久化的绑定 Turn 失败；嵌入式 Broker 拒绝把绑定 Session 解析到全局 Workspace。无读权限的 actor 在这些不可用 HTTP 操作上也得到 404。未绑定旧路径行为不变。（2026-10-02 由 issue #13181 取代：复检改为窗口化——至多每个 `qwen.managed-agent.events.read-grant-recheck-interval`（默认 5 秒）一次——撤权在窗口到期时生效，而非在下一个事件之前；`session.deleted` 仍立即终止流。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.zh-CN.md) §4。）
 
 原定由 W0b 负责的 Agent、Bundle 和配置兼容性校验延后至 W0c，必须在启用绑定执行之前完成。W0c 必须解析并校验冻结的配置/策略引用与 Agent、Bundle 的兼容性，不能静默改用当前 Registry 值；不兼容的绑定保持不可执行，需新建兼容 Session。此处的元数据准入不证明兼容性。
 

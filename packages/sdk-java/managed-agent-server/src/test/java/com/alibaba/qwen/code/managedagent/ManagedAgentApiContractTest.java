@@ -1181,8 +1181,9 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
         awaitIdle(tenant, sessionId);
-        TurnSummary first = store.findLatestTurn(tenant, sessionId)
-                .orElseThrow();
+        TurnSummary first = java.util.Objects.requireNonNull(
+                store.findLatestTurns(tenant, java.util.List.of(sessionId))
+                        .get(sessionId));
         // The fixture Harness runs one Turn per Session, so the second Turn
         // is written as a failed dispatch would leave it.
         String second = "turn_" + UUID.randomUUID().toString()

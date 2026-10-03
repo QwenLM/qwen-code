@@ -197,55 +197,18 @@ class ManagedArtifactReadIntegrationTest {
         var sessions = source.sessions;
         var stdout = source.stdout;
         var permission = new java.util.concurrent.atomic.AtomicBoolean(true);
-        ManagedArtifactPolicy policy =
-                new ManagedArtifactPolicy() {
-                    public String version() {
-                        return fixture.policy().version();
-                    }
-
-                    public boolean publishOriginal(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean publishPreview(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean readOriginal(String t, String a, String w, String s) {
-                        return permission.get();
-                    }
-                };
-        var reader = spy(fixture.reader());
-        doAnswer(
-                        invocation -> {
-                            var input = (java.io.InputStream) invocation.callRealMethod();
-                            return new java.io.FilterInputStream(input) {
-                                public int read(byte[] bytes, int offset, int length)
-                                        throws java.io.IOException {
-                                    return super.read(bytes, offset, Math.min(1, length));
-                                }
-                            };
-                        })
-                .when(reader)
-                .open(any(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
-        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
-        var output = spy(response.getOutputStream());
-        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
-        doAnswer(
-                        invocation -> {
-                            invocation.callRealMethod();
-                            if (deleteSession) {
-                                fixture.jdbc()
-                                        .update(
-                                                "UPDATE managed_agent_session SET status ="
-                                                    + " 'DELETING'");
-                            } else {
-                                permission.set(false);
-                            }
-                            return null;
-                        })
-                .when(output)
-                .write(any(byte[].class), anyInt(), anyInt());
+        var policy = readingPolicy(fixture, permission::get);
+        var reader = oneBytePerReadReader(fixture, 0);
+        var response = flippingResponse(() -> {
+            if (deleteSession) {
+                fixture.jdbc()
+                        .update(
+                                "UPDATE managed_agent_session SET status ="
+                                    + " 'DELETING'");
+            } else {
+                permission.set(false);
+            }
+        });
         // A zero revalidation window re-verifies access on every chunk.
         fixture.properties().getArtifacts()
                 .setReadRevalidationInterval(java.time.Duration.ZERO);
@@ -269,6 +232,15 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(failure)
                 .isInstanceOf(java.io.IOException.class)
                 .hasMessage("Artifact stream interrupted");
+        // The flipping stub really fired its state change.
+        if (deleteSession) {
+            assertThat(fixture.jdbc().queryForObject(
+                    "SELECT status FROM managed_agent_session"
+                            + " WHERE session_id = 'session-1'",
+                    String.class)).isEqualTo("DELETING");
+        } else {
+            assertThat(permission).isFalse();
+        }
     }
 
     @org.junit.jupiter.api.Test
@@ -279,52 +251,11 @@ class ManagedArtifactReadIntegrationTest {
         var fixture = source.fixture;
         var sessions = source.sessions;
         var stdout = source.stdout;
-        var permission = new java.util.concurrent.atomic.AtomicBoolean(true);
-        ManagedArtifactPolicy policy =
-                new ManagedArtifactPolicy() {
-                    public String version() {
-                        return fixture.policy().version();
-                    }
-
-                    public boolean publishOriginal(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean publishPreview(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean readOriginal(String t, String a, String w, String s) {
-                        return permission.get();
-                    }
-                };
-        var reader = spy(fixture.reader());
-        doAnswer(
-                        invocation -> {
-                            var input = (java.io.InputStream) invocation.callRealMethod();
-                            return new java.io.FilterInputStream(input) {
-                                public int read(byte[] bytes, int offset, int length)
-                                        throws java.io.IOException {
-                                    return super.read(bytes, offset, Math.min(1, length));
-                                }
-                            };
-                        })
-                .when(reader)
-                .open(any(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
-        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
-        var output = spy(response.getOutputStream());
-        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
-        doAnswer(
-                        invocation -> {
-                            invocation.callRealMethod();
-                            fixture.jdbc()
-                                    .update(
-                                            "UPDATE managed_agent_session SET status ="
-                                                + " 'DELETING'");
-                            return null;
-                        })
-                .when(output)
-                .write(any(byte[].class), anyInt(), anyInt());
+        var policy = readingPolicy(fixture, () -> true);
+        var reader = oneBytePerReadReader(fixture, 0);
+        var response = flippingResponse(() -> fixture.jdbc()
+                .update("UPDATE managed_agent_session SET status ="
+                        + " 'DELETING'"));
         // A 60s window: the DELETING lifecycle gate is evaluated by the
         // throttled access check, so a stage-1 deletion lands only when the
         // window lapses - here, after the stream has completed.
@@ -348,6 +279,12 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(response.getContentAsByteArray())
                 .isEqualTo(new byte[] {'a', 'b', 'c'});
         assertThat(failure).isNull();
+        // The deferral is real: the stage-1 transition really happened
+        // mid-stream, and the window is what let the stream complete.
+        assertThat(fixture.jdbc().queryForObject(
+                "SELECT status FROM managed_agent_session"
+                        + " WHERE session_id = 'session-1'",
+                String.class)).isEqualTo("DELETING");
     }
 
     @org.junit.jupiter.api.Test
@@ -359,39 +296,10 @@ class ManagedArtifactReadIntegrationTest {
         var sessions = source.sessions;
         var stdout = source.stdout;
         var calls = new AtomicInteger();
-        ManagedArtifactPolicy policy =
-                new ManagedArtifactPolicy() {
-                    public String version() {
-                        return fixture.policy().version();
-                    }
-
-                    public boolean publishOriginal(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean publishPreview(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean readOriginal(String t, String a, String w, String s) {
-                        // Revoked once the window has armed; a third call
-                        // would fail, and the window must not make it.
-                        return calls.incrementAndGet() <= 2;
-                    }
-                };
-        var reader = spy(fixture.reader());
-        doAnswer(
-                        invocation -> {
-                            var input = (java.io.InputStream) invocation.callRealMethod();
-                            return new java.io.FilterInputStream(input) {
-                                public int read(byte[] bytes, int offset, int length)
-                                        throws java.io.IOException {
-                                    return super.read(bytes, offset, Math.min(1, length));
-                                }
-                            };
-                        })
-                .when(reader)
-                .open(any(), any(), any(Runnable.class));
+        // Revoked once the window has armed; a third call would fail, and
+        // the window must not make it.
+        var policy = readingPolicy(fixture, () -> calls.incrementAndGet() <= 2);
+        var reader = oneBytePerReadReader(fixture, 0);
         var response = new org.springframework.mock.web.MockHttpServletResponse();
         fixture.properties().getArtifacts()
                 .setReadRevalidationInterval(java.time.Duration.ofSeconds(60));
@@ -426,60 +334,17 @@ class ManagedArtifactReadIntegrationTest {
         var sessions = source.sessions;
         var stdout = source.stdout;
         var permission = new java.util.concurrent.atomic.AtomicBoolean(true);
-        ManagedArtifactPolicy policy =
-                new ManagedArtifactPolicy() {
-                    public String version() {
-                        return fixture.policy().version();
-                    }
-
-                    public boolean publishOriginal(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean publishPreview(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean readOriginal(String t, String a, String w, String s) {
-                        return permission.get();
-                    }
-                };
-        var reader = spy(fixture.reader());
-        doAnswer(
-                        invocation -> {
-                            var input = (java.io.InputStream) invocation.callRealMethod();
-                            return new java.io.FilterInputStream(input) {
-                                public int read(byte[] bytes, int offset, int length)
-                                        throws java.io.IOException {
-                                    try {
-                                        Thread.sleep(500);
-                                    } catch (InterruptedException error) {
-                                        Thread.currentThread().interrupt();
-                                    }
-                                    return super.read(bytes, offset, Math.min(1, length));
-                                }
-                            };
-                        })
-                .when(reader)
-                .open(any(), any(), any(Runnable.class));
-        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
-        var output = spy(response.getOutputStream());
-        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
-        doAnswer(
-                        invocation -> {
-                            invocation.callRealMethod();
-                            permission.set(false);
-                            return null;
-                        })
-                .when(output)
-                .write(any(byte[].class), anyInt(), anyInt());
-        // A 1500ms window armed at open: reads take ~500ms each, so the two
-        // in-window chunks ship (1000 < 1500) and the third read ends past
-        // the window (>= 1500 >= the deadline), where the recheck observes
-        // the revocation. The 500ms margins absorb scheduler stalls; the
-        // deny side cannot undershoot because sleeps never finish early.
+        var policy = readingPolicy(fixture, permission::get);
+        var reader = oneBytePerReadReader(fixture, 1000);
+        var response = flippingResponse(() -> permission.set(false));
+        // A 3s window armed at open: reads take ~1s each, so the two
+        // in-window chunks ship (guards at ~1s and ~2s pass) and the third
+        // read ends past the window (>= 3s >= the deadline), where the
+        // recheck observes the revocation. The 1000ms margins absorb
+        // scheduler stalls; the deny side cannot undershoot because sleeps
+        // never finish early.
         fixture.properties().getArtifacts()
-                .setReadRevalidationInterval(java.time.Duration.ofMillis(1500));
+                .setReadRevalidationInterval(java.time.Duration.ofMillis(3000));
         var service =
                 new ManagedArtifactService(
                         sessions, fixture.results(), reader, policy, fixture.properties());
@@ -695,6 +560,69 @@ class ManagedArtifactReadIntegrationTest {
             logger.detachAppender(appender);
             appender.stop();
         }
+    }
+
+    private static ManagedArtifactPolicy readingPolicy(
+            ToolPublicationStoreTest.ApiFixture fixture,
+            java.util.function.BooleanSupplier allowed) {
+        return new ManagedArtifactPolicy() {
+            public String version() {
+                return fixture.policy().version();
+            }
+
+            public boolean publishOriginal(String t, String w, String s) {
+                return true;
+            }
+
+            public boolean publishPreview(String t, String w, String s) {
+                return true;
+            }
+
+            public boolean readOriginal(String t, String a, String w, String s) {
+                return allowed.getAsBoolean();
+            }
+        };
+    }
+
+    private static ManagedArtifactReader oneBytePerReadReader(
+            ToolPublicationStoreTest.ApiFixture fixture, long perReadDelayMillis) {
+        var reader = spy(fixture.reader());
+        doAnswer(
+                        invocation -> {
+                            var input = (java.io.InputStream) invocation.callRealMethod();
+                            return new java.io.FilterInputStream(input) {
+                                public int read(byte[] bytes, int offset, int length)
+                                        throws java.io.IOException {
+                                    if (perReadDelayMillis > 0) {
+                                        try {
+                                            Thread.sleep(perReadDelayMillis);
+                                        } catch (InterruptedException error) {
+                                            Thread.currentThread().interrupt();
+                                        }
+                                    }
+                                    return super.read(bytes, offset, Math.min(1, length));
+                                }
+                            };
+                        })
+                .when(reader)
+                .open(any(), any(), any(Runnable.class));
+        return reader;
+    }
+
+    private static org.springframework.mock.web.MockHttpServletResponse flippingResponse(
+            Runnable onWrite) throws java.io.IOException {
+        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
+        var output = spy(response.getOutputStream());
+        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
+        doAnswer(
+                        invocation -> {
+                            invocation.callRealMethod();
+                            onWrite.run();
+                            return null;
+                        })
+                .when(output)
+                .write(any(byte[].class), anyInt(), anyInt());
+        return response;
     }
 
     private static MockMvc mvc(ManagedArtifactService service) {
