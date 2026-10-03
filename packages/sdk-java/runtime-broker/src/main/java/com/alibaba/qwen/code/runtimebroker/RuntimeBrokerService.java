@@ -1239,7 +1239,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
         })
                 .whenComplete((reconciled, error) -> {
-                    if (cooled) {
+                    // An Error is not a lookup answer: both paths above
+                    // refuse to downgrade one, so the cache must not either.
+                    if (cooled && (error == null
+                            || !(unwrap(error) instanceof Error))) {
                         // Stamp before dropping the in-flight slot, so no
                         // sequential observer can slip between them and fan
                         // through to the worker. A failed lookup cools as

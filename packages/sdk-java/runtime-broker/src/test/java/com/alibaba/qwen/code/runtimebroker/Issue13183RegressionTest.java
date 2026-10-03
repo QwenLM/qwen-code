@@ -529,6 +529,34 @@ class Issue13183RegressionTest {
     }
 
     /**
+     * An Error is not a lookup answer. The takeover path and the HTTP face
+     * both refuse to downgrade one, so the cooldown must not cache one
+     * either: the next observation asks the Runtime again instead of being
+     * served a synthetic UNRESOLVED answer built out of the failure.
+     */
+    @Test
+    void anErrorDoesNotArmTheObservationCooldown() throws Exception {
+        try (UnknownObservationHarness harness =
+                new UnknownObservationHarness()) {
+            String executionId = harness.prepared.getExecutionCallId();
+            harness.transport.failStatusWithError = true;
+            assertThrows(CompletionException.class, () -> harness.service
+                    .observeExecution("harness", harness.runtime, executionId)
+                    .toCompletableFuture().join());
+            assertEquals(1, harness.transport.statusCalls.get());
+
+            // Still inside the cooldown window: had the Error armed the
+            // cache, this observation would be served from it and the worker
+            // would never be asked again.
+            harness.transport.failStatusWithError = false;
+            harness.service.observeExecution("harness", harness.runtime,
+                    executionId).toCompletableFuture().join();
+            assertEquals(2, harness.transport.statusCalls.get(),
+                    "an Error must not arm the observation cooldown");
+        }
+    }
+
+    /**
      * An explicit {@code reconcile=true} asks the Runtime every time, even
      * inside the automatic observation's cooldown window.
      */
@@ -1485,6 +1513,7 @@ class Issue13183RegressionTest {
         final AtomicInteger statusCalls = new AtomicInteger();
         volatile boolean failExecutions;
         volatile boolean failStatus;
+        volatile boolean failStatusWithError;
         volatile Map<String, Object> statusResult = Map.of("state",
                 "unknown");
 
@@ -1504,6 +1533,11 @@ class Issue13183RegressionTest {
                 RuntimeSession session, Map<String, Object> reference,
                 long afterSequence) {
             statusCalls.incrementAndGet();
+            if (failStatusWithError) {
+                // Thrown, not returned, so it reaches the caller through
+                // safeStage's Error arm the way a broken JVM would.
+                throw new AssertionError("worker status blew up");
+            }
             if (failStatus) {
                 return CompletableFuture.failedFuture(new RuntimeBrokerException(
                         503, "managed_runtime_unavailable",
