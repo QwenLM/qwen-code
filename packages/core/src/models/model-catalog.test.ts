@@ -15,6 +15,7 @@ import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
   hasExplicitOutputLimit,
+  normalize,
   tokenLimit,
 } from '../core/tokenLimits.js';
 import { computeThresholds } from '../services/chatCompressionService.js';
@@ -122,21 +123,23 @@ describe('model catalog', () => {
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
   });
 
-  it.each([undefined, 0, 2])(
-    'ignores a newer cache from another projection (%s)',
-    (projection) => {
-      writeJson(getModelCatalogCachePath(), {
-        source: MODELS_DEV_URL,
-        fetchedAt: FAR_FUTURE,
-        projection,
-        models: { 'deepseek-v4-flash': { modalities: { image: true } } },
-      });
+  it.each([
+    undefined,
+    0,
+    MODEL_CATALOG_PROJECTION_VERSION - 1,
+    MODEL_CATALOG_PROJECTION_VERSION + 1,
+  ])('ignores a newer cache from another projection (%s)', (projection) => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: FAR_FUTURE,
+      projection,
+      models: { 'deepseek-v4-flash': { modalities: { image: true } } },
+    });
 
-      expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
-      expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
-      expect(lookupModelCatalog(bundledId)).toEqual(bundledEntry);
-    },
-  );
+    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+    expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
+    expect(lookupModelCatalog(bundledId)).toEqual(bundledEntry);
+  });
 
   it('ignores a cache older than the bundled snapshot', () => {
     writeJson(getModelCatalogCachePath(), {
@@ -519,5 +522,43 @@ describe('model catalog', () => {
     // maintainer happened to generate from (scripts/generate-model-catalog.ts
     // stamps MODELS_DEV_URL for local-path inputs).
     expect(bundled.source).toBe(MODELS_DEV_URL);
+  });
+
+  it('stamps the committed snapshot with the current projection version', () => {
+    // loadModelCatalog and the ETag reuse in model-catalog-refresh.ts both
+    // gate on MODEL_CATALOG_PROJECTION_VERSION, so a snapshot committed at an
+    // older projection is silently rejected in favour of whatever a user has
+    // cached — and nothing else in CI pins the file's freshness.
+    expect(bundled.projection).toBe(MODEL_CATALOG_PROJECTION_VERSION);
+  });
+
+  it('serves both spellings of a dotted version from the committed snapshot', () => {
+    // #13209: models.dev publishes one spelling per provider (alibaba lists
+    // `qwen2-5-72b-instruct`), and normalize() folds the dotted minor to
+    // dashes for Claude only, so the dotted qwen spelling looked up a key the
+    // projection never wrote and fell through to the `/^qwen/` family rows.
+    expect(lookupModelCatalog(normalize('qwen2.5-72b-instruct'))).toEqual(
+      lookupModelCatalog('qwen2-5-72b-instruct'),
+    );
+    expect(tokenLimit('qwen2.5-72b-instruct')).toBe(131_072);
+    // The vision twin lost `{image:true}` the same way and degraded to the
+    // text-only `/^qwen/` modality row.
+    expect(lookupModelCatalog(normalize('qwen2.5-vl-72b-instruct'))).toEqual({
+      context: 131_072,
+      output: 8_192,
+      modalities: { image: true },
+    });
+  });
+
+  it('keeps the ids whose row requires the dot off the alias machinery', () => {
+    // A blanket dot->dash fold in normalize() would move `qwen3.5-max` off
+    // `/^qwen3\.\d/` (1M input, 64K output) and `glm-5.3-flash` off
+    // modalityDefaults' `/^glm-5\.3-flash/`. The alias is committed per key
+    // instead, so normalize() must stay untouched.
+    expect(normalize('qwen3.5-max')).toBe('qwen3.5-max');
+    expect(normalize('glm-5.3-flash')).toBe('glm-5.3-flash');
+    expect(tokenLimit('qwen3.5-max')).toBe(1_000_000);
+    expect(tokenLimit('qwen3.5-max', 'output')).toBe(65_536);
+    expect(lookupModelCatalog('glm-5.3-flash')?.modalities?.image).toBe(true);
   });
 });

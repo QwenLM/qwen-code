@@ -144,9 +144,36 @@ function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
 }
 
 /**
+ * The same version with its minor separator respelled: `qwen2-5-72b-instruct`
+ * <-> `qwen2.5-72b-instruct`, `glm-5.3-flash` <-> `glm-5-3-flash`. Vendors and
+ * the proxies in front of them accept either spelling, and `normalize()` folds
+ * the dotted minor to dashes for Claude only, so every other family reaches the
+ * catalog with whichever spelling the user typed. models.dev publishes one
+ * spelling per provider — `alibaba` lists `qwen2-5-72b-instruct`, `zai` lists
+ * `glm-5.3-flash` — so keying an entry by `normalize(model.id)` alone left the
+ * other spelling to fall through to the family regex rows (#13209):
+ * `tokenLimit('qwen2.5-72b-instruct')` answered 262,144 instead of the
+ * catalog's own 131,072, and the vision twin degraded to text-only.
+ *
+ * Only a version boundary is respelled. The digit run before the separator has
+ * to be the last one in the prefix and the run after it has to be a whole
+ * segment, so a size suffix is never mistaken for a minor version
+ * (`gemma-4-26b-a4b-it` gets no alias). Returns undefined when the key carries
+ * no version to respell.
+ */
+function versionSpellingAlias(key: string): string | undefined {
+  const dotted = key.replace(/^(.*\d)-(\d+(?=-|$))/, '$1.$2');
+  if (dotted !== key) {
+    return dotted;
+  }
+  const dashed = key.replace(/^(.*\d)\.(\d+(?=-|$))/, '$1-$2');
+  return dashed === key ? undefined : dashed;
+}
+
+/**
  * Projects a models.dev `api.json` payload onto the catalog shape: one entry
- * per normalized model id with only the fields the limit and modality tables
- * consume.
+ * per normalized model id, committed under both spellings of its version, with
+ * only the fields the limit and modality tables consume.
  *
  * Two ids can land on the same key, either because they normalize together
  * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
@@ -246,6 +273,35 @@ export function trimModelsDevCatalog(
     }
     if (Object.keys(entry).length > 0) {
       agreed.push([key, entry]);
+    }
+  }
+  // Commit every entry under the other spelling of its version too, so the
+  // dotted and dashed ids a vendor accepts both reach it (#13209).
+  const committed = new Set(agreed.map(([key]) => key));
+  const aliasCandidates = new Map<string, ModelCatalogEntry[]>();
+  for (const [key, entry] of agreed) {
+    const alias = versionSpellingAlias(key);
+    // A key the projection already wrote describes a model of its own and
+    // keeps its own numbers. An alias normalize() does not return unchanged
+    // is unreachable by its own spelling (Claude's dotted minor is folded to
+    // dashes), so it would be a dead key — the same class isModelCatalogKey
+    // keeps out of the projection above.
+    if (!alias || committed.has(alias) || !isModelCatalogKey(alias)) {
+      continue;
+    }
+    const existing = aliasCandidates.get(alias);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      aliasCandidates.set(alias, [entry]);
+    }
+  }
+  for (const [alias, candidates] of aliasCandidates) {
+    // Two spellings claiming one alias with different numbers would let the
+    // payload order decide what a user gets; drop it, as the provider and
+    // alias disagreement rules above do.
+    if (candidates.every((candidate) => sameEntry(candidate, candidates[0]!))) {
+      agreed.push([alias, candidates[0]!]);
     }
   }
   return {

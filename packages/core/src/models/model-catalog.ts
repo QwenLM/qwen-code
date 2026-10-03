@@ -29,7 +29,10 @@ export interface ModelCatalog {
 }
 
 // Bump when projection rules change so older caches are fetched and reprojected.
-export const MODEL_CATALOG_PROJECTION_VERSION = 1;
+// 2: entries are also committed under the other spelling of their version
+//    (`qwen2-5-72b-instruct` <-> `qwen2.5-72b-instruct`), so a projection-1
+//    cache must not keep winning and silently drop the aliases (#13209).
+export const MODEL_CATALOG_PROJECTION_VERSION = 2;
 
 /** `QWEN_CODE_MODELS_DEV=off` restores the regex-only model tables. */
 export const MODEL_CATALOG_ENV = 'QWEN_CODE_MODELS_DEV';

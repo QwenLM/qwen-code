@@ -331,6 +331,135 @@ describe('trimModelsDevCatalog', () => {
     expect(models).not.toHaveProperty('claude-sonnet-4@default');
     expect(models).not.toHaveProperty('auto');
   });
+
+  it('keys a version under its dotted as well as its dashed spelling', () => {
+    // #13209: alibaba publishes the dashed spelling only, so the dotted one
+    // the vendor and every proxy in front of it also accept missed the
+    // catalog and fell through to the `/^qwen/` family rows.
+    const models = trimModelsDevCatalog(
+      {
+        alibaba: {
+          models: {
+            'qwen2-5-72b-instruct': chat('qwen2-5-72b-instruct', {
+              context: 131072,
+              output: 8192,
+            }),
+            'qwen2-5-vl-72b-instruct': chat(
+              'qwen2-5-vl-72b-instruct',
+              { context: 131072, output: 8192 },
+              ['text', 'image'],
+            ),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['qwen2.5-72b-instruct']).toEqual(
+      models['qwen2-5-72b-instruct'],
+    );
+    expect(models['qwen2.5-72b-instruct']).toEqual({
+      context: 131072,
+      output: 8192,
+      modalities: {},
+    });
+    expect(models['qwen2.5-vl-72b-instruct']).toEqual({
+      context: 131072,
+      output: 8192,
+      modalities: { image: true },
+    });
+  });
+
+  it('keys a dashed spelling next to the dotted one it committed', () => {
+    // zai publishes `glm-5.3-flash`; the reverse direction has to work too
+    // or a proxy exposing the dashed spelling misses the same entry.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-5.3-flash': chat('glm-5.3-flash', {
+              context: 1000000,
+              output: 131072,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['glm-5-3-flash']).toEqual(models['glm-5.3-flash']);
+  });
+
+  it('never aliases over a key the projection committed itself', () => {
+    // Both spellings are real keys with different endpoint limits here, so
+    // each keeps its own numbers instead of one aliasing over the other.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-5.3-flash': chat('glm-5.3-flash', {
+              context: 1000000,
+              output: 131072,
+            }),
+          },
+        },
+        volcengine: {
+          models: {
+            'glm-5-3-flash-260828': chat('glm-5-3-flash-260828', {
+              context: 200000,
+              output: 16384,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['glm-5.3-flash']).toEqual({
+      context: 1000000,
+      output: 131072,
+      modalities: {},
+    });
+    expect(models['glm-5-3-flash']).toEqual({
+      context: 200000,
+      output: 16384,
+      modalities: {},
+    });
+  });
+
+  it('adds no alias for a spelling normalize() already folds', () => {
+    // Claude's dotted minor is rewritten to dashes by normalize(), so the
+    // dotted key is unreachable by its own spelling and isModelCatalogKey
+    // rejects it — committing it would resurrect the dead-key class the
+    // fixed-point filter exists for.
+    const models = trimModelsDevCatalog(
+      {
+        anthropic: {
+          models: {
+            'claude-opus-4.8': chat('claude-opus-4.8', {
+              context: 1000000,
+              output: 128000,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(Object.keys(models)).toEqual(['claude-opus-4-8']);
+  });
+
+  it('does not respell a size suffix into a minor version', () => {
+    const models = trimModelsDevCatalog(
+      {
+        google: {
+          models: {
+            'gemma-4-26b-a4b-it': chat('gemma-4-26b-a4b-it', {
+              context: 131072,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(Object.keys(models)).toEqual(['gemma-4-26b-a4b-it']);
+  });
 });
 
 describe('refreshModelCatalog', () => {
@@ -596,7 +725,7 @@ describe('refreshModelCatalog', () => {
     expect(Date.parse(cache.fetchedAt)).toBeGreaterThan(Date.parse(LONG_AGO));
   });
 
-  it.each([undefined, 0, 2])(
+  it.each([undefined, 0, MODEL_CATALOG_PROJECTION_VERSION - 1])(
     'does not revalidate an older projection on 304 (%s)',
     async (projection) => {
       writeJson(getModelCatalogCachePath(), {
