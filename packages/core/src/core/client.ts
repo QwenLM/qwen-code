@@ -1088,6 +1088,9 @@ export class LlmClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    // Stripped entries can carry the conditional-rule reminder appended to a
+    // read_file result, so the consumed marker must be dropped with them.
+    this.resetConditionalRuleInjectionMarkers();
     this.config
       .getMemoryManager()
       .restoreMemoryBodiesPresentInHistory(
@@ -1887,6 +1890,10 @@ export class LlmClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
+    // startChat() drops every tool result, so no conditional-rule reminder
+    // survives /clear. Without this the new session could never inject the
+    // rule again for the life of the process.
+    this.resetConditionalRuleInjectionMarkers();
     // Clean up old tool result overflow files on /clear
     void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
@@ -5539,6 +5546,11 @@ export class LlmClient {
       settleMemoryDelivery();
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
+        // The tool result never reached the model, so neither did the
+        // conditional-rule reminder appended to it. Roll the marker back for
+        // the same reason the memory bodies are restored above: a transient
+        // send failure must not burn the rule for the rest of the session.
+        this.resetConditionalRuleInjectionMarkers();
       }
       if (
         this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&

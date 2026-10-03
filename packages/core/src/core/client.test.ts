@@ -3440,6 +3440,20 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
+    it('resets the conditional rule injection markers', async () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+
+      await client.resetChat();
+
+      // startChat() drops every tool result, so no conditional-rule reminder
+      // survives /clear; a stale marker would suppress the rule for the whole
+      // new session.
+      expect(resetInjected).toHaveBeenCalled();
+    });
+
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
       // Without clearRevealedDeferredTools(), deferred tools revealed by
       // resumed-history compatibility in the previous session would carry over
@@ -3660,6 +3674,38 @@ describe('Gemini Client (client.ts)', () => {
       client.stripOrphanedUserEntriesFromHistory();
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
+    });
+
+    it('stripOrphanedUserEntriesFromHistory resets the conditional rule injection markers only when entries were stripped', () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmChat;
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      // The stripped entries can carry the reminder appended to a read_file
+      // result, so the consumed marker must go with them.
+      expect(resetInjected).toHaveBeenCalled();
+
+      // Nothing stripped: every carrier is still in history, so the markers
+      // stay valid and must not be reset.
+      resetInjected.mockClear();
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValue(2),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+      } as unknown as LlmChat;
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(resetInjected).not.toHaveBeenCalled();
     });
 
     it('truncateHistory clears the cache when entries are actually removed', () => {
@@ -4492,6 +4538,10 @@ describe('Gemini Client (client.ts)', () => {
       );
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
       const consumeRecall = vi
         .spyOn(client, 'consumeManagedAutoMemoryRecall')
         .mockResolvedValue(null);
@@ -4526,6 +4576,9 @@ describe('Gemini Client (client.ts)', () => {
           'history now 120000 (+140000 pending), target 250000 (soft-exceeded)',
         ),
       );
+      // The blanked tool results were the carriers of any conditional-rule
+      // reminder, so their markers must go with them.
+      expect(resetInjected).toHaveBeenCalled();
     });
 
     it('omits the soft-exceeded marker when clearing lands exactly on the watermark', async () => {
@@ -4699,6 +4752,10 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       const compressFast = vi.fn().mockReturnValue({
@@ -4763,6 +4820,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['surfacedRelevantAutoMemoryPaths'].size).toBe(0);
       expect(fastDeliveredRefs).toEqual(new Set());
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      // Fast compression blanked tool results, so the conditional-rule
+      // markers must be dropped with the rest of the derived state.
+      expect(resetInjected).toHaveBeenCalled();
     });
 
     it('uses targeted path fallback when fast compression sees an inode miss', async () => {
@@ -4895,6 +4955,10 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
       mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       client['lastDeliveredMemoryTreeRevision'] = 'before-compression';
       client['chat'] = {
@@ -4924,6 +4988,9 @@ describe('Gemini Client (client.ts)', () => {
       ).toHaveBeenCalledOnce();
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
       expect(client['surfacedRelevantAutoMemoryPaths'].size).toBe(0);
+      // Compression rewrote history, so the tool result that carried a
+      // conditional-rule reminder is gone.
+      expect(resetInjected).toHaveBeenCalled();
     });
 
     it('re-prepends startup context and seeds the new chat after compression', async () => {
@@ -5117,6 +5184,10 @@ describe('Gemini Client (client.ts)', () => {
       // the compressed → ChatCompressed bridge in turn.ts. The flip on this
       // path is owned by the for-await loop in client.sendMessageStream, not
       // by tryCompressChat, so this test feeds the event in directly.
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
       vi.spyOn(client, 'tryCompressChat').mockResolvedValue(
         compressionInfo(CompressionStatus.NOOP),
       );
@@ -5141,6 +5212,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledTimes(2);
+      // Auto-compaction dropped the tool results that carried the
+      // conditional-rule reminders.
+      expect(resetInjected).toHaveBeenCalled();
     });
 
     it('keeps managed-memory delivery state reset when compression precedes commit', async () => {
@@ -5591,6 +5665,39 @@ Other open files:
         ),
       ).rejects.toThrow('request failed before first event');
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+    });
+
+    it('rolls back the conditional rule injection markers when a tool result never reaches the model', async () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield* [];
+          throw new Error('request failed before first event');
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await expect(
+        collect(
+          client.sendMessageStream(
+            [{ text: 'tool result' }],
+            new AbortController().signal,
+            'prompt-conditional-rules-fail',
+            { type: SendMessageType.ToolResult },
+          ),
+        ),
+      ).rejects.toThrow('request failed before first event');
+
+      // The reminder rode a tool result the model never received, so the
+      // marker must not survive the failed send — a transient failure must
+      // not burn the rule for the rest of the session.
+      expect(resetInjected).toHaveBeenCalled();
     });
 
     it('does not commit a tree revision when the first model event is an error', async () => {
