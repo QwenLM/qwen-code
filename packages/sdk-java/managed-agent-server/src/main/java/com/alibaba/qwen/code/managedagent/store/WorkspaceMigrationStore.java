@@ -292,6 +292,10 @@ public final class WorkspaceMigrationStore {
                 + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
                 "migration_work_unsettled");
+        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_agent_command c"
+                + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND c.command_status = 'PENDING'") == 0,
+                "migration_work_unsettled");
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
         String after = "";

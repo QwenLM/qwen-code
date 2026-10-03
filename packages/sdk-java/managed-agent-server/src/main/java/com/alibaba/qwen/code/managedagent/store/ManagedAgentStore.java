@@ -436,6 +436,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits only the Session's creator.
@@ -447,6 +448,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (existing.isPresent()) {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
+        }
+        if (session.workspace() != null) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
             throw new ApiException(HttpStatus.CONFLICT, "session_not_active",
@@ -502,6 +506,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
@@ -517,6 +522,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             if ("FAILED".equals(command.status())) {
+                if (session.workspace() != null) {
+                    WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+                }
                 requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
                 jdbc.update("UPDATE managed_agent_command SET command_status ="
@@ -527,6 +535,9 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new SessionMutationCommand(sessionId, command.status(),
                     true);
+        }
+        if (session.workspace() != null) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         requireNoOpenOperation(tenantId, sessionId);
         validateMutationStatus(session, kind);
@@ -549,6 +560,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
@@ -569,6 +581,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 && !"FAILED".equals(command.status())) {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
+        }
+        if (session.workspace() != null) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         validateMutationStatus(session, kind);
         long now = clock.millis();
@@ -666,6 +681,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
         if ("DELETED".equals(session.status())) {
@@ -680,6 +696,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new SessionMutation(session, true);
         }
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ARCHIVED");
         requireNoOpenOperation(tenantId, sessionId);
         if (!hasCompletedWorkspaceClose(tenantId, sessionId)) {
