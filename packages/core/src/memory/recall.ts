@@ -311,12 +311,12 @@ function matchesTitleOrKeyword(
   query: string,
   doc: ScannedAutoMemoryDocument,
   /**
-   * Apply the keyword arm's token-boundary rule to a short Latin title too.
-   * Only the #13003 skip gate sets this: there the match is the final
-   * authority on whether the selector runs at all, so a coincidental inner
-   * substring (`ai` inside `explain`) would cancel the model call that is the
-   * only thing correcting it. Ranking callers keep the loose arm, so default
-   * recall behavior is unchanged.
+   * Apply the keyword arm's token-boundary rule to a single-word Latin title
+   * of any length. Only the #13003 skip gate sets this: there the match is the
+   * final authority on whether the selector runs at all, so a coincidental
+   * inner substring (`ai` inside `explain`, `log` inside `catalog`) would
+   * cancel the model call that is the only thing correcting it. Ranking
+   * callers keep the loose arm, so default recall behavior is unchanged.
    */
   requireTitleBoundary = false,
 ): boolean {
@@ -325,20 +325,24 @@ function matchesTitleOrKeyword(
   const keywords = doc.keywords
     .map((keyword) => normalizeRecallText(keyword).trim())
     .filter(Boolean);
-  const includesKeyword = (keyword: string) => {
-    if (!/^[a-z0-9]{1,2}$/.test(keyword)) {
-      return normalizedQuery.includes(keyword);
-    }
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const includesAtBoundary = (value: string) => {
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(
       `(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`,
       'u',
     ).test(normalizedQuery);
   };
+  const includesKeyword = (keyword: string) =>
+    /^[a-z0-9]{1,2}$/.test(keyword)
+      ? includesAtBoundary(keyword)
+      : normalizedQuery.includes(keyword);
   return (
+    // Multi-word and non-Latin titles keep the loose arm even under
+    // `requireTitleBoundary`: the tokenizer never emits a Latin run shorter
+    // than three characters, so the CJK arm has no boundary rule to apply.
     (title.length > 0 &&
-      (requireTitleBoundary
-        ? includesKeyword(title)
+      (requireTitleBoundary && /^[a-z0-9]+$/.test(title)
+        ? includesAtBoundary(title)
         : normalizedQuery.includes(title))) ||
     keywords.some(includesKeyword)
   );
@@ -407,23 +411,28 @@ function selectModelCandidateDocuments(
   modelCandidates: ScannedAutoMemoryDocument[];
   fallbackDocs: ScannedAutoMemoryDocument[];
   /**
-   * How many of the scored `lexical` pool match a title or keyword, or
-   * `undefined` when `countStrongMatches` was off.
+   * How many docs in `modelCandidates` — the pool the suppressed selector is
+   * handed — match the query by title or keyword, or `undefined` when
+   * `countStrongMatches` was off.
    *
-   * The #13003 skip guard needs this because the selector it suppresses is
-   * handed `modelCandidates`, whose lexical half is the top
-   * `MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE` of `lexical`,
-   * while `fallbackDocs` is only the top `fallbackLimit`
-   * (`<= MAX_RELEVANT_DOCS`). Counting the published list alone would call a
-   * recall "unique" while a second strong match still sat in the suppressed
-   * selector's pool at ranks `fallbackLimit + 1` and beyond.
+   * The #13003 skip guard needs the selector's whole pool, not the published
+   * list: `fallbackDocs` is only the top `fallbackLimit`
+   * (`<= MAX_RELEVANT_DOCS`) of the lexical ranking, and the pool's `recent`
+   * reserve is built from `eligible`, so a doc whose only strong-match
+   * evidence is a keyword that is a proper substring of a query token scores
+   * 0, never enters `lexical`, and still sits in the selector's pool.
+   *
+   * Counts title/keyword matches, not `isStrongFastMatch`: that predicate's
+   * "≥2 query tokens anywhere in metadata" arm is loose enough that almost
+   * every pool would hold two of them, which would empty the experiment's
+   * treatment arm. The guard's contract is a unique *title or keyword* match.
    *
    * Computed only while the guard is live: `matchesTitleOrKeyword` builds a
    * RegExp per short keyword per document, and this pool is roughly 36x wider
    * than the fast list, on a path that carries a latency budget for every
    * structured recall including knob-off ones.
    */
-  lexicalStrongMatchCount: number | undefined;
+  candidateTitleKeywordMatchCount: number | undefined;
 } {
   const isActiveToolNoise = createActiveToolUsageFilter(
     recentTools,
@@ -439,16 +448,6 @@ function selectModelCandidateDocuments(
     ),
     useStructuredMetadata,
   );
-  // Reuse the already-scored `lexical` array rather than re-scoring the
-  // corpus: the guard only needs a count, and re-scoring would double the
-  // cost of the widest pool on this path.
-  //
-  // Loose title arm on purpose: this counts what the suppressed selector would
-  // have had to choose from, and a coincidental short-title substring is still
-  // a competing candidate in its pool, so it suppresses the skip.
-  const lexicalStrongMatchCount = countStrongMatches
-    ? lexical.filter((doc) => matchesTitleOrKeyword(query, doc)).length
-    : undefined;
   const modelLexical = lexical.slice(
     0,
     MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
@@ -463,10 +462,13 @@ function selectModelCandidateDocuments(
     return recentDoc ? [doc, recentDoc] : [doc];
   });
   modelCandidates.push(...recent.slice(modelLexical.length));
+  const candidateTitleKeywordMatchCount = countStrongMatches
+    ? modelCandidates.filter((doc) => matchesTitleOrKeyword(query, doc)).length
+    : undefined;
   return {
     modelCandidates,
     fallbackDocs: lexical.slice(0, fallbackLimit),
-    lexicalStrongMatchCount,
+    candidateTitleKeywordMatchCount,
   };
 }
 
@@ -795,21 +797,13 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       fastDurationMs = Date.now() - fastStartedAt;
       // Count before rendering: a second candidate trimmed by the prompt
       // budget must not turn an ambiguous recall into a selector skip.
-      //
-      // Count the selector's own pool for the same reason. `fastCandidateCount`
-      // only sees `fallbackDocs`, the top `limit` (<= MAX_RELEVANT_DOCS) of the
-      // lexical ranking, while the selector this guard suppresses would have
-      // been handed `candidates.modelCandidates` — the top
-      // MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE, roughly 36x
-      // wider. A second strong match ranked below `limit` is invisible to the
-      // published count, so without `lexicalStrongMatchCount` the guard would
-      // fire on an ambiguous recall and still report `selector_skipped: true`,
-      // counting it in the treatment arm as a *unique* strong hit.
+      // `candidateTitleKeywordMatchCount` covers the selector's whole pool for
+      // the same reason — see its doc comment.
       const uniqueStrongHit = publishedFast?.selectedDocs[0];
       if (
         skipGateEnabled &&
         fastCandidateCount === 1 &&
-        (candidates.lexicalStrongMatchCount ?? 0) === 1 &&
+        (candidates.candidateTitleKeywordMatchCount ?? 0) === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
         // Strict title arm: this match decides whether the selector runs at

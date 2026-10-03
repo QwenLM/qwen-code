@@ -1140,6 +1140,101 @@ describe('auto-memory relevant recall', () => {
       expect(result.selectorSkipped).toBeUndefined();
     });
 
+    it('keeps the selector when a longer title only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` and inside `logging`. The keyword arm's
+      // boundary rule is gated on 1-2 characters, so the strict title arm has
+      // to carry its own: without it the strict and loose arms are byte-identical
+      // for every Latin title of three or more characters.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log',
+        keywords: [],
+        description: 'logging conventions',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our logging setup',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a competing keyword match scores zero lexically', async () => {
+      // B's only strong-match evidence is a keyword that is a proper substring
+      // of a query token, so the whole-token scorer gives it 0 and it never
+      // enters the lexical ranking — yet it is eligible and recent, so it sits
+      // in the pool handed to the suppressed selector.
+      const unique = {
+        ...memoryDoc(
+          'a-runbook.md',
+          'reference',
+          'Deployment runbook',
+          'release steps',
+          'unrelated text',
+        ),
+        keywords: ['deployment'],
+        mtimeMs: 1,
+      };
+      const zeroScoreCompetitor = {
+        ...memoryDoc(
+          'b-deploy.md',
+          'reference',
+          'Ops notes',
+          'misc guidance',
+          'unrelated text',
+        ),
+        keywords: ['deploy'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([unique, zeroScoreCompetitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Check the deployment runbook.',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([unique]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
+      ).toContainEqual(zeroScoreCompetitor);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset when the recall throws before the selector', async () => {
+      // `onFastResult` throws inside the same try that wraps the selector, so
+      // the recall reaches the heuristic fallback having made no skip decision.
+      // A constant `true` for `selectorDecided` would stamp `false` here and
+      // absorb pre-selector throws into the ablation's control series.
+      mockSnapshot([exact]);
+      const onFastResult = vi.fn().mockImplementation(() => {
+        throw new Error('fast delivery failed');
+      });
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('heuristic');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
     it('keeps the selector when the matching body is already present', async () => {
       mockSnapshot([exact, docs[1]!]);
       bodyPresentVersions.set('project:reference.md', exact.mtimeMs);
@@ -1441,6 +1536,12 @@ describe('auto-memory relevant recall', () => {
 
     expect(result.strategy).toBe('heuristic');
     expect(result.selectedDocs).toEqual([docs[0]]);
+    // The selector ran and then failed: a genuine control sample, so the field
+    // is reported as `false` rather than left off the series.
+    expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({ selector_skipped: false }),
+    );
   });
 
   it('excludes already surfaced bodies before legacy heuristic fallback', async () => {
