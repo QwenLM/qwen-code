@@ -81,6 +81,7 @@ Handles common cross-cutting concerns: sender gating (allowlist / denylist), gro
 | Feishu          | `packages/channels/feishu/src/FeishuAdapter.ts`     | Feishu/Lark Stream WebSocket (default) or HTTP webhook | Sends via Lark SDK as interactive cards; webhook mode requires `encryptKey` for HMAC signature verification.                                  |
 | GitHub          | `packages/channels/github/src/GithubAdapter.ts`     | GitHub Notifications API polling (`@octokit/rest`)     | Extends `PollingChannelBase`; cursor-based comment window dedup; posts comments via Issues API.                                               |
 | GitLab          | `packages/channels/gitlab/src/GitlabAdapter.ts`     | GitLab Todos API polling (`@gitbeaker/rest`)           | Extends `PollingChannelBase`; dispatches `todo.body` directly; `action_prompt_template` config drives event filtering and metadata rendering. |
+| Email           | `packages/channels/email/src/email-channel.ts`      | IMAP polling + SMTP over TLS                           | Sender-scoped threads; durable admission claims; restricted reply/proactive recipients.                                                       |
 
 Each adapter implements:
 

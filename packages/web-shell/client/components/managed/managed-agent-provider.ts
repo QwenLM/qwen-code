@@ -35,6 +35,8 @@ export interface ManagedAgentSessionSummary {
     canCancel: boolean;
     actions?: boolean;
     artifacts?: boolean;
+    /** The caller may submit later Turns to this Workspace-bound Session. */
+    workspaceTurns?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -66,6 +68,12 @@ export interface ManagedAgentSessionEvent {
   sessionId: string;
   turnId: string;
   data?: unknown;
+  /**
+   * Projected from a durable snapshot item rather than a raw event. The
+   * server can retract its items (reconciliation), after which these
+   * projections must not survive a resync.
+   */
+  assembledFromItem?: boolean;
 }
 
 export interface ManagedAgentSessionTranscript {

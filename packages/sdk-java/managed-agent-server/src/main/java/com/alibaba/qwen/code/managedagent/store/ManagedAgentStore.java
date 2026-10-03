@@ -321,6 +321,12 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId) {
     }
 
+    // A bound Session's creator may rename it under the Workspace-files
+    // opt-in (the service checks the creator); unarchive stays gated.
+    private boolean boundRenameAllowed(SessionMutationKind kind) {
+        return kind == SessionMutationKind.RENAME && workspaceFilesEnabled;
+    }
+
     private static ApiException workspaceExecutionUnavailable() {
         return new ApiException(HttpStatus.CONFLICT,
                 "workspace_unavailable",
@@ -427,7 +433,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        // A bound Session's later Turn needs the same deployment opt-in as
+        // its initial one; the service admits only the Session's creator.
+        if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
@@ -459,7 +467,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
-        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null
+                && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
@@ -490,7 +499,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
@@ -503,6 +512,15 @@ public class ManagedAgentStore implements AgentStateStore {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            if ("FAILED".equals(command.status())) {
+                requireNoOpenOperation(tenantId, sessionId);
+                validateMutationStatus(session, kind);
+                jdbc.update("UPDATE managed_agent_command SET command_status ="
+                                + " 'PENDING', updated_at = ? WHERE tenant_id = ?"
+                                + " AND operation = ? AND idempotency_key = ?",
+                        clock.millis(), tenantId, operation, idempotencyKey);
+                return new SessionMutationCommand(sessionId, "PENDING", true);
+            }
             return new SessionMutationCommand(sessionId, command.status(),
                     true);
         }
@@ -511,10 +529,15 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
-        appendEvent(tenantId, sessionId, null,
-                mutationEvent(kind, "requested"),
-                Map.of("sessionId", sessionId), false,
-                mutationSource(operation, idempotencyKey, "requested"), now);
+        // Older retired commands may have left their requested event behind.
+        String requestedSource = mutationSource(operation, idempotencyKey,
+                "requested");
+        if (!hasSourceEvent(tenantId, sessionId, requestedSource)) {
+            appendEvent(tenantId, sessionId, null,
+                    mutationEvent(kind, "requested"),
+                    Map.of("sessionId", sessionId), false,
+                    requestedSource, now);
+        }
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
@@ -523,7 +546,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
         CommandRecord command = findCommand(tenantId, operation,
@@ -538,7 +561,8 @@ public class ManagedAgentStore implements AgentStateStore {
         if ("COMPLETED".equals(command.status())) {
             return session;
         }
-        if (!"PENDING".equals(command.status())) {
+        if (!"PENDING".equals(command.status())
+                && !"FAILED".equals(command.status())) {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
         }
@@ -572,6 +596,19 @@ public class ManagedAgentStore implements AgentStateStore {
                 mutationSource(operation, idempotencyKey,
                         "completed"), now);
         return requireSessionForUpdate(tenantId, sessionId);
+    }
+
+    @Override
+    @Transactional
+    public void abandonSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId) {
+        // Keep the digest and receipt for replay and concurrent completion.
+        // A completed outcome must never be overwritten by a failing sibling.
+        jdbc.update("UPDATE managed_agent_command SET command_status = 'FAILED',"
+                        + " updated_at = ? WHERE tenant_id = ?"
+                        + " AND operation = ? AND idempotency_key = ?"
+                        + " AND session_id = ? AND command_status = 'PENDING'",
+                clock.millis(), tenantId, operation, idempotencyKey, sessionId);
     }
 
     @Override
