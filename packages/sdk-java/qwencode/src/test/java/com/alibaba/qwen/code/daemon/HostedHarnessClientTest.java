@@ -749,7 +749,7 @@ class HostedHarnessClientTest {
         server.createContext("/session/" + SESSION_ID + "/load",
                 exchange -> {
                     try {
-                        Thread.sleep(400);
+                        Thread.sleep(2_500);
                     } catch (InterruptedException error) {
                         Thread.currentThread().interrupt();
                     }
@@ -760,8 +760,12 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .requestTimeout(Duration.ofMillis(150))
-                .loadTimeout(Duration.ofSeconds(5))
+                // requestTimeout also caps the /capabilities negotiation
+                // inside build(); give it headroom past the contended-lane
+                // round trip while keeping requestTimeout < sleep <
+                // loadTimeout so the discrimination itself is unchanged.
+                .requestTimeout(Duration.ofMillis(1_000))
+                .loadTimeout(Duration.ofSeconds(10))
                 .build()) {
             assertThrows(MutationOutcomeUnknownException.class,
                     () -> client.loadSession(

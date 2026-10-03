@@ -269,8 +269,12 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
 
 - **D9a，重试预算对 writer lease。** 已绑定 Session 的恢复附着路径
   上，一个 body 带 lease 形态 code（`hosted_turn_recovery_required`、
-  `hosted_prompt_recovery_required`）的 409 豁免于准入前上限——该等待
-  以前任自己的 lease 为上界。其余一律计入预算，其中也包括
+  `managed_session_writer_conflict`）的 409 豁免于准入前上限——该等待
+  以前任自己的 lease 为上界：前者是前任仍持有的停放 Turn，后者是
+  受防 writer lease 失效时必然终结的拒绝。
+  `hosted_prompt_recovery_required` 刻意缺席：它只可能在 submission
+  标记设置之后到达，那时豁免门已无作用，列入它不可能改变任何结果。
+  其余一律计入预算，其中也包括
   `hosted_session_already_attached`：它看着像瞬时冲突，实际是永久的——
   daemon 只在显式 detach 或 delete 时才丢弃 attachment，而本控制面从不
   detach，所以豁免它会让「Spring 重启而 Harness 存活」无限空转。因此

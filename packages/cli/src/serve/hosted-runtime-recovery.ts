@@ -94,17 +94,24 @@ function recovered(turn: HostedRecoveryTurn): HostedRuntimeRecoveryOutcome {
 }
 
 /** A `blocked` authorization splits into durable parse/identity verdicts
- * and erased store-call failures (`missing_state` / `missing_checkpoint`,
- * which a 429/500/503/timeout while reading a staged resource also
- * produces); only the durable thirds may go terminal. Everything else is
- * transient: the caller throws and keeps its retriable refusal. */
-function isDurableBlockedVerdict(
+ * and erased store-call failures. `missing_checkpoint` is always durable
+ * (continuation without a checkpoint, or no checkpoint committed).
+ * `missing_state` splits: durable when the staged bytes are truly absent
+ * (authority returns the reason alone), erased when a 429/500/503/timeout
+ * read of the staged bytes was caught as `ManagedSessionRecordError` — the
+ * authority records that error's message, so the message field is the
+ * discriminator. Anything not in the durable set is not proven durable and
+ * must NOT end a Turn: the caller throws and keeps its retriable refusal. */
+export function isDurableBlockedVerdict(
   authorization: Extract<HarnessRunAuthorization, { status: 'blocked' }>,
 ): boolean {
   return (
     authorization.reason === 'opaque_state' ||
     authorization.reason === 'invalid_state' ||
-    authorization.reason === 'identity_mismatch'
+    authorization.reason === 'identity_mismatch' ||
+    authorization.reason === 'missing_checkpoint' ||
+    (authorization.reason === 'missing_state' &&
+      authorization.message === undefined)
   );
 }
 
@@ -112,8 +119,8 @@ function isTransientStoreBlock(
   authorization: Extract<HarnessRunAuthorization, { status: 'blocked' }>,
 ): boolean {
   return (
-    authorization.reason === 'missing_state' ||
-    authorization.reason === 'missing_checkpoint'
+    authorization.reason === 'missing_state' &&
+    authorization.message !== undefined
   );
 }
 

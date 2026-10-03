@@ -344,6 +344,81 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // `managed_session_writer_conflict` is the only wait that ends on its
+    // own when the fenced predecessor's lease lapses, so a bound Session's
+    // recovery attach escapes the pre-admission budget on that code.
+    @Test
+    void boundSessionEscapesRetryBudgetOnWriterConflict409() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("managed_session_writer_conflict");
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(conflict);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A codeless error body must never take the contains() NPE hostage:
+    // getErrorCode() is null by contract, and the Turn meets the budget
+    // instead of dying in a claim/NPE/release loop with no terminal state.
+    @Test
+    void codeless503MeetsRetryBudgetWithoutNpe() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException badGateway = mock(DaemonHttpException.class);
+        when(badGateway.getStatusCode()).thenReturn(503);
+        when(badGateway.getErrorCode()).thenReturn(null);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(badGateway);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
     // The withdrawal is a CAS: losing it (the mark is gone, or the lease
     // was lost) must end the Turn terminally rather than resubmit a prompt
     // another owner may already have admitted.
@@ -377,6 +452,16 @@ class HarnessCoordinatorTest {
         } finally {
             coordinator.close();
         }
+        // The CAS is load-bearing: it must be attempted exactly once, and
+        // the rebind must NOT happen after it was lost — re-submitting
+        // would double-admit a prompt the journal may already hold.
+        InOrder order = inOrder(store, harness);
+        order.verify(store).bindHarness(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("boot-new"));
+        order.verify(store).withdrawSubmissionAttempted(eq("tenant"),
+                eq("session"), eq("turn"), anyString());
+        verify(store, times(1)).bindHarness(anyString(), anyString(),
+                anyString(), anyString(), anyString());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("hosted_harness_generation_mismatch"),
                 anyString());

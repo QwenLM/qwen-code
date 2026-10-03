@@ -206,9 +206,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId, String promptId, String checkpointId,
             String activationId) {
         requireReadyForNewWork(tenantId, sessionId);
+        // Resolve the attachment BEFORE fetching the client: the resolution
+        // may block on a create/load round trip, and an adoption closing the
+        // captured client during that window would strand this call on a
+        // dead instance instead of the rebuilt one.
+        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         PromptReceipt receipt = client().continueManagedRuntime(
-                attachment(tenantId, sessionId, true), promptId, checkpointId,
-                activationId);
+                ref, promptId, checkpointId, activationId);
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
@@ -229,8 +233,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doCancelManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         PromptReceipt receipt = client().cancelManagedRuntime(
-                new CancelManagedRuntime(attachment(tenantId, sessionId, false),
+                new CancelManagedRuntime(ref,
                         promptId, checkpointId, activationId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         return new Admission(receipt.getLastEventId(),
@@ -251,9 +256,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private SourceStream doStream(String tenantId, String sessionId,
             long lastEventId, String eventEpoch) {
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         HarnessEventStream stream = client().streamEvents(
                 StreamHarnessEvents.builder()
-                        .session(attachment(tenantId, sessionId, false))
+                        .session(ref)
                         .lastEventId(lastEventId)
                         .eventEpoch(eventEpoch)
                         .build());
@@ -298,8 +304,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String actionId,
             JsonNode response) {
         requireReadyForNewWork(tenantId, sessionId);
+        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         client().resolveAction(
-                        attachment(tenantId, sessionId, true),
+                        ref,
                         actionId,
                         response.path("optionId").asText(),
                         response.path("inputRevision").asLong(),
@@ -317,7 +324,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void doCancel(String tenantId, String sessionId) {
-        client().cancelTurn(attachment(tenantId, sessionId, false));
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        client().cancelTurn(ref);
     }
 
     @Override
@@ -331,7 +339,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void doRename(String tenantId, String sessionId, String title) {
-        client().updateSessionTitle(attachment(tenantId, sessionId, false), title);
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        client().updateSessionTitle(ref, title);
     }
 
     @Override

@@ -566,6 +566,7 @@ describe('recoverHostedRuntimeTurn', () => {
       .mockResolvedValue({
         status: 'blocked',
         reason: 'missing_state',
+        message: 'the HTTP Managed Session writer is not active.',
       } as never);
     try {
       await expect(
@@ -579,6 +580,45 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ).rejects.toThrow();
       expect(authorization).toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'a checkpoint-less journal stays terminal',
+      authorization: { status: 'blocked', reason: 'missing_checkpoint' },
+    },
+    {
+      name: 'a durably absent checkpoint state stays terminal',
+      authorization: { status: 'blocked', reason: 'missing_state' },
+    },
+  ])('declines $name', async ({ authorization: blockedVerdict }) => {
+    // missing_checkpoint is only produced by a permanent journal shape,
+    // and a bare missing_state (no store-error message) is a durable
+    // absence — neither can change on retry, so both decline; only an
+    // erased store failure (missing_state WITH the authority's message)
+    // may stay retriable.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue(blockedVerdict as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
     } finally {
       await replacement.close();
     }

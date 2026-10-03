@@ -14,6 +14,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
@@ -469,6 +470,138 @@ class QwenHostedHarnessConnectorTest {
         verify(newClient).submitTurn(any());
     }
 
+    // R4-13: each call site must fetch the client AFTER resolving the
+    // attachment — the resolution runs a create/load round trip during
+    // which an adoption can close and rebuild the client; a receiver
+    // captured before that window throws on the closed instance. The
+    // fixture starts the connector on a dead client whose load, run while
+    // the attachment resolves, flips the field to the rebuilt one: a
+    // pre-fetched receiver lands on dead, the fixed order re-fetches alive.
+    private Object[] refetchFixture() {
+        HostedHarnessClient dead = mock(HostedHarnessClient.class);
+        HostedHarnessClient alive = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities deadCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HostedHarnessCapabilities aliveCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(deadCapabilities.getBootId()).thenReturn(BOOT_ID);
+        when(aliveCapabilities.getBootId()).thenReturn(BOOT_ID);
+        when(dead.capabilities()).thenReturn(deadCapabilities);
+        when(alive.capabilities()).thenReturn(aliveCapabilities);
+        QwenHostedHarnessConnector connector = connector(dead);
+        HarnessSessionRef ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(dead.loadSession(any(LoadHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    ReflectionTestUtils.setField(connector, "client", alive);
+                    return ref;
+                });
+        return new Object[] {connector, dead, alive};
+    }
+
+    @Test
+    void continueManagedRuntimeRefetchesTheClientAfterResolvingAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).continueManagedRuntime(any(), any(), any(),
+                        any());
+        when(alive.continueManagedRuntime(any(), any(), any(), any()))
+                .thenReturn(mock(PromptReceipt.class));
+
+        connector.continueManagedRuntime("tenant-a", SESSION_ID,
+                SUBMIT_PROMPT_ID, "checkpoint", "activation");
+
+        verify(alive).continueManagedRuntime(any(), any(), any(), any());
+    }
+
+    @Test
+    void cancelManagedRuntimeRefetchesTheClientAfterResolvingAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).cancelManagedRuntime(any());
+        when(alive.cancelManagedRuntime(any()))
+                .thenReturn(mock(PromptReceipt.class));
+
+        connector.cancelManagedRuntime("tenant-a", SESSION_ID,
+                SUBMIT_PROMPT_ID, "checkpoint", "activation");
+
+        verify(alive).cancelManagedRuntime(any());
+    }
+
+    @Test
+    void streamRefetchesTheClientAfterResolvingAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).streamEvents(any());
+        when(alive.streamEvents(any()))
+                .thenReturn(mock(HarnessEventStream.class));
+
+        connector.stream("tenant-a", SESSION_ID, 0L, "epoch");
+
+        verify(alive).streamEvents(any());
+    }
+
+    @Test
+    void resolveActionRefetchesTheClientAfterResolvingAttachment()
+            throws Exception {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).resolveAction(any(), any(), any(), anyLong(),
+                        any());
+
+        connector.resolveAction("tenant-a", SESSION_ID, "action-1",
+                new ObjectMapper().readTree("{\"optionId\":\"o\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p\"}"));
+
+        verify(alive).resolveAction(any(), any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void cancelRefetchesTheClientAfterResolvingAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).cancelTurn(any());
+
+        connector.cancel("tenant-a", SESSION_ID);
+
+        verify(alive).cancelTurn(any());
+    }
+
+    @Test
+    void renameRefetchesTheClientAfterResolvingAttachment() {
+        Object[] fixture = refetchFixture();
+        QwenHostedHarnessConnector connector =
+                (QwenHostedHarnessConnector) fixture[0];
+        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
+        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
+        doThrow(new IllegalStateException("HostedHarnessClient is closed"))
+                .when(dead).updateSessionTitle(any(), any());
+
+        connector.rename("tenant-a", SESSION_ID, "a new title");
+
+        verify(alive).updateSessionTitle(any(), any());
+    }
+
     // A stale cached ref used against an already-adopted client drops only
     // the entries minted under another boot: nothing to rebuild, and the
     // Sessions the live client still heartbeats keep working.
@@ -494,6 +627,8 @@ class QwenHostedHarnessConnectorTest {
         when(stale.getHarnessBootId()).thenReturn(BOOT_ID);
         when(fresh.getRuntimeRecovery())
                 .thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(stale.getRuntimeRecovery())
+                .thenReturn(mock(HarnessRuntimeRecovery.class));
         when(client.loadSession(any(LoadHarnessSession.class)))
                 .thenReturn(fresh, stale);
         QwenHostedHarnessConnector connector =
@@ -502,7 +637,7 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(
                 connector, "client", client);
         connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
-        connector.createOrLoad("tenant-a", secondSessionId, true);
+        connector.recoverManagedRuntime("tenant-a", secondSessionId, false);
 
         HostedHarnessGenerationException mismatch =
                 mock(HostedHarnessGenerationException.class);
@@ -522,14 +657,18 @@ class QwenHostedHarnessConnectorTest {
                 .noneMatch(ref -> BOOT_ID.equals(ref.getHarnessBootId()));
         assertThat(attachments.values())
                 .anyMatch(ref -> NEW_BOOT_ID.equals(ref.getHarnessBootId()));
-        // The equal-boot exception names the live client, so the markers
-        // it minted stay: a pending recovery is not collateral damage.
+        // The equal-boot exception names the live client: its freshly
+        // minted marker survives, while the evicted stale-boot entry's
+        // marker follows its attachment out. Both halves are asserted —
+        // retention alone would pass even if the eviction were deleted.
         @SuppressWarnings("unchecked")
         java.util.Set<Object> pendingRecovery =
                 (java.util.Set<Object>)
                         org.springframework.test.util.ReflectionTestUtils
                                 .getField(connector, "pendingRecovery");
-        assertThat(pendingRecovery).isNotEmpty();
+        assertThat(pendingRecovery.stream().map(String::valueOf))
+                .noneMatch(text -> text.contains(secondSessionId))
+                .anyMatch(text -> text.contains(SESSION_ID));
     }
 
     // The shared bean must rebuild exactly once when two attempts surface a
@@ -664,6 +803,19 @@ class QwenHostedHarnessConnectorTest {
                         mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
         return connector;
+    }
+
+    // The load timeout is env-overridable, so a bad value must fail at
+    // construction rather than as an endless transient retry inside client().
+    @Test
+    void rejectsNonPositiveLoadTimeoutAtConstruction() {
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setLoadTimeout(java.time.Duration.ZERO);
+        assertThatThrownBy(() ->
+                new QwenHostedHarnessConnector(properties,
+                        mock(AgentStateStore.class),
+                        mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     private static ManagedAgentProperties properties() {

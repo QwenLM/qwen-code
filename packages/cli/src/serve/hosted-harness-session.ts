@@ -29,6 +29,7 @@ import {
 import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
@@ -76,6 +77,7 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  isDurableBlockedVerdict,
   recoverHostedRuntimeTurn,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -162,6 +164,12 @@ interface HostedSession {
     promptId: string;
     passive: boolean;
     report: HostedRuntimeRecoveryReport;
+    /** The store the snapshot is anchored to: replaying it hands over the
+     * attached session's client id, so the replaying request must re-prove
+     * the same store identity, not merely carry any takeover flag. */
+    tenantId: string;
+    workspaceId: string;
+    storeBaseUrl: string;
   };
 }
 
@@ -1392,12 +1400,18 @@ export function registerHostedHarnessSessionRoutes(
     if (attached) {
       // An idempotent takeover reload: the original reply was presumably
       // lost after attach, so hand the same snapshot back while the parked
-      // prompt is still unsettled.
+      // prompt is still unsettled. Compare against the PARSED store: the
+      // snapshot carries the parsed baseUrl, so a raw-body read would
+      // refuse a syntactically different spelling of the same store.
       const snapshot = attached.recoverySnapshot;
       if (
         takeoverFlags &&
         snapshot &&
-        snapshot.passive === (body?.['passiveManagedRuntimeRecovery'] === true)
+        snapshot.passive ===
+          (body?.['passiveManagedRuntimeRecovery'] === true) &&
+        store.tenantId === snapshot.tenantId &&
+        store.workspaceId === snapshot.workspaceId &&
+        store.baseUrl === snapshot.storeBaseUrl
       ) {
         if (unsettledPromptId(attached) === snapshot.promptId) {
           res.status(200).json({
@@ -1632,12 +1646,7 @@ export function registerHostedHarnessSessionRoutes(
           .harnessRunAuthorization()
           .catch(() => undefined);
         await managed.close();
-        if (
-          verdict?.status === 'blocked' &&
-          (verdict.reason === 'opaque_state' ||
-            verdict.reason === 'invalid_state' ||
-            verdict.reason === 'identity_mismatch')
-        ) {
+        if (verdict?.status === 'blocked' && isDurableBlockedVerdict(verdict)) {
           recoveryDeclined(res, 'checkpoint_blocked');
           return;
         }
@@ -1698,6 +1707,9 @@ export function registerHostedHarnessSessionRoutes(
               passive: body?.['passiveManagedRuntimeRecovery'] === true,
               promptId: outcome.turn.promptId,
               report: outcome.turn.report,
+              tenantId: store.tenantId,
+              workspaceId: store.workspaceId,
+              storeBaseUrl: store.baseUrl,
             };
             if (outcome.turn.acquiredRuntime)
               session.runtimeLeaseHeld =
@@ -1940,6 +1952,14 @@ export function registerHostedHarnessSessionRoutes(
       await stores.close().catch(() => undefined);
       if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
+      } else if (
+        cause instanceof ManagedSessionStoreHttpError &&
+        cause.remoteCode === 'managed_session_writer_conflict'
+      ) {
+        // A fenced-but-alive predecessor's writer lease is the one 409 whose
+        // wait self-heals when the lease lapses; it must not collapse into
+        // the generic open failure, or the wait dies at the budget instead.
+        error(res, 409, cause.remoteCode);
       } else if (cause instanceof ManagedSessionAlreadyExistsError) {
         error(res, 409, 'managed_session_already_exists');
       } else if (cause instanceof ManagedSessionNotFoundError) {

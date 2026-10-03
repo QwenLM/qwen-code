@@ -89,6 +89,18 @@ vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
   () => ({
     HTTP_MANAGED_SESSION_STORE_CONTRACT: { maxInlineResourceBytes: 64 * 1024 },
+    // The load route's catch classifies with instanceof against this class;
+    // the wholesale module mock must still export it or the handler dies.
+    ManagedSessionStoreHttpError: class ManagedSessionStoreHttpError extends Error {
+      constructor(
+        readonly status: number,
+        readonly remoteCode: string,
+        message: string,
+      ) {
+        super(message);
+        this.name = 'ManagedSessionStoreHttpError';
+      }
+    },
     createHttpManagedSessionStores: (options: {
       sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
     }) => {
@@ -3802,6 +3814,56 @@ describe('Hosted Harness no-tool session', () => {
     expect(gone.status).toBe(404);
   });
 
+  it('replays a settled prompt admission from the journal after a reload', async () => {
+    // After a load, session.admissions is empty, so the idempotent retry is
+    // answered from the journal's input.accepted watermark. That watermark
+    // is the accepted sequence N — the first admission answered N+1 because
+    // the in-memory path replies after committing wake.requested — and the
+    // replay must answer exactly N: answering the live committedSequence
+    // would skip past events the destination has not seen, and refusing
+    // would loop the coordinator forever (D4's withdraw-and-resubmit).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(state.model).toHaveBeenCalledTimes(1);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+
+    const replayed = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(replayed.status).toBe(202);
+    expect(replayed.body.lastEventId).toBe(admitted.body.lastEventId - 1);
+    const status = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(status.body.hasActivePrompt).toBe(false);
+    expect(state.model).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects unsupported prompt content before model or tool execution', async () => {
     const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
@@ -6892,6 +6954,58 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(authorization.mock.invocationCallOrder.at(-1)).toBeLessThan(
       close.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it('keeps a transiently blocked restore on the retriable refusal', async () => {
+    // A missing_state WITH the authority's store-error message is an erased
+    // store call, not a durable verdict: the route must answer the retriable
+    // 409, never the typed terminal decline, even though a bare
+    // missing_state (no message) and missing_checkpoint both go terminal.
+    await parkToolTurn();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'missing_state',
+      message: 'the HTTP Managed Session writer is not active.',
+    } as never);
+    const close = vi.spyOn(LocalManagedSessionAuthority.prototype, 'close');
+    const { loaded } = await loadReplacement();
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBeUndefined();
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('replays the snapshot only to a request re-proving its store identity', async () => {
+    // The replay hands over the attached session's client id, so a caller
+    // with the harness token and a matching takeover shape must also
+    // re-prove tenant/workspace/store — otherwise it drives a session whose
+    // journal identity it never proved.
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const mismatched = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: { ...storeFor(BOOT_ID_2), tenantId: 'other-tenant' },
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(mismatched.status).toBe(409);
+    expect(mismatched.body.code).toBe('hosted_session_already_attached');
+    const matching = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(matching.status).toBe(200);
   });
 
   it('reports a parked execution passively and cancels the turn', async () => {

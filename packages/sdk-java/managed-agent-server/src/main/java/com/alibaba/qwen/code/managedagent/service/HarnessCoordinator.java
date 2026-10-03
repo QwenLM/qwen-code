@@ -52,9 +52,14 @@ public class HarnessCoordinator {
     // on an explicit detach or delete, and this control plane never detaches,
     // so a Spring restart against a surviving Harness would otherwise retry
     // a permanent refusal forever instead of ending the Turn.
+    // `managed_session_writer_conflict` is the only wait that provably ends
+    // on its own: the fenced predecessor's lease simply lapses, so retrying
+    // past the budget's pre-admission window is exactly the wait D9a meant.
+    // `hosted_prompt_recovery_required` is absent not by oversight: it only
+    // arrives after markSubmissionAttempted, where the budget is bypassed
+    // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES = Set.of(
-            "hosted_turn_recovery_required",
-            "hosted_prompt_recovery_required");
+            "hosted_turn_recovery_required", "managed_session_writer_conflict");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -225,12 +230,13 @@ public class HarnessCoordinator {
                 // the pre-admission budget: a lease-bounded 409 on the
                 // recovery attach of a bound Session is a wait bounded by
                 // that predecessor's own lease. Configuration-shaped 409s
-                // (the code says so) and every other failure meet it.
+                // (the code says so) and every other failure meet it — and
+                // a codeless body must never take the contains() NPE hostage.
+                String errorCode = error.getErrorCode();
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error,
-                        recoveryPath.get()
-                                && LEASE_BOUNDED_409_CODES.contains(
-                                        error.getErrorCode()));
+                        recoveryPath.get() && errorCode != null
+                                && LEASE_BOUNDED_409_CODES.contains(errorCode));
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
