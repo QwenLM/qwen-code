@@ -40,7 +40,10 @@ import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
-import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  CHARS_PER_TOKEN,
+  estimateContentTokens,
+} from '../services/tokenEstimation.js';
 import {
   defaultOutputCeiling,
   parsePositiveIntegerEnvValue,
@@ -63,8 +66,45 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
 }
 
 /**
+ * Estimate the tokens a `systemInstruction` occupies on the wire. It travels
+ * with the request but is not part of `contents`, so a room term that measures
+ * only `contents` over-budgets by exactly this much (#13208). Callers pass a
+ * bare string, a `Part`, a `Part[]` or a `Content`, so normalize by shape
+ * before reusing the `contents` estimator.
+ */
+function estimateSystemInstructionTokens(
+  systemInstruction: GenerateContentConfig['systemInstruction'],
+): number {
+  if (!systemInstruction) return 0;
+  const value = systemInstruction as Content | Part | Part[] | string;
+  if (typeof value === 'string') {
+    return Math.ceil(value.length / CHARS_PER_TOKEN);
+  }
+  // Same shape-narrowing order `appendSystemInstruction` uses: a bare `Part`
+  // has every field optional, so `'parts' in value` alone cannot tell it apart
+  // from a `Content` — the array check on `.parts` is what decides.
+  let parts: Part[];
+  if (Array.isArray(value)) {
+    parts = value;
+  } else if (
+    typeof value === 'object' &&
+    'parts' in value &&
+    Array.isArray(value.parts)
+  ) {
+    parts = value.parts;
+  } else {
+    parts = [value as Part];
+  }
+  return estimateContentTokens([{ role: 'user', parts }]);
+}
+
+/**
  * Give a request an output budget that fits the window it is actually going
- * to, so `prompt + max_tokens <= window` holds (#13208).
+ * to, so `prompt + max_tokens <= window` holds (#13208) for the prompt terms
+ * this layer can measure: `contents` and `systemInstruction`. A `generateJson`
+ * tool declaration is not counted — the flat estimation margin that would
+ * cover it was declined on #13208 — so in JSON mode the invariant holds for
+ * the measured terms only.
  *
  * Side queries reach the provider through `generateJson`/`generateText` and
  * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
@@ -84,26 +124,42 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
  * caller value is honored: both providers read that override only when the
  * request carries no output limit of its own
  * (`openaiContentGenerator/provider/default.ts` `applyOutputTokenLimit`,
- * `anthropicContentGenerator.ts` `createRequestParameters`), and it is
+ * `anthropicContentGenerator.ts` `buildSamplingParameters`), and it is
  * documented to take precedence over the model-limit default
  * (`docs/users/configuration/settings.md`). Budgeting every side query would
  * otherwise displace it — and could *raise* the wire value, since a small
  * prompt on a large window leaves more room than the override asks for.
  *
+ * `resolvedContextWindowSize` is the window of the model the request is
+ * actually sent to, resolved by `resolveForModel` against that target (its
+ * registry-declared window, else the catalog/curated one). It is preferred
+ * over `contentGeneratorConfig.contextWindowSize`, which on a per-model route
+ * is inherited from `{ ...parentConfig }` and therefore describes the
+ * *session* model whenever the target's registry entry declares no window of
+ * its own — the default for a same-provider fast model, which is where side
+ * queries go unless the caller pins one.
+ *
  * Call after `resolveForModel` so `model` is the resolved target and
- * `contents` is the slimmed payload actually sent. Caveat: on the
- * generator-error fallback in `createRuntimeViewForModel`,
- * `contentGeneratorConfig` is the *session* config while `model` is still the
- * resolved target, so `contextWindowSize` can describe a different model's
- * window than the ceiling does. That mismatch is inherent to the fallback
- * (the target's own config could not be built); the budget still never
- * exceeds the window it was handed.
+ * `contents` is the slimmed payload actually sent. Caveats:
+ *
+ * - On the generator-error fallback in `createRuntimeViewForModel` the session
+ *   generator sends the request, so `resolvedContextWindowSize` is `undefined`
+ *   and the session config supplies the window while `model` stays the
+ *   resolved target: the ceiling can then describe a different model than the
+ *   window does. That mismatch is inherent to the fallback (the target's own
+ *   config could not be built); the budget still never exceeds the window the
+ *   request is actually handed.
+ * - For a target in neither the catalog nor the curated tables the window term
+ *   falls back to `DEFAULT_TOKEN_LIMIT` (200 000) and does not bind. That
+ *   fabrication is pre-existing and shared with the main turn
+ *   (`tokenLimit`), not something this budget introduces.
  */
 function budgetOutputTokensForWindow(
   requestConfig: GenerateContentConfig,
   contents: Content[],
   model: string,
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
+  resolvedContextWindowSize: number | undefined,
 ): GenerateContentConfig {
   const envMaxOutputTokens = parsePositiveIntegerEnvValue(
     process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
@@ -118,8 +174,11 @@ function budgetOutputTokensForWindow(
         Math.min(
           defaultOutputCeiling(model),
           envMaxOutputTokens ?? Infinity,
-          (contentGeneratorConfig?.contextWindowSize ??
-            tokenLimit(model, 'input')) - estimateContentTokens(contents),
+          (resolvedContextWindowSize ??
+            contentGeneratorConfig?.contextWindowSize ??
+            tokenLimit(model, 'input')) -
+            estimateContentTokens(contents) -
+            estimateSystemInstructionTokens(requestConfig.systemInstruction),
         ),
       ),
   };
@@ -139,6 +198,14 @@ export interface ResolvedGeneratorForModel {
   retryAuthType: string | undefined;
   retryErrorCodes?: readonly number[];
   model: string;
+  /**
+   * Context window of the model this request is actually sent to, resolved
+   * against that target: its registry-declared `contextWindowSize`, else
+   * `tokenLimit(target, 'input')`. `undefined` when the request falls back to
+   * the session generator, whose `contentGeneratorConfig.contextWindowSize`
+   * then describes the window the request is handed.
+   */
+  contextWindowSize?: number;
 }
 
 /**
@@ -333,6 +400,7 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
+      contextWindowSize: resolvedContextWindowSize,
     } = await this.resolveForModel(model);
     const requestContents = slimCompactionInput(
       contents,
@@ -343,6 +411,7 @@ export class BaseLlmClient {
       requestContents,
       requestModel,
       contentGeneratorConfig,
+      resolvedContextWindowSize,
     );
 
     try {
@@ -471,6 +540,7 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
+      contextWindowSize: resolvedContextWindowSize,
     } = await this.resolveForModel(model, { failClosed: options.failClosed });
     const requestContents = slimCompactionInput(
       contents,
@@ -481,6 +551,7 @@ export class BaseLlmClient {
       requestContents,
       requestModel,
       contentGeneratorConfig,
+      resolvedContextWindowSize,
     );
 
     try {
@@ -676,13 +747,28 @@ export class BaseLlmClient {
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
       resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
+    const targetModel = resolvedModel?.id ?? requestModel;
+    // `contentGeneratorConfig` is built from `{ ...parentConfig }` and
+    // `applyResolvedModelConfig` overwrites `contextWindowSize` only when the
+    // registry declares one, so for a same-provider target it carries the
+    // *session* model's window. Resolve the window against the target instead.
+    // The session value stays authoritative only on the fallback route, where
+    // the session generator really is the one sending the request — detected
+    // by identity, since that fallback hands back the very object
+    // `mainGeneratorConfig` was read from.
+    const fellBackToSessionGenerator =
+      contentGeneratorConfig === mainGeneratorConfig;
 
     return {
       contentGenerator,
       contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
-      model: resolvedModel?.id ?? requestModel,
+      model: targetModel,
+      contextWindowSize: fellBackToSessionGenerator
+        ? undefined
+        : (resolvedModel?.generationConfig?.contextWindowSize ??
+          tokenLimit(targetModel, 'input')),
     };
   }
 

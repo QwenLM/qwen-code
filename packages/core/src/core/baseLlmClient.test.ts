@@ -1201,6 +1201,9 @@ describe('BaseLlmClient', () => {
     // keeps implementations), so the rest of the file needs them back.
     afterEach(() => {
       mockConfig.getModel.mockReturnValue('test-model');
+      mockConfig.getModelsConfig.mockReturnValue(
+        undefined as unknown as ReturnType<Config['getModelsConfig']>,
+      );
     });
 
     it('shrinks the request so a large prompt still fits the window', async () => {
@@ -1307,6 +1310,62 @@ describe('BaseLlmClient', () => {
       expect(5_000 + 3_192).toBeLessThanOrEqual(8_192);
     });
 
+    it('counts the system instruction against the window', async () => {
+      // `systemInstruction` travels with the request but is not part of
+      // `contents`, so a room term measuring only `contents` over-budgets by
+      // exactly the instruction's size: a 2_000-token instruction on an 8_192
+      // window leaves 6_092, not 8_092. The sibling side-query budget counts
+      // this term (services/chatCompressionService.ts `getColdInputEstimate`).
+      useWindow('qwen3-coder-plus', 8_192);
+
+      await askText('qwen3-coder-plus', 100, {
+        systemInstruction: 'y'.repeat(2_000 * 4),
+      });
+
+      expect(sentBudget()).toBe(8_192 - 100 - 2_000);
+      expect(100 + 2_000 + (8_192 - 100 - 2_000)).toBeLessThanOrEqual(8_192);
+    });
+
+    it('budgets against the target window, not the session window', async () => {
+      // Side queries default to the fast model, and a same-provider target
+      // whose registry entry declares no window inherits the *session* model's
+      // number through `{ ...parentConfig }` — a number, so the
+      // `?? tokenLimit(model, 'input')` fallback never fires. Session on an
+      // 8_192 window, target `qwen3-coder-plus` (1_000_000 window, 32_768
+      // ceiling): budgeting against the inherited 8_192 truncates a
+      // 5_000-token prompt to 3_192, 10x below what the provider itself would
+      // have written. The window has to come from the target.
+      useWindow('test-model', 8_192);
+      mockConfig.getModelsConfig.mockReturnValue({
+        getResolvedModel: vi.fn().mockReturnValue({
+          id: 'qwen3-coder-plus',
+          authType: AuthType.USE_GEMINI,
+          generationConfig: {},
+        }),
+      } as unknown as ReturnType<Config['getModelsConfig']>);
+      mockBuildAgentContentGeneratorConfig.mockReturnValue({
+        model: 'qwen3-coder-plus',
+        authType: AuthType.USE_GEMINI,
+        // what the real builder hands back for a same-provider target that
+        // declares no window of its own: the session's, inherited
+        contextWindowSize: 8_192,
+      });
+      const targetGenerateContent = vi
+        .fn()
+        .mockResolvedValue(createMockTextResponse('ok'));
+      mockCreateContentGenerator.mockResolvedValue({
+        generateContent: targetGenerateContent,
+        generateContentStream: vi.fn(),
+        embedContent: vi.fn(),
+      });
+
+      await askText('qwen3-coder-plus', 5_000);
+
+      expect(targetGenerateContent).toHaveBeenCalledTimes(1);
+      expect(sentBudget(targetGenerateContent)).toBe(32_768);
+      expect(5_000 + 32_768).toBeLessThanOrEqual(1_000_000);
+    });
+
     it('budgets against the session window when the target generator failed to build', async () => {
       // Caveat, by design: `createRuntimeViewForModel` falls back to the main
       // generator when the target model is not registered, returning the
@@ -1328,7 +1387,7 @@ describe('BaseLlmClient', () => {
     describe('QWEN_CODE_MAX_OUTPUT_TOKENS still applies to side queries', () => {
       // Both providers read the override only when the request carries no
       // output limit of its own (`provider/default.ts` applyOutputTokenLimit,
-      // `anthropicContentGenerator.ts` createRequestParameters), so a budget
+      // `anthropicContentGenerator.ts` buildSamplingParameters), so a budget
       // that ignores the env var silently displaces the documented override —
       // and can even raise the wire value. These assert the budget itself,
       // which is the layer the providers now take the value from.
@@ -1382,15 +1441,19 @@ describe('BaseLlmClient', () => {
 
       it('still lets a caller-supplied maxOutputTokens win over the override', async () => {
         // Documented precedence: an explicit request value outranks the env
-        // override, exactly as it did before side queries were budgeted.
+        // override, exactly as it did before side queries were budgeted. The
+        // caller value has to sit *above* the override to pin that direction —
+        // with a value below it, an implementation doing the opposite
+        // (`Math.min(callerValue, envOverride)`, override winning) returns the
+        // same number and this case cannot tell the two apart.
         process.env[ENV_KEY] = '2000';
         useWindow('qwen3-coder-plus', 131_072);
 
         await askText('qwen3-coder-plus', 100_000, {
-          config: { maxOutputTokens: 300 },
+          config: { maxOutputTokens: 4_096 },
         });
 
-        expect(sentBudget()).toBe(300);
+        expect(sentBudget()).toBe(4_096);
       });
     });
   });
