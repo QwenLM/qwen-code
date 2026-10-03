@@ -85,7 +85,20 @@ export function writeWithBackupSync(
       mode,
     });
     // Creation applies umask; restore the existing permissions before publishing.
-    if (mode !== undefined) fs.chmodSync(tempPath, mode);
+    if (mode !== undefined) {
+      try {
+        fs.chmodSync(tempPath, mode);
+      } catch (error) {
+        // Filesystems without POSIX permissions may not support chmod.
+        if (
+          !(error instanceof Error) ||
+          !('code' in error) ||
+          (error.code !== 'ENOSYS' && error.code !== 'ENOTSUP')
+        ) {
+          throw error;
+        }
+      }
+    }
 
     if (fs.existsSync(targetPath)) {
       try {

@@ -68,6 +68,23 @@ describe('writeWithBackup', () => {
     }
   });
 
+  it.each(['ENOSYS', 'ENOTSUP'])(
+    'publishes when chmod is unsupported (%s)',
+    (code) => {
+      nativeFs.writeFileSync(targetPath, 'old');
+      vi.mocked(fs.chmodSync).mockImplementation(() => {
+        throw Object.assign(new Error(code), { code });
+      });
+
+      writeWithBackupSync(targetPath, 'new');
+
+      expect(fs.chmodSync).toHaveBeenCalledOnce();
+      expect(fs.renameSync).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+    },
+  );
+
   describe.skipIf(process.platform === 'win32')('POSIX permissions', () => {
     it.each([0o022, 0o077])(
       'preserves existing modes under umask %o',
@@ -95,6 +112,25 @@ describe('writeWithBackup', () => {
       },
     );
 
+    it.each([0o4600, 0o2640, 0o1644])(
+      'drops special permission bits from mode %o',
+      (mode) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, mode);
+        expect(fs.statSync(targetPath).mode & 0o7777).toBe(mode);
+        vi.mocked(fs.renameSync).mockImplementation((...args) => {
+          expect(nativeFs.statSync(args[0]).mode & 0o7777).toBe(mode & 0o777);
+          nativeFs.renameSync(...args);
+        });
+
+        writeWithBackupSync(targetPath, 'new');
+
+        expect(fs.statSync(targetPath).mode & 0o7777).toBe(mode & 0o777);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+      },
+    );
+
     it.each([0o022, 0o077])(
       'keeps default new-file permissions under umask %o',
       (mask) => {
@@ -110,22 +146,31 @@ describe('writeWithBackup', () => {
       },
     );
 
-    it('preserves the target when setting staging permissions fails', () => {
-      nativeFs.writeFileSync(targetPath, 'old');
-      nativeFs.chmodSync(targetPath, 0o600);
-      vi.mocked(fs.chmodSync).mockImplementation(() => {
-        throw new Error('chmod failed');
-      });
+    it.each([undefined, 'EPERM', 'EACCES', 'EIO', 'EROFS'])(
+      'preserves the target when staging chmod fails (%s)',
+      (code) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, 0o600);
+        const failure = new Error('chmod failed');
+        if (code !== undefined) Object.assign(failure, { code });
+        vi.mocked(fs.chmodSync).mockImplementation(() => {
+          throw failure;
+        });
 
-      expect(() => writeWithBackupSync(targetPath, 'new')).toThrow(
-        'chmod failed',
-      );
-      expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
-      expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
-      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
-      expect(fs.copyFileSync).not.toHaveBeenCalled();
-      expect(fs.renameSync).not.toHaveBeenCalled();
-    });
+        let error: unknown;
+        try {
+          writeWithBackupSync(targetPath, 'new');
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBe(failure);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+        expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.renameSync).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps the sandbox policy and loaded scope readable until publication', () => {
