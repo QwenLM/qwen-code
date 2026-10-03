@@ -1384,7 +1384,6 @@ public final class ToolPublicationDataStore {
 
     void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
             long revision, long sequence) {
-        ToolPublicationRetentionStore.requireLive(jdbc, text(key, "tenantId"), text(key, "sessionId"));
         require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
                 outcomeRef, revision, sequence), "Publication receipt is unavailable");
     }
@@ -1675,12 +1674,12 @@ public final class ToolPublicationDataStore {
                     lease.check();
                     heartbeat.run();
                 })) {
-            byte[] buffer = new byte[64 * 1024];
+            byte[] buffer = new byte[1024 * 1024];
             long position = 0;
             for (;;) {
                 lease.check();
-                int count = input.read(buffer);
-                if (count == -1) {
+                int count = input.readNBytes(buffer, 0, buffer.length);
+                if (count == 0) {
                     break;
                 }
                 lease.check();
