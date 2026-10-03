@@ -5513,6 +5513,21 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Record the primary workspace as trusted in the daemon host's
+   * trusted-folders file. Requires operator authority over the daemon (the
+   * loopback primary listener or a real bearer credential).
+   */
+  async grantWorkspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return await this.jsonRequest<DaemonWorkspaceTrustStatus>(
+      '/workspace/trust/grant',
+      'POST /workspace/trust/grant',
+      { method: 'POST', clientId: opts?.clientId },
+    );
+  }
+
   async workspacePermissions(opts?: {
     clientId?: string;
   }): Promise<DaemonWorkspacePermissionsStatus> {
@@ -8499,6 +8514,21 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/trust/request',
       request,
       clientId,
+    );
+  }
+
+  /**
+   * Record this workspace as trusted in the daemon host's trusted-folders
+   * file. Requires operator authority over the daemon.
+   */
+  grantWorkspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return this.post(
+      '/trust/grant',
+      'POST /workspaces/:workspace/trust/grant',
+      {},
+      opts?.clientId,
     );
   }
 
