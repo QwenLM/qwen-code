@@ -237,6 +237,15 @@ describe('projectContextUsage', () => {
     expectCoherentBreakdown(item);
     expect(text).toContain('Context Usage');
     expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
+    expect(
+      projectContextUsage({ ...item, contextWindowSize: 1_000_000 }),
+    ).toContain('Context window: 1.0m tokens');
+    expect(
+      projectContextUsage({ ...item, contextWindowSize: 999_950 }),
+    ).toContain('Context window: 1.0m tokens');
+    expect(
+      projectContextUsage({ ...item, contextWindowSize: 999_949 }),
+    ).toContain('Context window: 999.9k tokens');
     expect(text).toContain('█ Used 5.0k tokens (5.0%)');
     expect(text).toContain('█ Messages 3.0k tokens (3.0%)');
     expect(text).toContain('Run /context detail for per-item breakdown.');
