@@ -79,7 +79,8 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 - **E2E 把 Workspace 准入当部署数据种子化**（registry 行、access 授权、Broker mount），并在
   两个 Spring owner 上都开启 `harness.workspace-files-enabled` 与可信 actor 头。物理副作用是
   固定的 `write_file`；恰好一次断言由持久执行记录、dispatch generation 与模型请求次数承载，
-  而不是文件字节。`--session-failover` 保持非绑定、不改动。
+  而不是文件字节。`--session-failover` 仍创建非绑定 Session，但这套准入接线不再按模式
+  门控：每个模式的 owner 都携带它(#13258)，其配置与其他模式一致。
 - **两个模式并入 `hosted-harness-mysql` 任务**，该任务安装 runner 私有 `mysqld` 所需的
   MySQL 二进制。
 
