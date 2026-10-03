@@ -12,13 +12,23 @@ public class ApiException extends RuntimeException {
         this(status, code, message, Map.of());
     }
 
+    public ApiException(HttpStatus status, String code, String message,
+            Throwable cause) {
+        this(status, code, message, Map.of(), cause);
+    }
+
     /**
      * Creates an error whose envelope carries {@code details} next to its code,
      * message and request id.
      */
     public ApiException(HttpStatus status, String code, String message,
             Map<String, Object> details) {
-        super(message);
+        this(status, code, message, details, null);
+    }
+
+    private ApiException(HttpStatus status, String code, String message,
+            Map<String, Object> details, Throwable cause) {
+        super(message, cause);
         this.status = status;
         this.code = code;
         this.details = Map.copyOf(details);

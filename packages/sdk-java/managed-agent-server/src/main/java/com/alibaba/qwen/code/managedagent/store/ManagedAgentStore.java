@@ -1342,6 +1342,15 @@ public class ManagedAgentStore implements AgentStateStore {
         return new MaterializationResult(true, nextCovered);
     }
 
+    @Override
+    public void deferMaterializationTarget(String tenantId,
+            String sessionId) {
+        jdbc.update("UPDATE managed_agent_consumer_progress SET updated_at"
+                        + " = ? WHERE tenant_id = ? AND session_id = ? AND"
+                        + " consumer_name = ?",
+                clock.millis(), tenantId, sessionId, MESSAGE_PROJECTION);
+    }
+
     public List<DispatchTarget> findDispatchable(long now, int limit) {
         return jdbc.query("SELECT tenant_id, session_id, turn_id FROM"
                         + " managed_agent_turn WHERE status IN"

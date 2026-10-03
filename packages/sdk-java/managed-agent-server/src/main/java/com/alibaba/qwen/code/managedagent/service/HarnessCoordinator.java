@@ -102,6 +102,17 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed dispatch retry limits are invalid");
         }
+        // Without this, a zero renew interval dies on the worker thread and
+        // a renew >= duration keeps losing the lease at the first renewal,
+        // surfacing later as hosted_harness_unavailable.
+        if (leaseDuration.isNegative() || leaseDuration.isZero()
+                || renewInterval.isNegative() || renewInterval.isZero()
+                || renewInterval.compareTo(leaseDuration) >= 0) {
+            throw new IllegalStateException(
+                    "Managed dispatch lease limits are invalid: renew"
+                            + " interval must be positive and below the lease"
+                            + " duration");
+        }
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {

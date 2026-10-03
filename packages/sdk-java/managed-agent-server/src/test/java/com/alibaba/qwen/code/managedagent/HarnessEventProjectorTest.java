@@ -50,4 +50,21 @@ class HarnessEventProjectorTest {
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
     }
+
+    @Test
+    void sourcePrefixedCallIdDoesNotCollideWithTheNoIdFallback() {
+        ProjectedEvent called = projector.project(new SourceEvent(1L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call", "toolCallId",
+                        "source:7")), "prompt", Map.of()), "turn-1");
+        ProjectedEvent fallback = projector.project(new SourceEvent(7L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call_update")),
+                "prompt", Map.of()), "turn-1");
+
+        // Both identities used to hash identically: the literal callId
+        // "source:<n>" matched the no-id fallback for SourceEvent.id = n.
+        assertThat(called.data().get("itemId"))
+                .isNotEqualTo(fallback.data().get("itemId"));
+    }
 }

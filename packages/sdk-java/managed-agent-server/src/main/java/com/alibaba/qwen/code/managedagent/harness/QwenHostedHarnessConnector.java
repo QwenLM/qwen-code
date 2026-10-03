@@ -36,6 +36,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
     private volatile HostedHarnessClient client;
+    private volatile boolean closed;
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
     private final Set<AttachmentKey> pendingRecovery =
@@ -66,7 +67,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Enabled Hosted Harness requires"
                     + " token and capability digest");
         }
-        URI.create(this.properties.getBaseUrl());
+        URI baseUri = URI.create(this.properties.getBaseUrl());
+        String scheme = baseUri.getScheme();
+        if (scheme == null
+                || !(scheme.equalsIgnoreCase("http")
+                        || scheme.equalsIgnoreCase("https"))
+                || baseUri.getHost() == null) {
+            // "localhost:4170" parses as an opaque URI and would only fail at
+            // the first RPC; reject it while the service is starting.
+            throw new IllegalStateException("Enabled Hosted Harness requires"
+                    + " an absolute http(s) base URL");
+        }
         if (sessionStore.isEnabled()
                 && (sessionStore.getBaseUrl() == null
                         || sessionStore.getBaseUrl().isBlank()
@@ -121,11 +132,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef attached = passiveManagedRuntimeRecovery
-                ? load(session, true)
-                : attachments.computeIfAbsent(key, ignored -> loadExisting
-                        ? load(session, false)
-                        : create(session));
+        HarnessSessionRef attached;
+        if (passiveManagedRuntimeRecovery) {
+            attached = load(session, true);
+        } else {
+            attached = attachments.get(key);
+            if (attached == null) {
+                // Fetch outside the map: a blocking HTTP call inside
+                // computeIfAbsent stalls every attachment hashing to the
+                // same bin. A lost putIfAbsent race is safe — create falls
+                // back to load on 409 and load is a read.
+                HarnessSessionRef resolved = loadExisting
+                        ? load(session, false) : create(session);
+                HarnessSessionRef raced = attachments.putIfAbsent(key,
+                        resolved);
+                attached = raced == null ? resolved : raced;
+            }
+        }
         if (session.workspace() != null
                 && !actions.approvalMode(tenantId, sessionId).equals(attached.getApprovalMode())) {
             attachments.remove(key);
@@ -246,9 +269,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void close() {
-        HostedHarnessClient current = client;
-        if (current != null) {
-            current.close();
+        synchronized (this) {
+            closed = true;
+            HostedHarnessClient current = client;
+            if (current != null) {
+                current.close();
+            }
+            client = null;
         }
         attachments.clear();
         pendingRecovery.clear();
@@ -398,6 +425,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return current;
         }
         synchronized (this) {
+            // Failing before construction matters: building here starts
+            // executors and a heartbeat that nothing would ever close once
+            // close() has run.
+            if (closed) {
+                throw new IllegalStateException(
+                        "Hosted Harness connector is closed");
+            }
             current = client;
             if (current == null) {
                 current = HostedHarnessClient.builder()

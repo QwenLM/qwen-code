@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.after;
@@ -1008,6 +1009,36 @@ class HarnessCoordinatorTest {
             public void close() {
             }
         };
+    }
+
+    @Test
+    void rejectsInvalidLeaseRenewConfiguration() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        ManagedAgentProperties zeroRenew = new ManagedAgentProperties();
+        zeroRenew.getDispatch().setLeaseRenewInterval(Duration.ZERO);
+        // A zero renew interval used to die on the worker thread holding
+        // the claimed turn; a renew >= duration kept losing the lease at
+        // the first renewal and read as hosted_harness_unavailable.
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), zeroRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        ManagedAgentProperties inverted = new ManagedAgentProperties();
+        inverted.getDispatch().setLeaseDuration(Duration.ofSeconds(10));
+        inverted.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(10));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), inverted))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // The defaults (60 s lease / 20 s renew) keep passing.
+        new HarnessCoordinator(store, harness, new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties()).close();
     }
 
     private static ExecutorService directExecutor() {
