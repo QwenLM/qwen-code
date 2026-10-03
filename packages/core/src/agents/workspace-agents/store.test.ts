@@ -48,6 +48,8 @@ import { Storage } from '../../config/storage.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 import {
   allocateRunSequence,
+  claimAgentHostSession,
+  releaseAgentHostSession,
   getAgentsFilePath,
   getThreadPath,
   getWorkspaceFilePath,
@@ -59,12 +61,17 @@ import {
   reconcileThreadOutbox,
   retireWorkspaceAgent,
   setWorkspaceAgentEnabled,
+  updateWorkspaceAgent,
+  issueAgentHostEnrollment,
+  enrollAgentHost,
+  heartbeatAgentHost,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
   writeThread,
 } from './store.js';
 import { postMessage, postMessageInTransaction } from './thread-actions.js';
+import { issueA2AGrant } from './a2a-grants.js';
 import { resolveThreadStatus } from './thread-status.js';
 import {
   HUMAN_AUTHOR_ID,
@@ -339,6 +346,34 @@ describe('agent versioned store', () => {
     });
   });
 
+  it('reads the thread directory once per transaction and keeps it current', async () => {
+    await writeThread(PROJECT_ROOT, thread());
+    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
+      const first = await transaction.listThreads();
+      expect(first.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // A change on disk mid-transaction is not re-read: nothing else may
+      // write while the lock is held, so the listing is taken once.
+      await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), {
+        ...thread(),
+        title: 'Changed outside',
+      });
+      // An in-place edit that is never written does not leak into the cache.
+      first.threads[0]!.title = 'Edited, not written';
+      const second = await transaction.listThreads();
+      expect(second.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // The transaction's own write is what the next read sees.
+      const [root] = second.threads;
+      await transaction.writeThread({ ...root!, title: 'Written' });
+      const third = await transaction.listThreads();
+      expect(third.threads.map((entry) => entry.title)).toEqual(['Written']);
+      await expect(transaction.readThread('th_root')).resolves.toMatchObject({
+        title: 'Written',
+      });
+    });
+  });
+
   it('rejects nested workspace transactions instead of deadlocking', async () => {
     await expect(
       withAgentStoreTransaction(PROJECT_ROOT, () =>
@@ -577,6 +612,59 @@ describe('agent versioned store', () => {
     );
     expect(fromAgent.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
   });
+  it('consumes a fresh enrollment token without replacing a valid host', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, enrolled.secret, {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toMatchObject({ id: enrolled.host.id });
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'other',
+        workspaceCwd: '/other',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+  });
+
+  it('keeps a fresh enrollment token when the saved credential is invalid', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, 'invalid', {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'replacement',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).resolves.toMatchObject({ host: { name: 'replacement' } });
+  });
 });
 
 describe('retiring an agent', () => {
@@ -686,6 +774,87 @@ describe('retiring an agent', () => {
     ).resolves.toBe('updated');
     const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
     expect(isAgentAddressable(alice)).toBe(true);
+  });
+
+  it('leaves every roster field unchanged when a combined placement update is refused', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running' })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        execution: { mode: 'local' },
+        enabled: false,
+      }),
+    ).resolves.toBe('has_live_work');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('does not apply config when disabling is refused by unreadable threads', async () => {
+    await seed([ALICE]);
+    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
+      schemaVersion: AGENTS_SCHEMA_VERSION,
+    });
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        enabled: false,
+      }),
+    ).rejects.toThrow('thread records are unreadable');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('checks concurrent persona and placement patches against the locked roster', async () => {
+    await seed([ALICE]);
+    const enrollment = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const { host } = await enrollAgentHost(PROJECT_ROOT, {
+      token: enrollment.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const results = await Promise.all([
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        execution: {
+          mode: 'managed-host',
+          hostIds: [host.id],
+          provider: 'qwen',
+        },
+      }),
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, model: 'custom-model' }),
+      }),
+    ]);
+    expect(results.sort()).toEqual([
+      'managed_host_persona_unsupported',
+      'updated',
+    ]);
+    const [agent] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(
+      agent.execution?.mode === 'managed-host' && Boolean(agent.model),
+    ).toBe(false);
+  });
+
+  it('combines a config change with disable and settles queued work', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'paused' }),
+        enabled: false,
+      }),
+    ).resolves.toBe('updated');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([
+      { ...ALICE, description: 'paused', enabled: false },
+    ]);
+    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
+      'cancelled',
+    );
   });
 
   it('cancels queued runs on disable so they cannot wedge their thread', async () => {
@@ -842,5 +1011,39 @@ describe('retiring an agent', () => {
       'not_found',
     );
     expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
+  });
+});
+
+describe('releasing the agent host session', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'agent-release-test-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('drops only the claim and keeps the A2A grants', async () => {
+    await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: ALICE.id,
+    });
+    await claimAgentHostSession(PROJECT_ROOT, 'session-1');
+
+    await expect(
+      releaseAgentHostSession(PROJECT_ROOT, 'session-1'),
+    ).resolves.toBe(true);
+
+    const workspace = await readAgentWorkspace(PROJECT_ROOT);
+    expect(workspace.hostSessionId).toBeUndefined();
+    expect(workspace.callerGrants?.map((grant) => grant.callerId)).toEqual([
+      'share_1',
+    ]);
   });
 });

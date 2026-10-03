@@ -624,6 +624,8 @@ function normalizedToRawOffsets(
  * `rawContent`. Inserted text takes the ending of the replaced region — the
  * break the span starts on, else its trailing break, else the break immediately
  * after it, else the most recent break before it, else the file's first break.
+ * Ending choices use the original rawContent; earlier replacements do not
+ * change the context for later matches.
  * A whole-file span keeps the previous writer's file-wide CRLF
  * conversion because there are no outside bytes to preserve. Uniformly
  * terminated files remain byte-identical to the previous path, with one

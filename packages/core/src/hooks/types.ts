@@ -1362,6 +1362,9 @@ export function detectTodoChanges(
  * Hook execution result
  */
 export interface HookExecutionResult {
+  /** True only if a managed command never starts or its owned cgroup is empty. */
+  processTreeDrained?: boolean;
+  httpRequestState?: 'not_started' | 'response_received' | 'outcome_unknown';
   hookConfig: HookConfig;
   eventName: HookEventName;
   success: boolean;

@@ -268,6 +268,14 @@ describe('applyReplacementPreservingLineEndings', () => {
     expect(splice('a\nb\r\nc\nb\r\n', 'b', 'B')).toBe('a\nB\r\nc\nB\r\n');
   });
 
+  it('uses the preceding ending when an end-of-file match has no following break', () => {
+    expect(splice('\r\n\na', 'a', '\n')).toBe('\r\n\n\n');
+  });
+
+  it('uses the original preceding endings across multiline replacement matches', () => {
+    expect(splice('Z\r\nA\nBgA\nB', 'A\nB', 'A\nB')).toBe('Z\r\nA\r\nBgA\nB');
+  });
+
   it('keeps a multi-line replacement on one ending style', () => {
     // The old string is matched against the normalized text, so it is spelled
     // with LF here even though the file is CRLF.

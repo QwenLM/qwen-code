@@ -13,6 +13,7 @@ import java.util.function.Supplier;
 /** Process-local Runtime binding repository for tests and single-node use. */
 public final class InMemoryRuntimeBindingRepository
         implements RuntimeBindingRepository {
+    private final java.util.Set<java.util.List<String>> draining = new java.util.HashSet<>();
     private final Clock clock;
     private final Supplier<String> idSupplier;
     private final Map<String, RuntimeBindingRecord> records = new HashMap<>();
@@ -47,6 +48,17 @@ public final class InMemoryRuntimeBindingRepository
     public synchronized RuntimeBindingRecord recoverLost(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, true);
+    }
+
+    private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
         RuntimeBindingRecord current = findById(expected.getBindingId());
         if (current == null || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()
@@ -65,7 +77,7 @@ public final class InMemoryRuntimeBindingRepository
         synchronized (memorySessions) {
             synchronized (memoryExecutions) {
                 memoryExecutions.abandonByBinding(current);
-                if (!current.hasStoppedWriters()
+                if (!holdersCleared || !current.hasStoppedWriters()
                         || executions.hasActiveByBinding(current.getBindingId(),
                                 current.getGeneration())) {
                     return current;
@@ -93,6 +105,7 @@ public final class InMemoryRuntimeBindingRepository
             RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
         RuntimeBindingRecord binding = findById(candidate.getBindingId());
         RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+        requireAdmission(binding.getRequest());
         if (!binding.getRequest().getScope().equals(
                 candidate.getSession().getScope())) {
             throw new IllegalArgumentException("Session scope differs from binding");
@@ -111,6 +124,7 @@ public final class InMemoryRuntimeBindingRepository
         }
         RuntimeBindingRecord binding = findById(candidate.getBindingId());
         RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+        requireAdmission(binding.getRequest());
         synchronized (sessions) {
             RuntimeAdmission.requireSession(sessions.findById(
                     binding.getRequest().getScope(),
@@ -120,11 +134,44 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized void requestHarnessDrain(String tenantId, String harnessSessionId) {
+        draining.add(List.of(BrokerValues.requireId(tenantId, "tenantId"),
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId")));
+    }
+
+    @Override
+    public synchronized boolean isHarnessDraining(String tenantId, String harnessSessionId) {
+        return draining.contains(List.of(tenantId, harnessSessionId));
+    }
+
+    private void requireAdmission(RuntimeProvisionRequest request) {
+        if ("session".equals(request.getScope().getIsolationClass())
+                && isHarnessDraining(request.getScope().getTenantId(), request.getIsolationKey())) {
+            throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session is draining.", false);
+        }
+    }
+
+    @Override
+    public synchronized List<RuntimeBindingRecord> findByHarnessSession(String tenantId,
+            String harnessSessionId, String afterBindingId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 bindings");
+        }
+        return records.values().stream().filter(record ->
+                tenantId.equals(record.getRequest().getScope().getTenantId())
+                && "session".equals(record.getRequest().getScope().getIsolationClass())
+                && harnessSessionId.equals(record.getRequest().getIsolationKey())
+                && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0))
+                .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId)).limit(limit).toList();
+    }
+
+    @Override
     public synchronized RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("request is required");
         }
+        requireAdmission(request);
         RuntimeBindingRecord existing = findActive(request);
         if (existing != null) {
             return existing;
@@ -166,6 +213,25 @@ public final class InMemoryRuntimeBindingRepository
             return null;
         }
         return record;
+    }
+
+    @Override
+    public synchronized List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
+        BrokerValues.requireId(kind, "provisionerKind");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Recovery batch must contain 1-100 bindings");
+        }
+        return records.values().stream()
+                .filter(record -> kind.equals(record.getRequest().getProvisionerKind())
+                        && record.getResourceHandle() != null && record.getResourceHandle().getVersion() == 2
+                        && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0)
+                        && (record.getState() == RuntimeBindingRecord.State.PROVISIONING
+                                || record.getState() == RuntimeBindingRecord.State.READY
+                                || record.getState() == RuntimeBindingRecord.State.DRAINING
+                                || record.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                || record.getState() == RuntimeBindingRecord.State.LOST))
+                .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId))
+                .limit(limit).toList();
     }
 
     @Override
