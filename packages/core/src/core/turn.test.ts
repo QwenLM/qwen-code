@@ -738,8 +738,8 @@ describe('Turn', () => {
       const events = await run([
         textChunk('First part'), // No finish reason on first response
         {
+          type: StreamEventType.CHUNK,
           value: {
-            type: StreamEventType.CHUNK,
             candidates: [
               {
                 content: { parts: [{ text: 'Second part' }] },
