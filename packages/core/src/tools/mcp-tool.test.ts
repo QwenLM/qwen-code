@@ -21,6 +21,7 @@ import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
+import { MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS } from './mcp-app-resource-limits.js';
 import {
   MCPServerStatus,
   removeMCPServerStatus,
@@ -1472,31 +1473,82 @@ describe('DiscoveredMCPTool', () => {
       },
     );
 
+    // An extension-declared server has no `mcpServers.<name>` settings path,
+    // so `appLimitSettingRef` returns a descriptive form instead. Pin the
+    // composed sentence: the source is named descriptively, the cap clause
+    // then names the bare key that lifts it without repeating the source.
+    it('names the extension-declared source and the cap in one sentence', async () => {
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeoutController.signal);
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(
+          async () =>
+            new Promise<never>((_resolve, reject) => {
+              timeoutController.abort(
+                new DOMException('The operation timed out', 'TimeoutError'),
+              );
+              reject(timeoutController.signal.reason);
+            }),
+        ),
+      };
+      try {
+        const result = await createAppTool(mcpClient, undefined, 60_000, {
+          extensionName: 'demo-ext',
+        })
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expectAppLoadWarning(
+          result,
+          `resource read timed out (limit: ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; ` +
+            `timeout for server '${serverName}' declared by extension 'demo-ext', ` +
+            `capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; ` +
+            `only appResourceTimeoutMs lifts that cap)`,
+        );
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
     it.each([
+      // Nothing is configured, so the App resource default owns the
+      // deadline and is the only key to name.
       {
         mcpTimeout: undefined,
         deadline: true,
         expectedTimeout: 10_000,
         expectedKey: 'appResourceTimeoutMs',
       },
+      // `timeout` at or above the cap yields exactly the cap, so the warning
+      // names `timeout` as the source AND the cap that pinned it -- raising
+      // `timeout` further changes nothing, only `appResourceTimeoutMs` does.
       {
         mcpTimeout: 60_000,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
       {
         mcpTimeout: 600_000,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
       {
         mcpTimeout: 10_000,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
+      // Below the cap it is not binding: raising `timeout` does lift the
+      // deadline, so naming the cap would send the operator the wrong way.
       {
         mcpTimeout: 500,
         deadline: false,
@@ -1509,7 +1561,8 @@ describe('DiscoveredMCPTool', () => {
         expectedTimeout: 50,
         expectedKey: 'timeout',
       },
-      // An explicit App timeout owns the deadline, so the warning names it.
+      // An explicit App timeout owns the deadline, so the warning names it
+      // alone -- the cap does not apply to it.
       {
         mcpTimeout: 60_000,
         appResourceTimeoutMs: 30_000,
@@ -1525,6 +1578,7 @@ describe('DiscoveredMCPTool', () => {
         deadline,
         expectedTimeout,
         expectedKey,
+        expectCapHint,
       }) => {
         const timeoutController = new AbortController();
         const timeoutSpy = vi
@@ -1569,9 +1623,13 @@ describe('DiscoveredMCPTool', () => {
             { uri: 'ui://demo/dashboard' },
             { timeout: expectedTimeout, signal: expect.any(AbortSignal) },
           );
+          // The cap clause rides along only where the cap actually binds.
+          const capHint = expectCapHint
+            ? `, capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; only appResourceTimeoutMs lifts that cap`
+            : '';
           expectAppLoadWarning(
             result,
-            `resource read timed out (limit: ${expectedTimeout} ms; mcpServers.${serverName}.${expectedKey})`,
+            `resource read timed out (limit: ${expectedTimeout} ms; mcpServers.${serverName}.${expectedKey}${capHint})`,
           );
           expect(mockDebugWarn).toHaveBeenCalledWith(
             expect.stringContaining(
