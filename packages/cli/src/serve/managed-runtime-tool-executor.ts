@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
   checkHostedGlobPattern,
@@ -837,7 +837,8 @@ export class ManagedToolExecutor {
           path.isAbsolute(relative)
         ) {
           // The boundary is the Session directory only when the target lands
-          // in ANOTHER installed Session's directory; anywhere else inside
+          // in ANOTHER installed Session's directory (or its binding cannot
+          // be resolved); anywhere else inside
           // the mount — a linked dependency's real location — stays
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
@@ -1299,7 +1300,8 @@ function escapesSession(relative: string): boolean {
 /**
  * A create's leaf does not exist yet, so a bare realpath cannot see a symlink
  * mid-path (`peek/pwned.txt` through `peek -> ../web`): resolve the deepest
- * ancestor that does exist and re-attach the lexical tail below it. A path
+ * ancestor that does exist and re-attach the lexical tail below it. A dangling
+ * link is resolved to its intended target before any tail is re-attached. A path
  * with no symlink in its ancestry keeps its lexical value, so the tool keeps
  * its own not-found answer rather than being accused as traversal; any
  * non-ENOENT failure to resolve is not something containment may assume away.
@@ -1307,20 +1309,33 @@ function escapesSession(relative: string): boolean {
 async function realpathDeepestExisting(candidate: string): Promise<string> {
   let resolved = candidate;
   const tail: string[] = [];
-  for (;;) {
-    try {
-      return path.join(await realpath(resolved), ...tail);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code !== 'ENOENT')
-        throw new Error(
-          `Path could not be resolved (${code ?? 'unknown error'}).`,
-        );
+  try {
+    for (;;) {
+      try {
+        return path.join(await realpath(resolved), ...tail);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+      // A dangling link exists even though realpath cannot resolve its leaf.
+      try {
+        if ((await lstat(resolved)).isSymbolicLink()) {
+          resolved = path.resolve(
+            await realpath(path.dirname(resolved)),
+            await readlink(resolved),
+          );
+          continue;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
       const parent = path.dirname(resolved);
       if (parent === resolved) return path.join(resolved, ...tail);
       tail.unshift(path.basename(resolved));
       resolved = parent;
     }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    throw new Error(`Path could not be resolved (${code ?? 'unknown error'}).`);
   }
 }
 

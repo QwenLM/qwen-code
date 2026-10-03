@@ -281,7 +281,8 @@ export function registerManagedContextRoutes(
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
         const directory = await mount.resolve(binding.cwdRelative);
-        if (directory === undefined) continue;
+        // An unresolved binding cannot prove the outside target is shared.
+        if (directory === undefined) return true;
         const relative = path.relative(directory, realPath);
         if (
           relative !== '..' &&

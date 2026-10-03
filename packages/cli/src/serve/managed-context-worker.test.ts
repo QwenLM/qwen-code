@@ -1406,6 +1406,102 @@ describe('Managed context tool gate', () => {
     ).toBe('mine too');
   });
 
+  it.each(['own', 'sibling'])(
+    'resolves a dangling leaf before writing to the %s directory',
+    async (owner) => {
+      const root = workspace(['services/api/src', 'services/web']);
+      const target = owner === 'own' ? 'src/new.txt' : '../web/new.txt';
+      fs.symlinkSync(target, path.join(root, 'services/api/dangling'));
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      const answer = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName: 'write_file',
+          input: { file_path: 'dangling', content: 'dummy' },
+        })
+      ).json();
+      const actual = path.resolve(root, 'services/api', target);
+      if (owner === 'own') {
+        expect(answer.result.executionStatus).toBe('success');
+        expect(fs.readFileSync(actual, 'utf8')).toBe('dummy');
+      } else {
+        expect(answer.result.executionStatus).toBe('error');
+        expect(JSON.stringify(answer)).toContain(
+          'not within the Session working directory',
+        );
+        expect(fs.existsSync(actual)).toBe(false);
+      }
+    },
+  );
+
+  it.each(['missing', 'linked'])(
+    'refuses directory-external file access with a %s sibling binding',
+    async (state) => {
+      const root = workspace(['services/api/src', 'services/web']);
+      fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+      fs.writeFileSync(path.join(root, 'services/web/notes.txt'), 'peer-data');
+      fs.symlinkSync('../web', path.join(root, 'services/api/peek'));
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      if (state === 'missing') {
+        fs.rmSync(path.join(root, 'services/web'), { recursive: true });
+      } else {
+        fs.renameSync(
+          path.join(root, 'services/web'),
+          path.join(root, 'services/retired-web'),
+        );
+        fs.symlinkSync('retired-web', path.join(root, 'services/web'));
+      }
+      const answer = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName: state === 'missing' ? 'write_file' : 'read_file',
+          input:
+            state === 'missing'
+              ? { file_path: '../web/new.txt', content: 'dummy' }
+              : { file_path: 'peek/notes.txt' },
+        })
+      ).json();
+      expect(answer.result.executionStatus).toBe('error');
+      expect(JSON.stringify(answer)).not.toContain('peer-data');
+      expect(fs.existsSync(path.join(root, 'services/web/new.txt'))).toBe(
+        false,
+      );
+      const own = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-2', ''),
+          toolName: 'read_file',
+          input: { file_path: 'src/index.ts' },
+        })
+      ).json();
+      expect(own.result.executionStatus).toBe('success');
+      expect(JSON.stringify(own)).toContain('mine');
+    },
+  );
+
   it('reads through a symlink to a shared directory that is no Session', async () => {
     // The Session boundary protects sibling SESSIONS. A linked dependency
     // inside the same mount (`node_modules/@acme/ui -> ../../packages/ui`)

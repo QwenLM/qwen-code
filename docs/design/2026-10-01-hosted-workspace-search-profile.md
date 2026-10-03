@@ -43,7 +43,7 @@ with the existing `normalizeWorkspaceRelativePath` before acquisition, so an
 absolute or `..` path is a model-correctable refusal with no Runtime work, the
 same treatment `file_path` gets today. A blank or null `path` is treated as
 omitted. The trimmed `pattern` must be a nonempty string; the shared checker
-refuses absolute or `..` brace alternatives and unsafe expansion before
+refuses absolute or `..` brace alternatives after unescaping, and unsafe expansion before
 acquisition, and the worker re-checks the dispatched value. Patterns use `/`
 as the directory separator; backslashes retain glob escape semantics.
 
@@ -72,7 +72,7 @@ invariants hold there, because Glob's own validation admits external paths:
   patterns over 1024 characters, with unbalanced braces, with unsafe numeric
   endpoints, steps or spans, or with more than 64 brace alternatives computed
   from their structure. Only then are they expanded and their alternatives
-  checked for absolute or `..` segments as a fast path.
+  unescaped and checked for absolute or `..` segments as a fast path.
 - Results are rewritten relative to the Session working directory before
   reaching the wire, the model, or the durable record. The Runtime host's physical layout
   must not leak to the Harness; for a search tool the paths are the payload.
@@ -88,7 +88,9 @@ its in-Session matches.
 
 The boot-v2 file-tool containment permits shared locations inside the mount
 and excludes directories owned by another Session installed in the same
-worker. That registry check is worker-local, not a confidentiality guarantee
+worker. An unresolved sibling binding refuses directory-external access;
+own-directory access remains available. Dangling links are checked against
+their intended targets before a write. That registry check is worker-local, not a confidentiality guarantee
 across separate workers. It preserves `/1` linked-dependency reads; file
 history retains its own write boundary. Boot v1 keeps the stricter Session
 boundary. Non-ENOENT resolution failures must fail without exposing Node's
