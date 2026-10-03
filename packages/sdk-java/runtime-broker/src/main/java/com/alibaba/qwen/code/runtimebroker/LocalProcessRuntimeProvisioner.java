@@ -498,8 +498,11 @@ public final class LocalProcessRuntimeProvisioner
         } catch (IOException | RuntimeException exception) {
             if (exception == closedRefusal) {
                 // A closed provisioner is not a managed-context startup
-                // failure. Keep the refusal retryable, so a rolling restart
-                // does not permanently fail the turn that raced it.
+                // failure, and recovery is not blocked by it: keep the
+                // refusal's own message and retryable flag for callers that
+                // provision directly. Through RuntimeBrokerService a
+                // managed-context provision failure blocks recovery either
+                // way, so this changes the surfaced error, not that outcome.
                 throw closedRefusal;
             }
             if (request.isManagedContext()) {

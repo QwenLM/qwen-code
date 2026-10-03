@@ -498,8 +498,11 @@ class Issue13183AdversarialTest {
                     "the harness never exited; harness log: "
                             + logTail(harnessLog));
             Thread.sleep(1000);
+            // running() rather than isAlive(): the JDK counts a zombie as
+            // alive, and a worker killed at halt is reaped by whoever adopts
+            // it, which a container runner's PID 1 may never do.
             boolean leaked = ProcessHandle.of(worker)
-                    .map(ProcessHandle::isAlive).orElse(false);
+                    .map(ProcessTrees::running).orElse(false);
             assertTrue(!leaked,
                     "worker " + worker
                             + " survived the broker JVM exit mid-handshake;"
@@ -557,16 +560,19 @@ class Issue13183AdversarialTest {
                             + logTail(harnessLog));
             // The harness has exited, and with it the hook's grace window,
             // so this loop only waits out pid reaping. It trusts the pid
-            // only while that process still names a node worker: the pid
-            // could be recycled while the loop waits.
+            // only while that process still runs and still names a node
+            // worker: a zombie counts as dead here, and the pid could be
+            // recycled while the loop waits.
             long pid = worker;
             boolean alive = true;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
             while (alive && System.nanoTime() < deadline) {
-                alive = ProcessHandle.of(pid).map(handle -> handle.isAlive()
-                        && handle.info().command()
-                                .map(command -> command.contains("node"))
-                                .orElse(true)).orElse(false);
+                alive = ProcessHandle.of(pid).map(handle ->
+                        ProcessTrees.running(handle)
+                                && handle.info().command()
+                                        .map(command -> command
+                                                .contains("node"))
+                                        .orElse(true)).orElse(false);
                 Thread.sleep(100);
             }
             assertTrue(!alive,

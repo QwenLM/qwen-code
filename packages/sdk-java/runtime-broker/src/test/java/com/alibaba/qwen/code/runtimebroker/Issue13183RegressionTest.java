@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -989,11 +990,11 @@ class Issue13183RegressionTest {
      * and stopping at 2s, so a finished result is never picked up later
      * than the cap allows. Asserted on the computation rather than on the
      * wall clock, which cannot resolve a 2s cap from a 2.5s one without
-     * depending on scheduler jitter. The sweep past the cap pins the inner
-     * clamp: the window has a floor but no ceiling, so the attempt count is
-     * unbounded, and an unclamped shift wraps — negative at attempt 57 —
-     * which would schedule zero and negative delays and return the polling
-     * to the rate the backoff exists to remove.
+     * depending on scheduler jitter. The tail is pinned by equality rather
+     * than by bounds: an in-bounds schedule that dipped back to 100ms on
+     * every other attempt would restore the 10/s polling the backoff exists
+     * to remove, and only an exact cap catches it — as does an unclamped
+     * shift, which wraps negative at attempt 57.
      */
     @Test
     void v3ResultPollingDelayDoublesToTheCap() {
@@ -1002,12 +1003,11 @@ class Issue13183RegressionTest {
                 IntStream.rangeClosed(0, 7)
                         .mapToObj(RuntimeBrokerService::v3PollDelayMillis)
                         .toList());
-        IntStream.rangeClosed(0, 100_000).forEach(attempt -> {
-            long delay = RuntimeBrokerService.v3PollDelayMillis(attempt);
-            assertTrue(delay >= 100L && delay <= 2_000L,
-                    "backoff left its bounds at attempt " + attempt + ": "
-                            + delay);
-        });
+        // The window has a floor but no ceiling, so the attempt count is
+        // unbounded; past the ramp every attempt must sit at the cap.
+        IntStream.rangeClosed(8, 100_000).forEach(attempt -> assertEquals(
+                2_000L, RuntimeBrokerService.v3PollDelayMillis(attempt),
+                "the backoff left the cap at attempt " + attempt));
     }
 
     /**
@@ -1127,45 +1127,54 @@ class Issue13183RegressionTest {
         // A plain (non-managed) request keeps the wedge provision's own
         // startup path out of the way.
         RuntimeProvisionRequest plain = raceRequest();
-        // A wedged worker stretches close()'s grace window, so the race
-        // window is seconds wide instead of nanoseconds.
-        provisioner.provision(plain, ManagedContextProtocolTest.seed())
-                .toCompletableFuture().get(10, TimeUnit.SECONDS);
-        Thread closer = new Thread(provisioner::close, "closer");
-        closer.start();
-        RuntimeBrokerException refused = null;
-        Instant giveUp = Instant.now().plusSeconds(10);
-        int attempt = 0;
-        while (refused == null && closer.isAlive()
-                && Instant.now().isBefore(giveUp)) {
-            try {
-                provisioner.provision(racing, racingSeeds.apply(attempt++))
-                        .toCompletableFuture().join();
-            } catch (CompletionException failure) {
-                // Match the guard's exact message; a worker killed
-                // mid-handshake reports "closed before ready".
-                if (failure.getCause() instanceof RuntimeBrokerException broker
-                        && "Managed Runtime provisioner is closed."
-                                .equals(broker.getMessage())) {
-                    refused = broker;
+        try {
+            // A wedged worker stretches close()'s grace window, so the race
+            // window is seconds wide instead of nanoseconds.
+            provisioner.provision(plain, ManagedContextProtocolTest.seed())
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            Thread closer = new Thread(provisioner::close, "closer");
+            closer.start();
+            RuntimeBrokerException refused = null;
+            Instant giveUp = Instant.now().plusSeconds(10);
+            int attempt = 0;
+            while (refused == null && closer.isAlive()
+                    && Instant.now().isBefore(giveUp)) {
+                try {
+                    provisioner.provision(racing, racingSeeds.apply(attempt++))
+                            .toCompletableFuture().join();
+                } catch (CompletionException failure) {
+                    // Match the guard's exact message; a worker killed
+                    // mid-handshake reports "closed before ready".
+                    if (failure.getCause() instanceof RuntimeBrokerException broker
+                            && "Managed Runtime provisioner is closed."
+                                    .equals(broker.getMessage())) {
+                        refused = broker;
+                    }
+                } catch (java.util.concurrent.RejectedExecutionException
+                        poolShutDown) {
+                    break;
                 }
-            } catch (java.util.concurrent.RejectedExecutionException
-                    poolShutDown) {
-                break;
+                Thread.sleep(20);
             }
-            Thread.sleep(20);
+            closer.join(TimeUnit.SECONDS.toMillis(15));
+            assertFalse(closer.isAlive(),
+                    "close() never finished, so the lingering-children check"
+                            + " below would measure a live teardown");
+            // Killed children linger as zombies until the JVM reaper runs, so
+            // wait them out rather than snapshot once.
+            await(() -> {
+                Set<Long> lingering = ProcessTrees.childPids();
+                lingering.removeAll(before);
+                lingering.removeIf(pid -> ProcessHandle.of(pid)
+                        .map(process -> !process.isAlive()).orElse(true));
+                return lingering.isEmpty();
+            }, Duration.ofSeconds(10));
+            return refused;
+        } finally {
+            // A throw anywhere above must not leave the wedged worker
+            // alive for the rest of the surefire JVM.
+            provisioner.close();
         }
-        closer.join(TimeUnit.SECONDS.toMillis(15));
-        // Killed children linger as zombies until the JVM reaper runs, so
-        // wait them out rather than snapshot once.
-        await(() -> {
-            Set<Long> lingering = ProcessTrees.childPids();
-            lingering.removeAll(before);
-            lingering.removeIf(pid -> ProcessHandle.of(pid)
-                    .map(process -> !process.isAlive()).orElse(true));
-            return lingering.isEmpty();
-        }, Duration.ofSeconds(10));
-        return refused;
     }
 
     /** The plain request the race fixture provisions with. */
@@ -1219,8 +1228,11 @@ class Issue13183RegressionTest {
     /**
      * The same refusal must survive managed-context retyping: start()'s catch
      * turns every other failure into a non-retryable "recovery is blocked"
-     * 503, which would permanently fail a turn that merely raced a rolling
-     * restart instead of letting the caller retry it.
+     * 503, which would tell a caller provisioning directly that recovery is
+     * blocked when the provisioner was merely closed. Through the service the
+     * turn fails either way — a managed-context provision failure blocks
+     * recovery regardless of the flag — so what this pins is the refusal's
+     * own message and its retryable flag.
      */
     @Test
     void provisionRacingCloseStaysRetryableForManagedContext()
