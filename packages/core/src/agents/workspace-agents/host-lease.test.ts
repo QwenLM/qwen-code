@@ -458,6 +458,51 @@ describe('Host result receipts', () => {
     }
   });
 
+  it('acks no receipt for a result that a cancellation discarded', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const input = {
+      threadId,
+      runId: assignment.runId,
+      hostId: mine,
+      leaseId: assignment.lease.leaseId,
+      attempt: assignment.attempt,
+      status: 'completed' as const,
+      close: { kind: 'review' as const, summary: 'Never posted.' },
+      tokens: 1_050,
+    };
+    // A cancel keeps the lease, so the Host's result still arrives inside its
+    // window. Settlement overrides the status to `cancelled` and the closing
+    // tool is skipped, because only a `running` run posts its answer, so the
+    // summary never reaches the thread.
+    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
+      const current = (await transaction.readThread(threadId))!;
+      await transaction.writeThread({
+        ...current,
+        runs: current.runs.map((run) => ({ ...run, status: 'cancelling' })),
+      });
+    });
+
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+    ).resolves.toMatchObject({ ok: true, value: { alreadyApplied: false } });
+    const cancelled = (await readThread(PROJECT_ROOT, threadId))!;
+    expect(cancelled.runs[0]?.status).toBe('cancelled');
+    expect(cancelled.runs[0]?.hostResultReceipt).toBeUndefined();
+    expect(cancelled.messages.map((message) => message.text)).not.toContain(
+      'Never posted.',
+    );
+
+    // An exact re-post is the retry a Host makes when the first response was
+    // lost. It must not be told its discarded answer was applied.
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 2),
+    ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+    expect((await readThread(PROJECT_ROOT, threadId))?.tokensUsed).toBe(1_050);
+  });
+
   it.each(['recovery', 'cancellation'] as const)(
     'accounts late usage after %s without applying the result',
     async (reason) => {

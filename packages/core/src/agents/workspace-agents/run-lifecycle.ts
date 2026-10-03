@@ -576,6 +576,14 @@ export async function finishRunInTransaction(
     terminalStatus === input.outcome.status
       ? input.outcome.failureStage
       : undefined;
+  // The receipt is a record that this outcome's answer was applied, so it is
+  // dropped with the error and failure stage when settlement overrode the
+  // status: a receipt on a run that was cancelled would answer an exact
+  // re-post of that discarded result with `alreadyApplied`.
+  const terminalHostResultReceipt =
+    terminalStatus === input.outcome.status
+      ? input.outcome.hostResultReceipt
+      : undefined;
 
   const closedThrough =
     target.status === 'finishing'
@@ -610,8 +618,8 @@ export async function finishRunInTransaction(
             ...run,
             status: terminalStatus,
             endedAt: now,
-            ...(input.outcome.hostResultReceipt
-              ? { hostResultReceipt: input.outcome.hostResultReceipt }
+            ...(terminalHostResultReceipt
+              ? { hostResultReceipt: terminalHostResultReceipt }
               : {}),
             // A run that stopped without calling a closing tool and without
             // saying anything is recorded as `unclosed`, never as an implicit
