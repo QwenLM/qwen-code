@@ -224,8 +224,17 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   sandbox: {
     alias: 's',
-    type: 'boolean' as const,
-    description: 'Run in sandbox?',
+    type: 'string' as const,
+    coerce: (raw: string | boolean | Array<string | boolean>) => {
+      const value = Array.isArray(raw) ? raw.at(-1) : raw;
+      if (typeof value === 'boolean') return value;
+      const selection = (value ?? '').trim().toLowerCase();
+      if (['', 'true', '1'].includes(selection)) return true;
+      if (['false', '0'].includes(selection)) return false;
+      return selection;
+    },
+    description:
+      'Run in a sandbox: true, false, docker, podman, sandbox-exec. Use --sandbox -p <prompt> for automatic selection.',
   },
   'sandbox-image': {
     type: 'string' as const,

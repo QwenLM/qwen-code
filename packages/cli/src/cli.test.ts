@@ -943,6 +943,16 @@ describe('runCliEntry', () => {
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
   });
 
+  it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
+    const error = new FatalError('Repair operator settings and restart.', 52);
+    mocks.mcpListHandler.mockRejectedValueOnce(error);
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const stderr = vi.spyOn(process.stderr, 'write');
+    await expect(runCliEntry(['mcp', 'list'])).rejects.toBe(error);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
   it('fails MCP fast-path validation without loading the full CLI', async () => {
     await runCliEntry(['mcp', 'doesnotexist']);
 
