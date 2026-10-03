@@ -712,7 +712,9 @@ function spawnDevProcess(label, command, commandArgs, options) {
 
 function killChild(child) {
   // Re-entrancy guard: shutdown() iterates every still-live child and the
-  // exit hook reaps the same set, so a second pass must be a no-op.
+  // exit hook reaps the same set. child.killed only tracks child.kill(), so
+  // a second pass on the group/taskkill plans is at worst one redundant
+  // signal to an already-dying tree, never a new kill of a reused pid.
   if (child.killed) return;
   const plan = buildKillPlan(isWin, Boolean(child.pid));
   try {
@@ -913,6 +915,11 @@ async function main() {
       );
     }
   }
+
+  // A child can die while the Java wait runs; teardown is already reaping
+  // in that case, so do not advertise a URL or spawn Vite into a dying group
+  // (the exit hook would reap it anyway, but the output would mislead).
+  if (shuttingDown) return;
 
   if (process.stdout.isTTY) {
     console.log(
