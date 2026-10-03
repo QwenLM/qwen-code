@@ -196,8 +196,19 @@ function object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function error(res: Response, status: number, code: string): void {
-  res.status(status).json({ error: code, code });
+function error(
+  res: Response,
+  status: number,
+  code: string,
+  message?: string,
+): void {
+  res
+    .status(status)
+    .json(
+      message === undefined
+        ? { error: code, code }
+        : { error: code, code, message },
+    );
 }
 
 function identity(
@@ -1339,11 +1350,12 @@ export function registerHostedHarnessSessionRoutes(
       store = parseBridgeManagedSessionStore(body?.['managedSessionStore']);
     } catch (cause) {
       debugLogger.warn('managed session store descriptor rejected:', cause);
-      res.status(400).json({
-        error: 'invalid_managed_session_store',
-        code: 'invalid_managed_session_store',
-        message: cause instanceof Error ? cause.message : String(cause),
-      });
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
       return;
     }
     if (store.writerId !== contract.bootId) {
@@ -1375,11 +1387,12 @@ export function registerHostedHarnessSessionRoutes(
       });
     } catch (cause) {
       debugLogger.warn('managed session store descriptor refused:', cause);
-      res.status(400).json({
-        error: 'invalid_managed_session_store',
-        code: 'invalid_managed_session_store',
-        message: cause instanceof Error ? cause.message : String(cause),
-      });
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
       return;
     }
     opening.add(sessionId);

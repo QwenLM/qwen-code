@@ -68,6 +68,12 @@ class BrokerSecurityTest {
         assertThatThrownBy(() -> security(properties, "127.0.0.1"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("allow-insecure-http");
+        // A bare "127" is not loopback either: WHATWG URL parsing maps it
+        // to 0.0.0.127, which the client refuses.
+        properties.getSessionStore().setBaseUrl("http://127:4183");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("allow-insecure-http");
         properties.getSessionStore().setAllowInsecureHttp(true);
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
@@ -86,6 +92,25 @@ class BrokerSecurityTest {
     }
 
     @Test
+    void refusesAPlaintextNonLoopbackPublicationUrl() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getToolPublication().setEnabled(true);
+        properties.getToolPublication()
+                .setServiceBaseUrl("http://publication.internal:4184");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("service-base-url");
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        properties.getAuth().setAllowInsecureBind(false);
+        properties.getToolPublication()
+                .setServiceBaseUrl("https://publication.internal:4184");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void theInsecureBindOverrideNamesEveryGuardItSkips() throws Exception {
         ch.qos.logback.classic.Logger logger =
                 (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
@@ -100,6 +125,9 @@ class BrokerSecurityTest {
             properties.getSessionStore().setEnabled(true);
             properties.getHarness().setEnabled(true);
             properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
+            properties.getToolPublication().setEnabled(true);
+            properties.getToolPublication()
+                    .setServiceBaseUrl("http://10.0.0.10:4184");
             BrokerSecurity security = security(properties, "10.0.0.8");
             assertThat(security.getMode()).isEqualTo(BrokerSecurity.Mode.OPEN);
             assertThat(appender.list).anySatisfy(event -> assertThat(
@@ -107,7 +135,8 @@ class BrokerSecurityTest {
                     .contains("skipped=")
                     .contains("public-bind")
                     .contains("internal-binding-key")
-                    .contains("harness-transport"));
+                    .contains("harness-transport")
+                    .contains("publication-transport"));
         } finally {
             logger.detachAppender(appender);
         }
@@ -190,6 +219,11 @@ class BrokerSecurityTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("binding-key");
         dedicated.getInternalServer().setAddress("127.0.0.1");
+        assertThatCode(() -> security(dedicated, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        // A blank address (unset template variable) binds loopback, exactly
+        // as the connector resolves it.
+        dedicated.getInternalServer().setAddress("");
         assertThatCode(() -> security(dedicated, "127.0.0.1"))
                 .doesNotThrowAnyException();
 

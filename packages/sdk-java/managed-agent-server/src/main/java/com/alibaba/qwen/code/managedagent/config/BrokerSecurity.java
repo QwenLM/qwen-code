@@ -179,6 +179,7 @@ public class BrokerSecurity {
         }
         checkStoreBaseUrlTransport(properties.getSessionStore());
         checkHarnessTransport(properties, skippedGuards);
+        checkPublicationTransport(properties, skippedGuards);
         this.maxSignedBodyBytes = auth.getMaxSignedBodyBytes();
         if (mode == Mode.SIGNED && maxSignedBodyBytes < 1) {
             throw new IllegalStateException(
@@ -283,8 +284,43 @@ public class BrokerSecurity {
         }
     }
 
-    // Matches the client's literal-only loopback set (localhost, *.localhost,
-    // 127.0.0.0/8, [::1]); the resolver is never consulted here.
+    // The publication surface is handed to remote runtimes; plaintext on a
+    // non-loopback host leaks writer credentials the same way.
+    private void checkPublicationTransport(ManagedAgentProperties properties,
+            java.util.List<String> skippedGuards) {
+        ManagedAgentProperties.ToolPublication publication =
+                properties.getToolPublication();
+        if (!publication.isEnabled()) {
+            return;
+        }
+        String baseUrl = publication.getServiceBaseUrl();
+        if (baseUrl == null || baseUrl.isBlank()) {
+            return;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(baseUrl);
+        } catch (IllegalArgumentException error) {
+            return;
+        }
+        if ("http".equalsIgnoreCase(uri.getScheme())
+                && !isLoopback(uri.getHost())) {
+            if (!allowInsecureBind) {
+                throw new IllegalStateException(
+                        "qwen.managed-agent.tool-publication.service-base-url"
+                                + " uses plaintext http on a non-loopback"
+                                + " host, exposing writer credentials; use"
+                                + " https or set auth.allow-insecure-bind=true"
+                                + " to override.");
+            }
+            skippedGuards.add("publication-transport");
+        }
+    }
+
+    // The practical literal-only loopback set the client enforces:
+    // localhost, *.localhost, dotted 127.0.0.0/8 forms, [::1]. A bare "127"
+    // is excluded — WHATWG URL parsing maps it to 0.0.0.127, which the
+    // client rejects. The resolver is never consulted here.
     private static boolean isLiteralLoopbackHost(String host) {
         if (host == null || host.isBlank()) {
             return false;
@@ -297,7 +333,7 @@ public class BrokerSecurity {
                 || "::1".equals(value)) {
             return true;
         }
-        return value.matches("^127(\\.[0-9]{1,3}){0,3}$");
+        return value.matches("^127(\\.[0-9]{1,3}){1,3}$");
     }
 
     public Mode getMode() {

@@ -107,8 +107,10 @@ harness。
 
   `requestURI` 是未解码的路径，不含查询串；`queryString` 是原始查询串
   （缺省为空）；`idempotencyKey` 是 `Idempotency-Key` 头的值（缺省为
-  空）。对请求体和幂等键签名意味着捕获的签名只对这一个请求有效，
-  而非漂移窗口内同路径的任意请求。
+  空）。对请求体和幂等键签名意味着捕获的签名无法转移到其他方法、
+  路径、查询串、租户、actor 或请求体；配方之外的头（如
+  `Last-Event-ID`、`Accept`）在漂移窗口内仍可变，因此捕获的读签名
+  可在这些头选择的游标值上重放。
 
   验证成功后过滤器安装 `AuthenticatedTenantActor` principal
   （租户与 actor 来自现已认证的头）；失败则以标准错误信封应答
@@ -122,10 +124,12 @@ harness。
   拼写（百分号编码、路径参数）都无法绕过，而规范串仍对原始请求
   URI 签名；重复的 `Idempotency-Key` 头以 `400 invalid_request`
   拒绝，因为 Servlet 契约会签第一个值而 controller 绑定的是逗号
-  拼接值。缓冲的请求体受
+  拼接值。缓冲的请求体按请求受
   `qwen.managed-agent.auth.max-signed-body-bytes`（默认 10 MiB）
-  限制——超限请求在签名比对之前应答 `413 payload_too_large`，
-  未签名调用者无法以此消耗 broker 堆内存。
+  限制——超限请求在签名比对之前应答 `413 payload_too_large`。
+  认证前的聚合缓冲上限为该值乘以 Servlet 工作线程数
+  （`server.tomcat.threads.max`，默认 200）；内存紧张的环境可调低
+  两者之一。
 
 - `auto`：当 `server.address` 为回环地址（交付默认值
   `127.0.0.1`）时解析为 `open`，否则启动失败并点名需要 `signed`
@@ -147,15 +151,17 @@ harness。
   指向其他端口（harness 的 store 调用会全部 404）。
 - `harness.enabled` 且 `harness.base-url` 为非回环明文 http（attach
   载荷携带下发的 writer 凭证）。
+- `tool-publication.enabled` 且 `service-base-url` 为非回环明文
+  http（runtime 携带 writer 凭证访问发布面）。
 - `session-store.enabled` 且 `session-store.base-url` 的主机落在客户端
   的纯字面量回环集（`localhost`、`*.localhost`、`127.0.0.0/8`、
   `[::1]`）之外、又未设 `session-store.allow-insecure-http` 的明文
   http——所有 harness 都会在 attach 时拒绝该 URL，因此 broker 在
   启动时直接拒绝。
 
-`allow-insecure-bind` 会同时停用其中三项守卫（公网绑定、内部面
-binding key、harness 传输）；启动 posture 行以 `skipped=...` 列出
-被跳过的守卫，使其爆炸半径在日志中可见。
+`allow-insecure-bind` 会同时停用其中四项守卫（公网绑定、内部面
+binding key、harness 传输、发布面传输）；启动 posture 行以
+`skipped=...` 列出被跳过的守卫，使其爆炸半径在日志中可见。
 
 OpenAPI 契约新增 `qwenSignature` apiKey 方案（`X-Qwen-Signature`），
 其描述固定规范串与 `401` 错误码；`trustedActor` 方案对外部网关
@@ -295,9 +301,12 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
 ## 6. 风险与缓解
 
 - **时间戳窗口内的重放。** HMAC 覆盖方法、路径、查询串、租户、
-  actor、时间戳、请求体摘要与幂等键——捕获的签名只对原请求有效；
-  残余风险是窗口（5 分钟）内的原样重放。内部写操作另有幂等键。
-  对无网关部署而言可接受；nonce 缓存列为后续工作。
+  actor、时间戳、请求体摘要与幂等键，因此捕获的签名无法转移到
+  其他方法、路径、查询串、租户、actor 或请求体。残余风险是窗口
+  （5 分钟）内的重放，包括携带未签名头（`Last-Event-ID`、
+  `Accept`、`Range`）重放同一路由的不同分页：一个被捕获的读签名
+  在过期前可遍历该路由的游标空间。内部写操作另有幂等键。对无网关
+  部署而言可接受；nonce 缓存与对游标头签名列为后续工作。
 - **绑定凭证对每个会话是静态的。** 单个 token 泄露只影响单个会话；
   轮换方式 = 轮换 `binding-key`（一次性切换）。创建时存储每会话
   随机密钥是被否决的替代方案，原因是额外的表和恢复复杂度。

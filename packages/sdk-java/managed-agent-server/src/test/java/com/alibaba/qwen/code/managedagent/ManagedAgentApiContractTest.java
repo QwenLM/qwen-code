@@ -258,22 +258,54 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void everyMappedPublicRouteIsCoveredByTheSharedSurfacePredicate() {
+        // A controller method added outside the predicate's prefixes would
+        // silently skip both the tenant filter and the signature filter.
+        Set<String> uncovered = new TreeSet<>();
+        handlerMapping.getHandlerMethods().keySet().forEach(info -> {
+            for (String pattern : info.getPatternValues()) {
+                if (pattern.startsWith("/internal/")
+                        || pattern.startsWith("/error")) {
+                    continue;
+                }
+                if (!com.alibaba.qwen.code.managedagent.api.PublicSurface
+                        .covers(pattern)) {
+                    uncovered.add(pattern);
+                }
+            }
+        });
+        assertThat(uncovered)
+                .as("every public controller route must satisfy PublicSurface.covers")
+                .isEmpty();
+    }
+
+    @Test
     void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
         // ManagedActionStore.requireOwner admits any tenant caller on a
-        // Session with no recorded creator; the public contract must qualify
-        // every creator-only responder sentence with that fall-through.
+        // Session with neither a recorded creator nor a create command; the
+        // public contract must qualify every creator-only responder sentence
+        // with that fall-through — per sentence, not per operation.
         int claims = 0;
         for (Operation operation : CONTRACT.operations()) {
-            String text = operation.node().toString();
-            if (text.contains("Responding requires the Session creator")
-                    || text.contains("only the Session creator may respond")) {
-                claims++;
-                assertThat(text).as(operation.operationId())
-                        .contains("no recorded creator");
+            JsonNode node = operation.node();
+            List<String> texts = new ArrayList<>();
+            texts.add(node.path("description").asText());
+            node.path("responses").properties().forEach(response ->
+                    texts.add(response.getValue().path("description")
+                            .asText()));
+            for (String text : texts) {
+                if (text.contains("Responding requires the Session creator")
+                        || text.contains("only the Session creator may respond")) {
+                    claims++;
+                    assertThat(text).as(operation.operationId())
+                            .contains("no recorded creator and no recorded"
+                                    + " create command");
+                }
             }
         }
-        assertThat(claims).as("every creator-only responder sentence stays qualified")
-                .isEqualTo(6);
+        assertThat(claims)
+                .as("every creator-only responder sentence stays qualified")
+                .isEqualTo(12);
     }
 
     @Test

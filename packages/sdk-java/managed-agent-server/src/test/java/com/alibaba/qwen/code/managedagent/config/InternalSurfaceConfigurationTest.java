@@ -86,6 +86,29 @@ class InternalSurfaceConfigurationTest {
         }
     }
 
+    @Test
+    void warnsWhenTheInternalListenerLeavesLoopbackWithoutTls() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(InternalSurfaceConfiguration.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            ManagedAgentProperties properties = properties(INTERNAL);
+            properties.getInternalServer().setAddress("10.0.0.8");
+            new InternalSurfaceConfiguration(properties).customize(
+                    new org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory());
+            assertThat(appender.list).anySatisfy(event -> assertThat(
+                    event.getFormattedMessage())
+                    .contains("non-loopback")
+                    .contains("cleartext"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
     private static ManagedAgentProperties properties(int port) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getInternalServer().setPort(port);

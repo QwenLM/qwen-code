@@ -109,16 +109,19 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         // The body is signed, so it is buffered here and re-exposed to the
         // chain; without it a captured signature would authorize any
         // substitute body on the same method and path inside the window. The
-        // buffer is bounded so an unsigned caller cannot pace heap growth.
+        // per-request buffer is bounded; the aggregate is bounded by the
+        // servlet worker-thread count times that limit.
         long maxBody = security.getMaxSignedBodyBytes();
-        if (request.getContentLengthLong() > maxBody) {
+        long declared = request.getContentLengthLong();
+        if (declared > maxBody) {
             reject(request, response,
                     HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
                     "payload_too_large",
                     "The request body exceeds the signed-body limit.");
             return;
         }
-        byte[] body = readBounded(request.getInputStream(), maxBody);
+        byte[] body = readBounded(request.getInputStream(), maxBody,
+                declared);
         if (body == null) {
             reject(request, response,
                     HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
@@ -229,11 +232,14 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     }
 
     // Returns null once the stream runs past the limit, so a chunked or
-    // under-declared body cannot outgrow the bound.
-    private static byte[] readBounded(java.io.InputStream source, long max)
-            throws IOException {
+    // under-declared body cannot outgrow the bound. Presized from the
+    // declared length when it is known, clamped to a safe array size.
+    private static byte[] readBounded(java.io.InputStream source, long max,
+            long declared) throws IOException {
+        int hint = (int) Math.min(Math.max(declared, 0),
+                Math.min(max, Integer.MAX_VALUE - 8L));
         java.io.ByteArrayOutputStream buffer =
-                new java.io.ByteArrayOutputStream();
+                new java.io.ByteArrayOutputStream(hint);
         byte[] chunk = new byte[8192];
         long total = 0;
         int read;

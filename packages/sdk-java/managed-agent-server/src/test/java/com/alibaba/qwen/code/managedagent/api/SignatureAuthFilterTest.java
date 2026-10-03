@@ -341,6 +341,68 @@ class SignatureAuthFilterTest {
     }
 
     @Test
+    void signsTheRawUriOnANormalizedSpelling() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+        // Signed over the raw (undecoded) URI: accepted.
+        MockHttpServletRequest raw = request("POST", "/v1/%61gents");
+        raw.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        raw.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        raw.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/%61gents", "tenant-a", "actor-a",
+                        timestamp));
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(raw, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+
+        // Signed over the decoded path instead: refused.
+        MockHttpServletRequest decoded = request("POST", "/v1/%61gents");
+        decoded.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        decoded.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        decoded.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/agents", "tenant-a", "actor-a", timestamp));
+        MockHttpServletResponse refused = new MockHttpServletResponse();
+        filter.doFilter(decoded, refused, new MockFilterChain());
+        assertThat(refused.getStatus()).isEqualTo(401);
+        assertThat(refused.getContentAsString()).contains("invalid_signature");
+    }
+
+    @Test
+    void boundsAChunkedBodyWhoseLengthIsUndeclared() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setMaxSignedBodyBytes(1024);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(new BrokerSecurity(properties,
+                server, new WebMvcProperties()));
+
+        // A chunked request reports no declared length, so only the bounded
+        // read can stop it.
+        MockHttpServletRequest chunked = new MockHttpServletRequest("POST",
+                "/v1/agents/sessions") {
+            @Override
+            public long getContentLengthLong() {
+                return -1;
+            }
+        };
+        chunked.addHeader(TenantContextFilter.HEADER, "tenant-a");
+        chunked.setContent(new byte[2048]);
+        chunked.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        chunked.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, now());
+        chunked.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                "v1=" + "0".repeat(64));
+        MockHttpServletResponse refused = new MockHttpServletResponse();
+        filter.doFilter(chunked, refused, new MockFilterChain());
+        assertThat(refused.getStatus()).isEqualTo(413);
+        assertThat(refused.getContentAsString())
+                .contains("payload_too_large");
+    }
+
+    @Test
     void signsTheQueryString() throws Exception {
         SignatureAuthFilter filter = filter(signed());
         String timestamp = now();

@@ -42,12 +42,19 @@ public class InternalSurfaceConfiguration
         if (port <= 0) {
             return;
         }
-        if (factory.getSsl() != null && factory.getSsl().isEnabled()) {
-            // Additional connectors do not inherit server.ssl; say so
-            // instead of serving plaintext beside a TLS public listener.
+        // Additional connectors never inherit server.ssl.
+        boolean tls = factory.getSsl() != null && factory.getSsl().isEnabled();
+        boolean loopback = BrokerSecurity.isLoopback(
+                properties.getInternalServer().getAddress());
+        if (tls) {
             LOG.warn("The internal listener on port {} serves plaintext;"
                     + " server.ssl applies to the public connector only.",
                     port);
+        }
+        if (!loopback && !tls) {
+            LOG.warn("The internal listener on port {} binds a non-loopback"
+                    + " address with no TLS; the writer credential crosses"
+                    + " in cleartext.", port);
         }
         Connector connector = new Connector(
                 TomcatServletWebServerFactory.DEFAULT_PROTOCOL);

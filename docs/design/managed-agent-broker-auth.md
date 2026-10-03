@@ -116,8 +116,11 @@ Mode resolution at startup:
   `requestURI` is the undecoded path without the query string;
   `queryString` is the raw query (empty when absent); `idempotencyKey` is
   the `Idempotency-Key` header value (empty when absent). Signing the body
-  and idempotency key means a captured signature authorizes exactly one
-  request, not any same-path request inside the drift window.
+  and idempotency key means a captured signature cannot be transferred to
+  a different method, path, query, tenant, actor or body; headers outside
+  the recipe (for example `Last-Event-ID` or `Accept`) stay variable
+  inside the drift window, so a captured read signature replays across
+  the cursor values those headers select.
 
   On success the filter installs the `AuthenticatedTenantActor` principal
   (tenant and actor from the now-authenticated headers); on failure it
@@ -132,10 +135,13 @@ Mode resolution at startup:
   while the canonical string keeps signing the raw request URI; and a
   repeated `Idempotency-Key` header is refused with `400 invalid_request`
   because the servlet contract would sign the first value while the
-  controllers bind the comma-joined pair. The buffered body is bounded by
-  `qwen.managed-agent.auth.max-signed-body-bytes` (default 10 MiB) — an
-  over-limit request answers `413 payload_too_large` before the signature
-  comparison, so an unsigned caller cannot pace broker heap growth.
+  controllers bind the comma-joined pair. The buffered body is bounded per
+  request by `qwen.managed-agent.auth.max-signed-body-bytes` (default
+  10 MiB) — an over-limit request answers `413 payload_too_large` before
+  the signature comparison. Aggregate pre-authentication buffering is
+  bounded by that limit times the servlet worker-thread count
+  (`server.tomcat.threads.max`, 200 by default); lower either knob on
+  memory-tight deployments.
 
 - `auto`: resolves to `open` when `server.address` is loopback (the
   shipped default `127.0.0.1`), otherwise startup fails and names
@@ -158,16 +164,19 @@ Startup guards (all fail fast with a named property):
   naming a different port (the harness's store calls would 404).
 - `harness.enabled` with a plaintext non-loopback `harness.base-url` (the
   attach payload carries the provisioned writer credential).
+- `tool-publication.enabled` with a plaintext non-loopback
+  `service-base-url` (runtimes reach the publication surface with the
+  writer credential).
 - `session-store.enabled` with a plaintext `session-store.base-url` whose
   host is outside the client's literal-only loopback set (`localhost`,
   `*.localhost`, `127.0.0.0/8`, `[::1]`) and no
   `session-store.allow-insecure-http` — every harness would refuse the
   advertised URL at attach time, so the broker refuses at startup instead.
 
-`allow-insecure-bind` disables three of these guards (public bind, internal
-binding key, harness transport); the startup posture line enumerates the
-guards it skipped as `skipped=...` so the blast radius is visible in the
-log.
+`allow-insecure-bind` disables four of these guards (public bind, internal
+binding key, harness transport, publication transport); the startup posture
+line enumerates the guards it skipped as `skipped=...` so the blast radius
+is visible in the log.
 
 The OpenAPI contract gains a `qwenSignature` apiKey scheme
 (`X-Qwen-Signature`) whose description pins the canonical string and the
@@ -322,10 +331,14 @@ for loopback deployments without a binding key.
 
 - **Replay within the timestamp window.** The HMAC covers method, path,
   query string, tenant, actor, timestamp, a body digest and the
-  idempotency key — a captured signature authorizes exactly that one
-  request; the residual risk is verbatim replay inside the 5-minute
-  window. Internal mutations are additionally idempotency-keyed. Accepted
-  for a gateway-free deployment; a nonce cache is listed as future work.
+  idempotency key, so a captured signature cannot be moved to another
+  method, path, query, tenant, actor or body. The residual risk is replay
+  inside the 5-minute window, including with unsigned headers that select
+  a different page of the same route (`Last-Event-ID`, `Accept`,
+  `Range`): a captured read signature can walk the cursor space of that
+  one route until it expires. Internal mutations are additionally
+  idempotency-keyed. Accepted for a gateway-free deployment; a nonce
+  cache and signing the cursor-bearing headers are listed as future work.
 - **Binding credential is static per Session.** Compromise of one token
   affects one Session only; rotation = rotate `binding-key` (flag day).
   Per-Session random secrets stored at creation are the listed alternative

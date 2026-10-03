@@ -310,8 +310,11 @@ public class ManagedAgentProperties {
             this.port = port;
         }
 
+        // A blank value comes from an unset template variable; both the
+        // startup guard and the connector must read it as the default.
         public String getAddress() {
-            return address;
+            return address == null || address.isBlank() ? "127.0.0.1"
+                    : address;
         }
 
         public void setAddress(String address) {

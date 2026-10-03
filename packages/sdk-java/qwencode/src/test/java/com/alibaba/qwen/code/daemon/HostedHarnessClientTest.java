@@ -165,11 +165,11 @@ class HostedHarnessClientTest {
 
     @Test
     void writerTokenLengthBoundsMatchTheSharedFixture() throws Exception {
-        String contract = java.nio.file.Files.readString(locateFixture());
-        int minimum = Integer.parseInt(group(contract,
-                "minimumWriterTokenLength"));
-        int maximum = Integer.parseInt(group(contract,
-                "maximumWriterTokenLength"));
+        var limits = com.alibaba.fastjson2.JSON
+                .parseObject(java.nio.file.Files.readString(locateFixture()))
+                .getJSONObject("limits");
+        int minimum = limits.getIntValue("minimumWriterTokenLength");
+        int maximum = limits.getIntValue("maximumWriterTokenLength");
         assertTokenRejected("a".repeat(minimum - 1));
         assertTokenAccepted("a".repeat(minimum));
         assertTokenAccepted("a".repeat(maximum));
@@ -195,13 +195,6 @@ class HostedHarnessClientTest {
                         .writerId(BOOT_ID)
                         .writerToken(token)
                         .build());
-    }
-
-    private static String group(String json, String name) {
-        var matcher = java.util.regex.Pattern
-                .compile("\"" + name + "\": (\\d+)").matcher(json);
-        assertTrue(matcher.find(), () -> name + " missing from the fixture");
-        return matcher.group(1);
     }
 
     private static java.nio.file.Path locateFixture() {
