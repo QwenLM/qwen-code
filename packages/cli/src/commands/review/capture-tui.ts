@@ -444,7 +444,7 @@ let artifactsComplete = false;
  * exhausted fd table to the caller's argument sends an agent to fix
  * something that is fine. Exported so each arm is pinned directly — every
  * one of them but EMFILE needs a fault injector to reach through the real
- * syscalls, which left three of the four asserted nowhere. */
+ * syscalls, which left those six asserted nowhere. */
 export function hostStateFor(code: string | undefined): string | null {
   switch (code) {
     case 'EMFILE':
@@ -1550,6 +1550,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // happens, just without the pause.
           }
         }
+        // A kill pinned at an UNUSABLE base can only reach the fallback
+        // (/tmp): sample the stamped identity BEFORE the kill, or the
+        // /gone→/tmp shape kills this run's own server on the first visit
+        // and WARNs about the orphan it just reaped — the second visit's
+        // goal-state read of the start base finds the stamped socket gone
+        // because tmux unlinked it when that first kill's exit-0 killed
+        // the server ("tmux does not always unlink"; when it does, only
+        // the moment before the connect still names whose answer this
+        // was). false covers the rest conservatively: no stamp means
+        // nothing to weigh, a usable base means no fallback happened, and
+        // a stamp already gone is the swap the WARNING exists for.
+        const stampedAliveAtFallbackKill =
+          socketStamp !== undefined && !baseIsUsable(base)
+            ? stampedSocketAlive()
+            : false;
         try {
           tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
           // WHERE THE CLIENT LOOKED, not where it was aimed. `-L` pins the
@@ -1586,8 +1601,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           // happened on the start base, so a success anywhere else cannot be
           // ours; with no stamp the bind site is unknown and any base's
           // success is the best evidence there is — which is the fallback
-          // shape this inference was written for.
-          if (resolve(base) === startBase || socketStamp === undefined) {
+          // shape this inference was written for. The third arm is the
+          // fallback kill that the stamp sample sized up: the client had
+          // nowhere but /tmp to look, and the sampled stamp proves the
+          // answering server at this run's unique name was this run's own
+          // — the sacrificial shape the stamp exists for cannot pass it,
+          // because its arrival IS the stamped socket going away.
+          if (
+            resolve(base) === startBase ||
+            socketStamp === undefined ||
+            stampedAliveAtFallbackKill
+          ) {
             confirmedDead = true;
           }
         } catch (e) {
@@ -2458,7 +2482,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // remove what this run already wrote before refusing.
     try {
       // Plain, never recursive — same rationale as the .ans catch above —
-      // and each path only if this run put it there. Reaching here, the
+      // and each path only if this run put it there.
       // Each path only if THIS run changed it: the .ans write succeeded so
       // it is ours, the png is ours only when the render actually produced
       // one, and a manifest write that failed at open() left the previous

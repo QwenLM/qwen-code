@@ -355,7 +355,9 @@ export function tmuxPlan(opts: {
   cwd: string;
   /** Whether to ask for real trailing spaces at all (`-N`). False only on
    * the tmux versions whose `-N` FABRICATES them and that have no `-T` to
-   * undo it — see tmuxPadsWithCaptureN. */
+   * undo it (see tmuxPadsWithCaptureN) — and on a version `tmux -V`
+   * cannot name: the caller cannot show such a host is NOT one of those,
+   * so an unparseable version drops `-N` too, with the lesser lie. */
   captureTrailing?: boolean;
   /** Whether this tmux takes `capture-pane -T` (3.4+) — see the capture
    * argv below. False on older versions, which need no trimming and reject
@@ -547,11 +549,13 @@ export function tmuxPlan(opts: {
       'capture-pane',
       '-p',
       '-e',
-      // -N asks tmux to keep the REAL trailing spaces — dropped only where
-      // it would invent them instead (tmux 3.1-3.2.x, which pad to the grid
-      // allocation and have no -T): there, a trimmed line understates a
-      // clipped right edge, while a padded one FABRICATES evidence, and the
-      // manifest records the caveat as a degradation.
+      // -N asks tmux to keep the REAL trailing spaces — dropped wherever it
+      // could INVENT them instead: on tmux 3.1-3.2.x (pads to the grid
+      // allocation, no -T to undo it) and, by the caller's composition, on
+      // a version `tmux -V` cannot name — an unnameable host may be either
+      // of those families exactly. There, a trimmed line understates a
+      // clipped right edge, while a padded one FABRICATES evidence, and
+      // the manifest records the caveat as a degradation.
       ...(opts.captureTrailing === false ? [] : ['-N']),
       // -N alone pads each line out to the grid line's ALLOCATED cell count,
       // not what it rendered: measured on tmux 3.4, a row that had held 24

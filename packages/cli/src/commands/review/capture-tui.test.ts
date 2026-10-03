@@ -157,7 +157,7 @@ function leakedSentinels(pid: number = process.pid): string[] {
 }
 
 describe('hostStateFor', () => {
-  // Five of these six arms were asserted nowhere: reaching them through
+  // Six of these seven arms were asserted nowhere: reaching them through
   // the real syscalls needs a fault injector, so deleting any one shipped
   // green while the refusal blamed the caller's --out for the host.
   it.each([
@@ -918,6 +918,95 @@ exit 0
         // And it says WHICH doubt: an operator told "kill-server failed
         // twice" would go looking for a wedged server.
         expect(stderr).toContain('could not reach the base this run started');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a fallback kill that reaped through /tmp does not warn — stamp sampled BEFORE the kill',
+    async () => {
+      // tmux "does not always unlink the socket of a killed server" — but
+      // on the versions that DO, the unusable-TMUX_TMPDIR shape warned
+      // about the orphan it had just reaped: the first kill, pinned at
+      // the unusable base, could only reach the fallback /tmp, where it
+      // killed this run's own server at its unique name (exit 0 — the
+      // kill genuinely succeeded), and tmux unlinked the socket with it;
+      // the second visit's goal-state read of the start base then found
+      // the stamped socket GONE, refused the credit, and the run ended in
+      // `kill-server failed twice … may still be running` over a dead
+      // server. A kill's answer must be weighed against the stamp sampled
+      // BEFORE the connect, not against the socket state the kill itself
+      // produced. The sibling fixture above needs the opposite polarity
+      // on the same words (`no server running`) where the stamp says the
+      // answer was NOT ours — both directions live here.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-fbk-'));
+      const envBase = join(dir, 'no-such-base');
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // Binds by planting this run's socket under /tmp (the fallback an
+      // unusable env base forces), then answers the FIRST kill (pinned at
+      // the unusable base) the way a fallback kill against /tmp that
+      // killed the real server — and had tmux unlink its socket — does:
+      // exit 0, socket gone. The /tmp-pinned visit then answers
+      // `no server running`, honestly.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "/tmp/tmux-$(id -u)"
+    : > "/tmp/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    p="/tmp/tmux-$(id -u)/$SRV"
+    if [ "$TMUX_TMPDIR" = "/tmp" ]; then
+      echo "no server running on $p" >&2
+      exit 1
+    fi
+    rm -f "$p"
+    exit 0
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      // UNUSABLE from the start: the env base this run is pinned at never
+      // exists, so every kill pinned at it can only have run under /tmp.
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).not.toContain('WARNING');
       } finally {
         if (realPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = realPath;
@@ -4498,7 +4587,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // the manifest presented fabricated grid padding as clean rendering
       // evidence. The unnameable version now takes the padding host's
       // fails-closed treatment: no `-N`, and the manifest says so.
-      probes.tmux = realTmuxProbe; // the shim on PATH answers -V instead
       const realTmuxBin = spawnSync('sh', ['-c', 'command -v tmux'], {
         encoding: 'utf8',
       }).stdout?.trim();
@@ -5305,12 +5393,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // /tmp; the env-base-only unlink mutant left dead sockets littering it.
     const realEnv = process.env['TMUX_TMPDIR'];
     process.env['TMUX_TMPDIR'] = join(dir, 'no-such-base');
+    let stderr = '';
     try {
-      await run({ until: undefined, settleMs: 0, out: join(dir, 'tt') });
+      ({ stderr } = await withStdio(() =>
+        run({ until: undefined, settleMs: 0, out: join(dir, 'tt') }),
+      ));
     } finally {
       if (realEnv === undefined) delete process.env['TMUX_TMPDIR'];
       else process.env['TMUX_TMPDIR'] = realEnv;
     }
+    // The fallback kill reaped this run's ONLY server through /tmp — the
+    // very exit-0 the unlink assertion below proves — and warned about it
+    // anyway: the second visit's goal-state read of the start base found
+    // the stamped socket gone because tmux unlinks what its own
+    // kill-server kills. A kill answer must be weighed against the stamp
+    // sampled BEFORE it, not the socket state after it.
+    expect(stderr).not.toContain('WARNING');
     expect(process.exitCode).toBeUndefined();
     const probe = spawnSync('bash', [
       '-c',
@@ -6494,9 +6592,20 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // lives.
       const tag = (arm: string): string =>
         `capture-tui-orphan-${process.pid}-${arm}`;
+      // Resolved, never the literal /bin/sleep: NixOS keeps sleep off /bin
+      // entirely, and a dangling link fails the detached arm RED against
+      // healthy code (spawn ENOENT before any sleeper exists) while the
+      // attached arm passes vacuously.
+      const sleepTarget = probes.sleepBin();
+      if (sleepTarget === undefined) {
+        throw new Error(
+          'sleep is not resolvable to an executable on PATH — the per-run ' +
+            'symlink needs a real target',
+        );
+      }
       const sleeper = (arm: string): string => {
         const link = join(dir, tag(arm));
-        symlinkSync('/bin/sleep', link);
+        symlinkSync(sleepTarget, link);
         return link;
       };
       const arms: Array<[string, string, boolean]> = [
