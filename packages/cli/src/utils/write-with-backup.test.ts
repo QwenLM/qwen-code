@@ -86,6 +86,46 @@ describe('writeWithBackup', () => {
   );
 
   describe.skipIf(process.platform === 'win32')('POSIX permissions', () => {
+    it.each([
+      ['ENOSYS', 0o022],
+      ['ENOTSUP', 0o022],
+      ['ENOSYS', 0o077],
+      ['ENOTSUP', 0o077],
+    ] as const)(
+      'does not widen permissions when chmod returns %s under umask %o',
+      (code, mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          vi.mocked(fs.chmodSync).mockImplementation(() => {
+            throw Object.assign(new Error(code), { code });
+          });
+          for (const mode of [0o600, 0o640]) {
+            nativeFs.writeFileSync(targetPath, 'old');
+            nativeFs.chmodSync(targetPath, mode);
+            vi.mocked(fs.renameSync).mockImplementation((...args) => {
+              expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(
+                mode & ~mask,
+              );
+              expect(nativeFs.statSync(targetPath).mode & 0o777).toBe(mode);
+              nativeFs.renameSync(...args);
+            });
+
+            writeWithBackupSync(targetPath, 'new');
+
+            expect(fs.chmodSync).toHaveBeenLastCalledWith(
+              expect.any(String),
+              mode,
+            );
+            expect(fs.statSync(targetPath).mode & 0o777).toBe(mode & ~mask);
+            expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+            expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+          }
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
     it.each([0o022, 0o077])(
       'preserves existing modes under umask %o',
       (mask) => {
