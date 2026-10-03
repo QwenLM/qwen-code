@@ -196,18 +196,29 @@ public class HarnessCoordinator {
             terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
         } catch (HostedHarnessRecoveryDeclinedException error) {
-            // The reason is remote-supplied; the terminal write lands in
-            // managed_agent_turn.error_message VARCHAR(2048), so bound it
-            // instead of letting one oversized body throw the terminal
-            // write itself.
-            String declineReason = error.getReason().length() > 1024
-                    ? error.getReason().substring(0, 1024)
-                    : error.getReason();
-            terminal = failTerminally(claimed,
-                    "managed_runtime_recovery_blocked",
-                    "The prior Harness generation parked a Turn this"
-                            + " Harness cannot take over ("
-                            + declineReason + ").", error);
+            // An approval wait is not a durable verdict: the decision is
+            // still deliverable through the attached Session, so the Turn
+            // must never die while the Action is requested — the approval
+            // timeout bounds the retry like the predecessor's lease does.
+            // The daemon itself now answers await_action plain, so this
+            // guard only catches a Harness that still declines it.
+            if ("await_action".equals(error.getReason())) {
+                terminal = transientFailure(claimed,
+                        submissionAttempted.get(), error, false);
+            } else {
+                // The reason is remote-supplied; the terminal write lands
+                // in managed_agent_turn.error_message VARCHAR(2048), so bound it
+                // instead of letting one oversized body throw the terminal
+                // write itself.
+                String declineReason = error.getReason().length() > 1024
+                        ? error.getReason().substring(0, 1024)
+                        : error.getReason();
+                terminal = failTerminally(claimed,
+                        "managed_runtime_recovery_blocked",
+                        "The prior Harness generation parked a Turn this"
+                                + " Harness cannot take over ("
+                                + declineReason + ").", error);
+            }
         } catch (HostedHarnessGenerationException error) {
             // G3: a generation change is adopted, not failed. The next
             // dispatch attempt re-attaches through the takeover load; on a

@@ -81,7 +81,12 @@ export type HostedRecoveryDeclineReason =
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
-  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason };
+  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason }
+  /** No Runtime work a takeover owes this payload: a wait someone else
+   * owns (a user approval, a model round), or a cancellation-only load
+   * whose Turn needs no Runtime bookkeeping. The route answers the plain
+   * attach — exactly the pre-G3 behavior for these shapes. */
+  | { readonly kind: 'inapplicable' };
 
 function declined(
   reason: HostedRecoveryDeclineReason,
@@ -91,6 +96,10 @@ function declined(
 
 function recovered(turn: HostedRecoveryTurn): HostedRuntimeRecoveryOutcome {
   return { kind: 'recovered', turn };
+}
+
+function inapplicable(): HostedRuntimeRecoveryOutcome {
+  return { kind: 'inapplicable' };
 }
 
 /** A `blocked` authorization splits into durable parse/identity verdicts
@@ -361,8 +370,12 @@ export async function stopParkedRuntimeExecutions(input: {
  *
  * A parked state that can be taken over answers `recovered`; one that is
  * deterministically unrecoverable answers `declined` with a typed reason.
- * Thrown errors are transient: the caller keeps its plain retriable
- * refusal for them.
+ * A wait someone else owns — a requested approval (either shape), anything
+ * a cancellation-only (`passive`) load does not need Runtime bookkeeping
+ * for — answers `inapplicable`: the route then answers the plain attach,
+ * the pre-G3 behavior for these shapes, so a cancellation or an approval
+ * is never turned into a terminal failure. Thrown errors are transient:
+ * the caller keeps its plain retriable refusal for them.
  */
 export async function recoverHostedRuntimeTurn(input: {
   session: ManagedSession;
@@ -376,10 +389,11 @@ export async function recoverHostedRuntimeTurn(input: {
   const authorization = await session.authority.harnessRunAuthorization();
   // A submitted prompt with no checkpoint yet is parked in its first model
   // round; one whose checkpoint no longer parses cannot be driven either.
-  if (authorization.status === 'initial') return declined('model_start');
+  if (authorization.status === 'initial')
+    return passive ? inapplicable() : declined('model_start');
   if (authorization.status === 'blocked') {
     if (isDurableBlockedVerdict(authorization))
-      return declined('checkpoint_blocked');
+      return passive ? inapplicable() : declined('checkpoint_blocked');
     // A store glitch while reading the staged state erased into the same
     // status as a durable verdict: transient, so the caller retries.
     if (isTransientStoreBlock(authorization))
@@ -397,26 +411,30 @@ export async function recoverHostedRuntimeTurn(input: {
   }
   const checkpoint = authorization.checkpoint;
   if (checkpoint.identity.turnId !== promptId)
-    return declined('unresolved_after_settle');
+    return passive ? inapplicable() : declined('unresolved_after_settle');
   if (
     checkpoint.continuation.phase !== 'await_runtime' &&
     checkpoint.continuation.phase !== 'results_ready'
   ) {
+    // A requested approval is a wait the USER owns, not a verdict: even a
+    // drive takeover must not end the Turn — the answer is still
+    // deliverable through the plain attach, so answer inapplicable on
+    // both shapes and let the approval timeout bound the wait.
     if (
       checkpoint.approval !== null &&
       checkpoint.approval.state === 'requested'
     )
-      return declined('await_action');
+      return inapplicable();
     // Settled in the journal with the terminal record still unprojected:
     // rebind-and-keep-reading is Step 3's row, so in this slice the same
     // durable verdict declines with its own typed reason instead.
     if (checkpoint.continuation.phase === 'turn_settled')
-      return declined('turn_settled');
+      return passive ? inapplicable() : declined('turn_settled');
     if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase))
-      return declined('model_start');
+      return passive ? inapplicable() : declined('model_start');
     // A phase outside the model-start vocabulary is not one a takeover
     // may drive: classify by the durable verdict rather than by name.
-    return declined('checkpoint_blocked');
+    return passive ? inapplicable() : declined('checkpoint_blocked');
   }
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
@@ -432,8 +450,11 @@ export async function recoverHostedRuntimeTurn(input: {
   } catch (cause) {
     // The checkpoint's executions cannot be rebuilt durably (missing args,
     // an args kind mismatch across owners, or a split ownership) — that is
-    // a deterministic function of the journal, never a retry-later.
-    if (cause instanceof RecoveryDeclined) return declined('batch_not_durable');
+    // a deterministic function of the journal, never a retry-later. A
+    // cancellation-only load needs no rebuild at all: it settles the Turn
+    // through the cancel route's own fences.
+    if (cause instanceof RecoveryDeclined)
+      return passive ? inapplicable() : declined('batch_not_durable');
     throw cause;
   }
   const pending = items.filter((item) => item.state === 'in_progress');
@@ -644,9 +665,19 @@ export async function recoverHostedRuntimeTurn(input: {
       finalAuthorization.status === 'blocked' &&
       isDurableBlockedVerdict(finalAuthorization)
     ) {
-      return declined('checkpoint_blocked');
+      return passive ? inapplicable() : declined('checkpoint_blocked');
     }
-    return declined('unresolved_after_settle');
+    if (passive) return inapplicable();
+    // Same rule as the pre-settle read: a reason this file does not know
+    // is not proven durable, and only a durable verdict may end the Turn
+    // — stay retriable rather than terminalizing on
+    // 'unresolved_after_settle'.
+    throw new Error(
+      finalAuthorization.status === 'blocked'
+        ? (finalAuthorization.message ??
+          `Checkpoint re-read was blocked (${finalAuthorization.reason})`)
+        : 'Checkpoint became unavailable before the re-read settled',
+    );
   }
   const finalCheckpoint = finalAuthorization.checkpoint;
   const executions: HostedRuntimeRecoveryExecution[] = items.map((item) => {

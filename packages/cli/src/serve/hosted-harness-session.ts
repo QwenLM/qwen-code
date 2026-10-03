@@ -1706,7 +1706,7 @@ export function registerHostedHarnessSessionRoutes(
             await managed.close();
             recoveryDeclined(res, outcome.reason);
             return;
-          } else {
+          } else if (outcome.kind === 'recovered') {
             recovery = outcome.turn.report;
             session.recoverySnapshot = {
               passive: body?.['passiveManagedRuntimeRecovery'] === true,
@@ -1721,6 +1721,9 @@ export function registerHostedHarnessSessionRoutes(
                 outcome.turn.report.executions[0]?.runtimeSessionId ??
                 outcome.turn.promptId;
           }
+          // inapplicable: nothing a takeover owes this payload — the load
+          // continues as the plain attach it was before G3, so a requested
+          // approval or a cancellation-only load meets its own path.
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
@@ -2983,8 +2986,15 @@ export function registerHostedHarnessSessionRoutes(
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
     });
-    if (session.recoverySnapshot?.promptId === promptId)
-      session.recoverySnapshot = undefined;
+    // Consumption rolls back symmetric with the admission: an unconfirmed
+    // cancellation is re-driven, and the re-drive needs the load-time
+    // snapshot again — not a hosted_session_already_attached while the
+    // Turn is still unsettled (D6).
+    const consumedSnapshot =
+      session.recoverySnapshot?.promptId === promptId
+        ? session.recoverySnapshot
+        : undefined;
+    if (consumedSnapshot) session.recoverySnapshot = undefined;
     session.active = { promptId, digest: '', abort: new AbortController() };
     void (async () => {
       try {
@@ -3067,8 +3077,11 @@ export function registerHostedHarnessSessionRoutes(
           `qwen serve: Hosted Harness turn ${promptId} could not settle the cancellation: ${String(cause)}`,
         );
         // The cancellation never confirmed: drop the admission so the
-        // coordinator's retry re-drives instead of replaying the watermark.
+        // coordinator's retry re-drives instead of replaying the watermark
+        // — and hand its consumed snapshot back with it, so the retrying
+        // takeover load replays instead of being refused already-attached.
         session.admissions.delete(promptId);
+        if (consumedSnapshot) session.recoverySnapshot = consumedSnapshot;
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {
         // No handback here: the coordinator retries a failed cancel, and a

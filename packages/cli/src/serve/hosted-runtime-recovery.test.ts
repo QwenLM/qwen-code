@@ -637,6 +637,159 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it.each([true, false])(
+    'answers inapplicable for an approval wait the user owns (passive=%s)',
+    async (passive) => {
+      // The decision belongs to the user, never to a takeover: declining
+      // would write the Turn failed while the answer is still deliverable
+      // (G3), so BOTH loads answer inapplicable and let the plain attach
+      // carry the approval flow (bounded by the approval timeout).
+      await parkAtAwaitRuntime();
+      const replacement = await open('boot-2', false);
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue({
+        status: 'runnable',
+        checkpoint: {
+          identity: {
+            turnId: PROMPT_ID,
+            promptId: PROMPT_ID,
+            checkpointId: 'checkpoint-await-action',
+          },
+          attempt: {},
+          continuation: { phase: 'await_action' },
+          approval: { state: 'requested', requestId: 'request-1' },
+          output: {},
+          followUp: {},
+          runtime: {},
+          tools: { items: [] },
+        },
+      } as never);
+      try {
+        const outcome = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        expect(outcome.kind).toBe('inapplicable');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('answers inapplicable for a model-round wait on a cancellation load', async () => {
+    // A cancellation-only load needs no Runtime bookkeeping for a Turn
+    // parked in its first model round: declining would fail a Turn the
+    // user asked to CANCEL. The plain attach proceeds to the cancel path.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({ status: 'initial' } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(outcome.kind).toBe('inapplicable');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    { passive: false, expected: 'throw' },
+    { passive: true, expected: 'inapplicable' },
+  ])(
+    'stays retriable for an unproven blocked reason at the final re-read (passive=$passive)',
+    async ({ passive, expected }) => {
+      // A reason this file does not know is not proven durable: the drive
+      // side may only keep its retriable refusal, mirroring the pre-settle
+      // read — a cause erased into 'unresolved_after_settle' would
+      // terminalize what could be a transient store glitch.
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      if (!passive)
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'written' }],
+        } as never);
+      const replacement = await open('boot-2', false);
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let calls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        calls += 1;
+        if (calls === 2)
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'a_future_blocked_reason',
+          } as never);
+        return original();
+      });
+      try {
+        const outcome = recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        if (expected === 'throw')
+          // A throw, never a terminal decline: the exact producer's text
+          // may vary (the handle re-checks too), the retriable semantics
+          // may not.
+          await expect(outcome).rejects.toThrow('a_future_blocked_reason');
+        else expect((await outcome).kind).toBe('inapplicable');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('answers inapplicable for a durable verdict on a cancellation load', async () => {
+    // The cancellation route settles through its own fences even for a
+    // checkpoint inapplicable parses cannot prove; the takeover load may
+    // only refuse retriably (baseline parity), never terminally.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'opaque_state',
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(outcome.kind).toBe('inapplicable');
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('declines a durable blocked checkpoint verdict deterministically', async () => {
     await parkAtAwaitRuntime();
     const replacement = await open('boot-2', false);

@@ -703,11 +703,16 @@ class QwenHostedHarnessConnectorTest {
                 .thenReturn(replacementAttached);
         when(replacementAttached.getHarnessBootId()).thenReturn(NEW_BOOT_ID);
         doThrow(mismatch).when(replacement).submitTurn(any());
+        // The losing worker's adoption reuses the winner's rebuild: the
+        // factory must run for the whole race exactly once.
+        java.util.concurrent.atomic.AtomicInteger rebuilds =
+                new java.util.concurrent.atomic.AtomicInteger();
         QwenHostedHarnessConnector racingConnector =
                 new QwenHostedHarnessConnector(properties(), sessions(),
                         mock(WorkspaceExecutionStore.class)) {
                     @Override
                     HostedHarnessClient createClient() {
+                        rebuilds.incrementAndGet();
                         return replacement;
                     }
                 };
@@ -747,6 +752,11 @@ class QwenHostedHarnessConnectorTest {
         // The replacement survives its own adoption error: only the
         // generation the exception named is closed, exactly once.
         verify(replacement, never()).close();
+        // The first call after the race resolves its attachment through
+        // exactly one rebuild for the whole race — not zero (the race
+        // alone never forces one) and not one per worker.
+        racingConnector.createOrLoad("tenant-a", SESSION_ID, true);
+        assertThat(rebuilds.get()).isEqualTo(1);
     }
 
     // The one code-aware call site: a takeover refusal that cannot change

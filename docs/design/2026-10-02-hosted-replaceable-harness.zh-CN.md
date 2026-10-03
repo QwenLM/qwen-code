@@ -202,7 +202,11 @@ passive 只回放给 passive、drive 只回放给 drive，因为 passive 报告�
 正是 drive load 本该结算的状态，永远不会 continuation-ready——
 (d) 恢复仍未完成——返回 200 与同一份快照，而不是 409
 `hosted_session_already_attached`。重复的普通 load、以及换成另一形态的
-重复 takeover，都保持 409。这关闭了 2026-09-30 设计记录的丢回复 follow-up；
+重复 takeover，都保持 409。这关闭了 2026-09-30 设计记录的丢回复
+follow-up——以重试保持原形态为界。仍留一格开口：形态由 Turn 状态派生
+且运行中可变，drive 回复丢失后落入取消（CANCELLING→passive）时，保留
+的 drive 快照在回放守卫下不可消费（被动回放对 drive 铸造的快照被拒为
+already-attached）——这段交接属于回放放宽切片，刻意不并入 D6。
 `opening.has(sessionId)` 的拒绝（一次接管正在进行中）不变，仍可重试。
 
 ### D7 —— Q2 门禁：冻结变体（纯测试，除非测出缺陷）
@@ -240,7 +244,8 @@ Harness 的 journal store URL 在 load 时已经固定：苏醒后它的 store
 Harness（注册键与唤醒查找共用同一个常量；查不到就直接让运行失败，
 而不是留下卡死的 writer）。同一个 PR 把
 `npm run test:e2e:managed-session-failover` 接进 `hosted-harness-mysql`
-CI 任务——它此前是遗漏而非刻意缺席。
+CI 任务——2026-09-26 的 fault-gates 设计曾明确把它放在 scope 外；本条
+接入 CI 相当于撤销那笔旧决定，让它随门禁运行。
 
 ### D8 —— E2E：只重启 Harness 的支路
 
@@ -277,8 +282,11 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
   其余一律计入预算，其中也包括
   `hosted_session_already_attached`：它看着像瞬时冲突，实际是永久的——
   daemon 只在显式 detach 或 delete 时才丢弃 attachment，而本控制面从不
-  detach，所以豁免它会让「Spring 重启而 Harness 存活」无限空转。因此
-  Harness 永久缺席的 Turn 仍以 `hosted_harness_unavailable` 终结。
+  detach，所以豁免它会让「Spring 重启而 Harness 存活」无限空转。这条
+  保证只覆盖它约束的窗口：Harness 永久缺席时，准入前（submission 标记
+  未设置）的 Turn 仍以 `hosted_harness_unavailable` 终结；而带有
+  submission 标记的 Turn 无论 code 如何都沿自身路径重试——预算本来就
+  不看这些 Turn（那是 `transientFailure` 的既有约定，不是豁免）。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
   只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
   `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，
@@ -301,8 +309,10 @@ D4 已经交付提案表格的第一行（尝试过提交但从未准入 → 撤
 `managed-harness-factory.ts:541-547` 保证其安全；依赖前须核实 MCP
 profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 decline
 契约之上的后续切片。Shell 停靠保持带类型化结局的拒绝；真正的 Shell
-接管归 Shell 工作项。G3 的退出检查由 Step 1+2（D1-D9）满足；issue 在
-模型轮切片落地时关闭。
+接管归 Shell 工作项。G3 的功能范围是 Step 1+2（D1-D9），但 issue 不
+因模型轮切片落地就关闭：「边界与开放问题」一节让 #12952 的 Q2 半边
+保持开放，留待一个独立的多实例控制面 tracker 证明——关闭须两边同时
+成立。
 
 ## 改动与属主
 

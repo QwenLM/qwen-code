@@ -419,6 +419,88 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // An approval wait is bounded by the approval timeout, never by a
+    // durable verdict: a decline with this reason stays retriable — the
+    // Turn must not die while the Action is still requested.
+    @Test
+    void awaitActionDeclineStaysRetriableWhileActionRequested() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        // submissionAttempted = true: the wait the retry beats the human
+        // over happens after admission, where the budget is bypassed.
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                "epoch-1", 3, "RUNNING", true, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException(
+                        "await_action"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // The daemon now answers a cancellation-only takeover plain when the
+    // parked Turn needs no Runtime bookkeeping: declining would have
+    // written the user's CANCEL as a harness failure (R5-36).
+    @Test
+    void cancellingTurnWithPlainRecoverCancelsNotFails() {
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", promptId,
+                "epoch-old", 4, "CANCELLING");
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        // Inapplicable on the wire: a plain Attachment with no recovery.
+        when(harness.recoverManagedRuntime("tenant", "session", true))
+                .thenReturn(new Attachment("boot-new", null, 4L,
+                        "epoch-old"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(harness.stream("tenant", "session", 4, "epoch-old"))
+                .thenReturn(cancelledStream(promptId));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness).cancel("tenant", "session");
+        verify(harness, never()).cancelManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(),
+                eq("managed_runtime_recovery_blocked"));
+    }
+
     // The withdrawal is a CAS: losing it (the mark is gone, or the lease
     // was lost) must end the Turn terminally rather than resubmit a prompt
     // another owner may already have admitted.

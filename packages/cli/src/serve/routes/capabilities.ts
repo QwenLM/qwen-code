@@ -7,8 +7,8 @@
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
-  getRegisteredServeFeatures,
   getServeProtocolVersions,
+  hostedPersonaServeFeatures,
 } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
@@ -93,14 +93,7 @@ export function registerCapabilitiesRoutes(
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
     const features = deps.hostedHarness
-      ? // The hosted persona is curated, but never hand-maintained: both
-        // tags come from the registry so removing an entry there removes
-        // it from the wire (there is no second source of truth to drift).
-        getRegisteredServeFeatures().filter(
-          (feature) =>
-            feature === 'hosted_harness_private_v1' ||
-            feature === 'managed_session_journal_delta_v1',
-        )
+      ? hostedPersonaServeFeatures()
       : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {

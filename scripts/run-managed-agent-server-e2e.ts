@@ -1027,6 +1027,22 @@ try {
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
     let originalRuntimeSessionId: string | undefined;
+    // The runtime_session_id column is written once at INSERT and never
+    // rewritten, so an equality pin cannot fail. The harness-only arms
+    // therefore also compare the row's own liveness metric before and
+    // after the crash: a surviving worker's re-attach renews it.
+    function runtimeSessionHeartbeat(
+      runtimeSessionId: string,
+    ): [string, number] {
+      const row = runMysql(
+        mysqlPort,
+        `SELECT last_active_at, record_version FROM qwen_runtime_session WHERE runtime_session_id = ${sqlString(runtimeSessionId)}`,
+      ).split('\t');
+      if (row.length !== 2 || row[1].length === 0)
+        throw new Error(`Runtime session row missing (${runtimeSessionId})`);
+      return [row[0], Number(row[1])];
+    }
+    let firstRuntimeHeartbeat: [string, number] | undefined;
     if (inflightFailover) {
       if (heldStartProxy === undefined) {
         throw new Error('In-flight failover did not start its Broker proxy');
@@ -1096,6 +1112,10 @@ try {
       }
       originalExecutionCallId = execution[0];
       originalRuntimeSessionId = execution[3];
+      if (harnessOnly)
+        firstRuntimeHeartbeat = runtimeSessionHeartbeat(
+          originalRuntimeSessionId,
+        );
     } else {
       const firstTurn = await waitForTerminal(
         springUrl,
@@ -1164,6 +1184,10 @@ try {
       }
       originalExecutionCallId = execution[0];
       originalRuntimeSessionId = execution[3];
+      if (harnessOnly)
+        firstRuntimeHeartbeat = runtimeSessionHeartbeat(
+          originalRuntimeSessionId,
+        );
     }
 
     if (freeze) {
@@ -1452,6 +1476,16 @@ try {
         // Worker keep serving the same runtime session; re-provisioning
         // would redefine the arm as a kill-both.
         (harnessOnly && recoveredExecution[4] !== originalRuntimeSessionId) ||
+        // The equality above cannot fail (the column settles at INSERT):
+        // "kept serving" is witnessed by the row's own liveness moving.
+        (harnessOnly &&
+          !(
+            firstRuntimeHeartbeat !== undefined &&
+            (runtimeSessionHeartbeat(recoveredExecution[4])[1] >
+              firstRuntimeHeartbeat[1] ||
+              runtimeSessionHeartbeat(recoveredExecution[4])[0] >
+                firstRuntimeHeartbeat[0])
+          )) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||
@@ -1558,6 +1592,14 @@ try {
         // See the in-flight arm: the surviving owner keeps the durable
         // runtime session; a new Worker is a kill-both in disguise.
         (harnessOnly && recoveredExecution[4] !== originalRuntimeSessionId) ||
+        (harnessOnly &&
+          !(
+            firstRuntimeHeartbeat !== undefined &&
+            (runtimeSessionHeartbeat(recoveredExecution[4])[1] >
+              firstRuntimeHeartbeat[1] ||
+              runtimeSessionHeartbeat(recoveredExecution[4])[0] >
+                firstRuntimeHeartbeat[0])
+          )) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||

@@ -773,6 +773,12 @@ class HostedHarnessClientTest {
                                     false)));
             assertNotNull(client.loadSession(
                     new LoadHarnessSession(SESSION_ID, null, true)));
+            // The drive disjunct of the same predicate: an active takeover
+            // drive (passive=false, drive=true) also pays loadTimeout —
+            // the connector's headline recovery path.
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, false, null,
+                            true)));
         }
     }
 

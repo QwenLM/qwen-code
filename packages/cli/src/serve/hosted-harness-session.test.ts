@@ -7008,6 +7008,83 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(matching.status).toBe(200);
   });
 
+  function mockAuthorizationWithPhase(phase: string, approval: unknown) {
+    // Pass the REAL authorization through with only the wait shape
+    // changed: a wholesale replacement breaks the integrity checks the
+    // route performs between open, restore and takeover.
+    const original =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      const authorization = await original.call(this);
+      if (authorization.status !== 'runnable') return authorization;
+      return {
+        ...authorization,
+        checkpoint: {
+          ...authorization.checkpoint,
+          continuation: {
+            ...authorization.checkpoint.continuation,
+            phase,
+          },
+          ...(approval === undefined ? {} : { approval }),
+        },
+      } as never;
+    });
+  }
+
+  it('carries a takeover decline reason onto the wire', async () => {
+    // The seven-reason taxonomy was witnessed only at the restore guard:
+    // this pins a recoverHostedRuntimeTurn decline reaching the route's
+    // own emitter with its typed reason intact.
+    await parkToolTurn();
+    mockAuthorizationWithPhase('before_model', undefined);
+    const { loaded } = await loadReplacement();
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
+    expect(loaded.body.reason).toBe('model_start');
+  });
+
+  it('restores the consumed snapshot when a cancellation report is lost', async () => {
+    // The admission's rollback owns a twin for the snapshot: a re-driven
+    // takeover load must replay it, not be refused already-attached (D6).
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'unknown',
+    });
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(503);
+    expect(cancelled.body.code).toBe('managed_runtime_cancel_failed');
+    const replayed = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(replayed.status).toBe(200);
+    expect(replayed.body._meta?.['qwen.daemon.managedRuntimeRecovery']).toEqual(
+      recovery,
+    );
+  });
+
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
     let stopConfirmed = false;

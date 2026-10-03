@@ -229,8 +229,13 @@ drive, because a passive report parks what a drive load would settle and
 would never be continuation-ready — and (d) finds the recovery still
 pending returns 200 with the stored snapshot instead of 409
 `hosted_session_already_attached`. Repeated plain loads, and a repeated
-takeover in the other shape, keep the 409. This
-closes the lost-reply follow-up recorded by the 2026-09-30 design; the
+takeover in the other shape, keep the 409. This closes the lost-reply
+follow-up recorded by the 2026-09-30 design — scoped to retries that keep
+their shape. One cell stays open: the shape is derived from the Turn's
+status, so a cancellation landing after a lost DRIVE reply finds the
+retained snapshot permanently unconsumable (passive replay against a
+drive-minted snapshot refuses already-attached); that handoff is the
+replay-widening slice, deliberately not folded into D6. The
 `opening.has(sessionId)` refusal (a takeover currently in flight) is
 unchanged and stays retriable.
 
@@ -273,7 +278,9 @@ frozen Harness before stopping the children, through the children
 registry's startup-name lookup (one constant names both the registry
 entry and the wake lookup; a miss fails the run instead of leaving a
 wedged writer). The same PR also wires `npm run test:e2e:managed-session-failover` into the
-`hosted-harness-mysql` CI job, where it was previously absent by omission.
+`hosted-harness-mysql` CI job — the 2026-09-26 fault-gates design had
+scoped that arm out deliberately, and this slice supersedes that older
+decision so it runs under the gate.
 
 ### D8 — E2E: the Harness-only restart arm
 
@@ -319,8 +326,12 @@ happen.
   reads as a transient conflict but is permanent: the daemon drops an
   attachment only on an explicit detach or delete and this control plane
   never detaches, so exempting it would spin forever on a Spring restart
-  against a surviving Harness. A permanently absent Harness therefore
-  still ends a Turn as `hosted_harness_unavailable`.
+  against a surviving Harness. The guarantee is scoped to the window it
+  constrains: a permanently absent Harness still ends a pre-admission Turn
+  as `hosted_harness_unavailable`, while a Turn carrying the submission
+  mark retries on its own path regardless of the code — the budget never
+  consulted those Turns (that is `transientFailure`'s contract, not a
+  lease exemption).
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag
@@ -346,8 +357,10 @@ release (safe per `managed-harness-factory.ts:541-547`; the MCP profile
 must be checked first), and `turn_settled` rebind-and-keep-reading — are
 follow-up slices on top of D5's typed-decline contract. Shell parkings stay
 declined with the typed outcome; real Shell takeover belongs to the Shell
-work item. G3's exit check is met by Steps 1+2 (D1-D9); the issue closes
-when the model-round slice lands.
+work item. G3's functional scope is Steps 1+2 (D1-D9), but the issue does
+NOT close on the model-round slice alone: the Boundaries bullet keeps
+#12952's Q2 half open until a separate multi-instance control-plane
+tracker proves it, so closing waits on both.
 
 ## Changes and ownership
 
