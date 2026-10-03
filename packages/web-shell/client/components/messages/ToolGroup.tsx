@@ -172,21 +172,50 @@ function isEditToolName(toolName: string): boolean {
   );
 }
 
-export function extractDiff(tool: ACPToolCall): string {
+export type DiffSource =
+  | 'none'
+  | 'recorded'
+  | 'content-block'
+  | 'patch-arg'
+  | 'rebuilt-from-args';
+
+/**
+ * Resolve the diff a completed edit surface should show, and report which
+ * source produced it, so provenance decisions read the same ladder the
+ * renderer walks instead of re-encoding it. The source order is the render
+ * order: a recorded fileDiff wins, then a tool-provided diff content block,
+ * then the call's own `patch` argument (a real unified diff), and finally a
+ * rebuild from the edit's old/new text. The two `buildUnifiedDiff`
+ * sources — content block and argument rebuild — render headerless and
+ * 0-based, so those are the ones `isAnnotatedDiffSource` marks; recorded
+ * diffs and `patch` arguments keep their real hunk headers.
+ */
+export function resolveDiff(tool: ACPToolCall): {
+  diff: string;
+  source: DiffSource;
+} {
   const rawFileDiff = getRawFileDiff(tool);
-  if (rawFileDiff) return rawFileDiff;
+  if (rawFileDiff) return { diff: rawFileDiff, source: 'recorded' };
 
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
+      return {
+        diff: buildUnifiedDiff(
+          diffBlock.oldText || '',
+          diffBlock.newText || '',
+        ),
+        source: 'content-block',
+      };
     }
   }
 
-  if (tool.status === 'failed' || tool.wasCancelled) return '';
+  if (tool.status === 'failed' || tool.wasCancelled)
+    return { diff: '', source: 'none' };
 
   const previewPatch = tool.args?.patch;
-  if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
+  if (typeof previewPatch === 'string' && previewPatch)
+    return { diff: previewPatch, source: 'patch-arg' };
   // `newText`/`oldText` come from the safe tool preview projection; the full
   // projection carries the edit tool's real parameter names instead.
   const previewNewText = tool.args?.newText ?? tool.args?.new_string;
@@ -195,13 +224,16 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildUnifiedDiff(
-      typeof previewOldText === 'string' ? previewOldText : '',
-      typeof previewNewText === 'string' ? previewNewText : '',
-    );
+    return {
+      diff: buildUnifiedDiff(
+        typeof previewOldText === 'string' ? previewOldText : '',
+        typeof previewNewText === 'string' ? previewNewText : '',
+      ),
+      source: 'rebuilt-from-args',
+    };
   }
 
-  return '';
+  return { diff: '', source: 'none' };
 }
 
 export function getRawFileDiff(tool: ACPToolCall): string {
@@ -217,6 +249,57 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
   return (
     raw.truncatedForSession === true && 'fileName' in raw && 'newContent' in raw
   );
+}
+
+/**
+ * The copy key the reconstruction note renders for a source, or null when
+ * that render needs no note. Keyed on what the note actually describes:
+ * the rendered diff carries no `@@` header, so its gutter counts from 0
+ * within the shown text rather than the file. The two headerless
+ * buildUnifiedDiff sources get different copy because they differ in what
+ * is true of them: an argument rebuild renders the edit snippet, so its
+ * replace_all clause applies, while a content block is built from the
+ * tool result's recorded file bodies and claims nothing about the
+ * arguments. The edit-shape clause requires a non-empty old text (the
+ * content block's, or the arguments' for a rebuild): an empty old text is
+ * this repo's convention for a file creation, whose rebuild spans the
+ * entire file and has no replace_all, so it stays unannotated. Argument
+ * rebuilds are the one source that doubles as an approval-time preview,
+ * so those are gated to completed calls; a content block is
+ * server-provided and is annotated whenever it renders.
+ */
+function annotationNoteKey(
+  tool: ACPToolCall,
+  source: DiffSource,
+): string | null {
+  if (source === 'content-block') {
+    const diffBlock = tool.content?.find((b) => b.type === 'diff');
+    return diffBlock?.oldText ? 'toolGroup.diffRenderedHeaderless' : null;
+  }
+  if (source === 'rebuilt-from-args') {
+    if (tool.status !== 'completed' || tool.wasCancelled) return null;
+    const oldText = tool.args?.oldText ?? tool.args?.old_string;
+    return typeof oldText === 'string' && oldText !== ''
+      ? 'toolGroup.diffRebuiltFromArgs'
+      : null;
+  }
+  return null;
+}
+
+/**
+ * Resolve the diff and its annotation copy key in a single ladder walk, so
+ * a surface that renders both never re-runs the source resolution (the
+ * rebuild's LCS is the expensive half).
+ */
+export function resolveDiffAnnotation(tool: ACPToolCall): {
+  diff: string;
+  noteKey: string | null;
+} {
+  const resolved = resolveDiff(tool);
+  return {
+    diff: resolved.diff,
+    noteKey: annotationNoteKey(tool, resolved.source),
+  };
 }
 
 // A description longer than this is likely ellipsised on a normal-width row, so
@@ -291,7 +374,11 @@ export function fencedCodeBlock(language: string, code: string): string {
 }
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
-  const diff = useMemo(() => extractDiff(tool), [tool]);
+  const { t } = useI18n();
+  // One resolveDiff walk per tool change: the rendered diff and the note
+  // copy come from the same pass, so a streaming re-render never re-runs
+  // the source ladder (its LCS is the expensive half).
+  const { diff, noteKey } = useMemo(() => resolveDiffAnnotation(tool), [tool]);
   const text = useMemo(
     () => (tool.content ? extractText(tool) || '' : ''),
     [tool],
@@ -300,7 +387,10 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   return (
     <div className={styles.expandedEdit}>
       {diff ? (
-        <DiffView diff={diff} />
+        <>
+          <DiffView diff={diff} />
+          {noteKey && <p className={styles.expandedCardDetail}>{t(noteKey)}</p>}
+        </>
       ) : (
         <pre className={styles.expandedOutput}>{text}</pre>
       )}
