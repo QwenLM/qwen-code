@@ -87,7 +87,7 @@ public class ActionResponseCoordinator {
                     return;
                 }
                 if (error.getStatusCode() == 400) {
-                    actions.complete(op, owner, "invalid_action_response", null, clock.millis());
+                    actions.complete(op, owner, "invalid_action_response", null, true, clock.millis());
                     return;
                 }
                 throw error;
@@ -95,11 +95,38 @@ public class ActionResponseCoordinator {
             if (settled(op, response)) {
                 return;
             }
-            throw new IllegalStateException("The Action has no committed decision yet");
+            throw new DecisionNotYetProjected();
         } catch (RuntimeException error) {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             if (settled(op, actions.response(tenant, session, operation))) {
+                return;
+            }
+            // The budget terminal records "the Harness never answered", so
+            // only a genuinely undelivered answer may reach it. A 200 from
+            // resolveAction means the decision IS committed (the Harness
+            // commits before it answers) and only Java's projection lags —
+            // that attempt keeps retrying until the projection heals or the
+            // Action's own end state settles it, and is never recorded as a
+            // delivery failure.
+            if (op.attemptCount() >= dispatch.getMaxOperationRetries()
+                    && !(error instanceof DecisionNotYetProjected)) {
+                LOG.error(
+                        "Action response exhausted retries tenant={} session={} operation={} attempts={}",
+                        tenant,
+                        session,
+                        operation,
+                        op.attemptCount(),
+                        error);
+                // The Harness never answered, so the record must not claim
+                // a harness_confirmed admission.
+                actions.complete(
+                        op,
+                        owner,
+                        "action_response_delivery_failed",
+                        null,
+                        false,
+                        clock.millis());
                 return;
             }
             long delay =
@@ -136,7 +163,17 @@ public class ActionResponseCoordinator {
                 owner,
                 matched ? null : ManagedActionStore.endedCode(action.state()),
                 matched ? action.decisionReceiptId() : null,
+                true,
                 clock.millis());
         return true;
+    }
+
+    // The Harness answered 200, which it only does after committing the
+    // decision, but Java's projection does not show it yet. The delivery
+    // succeeded; the pending work is the projection's.
+    private static final class DecisionNotYetProjected extends IllegalStateException {
+        DecisionNotYetProjected() {
+            super("The Action has no committed decision yet");
+        }
     }
 }

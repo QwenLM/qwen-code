@@ -561,6 +561,30 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     ).rejects.toThrow('action_delivery_failed');
 
+    // The failure code rides the error so the hook can classify it (an ended
+    // Action vs a delivery failure worth retrying).
+    fetchImpl.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          operationId: 'op-2',
+          sessionId: 'session-1',
+          type: 'action_response',
+          status: 'failed',
+          admissionStage: 'java_durable',
+          deliveryState: 'confirmed',
+          failureCode: 'action_response_delivery_failed',
+          replayed: true,
+        }),
+        { status: 202, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    await expect(
+      provider.actions!.respond(pending[0], 'deny', {
+        clientId: 'client-1',
+        idempotencyKey: 'tool_approval_1:deny',
+      }),
+    ).rejects.toMatchObject({ code: 'action_response_delivery_failed' });
+
     for (const status of ['cancelled', 'recovery_blocked'] as const) {
       fetchImpl.mockResolvedValueOnce(
         new Response(

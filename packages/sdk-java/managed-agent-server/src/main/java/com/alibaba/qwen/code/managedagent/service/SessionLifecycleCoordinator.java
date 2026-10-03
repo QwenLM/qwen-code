@@ -23,8 +23,11 @@ import org.springframework.stereotype.Component;
  * active Session closes it in the Hosted Harness and waits until no Harness
  * holds the Session's journal writer; every operation then drains the
  * Session's Runtime binding and completes. A failed attempt is retried with
- * the dispatch backoff until it succeeds, so an operation never completes
- * before these steps.
+ * the dispatch backoff; once the retry budget is spent the operation reaches
+ * a terminal failure that keeps the failure code and leaves the Session in
+ * its pending status, rather than retrying forever or certifying a settle
+ * that never happened. The one exception is a live journal writer: the close
+ * can still succeed once it stops, so the operation keeps waiting.
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -40,6 +43,7 @@ public class SessionLifecycleCoordinator {
     private final Duration leaseDuration;
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
+    private final int maxOperationRetries;
     private final String owner = UUID.randomUUID().toString();
     private final java.util.concurrent.ScheduledExecutorService renewals =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
@@ -69,6 +73,8 @@ public class SessionLifecycleCoordinator {
         this.retryInitialDelay = properties.getDispatch()
                 .getRetryInitialDelay();
         this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
+        this.maxOperationRetries = properties.getDispatch()
+                .getMaxOperationRetries();
     }
 
     public void dispatch(String tenantId, String sessionId,
@@ -115,8 +121,9 @@ public class SessionLifecycleCoordinator {
                 valid.set(false);
             }
         }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+        Boolean harnessConfirmed = null;
         try {
-            boolean harnessConfirmed = settle(claimed);
+            harnessConfirmed = settle(claimed);
             if (!valid.get()) {
                 return;
             }
@@ -133,14 +140,107 @@ public class SessionLifecycleCoordinator {
             while (cause.getCause() != null && cause instanceof java.util.concurrent.CompletionException) {
                 cause = cause.getCause();
             }
+            // A blocked close waits on a fact only an operator or the
+            // original worker can change; it keeps its failure code through
+            // every attempt and through the terminal record.
             String blocked = null;
+            String failureCode = "session_lifecycle_delivery_failed";
             if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
+                failureCode = brokerError.getCode();
                 if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
                     blocked = brokerError.getCode();
                 } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
                         || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
                     blocked = "workspace_close_identity_unverified";
                 }
+            }
+            // The budget bounds every settle outcome, blocked or not, and
+            // the terminal record keeps the cause instead of certifying a
+            // completion that never settled. Two exceptions keep waiting
+            // instead: a live journal writer (the close can still succeed
+            // once it stops), and a failure thrown AFTER settle() returned —
+            // the settle did happen then, and a terminal
+            // session_lifecycle_delivery_failed would certify the opposite;
+            // the completion write is simply retried (settle is idempotent).
+            if (harnessConfirmed == null
+                    && claimed.attemptCount() >= maxOperationRetries
+                    && valid.get() && !writerStillLive(claimed)) {
+                LOG.error("Managed Session operation exhausted retries"
+                                + " tenant={} session={} operation={}"
+                                + " attempts={}",
+                        tenantId, sessionId, operationId,
+                        claimed.attemptCount(), error);
+                // The Runtime binding is still released best-effort, along
+                // settle()'s routing: a session whose operation is terminal
+                // must not stay warmable. A bound Session this replica
+                // cannot verify releases nothing — closing its workspace
+                // without the original worker's stop verified is what the
+                // blocked code exists to refuse — and a delete of an
+                // already closed Session makes zero calls, as settle() does.
+                try {
+                    boolean bound = store.requireSession(tenantId, sessionId)
+                            .workspace() != null;
+                    if (bound && closedSessionDeletion(claimed)) {
+                        // The completed CLOSE is the cleanup authority.
+                    } else if (bound) {
+                        if (runtimeWarmer.supportsWorkspaceClose()) {
+                            runtimeWarmer.requestWorkspaceClose(tenantId,
+                                    sessionId);
+                            runtimeWarmer.closeWorkspace(tenantId, sessionId)
+                                    .toCompletableFuture().join();
+                        }
+                    } else {
+                        runtimeWarmer.drain(sessionId).toCompletableFuture()
+                                .join();
+                    }
+                } catch (RuntimeException drainError) {
+                    LOG.warn("Managed Session operation drain failed"
+                                    + " tenant={} session={} operation={}"
+                                    + " failure={}",
+                            tenantId, sessionId, operationId,
+                            drainError.getMessage());
+                }
+                try {
+                    if (!store.failOperation(tenantId, sessionId,
+                            operationId, owner, claimed.claimGeneration(),
+                            failureCode)) {
+                        LOG.warn("Managed Session operation was claimed by"
+                                        + " another worker tenant={}"
+                                        + " session={} operation={}",
+                                tenantId, sessionId, operationId);
+                    }
+                } catch (RuntimeException writeError) {
+                    // The terminal record itself failed: reschedule rather
+                    // than leave the operation wedged on a spent lease. The
+                    // blocked reschedule is restricted to the shapes the
+                    // recovery scan re-drives from BLOCKED (CLOSE, and a
+                    // DELETE admitted on a closed Session); every other
+                    // shape goes back to PENDING, which is always re-driven.
+                    // A blocked code can only arise from settle()'s
+                    // workspace-close path, which the closed-Session delete
+                    // never enters, so CLOSE is the only shape that needs it
+                    // here.
+                    LOG.warn("Managed Session operation terminal record"
+                                    + " failed; rescheduling tenant={}"
+                                    + " session={} operation={} failure={}",
+                            tenantId, sessionId, operationId,
+                            writeError.getMessage());
+                    if (valid.get()) {
+                        if (blocked != null
+                                && claimed.kind() == OperationKind.CLOSE) {
+                            store.blockLifecycleOperation(tenantId, sessionId,
+                                    operationId, owner,
+                                    claimed.claimGeneration(), blocked,
+                                    Math.addExact(clock.millis(), delay));
+                        } else {
+                            store.retryOperation(tenantId, sessionId,
+                                    operationId, owner,
+                                    claimed.claimGeneration(),
+                                    Math.addExact(clock.millis(), delay));
+                        }
+                    }
+                }
+                return;
             }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
@@ -160,14 +260,44 @@ public class SessionLifecycleCoordinator {
         }
     }
 
+    // A live journal writer blocks every delivered shape — settle()'s writer
+    // check on an ACTIVE Session, and the retention retirement a delete of a
+    // closed Session runs inside completeOperation — and in both cases the
+    // operation can still succeed once that writer stops, so the budget never
+    // terminates it. The gate keys on the writer itself, not on the status
+    // the operation was admitted on. A check that itself fails is treated as
+    // live rather than recorded as a failure.
+    private boolean writerStillLive(OperationRecord operation) {
+        try {
+            return sessionStore.hasLiveWriter(operation.tenantId(),
+                    operation.sessionId());
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Session operation could not check the journal"
+                            + " writer tenant={} session={} operation={}"
+                            + " failure={}",
+                    operation.tenantId(), operation.sessionId(),
+                    operation.operationId(), error.getMessage());
+            return true;
+        }
+    }
+
+    // A delete of an already closed or archived bound Session makes zero
+    // Runtime calls: the completed CLOSE is the cleanup authority, so the
+    // settlement stays independent of revoked mounts. Both settle() and the
+    // terminal arm honour this shape.
+    private boolean closedSessionDeletion(OperationRecord operation) {
+        return operation.kind() == OperationKind.DELETE
+                && ("CLOSED".equals(operation.sessionStatusBefore())
+                        || "ARCHIVED".equals(operation.sessionStatusBefore()));
+    }
+
     // Returns whether the Harness that held the Session acknowledged closing
     // it. A Harness that never held it, or that replaced the one that did,
     // answers too, but its answer confirms nothing about the Session.
     private boolean settle(OperationRecord operation) {
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
-        if (bound && operation.kind() == OperationKind.DELETE
-                && ("CLOSED".equals(operation.sessionStatusBefore()) || "ARCHIVED".equals(operation.sessionStatusBefore()))) {
+        if (bound && closedSessionDeletion(operation)) {
             return false;
         }
         if (bound) {

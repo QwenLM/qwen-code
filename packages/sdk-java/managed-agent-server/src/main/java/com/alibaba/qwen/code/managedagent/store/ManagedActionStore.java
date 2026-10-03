@@ -353,6 +353,59 @@ public class ManagedActionStore {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            if ("FAILED".equals(existing.state())
+                    && "action_response_delivery_failed"
+                            .equals(existing.failureCode())) {
+                // The delivery failed past its budget while the Action is
+                // still waiting: the caller's retry re-admits the same
+                // response under the same key, digest and row — a second
+                // vote stays impossible — instead of returning the stale
+                // failure receipt forever. Only the budget terminal is
+                // re-admissible: a FAILED the Harness itself produced (a
+                // definitive 400 invalid_action_response, or an ended
+                // Action) keeps replaying its recorded terminal row, since
+                // re-sending the identical body would only repeat a refusal
+                // the Harness already made. Unlike a fresh admission this
+                // does not re-check the Action's expiry: the vote was cast
+                // while the Action was live, and the retry only re-drives
+                // its delivery (the Harness still refuses a decided answer
+                // on an ended Action). The Session gate does apply: on a
+                // Session that no longer accepts responses the replay keeps
+                // returning the recorded failure instead of re-admitting
+                // deliveries that can never land.
+                String failedAction = jdbc.queryForObject(
+                        "SELECT action_id FROM managed_agent_operation WHERE"
+                                + " tenant_id = ? AND session_id = ? AND"
+                                + " operation_id = ?",
+                        String.class, tenantId, sessionId,
+                        existing.operationId());
+                Optional<Action> action = failedAction == null
+                        ? Optional.empty()
+                        : find(tenantId, sessionId, failedAction);
+                String replaySessionStatus = jdbc.queryForObject(
+                        "SELECT status FROM managed_agent_session WHERE"
+                                + " tenant_id = ? AND session_id = ?",
+                        String.class, tenantId, sessionId);
+                if (action.isPresent()
+                        && "requested".equals(action.get().state())
+                        && "ACTIVE".equals(replaySessionStatus)) {
+                    jdbc.update("UPDATE managed_agent_operation SET state ="
+                                    + " 'PENDING', delivery_state ="
+                                    + " 'PENDING', error_code = NULL,"
+                                    + " attempt_count = 0, lease_owner ="
+                                    + " NULL, lease_until = NULL, receipt_id"
+                                    + " = NULL, available_at = ?, updated_at"
+                                    + " = ?, completed_at = NULL WHERE"
+                                    + " tenant_id = ? AND session_id = ? AND"
+                                    + " operation_id = ?",
+                            now, now, tenantId, sessionId,
+                            existing.operationId());
+                    return new OperationAdmission(
+                            sessions.findOperation(tenantId, sessionId,
+                                    existing.operationId()).orElseThrow(),
+                            true);
+                }
+            }
             return new OperationAdmission(existing, true);
         }
         String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
@@ -459,15 +512,17 @@ public class ManagedActionStore {
             String owner,
             String errorCode,
             String decisionReceiptId,
+            boolean harnessConfirmed,
             long now) {
         jdbc.update(
-                "UPDATE managed_agent_operation SET state = ?, admission_stage ="
-                    + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
+                "UPDATE managed_agent_operation SET state = ?, admission_stage = ?,"
+                    + " delivery_state = 'CONFIRMED', receipt_id = ?,"
                     + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL, lease_until ="
                     + " NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id ="
                     + " ? AND operation_id = ? AND delivery_state = 'LEASED' AND lease_owner = ?"
                     + " AND claim_generation = ?",
                 errorCode == null ? "COMPLETED" : "FAILED",
+                harnessConfirmed ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
                 "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                 errorCode,
                 decisionReceiptId,

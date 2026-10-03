@@ -36,8 +36,9 @@ original operation, and that a different payload under the same key conflicts.
   answer `202` with `PublicCommandOperation` or `WebShellCommandOperation`.
 - Serve the operation query on both surfaces, including for a deleted Session.
 - Deliver close and delete in the background until their Harness close and
-  Runtime drain succeed, surviving failing Harness calls, failed attempts and a
-  lost worker.
+  Runtime drain succeed or the `dispatch.max-operation-retries` budget is
+  spent (4.5), surviving failing Harness calls, failed attempts and a lost
+  worker.
 - Keep the idempotency domain of the contract: tenant, Session, operation kind,
   actor and key.
 - Finish archives and deletes that were waiting for a retry when the server is
@@ -54,8 +55,10 @@ original operation, and that a different payload under the same key conflicts.
 - `archived_at` and the list's `include_archived`, which stay `planned`.
 - Erasing a deleted Session's content and purging tombstones and operations
   after the retry window. Both belong to the retention work.
-- The `failed`, `cancelled` and `recovery_blocked` outcomes. D4 operations retry
-  until they complete (4.5).
+- The `cancelled` outcome. D4 operations retry within the
+  `dispatch.max-operation-retries` budget and terminate `failed` with the
+  settle's failure code once it is spent (4.5); a close waiting on an
+  unverifiable workspace settlement is `recovery_blocked` meanwhile.
 
 ## 4. Decisions
 
@@ -184,12 +187,38 @@ loses nothing.
 
 A failed attempt returns the operation to pending with the dispatch backoff,
 from `dispatch.retry-initial-delay` doubling to `dispatch.retry-max-delay`, and
-counts it. There is no last attempt: an operation completes only after its
+counts it. The retries are bounded by `dispatch.max-operation-retries`
+(default 10): while the budget lasts, an operation completes only after its
 steps succeed, so the `202` never claims that tools stopped, and an operation
-whose Harness keeps failing stays `running`. After the Hosted Harness
-restarts, the Java connector keeps the previous boot, so its calls fail with a
-generation error until Java restarts too, as Turn dispatch does; the operation
-waits meanwhile, and then until the old process's writer lease expires.
+whose Harness keeps failing stays `running`. The budget is denominated in
+attempts, so its wall clock depends on how fast the outage answers: at the
+default backoff the claims span about five minutes when attempts fail fast (a
+generation error rejects immediately, and a blocked journal answers every
+attempt with `503` at once) and about twice that when each attempt consumes
+the full Harness request timeout. When the budget is spent, the operation
+still releases the Runtime binding best-effort — along settle()'s routing,
+which for a delete of an already closed bound Session is no call at all —
+and terminates `failed` with the settle's failure
+code, so a Session whose settle can never succeed still reaches a terminal
+state instead of looping forever: the Session keeps its pending status, no
+`session.closed` is appended, and no completion is certified. The one
+exception is a live journal writer, whatever status the operation was
+admitted on — a close or delete of an active Session whose settle waits for
+the writer, or a delete of a closed Session whose retention retirement
+refuses while a residual writer holds the journal: either can still succeed
+once that writer stops, so the budget does not terminate it and it keeps
+waiting until the writer stops or its lease lapses. After the Hosted Harness restarts, the Java
+connector keeps the previous boot, so its calls fail with a generation error
+until Java restarts too, as Turn dispatch does; the operation waits meanwhile
+— within the same budget — and then until the old process's writer lease
+expires.
+
+A budget-terminated operation leaves its Session in the pending status
+(`closing` or `deleting`) with the failure code on the operation row, and no
+route admits a fresh operation onto that status today: once the cause the
+code names is resolved, an operator reconciles the Session by hand (the
+operation row is the audit record), and admitting a new close or delete onto
+it from the API is follow-up work.
 
 A Harness that stopped writing the Session's journal cannot close it either.
 After any failed journal commit, for example one made while Java or its
@@ -198,8 +227,10 @@ Session, and its close first records that its activation ended, so it answers
 every attempt with `503`. Its writer lease can stay live, because the writer's
 own renewal keeps running, so no other server can complete the close; the
 operation stays `running` until that Harness restarts, and Java with it as
-above. Only when that lease lapses too can another server's Harness complete it
-(step 2). D4 does not complete such a close without the Harness: section 10 of
+above, or until that lease lapses — the budget does not terminate an
+operation whose writer is still live. Only when that lease lapses too can
+another server's Harness complete it (step 2). D4 does not complete such a
+close without the Harness while the budget lasts: section 10 of
 the [contract][contract] keeps close and delete behind the existing Hooks and
 resource settlement, and only the Harness can report that its Session settled.
 
@@ -216,12 +247,13 @@ Session and drains its own Runtime binding.
 
 ### 4.6 Operation fields
 
-| Field             | Values                                                                                                         |
-| ----------------- | -------------------------------------------------------------------------------------------------------------- |
-| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end.                               |
-| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close. |
-| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` when completed.                                   |
-| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation completes.                                       |
+| Field             | Values                                                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end, `failed` when the retry budget is spent (4.5). |
+| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                  |
+| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.           |
+| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                         |
+| `failure_code`    | The settle failure that spent the budget, or the workspace-close code a `recovery_blocked` close waits on.                      |
 
 The Harness that held the Session is the one whose boot ID the Session
 recorded: Turn dispatch records the boot it attaches to, and a rename records
@@ -234,8 +266,11 @@ restart: the new Harness answers that it does not hold the Session, and the
 operation completes once the old process's writer lease has expired instead of
 being sealed. An archive migrated from before V17 was admitted on an active
 Session, so it closes the Session first and can complete as
-`harness_confirmed` (4.10). `failure_code`, `blocked` and the `failed`,
-`cancelled` and `recovery_blocked` statuses are not produced.
+`harness_confirmed` (4.10). A close whose workspace settlement the Runtime
+Broker keeps refusing is `recovery_blocked` with `delivery_state` `blocked`
+and the refusal's `failure_code` until its budget is spent. A `cancelled`
+status is not produced. A budget-terminated operation reads `failed` with its
+`failure_code`, so a give-up is never indistinguishable from a settled close.
 
 ### 4.7 Reading operations
 
@@ -309,8 +344,10 @@ workflow on every pull request and push (#12940).
   deletes another Session. Every route gets its `400`, `403` and `404`, both
   operation reads reject an overlong operation id with `400`, the deleted
   Sessions' operations are read, and a new key on a tombstone answers `404`. The scenario exercises every operation that is not `planned`.
-- **Lifecycle test.** Eleven scenarios: a close that waits while the Harness
-  fails every close; a failed Harness close and repeated drain failures that
+- **Lifecycle test.** Eleven scenarios: a close that retries while the
+  Harness fails every close (its budget-exhausted `failed` terminal is pinned
+  in the coordinator and operation-store unit suites); a failed Harness close
+  and repeated drain failures that
   must be retried before completion, with input rejected meanwhile; a Session
   that no Harness held, closed with and without a configured Harness; a
   Harness replaced by a restart, whose answer confirms nothing; a close that

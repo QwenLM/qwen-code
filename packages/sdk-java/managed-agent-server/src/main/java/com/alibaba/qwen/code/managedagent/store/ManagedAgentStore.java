@@ -46,6 +46,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,6 +60,8 @@ import java.util.Locale;
 
 @Repository
 public class ManagedAgentStore implements AgentStateStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentStore.class);
     private static final TypeReference<List<Map<String, Object>>> INPUT_TYPE =
             new TypeReference<>() {
             };
@@ -905,6 +909,32 @@ public class ManagedAgentStore implements AgentStateStore {
         return true;
     }
 
+    @Override
+    @Transactional
+    public boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode) {
+        long now = lifecycleDatabaseTime();
+        // The same fencing as completeOperation, and deliberately nothing
+        // more: the Session row keeps its pending status and no completion
+        // event is appended, because the settle never succeeded. The receipt
+        // the contract requires of every confirmed row certifies nothing —
+        // status failed and the failure code carry the outcome.
+        // delivery_state CONFIRMED keeps every recovery scan from re-driving
+        // the row.
+        return jdbc.update("UPDATE managed_agent_operation SET"
+                        + " state = 'FAILED', delivery_state = 'CONFIRMED',"
+                        + " error_code = ?, receipt_id = ?,"
+                        + " lease_owner = NULL, lease_until = NULL,"
+                        + " updated_at = ?, completed_at = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND delivery_state = 'LEASED'"
+                        + " AND lease_owner = ? AND claim_generation = ?"
+                        + " AND lease_until > ?",
+                failureCode, publicId("rcpt"), now, now, tenantId, sessionId,
+                operationId, owner, claimGeneration, now) == 1;
+    }
+
     private long lifecycleDatabaseTime() {
         return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -1305,11 +1335,63 @@ public class ManagedAgentStore implements AgentStateStore {
         long expected = covered + 1;
         for (EventRecord event : events) {
             if (event.sequence() != expected) {
-                throw new IllegalStateException(
-                        "Message projection event sequence has a gap");
+                // A gap is permanent: appendEvent allocates a sequence under
+                // the session row lock this method already holds, so no
+                // missing sequence can still appear. Skipping ahead once
+                // beats throwing on every scan and wedging the projection.
+                LOG.error("Message projection skips a permanent event gap"
+                                + " tenant={} session={} missingSequences={}-{}"
+                                + " nextEvent={}",
+                        tenantId, sessionId, expected, event.sequence() - 1,
+                        event.sequence());
+                // The skipped range may have carried a turn's terminal
+                // event, whose settle is the only write that moves its
+                // items off in_progress. Settle those turns' items here, or
+                // they would be pinned forever — but only for a turn that is
+                // provably over: its terminal event is in the journal (its
+                // own materialization settled it already, making this a
+                // no-op guard) or its row is not live. A turn whose row is
+                // still live (recordHarnessEvents flips it in the same
+                // transaction that appends the terminal event, so a live row
+                // means the terminal event can still arrive) is settled by
+                // its own event or by turn recovery's turn.failed — never
+                // here. The remaining guards mirror settleTurnItems (never
+                // re-settle a completed item, never push last_sequence
+                // backwards).
+                jdbc.update("UPDATE managed_agent_item SET item_status ="
+                                + " 'failed', last_sequence = CASE WHEN"
+                                + " last_sequence < ? THEN ? ELSE"
+                                + " last_sequence END, updated_at = ?,"
+                                + " revision = revision + 1 WHERE tenant_id"
+                                + " = ? AND session_id = ? AND item_status"
+                                + " = 'in_progress' AND last_sequence < ?"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " managed_agent_event terminal WHERE"
+                                + " terminal.tenant_id ="
+                                + " managed_agent_item.tenant_id AND"
+                                + " terminal.session_id ="
+                                + " managed_agent_item.session_id AND"
+                                + " terminal.turn_id ="
+                                + " managed_agent_item.turn_id AND"
+                                + " terminal.event_type IN"
+                                + " ('turn.completed', 'turn.failed',"
+                                + " 'turn.cancelled'))"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " managed_agent_turn live WHERE"
+                                + " live.tenant_id ="
+                                + " managed_agent_item.tenant_id AND"
+                                + " live.session_id ="
+                                + " managed_agent_item.session_id AND"
+                                + " live.turn_id ="
+                                + " managed_agent_item.turn_id AND"
+                                + " live.status IN ('ACCEPTED', 'RUNNING',"
+                                + " 'CANCELLING'))",
+                        event.sequence() - 1, event.sequence() - 1,
+                        clock.millis(), tenantId, sessionId,
+                        event.sequence());
             }
             materializeEvent(event);
-            expected++;
+            expected = event.sequence() + 1;
         }
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();

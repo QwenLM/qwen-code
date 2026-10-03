@@ -73,14 +73,19 @@ export function createJavaManagedAgentProvider(
           command.signal,
         );
         // A cancelled or recovery-blocked operation did not apply the answer,
-        // so the card must stay rather than hide as if it had.
+        // so the card must stay rather than hide as if it had. The failure
+        // code rides the error so the hook can tell an ended Action (no
+        // retry can succeed) from a delivery failure worth retrying.
         if (
           result.status === 'failed' ||
           result.status === 'cancelled' ||
           result.status === 'recovery_blocked'
         ) {
-          throw new Error(
-            `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+          throw Object.assign(
+            new Error(
+              `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+            ),
+            { code: result.failureCode ?? 'unknown' },
           );
         }
       },

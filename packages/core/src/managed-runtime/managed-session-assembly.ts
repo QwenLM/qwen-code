@@ -256,11 +256,24 @@ export async function openManagedSession(
     // A call that owns the whole lifecycle also records the boundary, or the
     // activation would read as abandoned. An adopted lease still stops the
     // renewal it started; only the lease itself stays with its owner.
+    // The seal runs in a finally: a writer left unsealed because releasing
+    // the activation failed can neither resume cleanly nor be taken over.
     close: async () => {
       renewal.stop();
       if (adopted) return;
-      await authority.releaseActivation();
-      await authority.close();
+      try {
+        await authority.releaseActivation();
+      } catch (error) {
+        // The finally's seal failure would otherwise erase this error from
+        // the caller's view entirely.
+        debugLogger.debug(
+          'Managed Session activation release failed before seal',
+          describeRenewalError(error),
+        );
+        throw error;
+      } finally {
+        await authority.close();
+      }
     },
   };
 }

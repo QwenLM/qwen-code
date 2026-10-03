@@ -247,7 +247,8 @@ the Hosted prompt ID when a matching Java Turn exists.
   and expiry before admission. The operation is idempotent in D4's domain
   (tenant, Session, kind, actor and key). A worker forwards it to the Harness
   route and returns a failed attempt to pending with the dispatch backoff; as
-  in D4 there is no last attempt. The worker takes the outcome from the Action
+  in D4 the retries are bounded, by `dispatch.max-operation-retries` (default
+  10). The worker takes the outcome from the Action
   that Java projects from the journal, never from the clock or from a failed
   call alone, because a decision the Harness recorded may already have run its
   call although its answer was lost or the Harness restarted. The Harness
@@ -257,9 +258,19 @@ the Hosted prompt ID when a matching Java Turn exists.
   decided with this response's decision (Java compares the digest using the
   exact decision encoding in section 5.4), and with its end state
   (`action_expired`, `action_cancelled` or `action_already_resolved`)
-  otherwise, exposed as `failure_code` (`failureCode` on WebShell). A `400` from the Harness completes it with that error. While the
+  otherwise, exposed as `failure_code` (`failureCode` on WebShell). A `400` from the Harness completes it with that error. When the
+  retry budget is spent without the Harness ever answering, the operation
+  completes as FAILED with `action_response_delivery_failed` and stays
+  `java_durable` — the admission stage never claims a Harness confirmation
+  that did not happen. That FAILED is not the end of the answer: while the
+  Action is still `requested` and the Session still accepts responses, a
+  retried request under the same key and digest re-admits the delivery on
+  the same operation row (back to `pending`, budget reset, receipt cleared)
+  instead of returning the stale failure forever — one row per key keeps a
+  second vote impossible. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
-  operation stays `running`. The WebShell request gains `requestId`.
+  operation stays `running` within that budget. The WebShell request gains
+  `requestId`.
 
 ### 6.3 Checks
 

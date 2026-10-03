@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -235,6 +235,22 @@ describe('managed session assembly', () => {
         transcriptPath: workspace.transcriptPath,
       }),
     ).rejects.toThrow();
+  });
+
+  // Regression for issue #13182 finding 6a: a writer left unsealed because
+  // releasing the activation failed could neither resume nor be taken over.
+  it('still attempts to seal the writer when releasing the activation fails', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const sealAttempted = vi.spyOn(session.authority, 'close');
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      new Error('activation store unavailable'),
+    );
+
+    await expect(session.close()).rejects.toThrow(
+      'activation store unavailable',
+    );
+    expect(sealAttempted).toHaveBeenCalled();
   });
 
   it('seals with the commit proof and reopens through a certified takeover', async () => {

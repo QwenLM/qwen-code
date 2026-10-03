@@ -57,6 +57,7 @@ public class HarnessCoordinator {
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final int maxPreAdmissionRetries;
+    private final int maxPostAdmissionRetries;
     private final Duration batchInterval;
     private final int batchMaxEvents;
     private final int batchMaxBytes;
@@ -88,6 +89,8 @@ public class HarnessCoordinator {
         this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
         this.maxPreAdmissionRetries = properties.getDispatch()
                 .getMaxPreAdmissionRetries();
+        this.maxPostAdmissionRetries = properties.getDispatch()
+                .getMaxPostAdmissionRetries();
         this.batchInterval = properties.getEvents().getBatchInterval();
         this.batchMaxEvents = properties.getEvents().getBatchMaxEvents();
         this.batchMaxBytes = properties.getEvents().getBatchMaxBytes();
@@ -96,11 +99,32 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed event batch limits must be positive");
         }
+        int maxOperationRetries = properties.getDispatch()
+                .getMaxOperationRetries();
         if (retryInitialDelay.isNegative() || retryInitialDelay.isZero()
-                || retryMaxDelay.compareTo(retryInitialDelay) < 0
-                || maxPreAdmissionRetries < 0) {
+                || retryMaxDelay.compareTo(retryInitialDelay) < 0) {
             throw new IllegalStateException(
-                    "Managed dispatch retry limits are invalid");
+                    "Managed dispatch retry delays are invalid:"
+                            + " retry-initial-delay=" + retryInitialDelay
+                            + " retry-max-delay=" + retryMaxDelay);
+        }
+        if (maxPreAdmissionRetries < 0 || maxPostAdmissionRetries < 0
+                || maxOperationRetries < 0) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " max-post-admission-retries="
+                            + maxPostAdmissionRetries
+                            + " max-operation-retries=" + maxOperationRetries);
+        }
+        if (maxPostAdmissionRetries < maxPreAdmissionRetries) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " exceeds max-post-admission-retries="
+                            + maxPostAdmissionRetries);
         }
     }
 
@@ -594,6 +618,24 @@ public class HarnessCoordinator {
                     error.getClass().getSimpleName(), error);
             return fail(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
+                            + " admission.");
+        }
+        if (submissionAttempted
+                && turn.retryCount() >= maxPostAdmissionRetries) {
+            LOG.error("Managed Turn coordination exhausted retries tenant={}"
+                            + " session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    error.getClass().getSimpleName(), error);
+            // A distinct code from the pre-admission arm: the Turn may have
+            // been admitted and executed, so blind retry is not safe. A
+            // Runtime Broker refusal keeps its own code — the generic one
+            // would name a component that did not fail.
+            if (error instanceof RuntimeBrokerException brokerError) {
+                return fail(turn, brokerError.getCode(),
+                        brokerError.getMessage());
+            }
+            return fail(turn, "hosted_harness_unavailable_after_admission",
+                    "Hosted Harness remained unavailable after Turn"
                             + " admission.");
         }
         long delay = retryDelay(retryInitialDelay, retryMaxDelay,

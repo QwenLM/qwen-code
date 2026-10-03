@@ -953,6 +953,182 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // Regression for issue #13182 finding 6b: a failed seal must not leave the
+  // writer unsealed and unrenewed — and an unsealed writer must converge to
+  // SEALED even when the caller gives up after close() rejects.
+  it('keeps renewing and retries the seal until the writer is sealed', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    server.sealFailuresRemaining = 2;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(server.renewCount).toBe(1);
+
+      await expect(stores.close()).rejects.toThrow('backend down');
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+
+      // The renewal cadence keeps the grant alive and retries the seal; the
+      // endpoint recovers after two failures and the writer converges to
+      // SEALED without any further caller involvement.
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(server.renewCount).toBeGreaterThan(1);
+      expect(server.sealCount).toBeGreaterThan(1);
+      expect(server.state).toBe('SEALED');
+
+      // Once sealed the cadence stops entirely.
+      const renewals = server.renewCount;
+      const seals = server.sealCount;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(server.renewCount).toBe(renewals);
+      expect(server.sealCount).toBe(seals);
+    } finally {
+      await stores.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // The retry cadence is bounded in wall-clock time, not just attempts: a
+  // seal endpoint that stays broken while renewal works must not block a
+  // takeover for longer than two lease durations, no matter how the caller
+  // sized the lease.
+  it('lets the grant lapse when the seal stays broken past the retry bound', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    server.sealFailuresRemaining = Number.MAX_SAFE_INTEGER;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(stores.close()).rejects.toThrow('backend down');
+
+      // The seal rides the 30s renewal cadence (half the 60s lease) for the
+      // ticks at 60s/90s/120s; at the 150s tick the seal has been pending
+      // for two lease durations and the cadence stops so the grant lapses.
+      await vi.advanceTimersByTimeAsync(360_000);
+      expect(server.sealCount).toBe(4);
+      expect(server.renewCount).toBe(4);
+      expect(server.state).toBe('ACTIVE');
+
+      // An abandoned seal stays abandoned: a write-path renewal from a
+      // still-live lease may restart one renewal, but the cadence must not
+      // resume without sealing.
+      await stores.assertWritable();
+      expect(server.renewCount).toBe(5);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(5);
+      expect(server.sealCount).toBe(4);
+      expect(server.state).toBe('ACTIVE');
+
+      // Past the lapse the fake — like the real backend — refuses to renew
+      // the grant; only the seal still lands without a live lease.
+      await vi.advanceTimersByTimeAsync(600_000);
+      await expect(stores.assertWritable()).rejects.toThrow(
+        'The writer lease has lapsed.',
+      );
+      expect(server.renewCount).toBe(5);
+      expect(server.sealCount).toBe(4);
+
+      server.sealFailuresRemaining = 0;
+      await stores.close();
+      expect(server.state).toBe('SEALED');
+    } finally {
+      await stores.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // While a seal is pending, a failing renewal ends the cadence on purpose:
+  // the grant lapses and a takeover can proceed. A later close() retries.
+  it('stops the renewal cadence when renewal fails while a seal is pending', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(server.renewCount).toBe(1);
+
+      server.sealFailuresRemaining = Number.MAX_SAFE_INTEGER;
+      server.renewFailuresRemaining = 1;
+      await expect(stores.close()).rejects.toThrow('backend down');
+
+      // The pending-seal tick renews before resealing; the renewal failure
+      // ends the cadence, so nothing renews or seals anymore.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(2);
+      expect(server.sealCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(server.renewCount).toBe(2);
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+
+      server.renewFailuresRemaining = 0;
+      server.sealFailuresRemaining = 0;
+      await stores.close();
+      expect(server.state).toBe('SEALED');
+    } finally {
+      await stores.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // The same convergence covers a seal that answers 200 with a receipt that
+  // does not name the active writer.
+  it('retries the seal when the seal receipt does not match the active writer', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    server.sealReceiptMismatch = true;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(stores.close()).rejects.toThrow(
+        'seal receipt does not match the active writer.',
+      );
+      expect(server.state).toBe('ACTIVE');
+
+      server.sealReceiptMismatch = false;
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(server.sealCount).toBeGreaterThan(1);
+      expect(server.state).toBe('SEALED');
+    } finally {
+      await stores.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('commits the resources a Stage H record names and rebuilds it cold', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
@@ -1398,6 +1574,10 @@ class FakeManagedSessionStore {
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   transactionReads = 0;
   sealCount = 0;
+  renewCount = 0;
+  sealFailuresRemaining = 0;
+  sealReceiptMismatch = false;
+  renewFailuresRemaining = 0;
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -1420,11 +1600,47 @@ class FakeManagedSessionStore {
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:renew') {
+      // The real backend refuses to renew a lapsed lease
+      // (ManagedSessionStore.requireWriter with requireUnexpired); the seal
+      // endpoint below intentionally keeps accepting one.
+      if (Date.now() >= this.leaseUntil) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease has lapsed.',
+            },
+          },
+          409,
+        );
+      }
+      this.renewCount++;
+      if (this.renewFailuresRemaining > 0) {
+        this.renewFailuresRemaining--;
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'renew down' } },
+          500,
+        );
+      }
       this.leaseUntil = Date.now() + 300_000;
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      if (this.sealFailuresRemaining > 0) {
+        this.sealFailuresRemaining--;
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'backend down' } },
+          500,
+        );
+      }
+      if (this.sealReceiptMismatch) {
+        return jsonResponse({
+          writerGeneration: this.writerGeneration + 1,
+          state: 'SEALED',
+          replayed: false,
+        });
+      }
       this.state = 'SEALED';
       return jsonResponse({
         writerGeneration: this.writerGeneration,
@@ -1569,7 +1785,7 @@ class FakeManagedSessionStore {
     );
   });
 
-  private state = 'SEALED';
+  state = 'SEALED';
   private writerGeneration = 0;
   private leaseUntil = 0;
   private committedSequence = 0;
