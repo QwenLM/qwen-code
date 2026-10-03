@@ -24,17 +24,30 @@ class WorkspaceMigrationRepositoryTest {
 
     @Test
     void historicalLookupKeepsOriginalScopeAndRejectsAmbiguity() {
-        var repository = new InMemoryRuntimeSessionRepository();
-        var old = new RuntimeScope("tenant", "workspace", "1", "/old", "capability", "session");
-        var target = new RuntimeScope("tenant", "workspace", "1", "/target", "capability", "session");
-        var first = new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", old),
-                "binding-old", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
-        repository.findOrCreate(first);
-        assertSame(first, repository.findHistorical("tenant", "harness", "runtime"));
-        assertNull(repository.findById(target, "runtime"));
-        assertNull(repository.findHistorical("other-tenant", "harness", "runtime"));
-        repository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", target),
-                "binding-new", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        assertThrows(IllegalStateException.class, () -> repository.findHistorical("tenant", "harness", "runtime"));
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:history-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
+        JdbcRuntimeBrokerSchema.initialize(source);
+        for (RuntimeSessionRepository repository : java.util.List.of(
+                new InMemoryRuntimeSessionRepository(), new JdbcRuntimeSessionRepository(source))) {
+            var old = new RuntimeScope("tenant", "workspace", "1", "/old", "capability", "session");
+            var target = new RuntimeScope("tenant", "workspace", "1", "/target", "capability", "session");
+            var first = new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", old),
+                    "binding-old", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+            repository.findOrCreate(first);
+            assertEquals(old, repository.findHistorical("tenant", "harness", "runtime").getSession().getScope());
+            var other = new RuntimeScope("other-tenant", "workspace", "1", "/other", "capability", "session");
+            repository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", other),
+                    "binding-other", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            var unrelated = new RuntimeScope("tenant", "workspace", "1", "/unrelated", "capability", "session");
+            repository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("other-harness", "runtime", "bootstrap", unrelated),
+                    "binding-unrelated", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            assertEquals(old, repository.findHistorical("tenant", "harness", "runtime").getSession().getScope());
+            assertNull(repository.findById(target, "runtime"));
+            assertNull(repository.findHistorical("missing-tenant", "harness", "runtime"));
+            repository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", target),
+                    "binding-new", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            assertThrows(IllegalStateException.class, () -> repository.findHistorical("tenant", "harness", "runtime"));
+        }
     }
 }

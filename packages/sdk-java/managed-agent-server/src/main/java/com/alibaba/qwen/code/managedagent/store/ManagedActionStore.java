@@ -356,7 +356,7 @@ public class ManagedActionStore {
             }
             return new OperationAdmission(existing, true);
         }
-        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId);
+        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
