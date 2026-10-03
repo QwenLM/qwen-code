@@ -463,10 +463,16 @@ describe('shared-session operator warning', () => {
   });
 
   it('warns for chat_thread and single shared scopes too', () => {
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // Each scope separately: a shared containment check cannot tell which
+    // scope the warning came from, so dropping one from sharedScope survived.
     makeChannel({ groupPolicy: 'allowlist', sessionScope: 'chat_thread' });
+    expect(capturedStderr()).toContain("shared sessionScope 'chat_thread'");
+    stderrSpy.mockClear();
     makeChannel({ groupPolicy: 'pairing', sessionScope: 'single' });
-    expect(capturedStderr()).toContain('no operators are configured');
+    expect(capturedStderr()).toContain("shared sessionScope 'single'");
   });
 
   it('warns for a DM-only channel on a shared scope with no operators', () => {
@@ -5214,5 +5220,37 @@ describe('a null route is not a delivered stash', () => {
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
     expect(anchors.has('s1')).toBe(false);
+  });
+});
+
+describe('disconnect clears routing state', () => {
+  it('clears the chat type map on disconnect', () => {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    const chatTypeMap = chp['chatTypeMap'] as Map<string, string>;
+    chatTypeMap.set('test-chat', 'c2c');
+    expect(chatTypeMap.size).toBe(1);
+
+    ch.disconnect();
+
+    // resetRoutingState drops the routing maps: keeping a stale chat type
+    // would let a later resolveRoute classify a removed chat as deliverable.
+    expect(chatTypeMap.size).toBe(0);
   });
 });
