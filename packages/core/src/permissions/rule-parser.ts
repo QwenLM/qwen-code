@@ -2000,12 +2000,17 @@ function matchesRestrictiveMcpName(
   );
 }
 
-// `normalizeToolNameForProvider` keeps 55 characters + `_<hash>`, so a long
-// or unsafe key loses its `__` separator in the registered name and the
-// identity wildcard arm has no boundary to place a rule copied from it.
-// Restrictive rules keep main's literal prefix match on that registered name;
-// like the exact fallback above, this must never grant permission (R18-1).
-function matchesRestrictiveCutRegistration(
+// A restrictive wildcard that is a literal prefix of the tool's registered
+// name keeps main's match wherever the identity arm cannot place it:
+// - `normalizeToolNameForProvider` keeps 55 characters + `_<hash>`, so a long
+//   or unsafe key loses its `__` separator and a rule copied from the
+//   registered name has no boundary at all (R18-1);
+// - a rule that starts at this key's own boundary with a pure-underscore tool
+//   side (`mcp__foo____*` for key `foo_`, `mcp__a__b___*` for key `a__b`) is
+//   read as the split's server (`foo`, `a`), so an `allow` written for that
+//   other key never reaches this one (R17-1).
+// Like the exact fallback above, this must never grant permission.
+function matchesRestrictiveRegisteredPrefix(
   pattern: string,
   toolName: string,
   identity: McpToolIdentity | undefined,
@@ -2017,10 +2022,12 @@ function matchesRestrictiveCutRegistration(
   ) {
     return false;
   }
+  const prefix = pattern.slice(0, -1);
   const registeredServerPrefix = `mcp__${identity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
   return (
-    !toolName.startsWith(registeredServerPrefix) &&
-    toolName.startsWith(pattern.slice(0, -1))
+    toolName.startsWith(prefix) &&
+    (!toolName.startsWith(registeredServerPrefix) ||
+      prefix.startsWith(registeredServerPrefix))
   );
 }
 
@@ -2060,7 +2067,7 @@ export function matchesToolPattern(
     ) ||
     matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName) ||
     matchesRestrictiveMcpName(pattern, mcpIdentity) ||
-    matchesRestrictiveCutRegistration(pattern, toolName, mcpIdentity)
+    matchesRestrictiveRegisteredPrefix(pattern, toolName, mcpIdentity)
   );
 }
 
@@ -2147,7 +2154,7 @@ export function matchesRule(
       (restrictive &&
         canonicalCtxToolName.startsWith('mcp__') &&
         (matchesRestrictiveMcpName(rule.toolName, mcpIdentity) ||
-          matchesRestrictiveCutRegistration(
+          matchesRestrictiveRegisteredPrefix(
             rule.toolName,
             canonicalCtxToolName,
             mcpIdentity,

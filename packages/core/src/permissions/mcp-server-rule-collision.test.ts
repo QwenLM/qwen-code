@@ -2124,3 +2124,91 @@ describe('restrictive rules retain exact truncated legacy spellings (R15-1)', ()
     ).toBe('default');
   });
 });
+
+describe('a restrictive wildcard that is a literal prefix of the registered name keeps covering its own key (R17-1)', () => {
+  // `prefix.split('__')` cannot name a key whose own spelling contains `__`
+  // (or ends in `_`), so the identity arm's pure-underscore branch refuses the
+  // key's OWN rule: `segments[1]` is the fragment `a` for key `a__b`, and `foo`
+  // for key `foo_`. Restrictive rules keep main's literal-prefix match through
+  // the registered-prefix fallback; `allow` must not widen with them.
+  const shapes: Array<[string, string, string]> = [
+    ['a__b', '_hidden', 'mcp__a__b___*'],
+    ['my__svc', '_internal', 'mcp__my__svc___*'],
+    ['foo_', '_internal', 'mcp__foo____*'],
+  ];
+
+  it.each(shapes)(
+    'denies %s / %s for %s and leaves the allow direction untouched',
+    async (serverName, serverToolName, rule) => {
+      const tool = prodTool(serverName, serverToolName);
+      const identity = {
+        serverName: tool.serverName,
+        serverToolName: tool.serverToolName,
+      };
+      // The rule is a literal prefix of the tool's own registered name.
+      expect(tool.name.startsWith(rule.slice(0, -1))).toBe(true);
+      expect(matchesToolPattern(rule, tool.name, undefined, identity)).toBe(
+        true,
+      );
+
+      const deny = new PermissionManager(
+        makeConfig({ permissionsDeny: [rule] }),
+      );
+      deny.initialize();
+      expect(
+        await deny.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+          mcpIdentity: identity,
+        }),
+      ).toBe('deny');
+      expect(
+        await deny.isToolEnabled(tool.name, tool.permissionAliases, identity),
+      ).toBe(false);
+
+      const allow = new PermissionManager(
+        makeConfig({ permissionsAllow: [rule] }),
+      );
+      allow.initialize();
+      expect(
+        await allow.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+          mcpIdentity: identity,
+        }),
+      ).toBe('default');
+    },
+  );
+
+  it('does not let the fallback reach a foreign tool prefix at the key boundary', () => {
+    const tool = prodTool('foo_', '_internal');
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+    // `mcp__foo___zz*` starts at this key's boundary but is not a literal
+    // prefix of `mcp__foo____internal`, so it stays unmatched.
+    expect(
+      matchesToolPattern('mcp__foo___zz*', tool.name, undefined, identity),
+    ).toBe(false);
+  });
+
+  it('keeps a genuine tool prefix with real characters matching (control)', async () => {
+    const tool = prodTool('a__b', '_hidden');
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+    const deny = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__a__b___hid*'] }),
+    );
+    deny.initialize();
+    expect(
+      await deny.evaluate({
+        toolName: tool.name,
+        toolAliases: tool.permissionAliases,
+        mcpIdentity: identity,
+      }),
+    ).toBe('deny');
+  });
+});
