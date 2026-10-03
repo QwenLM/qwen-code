@@ -6,6 +6,7 @@
 
 import type OpenAI from 'openai';
 import {
+  FinishReason,
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
@@ -13,7 +14,10 @@ import type {
   ContentGeneratorConfig,
   PromptCacheSharingParameters,
 } from '../contentGenerator.js';
-import { OpenAIContentConverter } from './converter.js';
+import {
+  corroborateTruncationFromCompletionTokens,
+  OpenAIContentConverter,
+} from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   applyOfficialOpenAIPromptCaching,
@@ -29,6 +33,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
@@ -377,6 +382,29 @@ function hasProviderOutputBudgetKey(samplingParams: {
   return PROVIDER_OUTPUT_BUDGET_KEYS.some(
     (key) => samplingParams[key] !== undefined,
   );
+}
+
+/**
+ * Effective output-token ceiling carried by a wire request, whichever key the
+ * budget travels under (`max_tokens` or a provider-specific stand-in).
+ * Undefined when the request caps output by neither (e.g. a samplingParams
+ * opt-out), in which case the converter's truncation corroboration check is
+ * inconclusive and keeps its legacy inference.
+ */
+function getWireOutputBudget(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): number | undefined {
+  if (typeof request.max_tokens === 'number' && request.max_tokens > 0) {
+    return request.max_tokens;
+  }
+  const wire = request as unknown as Record<string, unknown>;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = wire[key];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -762,6 +790,7 @@ export class ContentGenerationPipeline {
             // into this generator at the yield below never runs the statement
             // that follows it, and the error-path flush re-tests this flag
             // before deciding whether the response still needs delivering.
+            this.settleParkedTruncationOverride(pendingFinishResponse, context);
             finishYielded = true;
             yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
@@ -818,6 +847,7 @@ export class ContentGenerationPipeline {
           pendingFinishProtocolTagSanitized,
         );
         // Before the yield, for the reason given at the in-loop one above.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         finishYielded = true;
         yield pendingFinishResponse;
       }
@@ -892,6 +922,9 @@ export class ContentGenerationPipeline {
         if (parkedHasToolCall) {
           markFlushedToolCallPark(pendingFinishResponse);
         }
+        // Same invariant as the two normal delivery paths above: no parked
+        // finish is handed to the consumer with an unsettled rewrite on it.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         yield pendingFinishResponse;
         finishYielded = true;
       }
@@ -1019,6 +1052,58 @@ export class ContentGenerationPipeline {
 
     // Normal chunk
     return true;
+  }
+
+  /**
+   * Settle a finish_reason rewrite the converter parked for want of usage
+   * evidence, immediately before the parked finish response is delivered.
+   *
+   * The pipeline requests `stream_options.include_usage`, and under that
+   * convention the chunk carrying `finish_reason` reports no usage — the
+   * totals arrive on a later `choices: []` chunk, which handleChunkMerging
+   * folds into the parked finish response and only then releases. That merge
+   * is therefore the first point at which the rewrite can be corroborated, and
+   * it happens before the yield, so the consumer only ever observes the
+   * settled reason (QwenLM/qwen-code#12970).
+   *
+   * Downgrade-only and one-shot: the parked verdict is consumed here, and the
+   * candidate is touched only while it still reads MAX_TOKENS, so a
+   * provider-reported `length` is never rewritten.
+   */
+  private settleParkedTruncationOverride(
+    response: GenerateContentResponse,
+    context: RequestContext,
+  ): void {
+    const parked = context.pendingTruncationOverride;
+    if (!parked) {
+      return;
+    }
+    context.pendingTruncationOverride = undefined;
+    const candidate = response.candidates?.[0];
+    if (!candidate || candidate.finishReason !== FinishReason.MAX_TOKENS) {
+      return;
+    }
+    const verdict = corroborateTruncationFromCompletionTokens(
+      response.usageMetadata?.candidatesTokenCount,
+      context.maxOutputTokens,
+    );
+    if (verdict === 'disproved') {
+      candidate.finishReason = parked.finishReason;
+      // Same withdrawal as the converter's immediate `disproved` branch, only
+      // decided here because the usage totals arrived after the finish chunk.
+      // The arguments were unterminated — that is why an override was parked
+      // at all — so the guard has to stay armed through the downgrade.
+      markToolCallArgumentsIncomplete(candidate.content?.parts);
+    }
+    debugLogger.debug('Settled a parked truncation override', {
+      candidatesTokenCount:
+        response.usageMetadata?.candidatesTokenCount ?? null,
+      maxOutputTokens: context.maxOutputTokens ?? null,
+      verdict,
+      downgraded: verdict === 'disproved',
+      from: FinishReason.MAX_TOKENS,
+      to: candidate.finishReason,
+    });
   }
 
   private async buildRequest(
@@ -1601,6 +1686,10 @@ export class ContentGenerationPipeline {
         attemptContext,
         isStreaming,
       );
+      // The converter corroborates suspected tool-call truncation against the
+      // output budget actually sent on the wire before it may override
+      // finish_reason to "length" (QwenLM/qwen-code#12970).
+      attemptContext.maxOutputTokens = getWireOutputBudget(openaiRequest);
 
       // Position is load-bearing: capture must run after buildRequest (post
       // provider enhancement, post disable-reasoning) and before the SDK call

@@ -146,6 +146,21 @@ class ManagedSessionOperationStoreTest {
                 "worker", Duration.ofSeconds(30))).isEmpty();
     }
 
+    @Test
+    void blockedActiveDeletionRemainsUnavailable() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        var admitted = store.beginOperation(TENANT, sessionId, OperationKind.DELETE, "", "delete", "digest");
+        var claim = store.claimOperation(TENANT, sessionId, admitted.operation().operationId(),
+                "worker", Duration.ofMinutes(1)).orElseThrow();
+        store.blockLifecycleOperation(TENANT, sessionId, claim.operationId(), "worker", claim.claimGeneration(),
+                "workspace_close_identity_unverified", now.get());
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, claim.operationId(), "replacement", Duration.ofMinutes(1))).isEmpty();
+        assertThat(operation(store, sessionId, claim.operationId()).state()).isEqualTo("RECOVERY_BLOCKED");
+    }
+
     private long databaseTime() {
         return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);

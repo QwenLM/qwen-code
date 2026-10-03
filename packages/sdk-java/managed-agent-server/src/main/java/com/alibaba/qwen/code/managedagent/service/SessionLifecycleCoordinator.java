@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import java.time.Clock;
 import java.time.Duration;
@@ -268,6 +269,10 @@ public class SessionLifecycleCoordinator {
     private boolean settle(OperationRecord operation) {
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
+        if (bound && operation.kind() == OperationKind.DELETE
+                && ("CLOSED".equals(operation.sessionStatusBefore()) || "ARCHIVED".equals(operation.sessionStatusBefore()))) {
+            return false;
+        }
         if (bound) {
             if (!runtimeWarmer.supportsWorkspaceClose()) {
                 throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409,

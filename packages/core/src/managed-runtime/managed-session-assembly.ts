@@ -5,7 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  activationAlreadyInstalledError,
+} from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -120,8 +123,16 @@ export interface ManagedSession {
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
+   * The successor's ID is random unless `activationId` names it. Hosted Hook
+   * release reads a random successor as a load that may own a Hook Runtime,
+   * so a successor that never acquires one carries a `hook_operation` subject
+   * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
+   * to the log; a repeat is refused before the current activation is released.
    */
-  replaceActivation(subject?: ManagedSessionSubject): Promise<{
+  replaceActivation(
+    subject?: ManagedSessionSubject,
+    activationId?: string,
+  ): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
@@ -223,10 +234,18 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation(subject) {
+    async replaceActivation(subject, activationId) {
+      // Refuse before the release, or the current activation would be left
+      // released with no successor.
+      if (
+        activationId !== undefined &&
+        authority.hasInstalledActivation(activationId)
+      ) {
+        throw activationAlreadyInstalledError(activationId);
+      }
       await authority.releaseActivation();
       activation = await authority.installActivation({
-        activationId: randomUUID(),
+        activationId: activationId ?? randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
         subject,
