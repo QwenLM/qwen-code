@@ -784,6 +784,12 @@ export class ManagedToolExecutor {
       if (
         directory &&
         entry.toolName !== ShellTool.Name &&
+        // Glob declares no `file_path`, so a stray one — schema confusion with
+        // the file tools that share the turn, or a hook that stamps the key on
+        // every call it sees — must not refuse the search: the tool never reads
+        // it, and glob's own pattern/output containment below covers every path
+        // it does consume.
+        entry.toolName !== GlobTool.Name &&
         typeof params['file_path'] === 'string' &&
         !path.isAbsolute(params['file_path'].trim())
       ) {

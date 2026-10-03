@@ -833,11 +833,20 @@ export class HostedWorkspaceToolTurn {
           input = { ...call.args };
           const globError =
             'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
-          const pattern = call.args['pattern'];
+          const requestedPattern = call.args['pattern'];
           const directory = call.args['path'];
+          // Validate the value that gets dispatched, never the raw one. Glob
+          // treats an untrimmed pattern as a literal, so it matches nothing and
+          // the false negative is persisted; trimming first also stops a
+          // whitespace-masked `..`/absolute shape from clearing this guard only
+          // to be refused by the worker after a full durable round trip.
+          const pattern =
+            typeof requestedPattern === 'string'
+              ? requestedPattern.trim()
+              : requestedPattern;
           if (
             typeof pattern !== 'string' ||
-            !pattern.trim() ||
+            !pattern ||
             // A pattern is a second search root: refuse the absolute/`..`
             // shapes here, pre-acquisition, with the identical segment
             // equality rule the worker applies after dispatch — a refusal
@@ -848,19 +857,20 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError = globError;
           } else {
-            // Dispatch what was validated: glob treats an untrimmed pattern as a
-            // literal, so it matches nothing and the false negative is persisted.
-            input['pattern'] = pattern.trim();
+            input['pattern'] = pattern;
           }
           if (!validationError && directory !== undefined) {
-            if (typeof directory !== 'string') {
-              validationError = globError;
-            } else if (directory.trim() === '') {
-              // A blank path is the omitted case: the declaration marks it
-              // optional, and the executor maps a missing key to the Session
-              // root — refusing it as traversal would also poison every valid
-              // sibling call in the batch.
+            if (
+              directory === null ||
+              (typeof directory === 'string' && directory.trim() === '')
+            ) {
+              // A blank or `null` path is the omitted case: the declaration
+              // marks it optional, and the executor maps a missing key to the
+              // Session root — refusing it as traversal would also poison every
+              // valid sibling call in the batch.
               delete input['path'];
+            } else if (typeof directory !== 'string') {
+              validationError = globError;
             } else {
               try {
                 input['path'] = normalizeWorkspaceRelativePath(

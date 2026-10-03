@@ -236,10 +236,11 @@ function workspaceInstallation(
 /** Activation request for a workspaceInstallation-installed Session. */
 function workspaceActivation(
   request: ReturnType<typeof workspaceInstallation>,
+  operation = 'activate',
 ) {
   return {
     protocolVersion: 1,
-    operation: 'activate',
+    operation,
     sessionId: request.sessionId,
     contextDigest: request.contextDigest,
     contextConfigRef: request.binding.contextConfigRef,
@@ -1057,6 +1058,19 @@ describe('Managed context tool gate', () => {
         glob('call-3', { pattern: '**/*', path: '..' }),
       )
     ).json();
+    // Glob declares no `file_path`, so a stray one — ordinary schema confusion
+    // with the file tools that share the turn — must not be read as a
+    // traversal attempt that refuses the whole search.
+    const strayFilePath = await (
+      await post(
+        origin,
+        EXECUTE,
+        glob('call-4', {
+          pattern: '**/*.ts',
+          file_path: '../web/secret.txt',
+        }),
+      )
+    ).json();
 
     expect(all.result.executionStatus).toBe('success');
     const text = JSON.stringify(all);
@@ -1069,6 +1083,9 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(outside)).toContain(
       'not within the Session working directory',
     );
+    expect(strayFilePath.result.executionStatus).toBe('success');
+    expect(JSON.stringify(strayFilePath)).toContain('index.ts');
+    expect(JSON.stringify(strayFilePath)).not.toContain('secret.txt');
   });
 
   it('allows a pattern segment that merely starts with `..`', async () => {
@@ -1511,32 +1528,13 @@ describe('Managed context tool gate', () => {
 });
 
 describe('Managed Workspace execution activation', () => {
-  function fixedInstallation(sessionId: string, cwd = '.') {
-    const request = installation(sessionId, cwd);
-    const binding = {
-      ...request.binding,
-      contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
-    };
-    return {
-      ...request,
-      binding,
-      contextDigest: computeManagedContextDigest(binding),
-    };
-  }
-
-  function activation(
-    request: ReturnType<typeof fixedInstallation>,
-    operation = 'activate',
-  ) {
-    return {
-      protocolVersion: 1,
-      operation,
-      sessionId: request.sessionId,
-      contextDigest: request.contextDigest,
-      contextConfigRef: request.binding.contextConfigRef,
-      profile: WORKSPACE_EXECUTION_PROFILE,
-    };
-  }
+  // The workspace activation envelope is built once, at module scope; these
+  // aliases only carry this block's shorter names and its `cwd` default, so a
+  // change to the request shape cannot leave half the suite posting a stale
+  // envelope.
+  const fixedInstallation = (sessionId: string, cwd = '.') =>
+    workspaceInstallation(sessionId, cwd);
+  const activation = workspaceActivation;
 
   it('pins the explicit frozen configuration and capability digests', () => {
     const refs = 'managed-runtime-tools/1\0preapproved-workspace-tools/1';
