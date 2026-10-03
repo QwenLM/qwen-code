@@ -32,6 +32,7 @@ import type {
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -172,6 +173,23 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
     response.state === 'settled' &&
     (response.error?.code === 'managed_hook_handler_unavailable' ||
       response.error?.code === 'managed_hook_command_isolation_unavailable')
+  );
+}
+
+const debugLogger = createDebugLogger('HOSTED_HOOK_SESSION');
+
+/**
+ * A release the Broker refuses because the owner still holds unfinished work —
+ * the shape an operation whose module evaluation was abandoned answers with.
+ * Both codes are needed: the provider worker answers a pending-work refusal
+ * with either, depending on which of its checks fires first.
+ */
+function holdFencedRelease(cause: unknown): boolean {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    (cause.code === 'managed_runtime_identity_conflict' ||
+      cause.code === 'managed_runtime_provider_operation_failed')
   );
 }
 
@@ -368,12 +386,25 @@ export class HostedHookSession {
       try {
         await broker.release();
       } catch (cause) {
-        if (
-          !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 404 ||
-          cause.code !== 'runtime_session_not_found'
-        )
-          throw cause;
+        const absent =
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 404 &&
+          cause.code === 'runtime_session_not_found';
+        const holdFenced = holdFencedRelease(cause);
+        if (!absent && !holdFenced) throw cause;
+        // One of the two tolerated codes is the provider worker's catch-all,
+        // so a refusal absorbed here is otherwise invisible: the absent branch
+        // books the owner released for good, and the fenced one is retried by
+        // every later acquire.
+        debugLogger.warn(
+          `Earlier Hook owner release refused (${holdFenced ? 'left for a later acquire' : 'owner absent, booked released'}):`,
+          id,
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? `${cause.status} ${cause.code}`
+            : String(cause),
+        );
+        this.recoveredBrokers.delete(id);
+        if (holdFenced) continue;
       }
       this.recoveredBrokers.delete(id);
       this.releasedOwners.add(id);
@@ -1521,7 +1552,22 @@ export class HostedHookSession {
     for (const broker of this.recoveredBrokers.values()) await broker.release();
     this.recoveredBrokers.clear();
     if (this.ownsBroker && this.broker.runtime) {
-      await this.broker.release();
+      try {
+        await this.broker.release();
+      } catch (cause) {
+        // An abandoned module evaluation can outlive the cancelled receipt that
+        // let drain() pass, so this release can be hold-fenced. Name that
+        // condition instead of letting a bare Broker refusal reach the route.
+        if (!holdFencedRelease(cause)) throw cause;
+        debugLogger.warn(
+          'Hook owner release held by unfinished work:',
+          this.broker.runtimeSessionId,
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? `${cause.status} ${cause.code}`
+            : String(cause),
+        );
+        throw new HostedHookRecoveryRequiredError();
+      }
       this.acquired = false;
     }
   }

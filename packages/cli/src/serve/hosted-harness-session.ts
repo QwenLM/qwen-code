@@ -3331,7 +3331,11 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${req.params['id']} close failed: ${String(cause)}`,
       );
-      error(res, 503, 'managed_session_close_failed');
+      // A Hook owner still holding unfinished work keeps the Session attached
+      // and its lease pinned; say so rather than reporting a generic failure.
+      if (cause instanceof HostedHookRecoveryRequiredError)
+        error(res, 503, 'hosted_hook_recovery_required');
+      else error(res, 503, 'managed_session_close_failed');
     } finally {
       session.mcpClosing = false;
       session.mcpBusy = false;
