@@ -28,19 +28,33 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
+  // The shared approval card asks whether a tool is an agent launch.
+  isAgentTool: () => false,
 }));
 vi.mock('../MessageList', () => ({
   MessageList: ({
     messages,
     hasOlderHistory,
     onLoadOlderHistory,
+    onToolResultOpen,
+    pendingApproval,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
+    onToolResultOpen?: (itemId: string) => void;
+    pendingApproval?: unknown;
   }) => (
     <>
+      <button onClick={() => onToolResultOpen?.('item-1')}>
+        Open tool output
+      </button>
       <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+      {/* The real MessageList keys its folding off this prop, so the mock has
+          to expose it for the join between the two to be observed. */}
+      <pre data-testid="message-list-pending-approval">
+        {JSON.stringify(pendingApproval ?? null)}
+      </pre>
       {hasOlderHistory && (
         <button onClick={() => void onLoadOlderHistory()}>Older history</button>
       )}
@@ -49,6 +63,7 @@ vi.mock('../MessageList', () => ({
 }));
 
 import { ManagedSessionsPage } from './ManagedSessionsPage';
+import { artifact, result } from './managed-tool-result.test-fixtures';
 
 function summary(
   sessionId = 's1',
@@ -84,6 +99,21 @@ function event(id: number, text: string): ManagedAgentSessionEvent {
 async function flush() {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
+
+const pendingAction = {
+  actionId: 'tool_approval_1',
+  sessionId: 's1',
+  turnId: 'p1',
+  functionCallId: 'call-1',
+  toolName: 'write_file',
+  inputRevision: 1,
+  policyRevision: 'hosted-tool-approval/1',
+  expiresAt: Date.now() + 600_000,
+  options: [
+    { id: 'allow', label: 'Allow' },
+    { id: 'deny', label: 'Deny' },
+  ],
+};
 
 describe('ManagedSessionsPage', () => {
   let container: HTMLDivElement;
@@ -174,6 +204,362 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('keeps the shown approval while a reload has not returned the Session yet', async () => {
+    let hold = false;
+    let release: (() => void) | undefined;
+    mocks.client.getSession.mockImplementation(async (id: string) => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+      return summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      });
+    });
+    const listPending = vi.fn().mockResolvedValue([pendingAction]);
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+
+    hold = true;
+    const refresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Refresh',
+    );
+    await act(async () => {
+      refresh!.click();
+      await flush();
+    });
+    // The reload has not returned the Session summary, so the capability is
+    // unknown: the card stays and nothing is read yet.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    hold = false;
+    await act(async () => {
+      release?.();
+      await flush();
+    });
+  });
+
+  it('shows a pending Hosted approval and answers it with the chosen option', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    const action = pendingAction;
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([action])
+      .mockResolvedValue([]);
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+
+    const card = container.querySelector('[data-testid="managed-approval"]');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('Tool arguments are unavailable');
+    // The caveat sits beside the panel, so the panel has to be told about it:
+    // the description a screen-reader user hears must reach it.
+    const dialog = card!.querySelector('[role="alertdialog"]')!;
+    const caveatId = card!
+      .querySelector('p[role="status"]')!
+      .getAttribute('id') as string;
+    expect(caveatId).toBeTruthy();
+    expect(dialog.getAttribute('aria-describedby')).toContain(caveatId);
+    // The transcript row that carries the tool call keeps the approval card
+    // reachable: MessageList folds turns by this prop.
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_1');
+    const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Yes, allow once'),
+    );
+    expect(allow).toBeDefined();
+    await act(async () => {
+      allow!.click();
+      await flush();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Retry the same option',
+    );
+    const retry = Array.from(
+      container.querySelectorAll('[data-testid="managed-approval"] button'),
+    ).find((button) => button.textContent?.includes('Yes, allow once'));
+    await act(async () => {
+      (retry as HTMLButtonElement).click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(respond).toHaveBeenCalledWith(action, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    // The answered Action left, so the warning that described it leaves too.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toBe('null');
+  });
+
+  it.each([
+    ['write_file', { file_path: 'notes.md', content: 'approval-write-body' }],
+    [
+      'edit',
+      {
+        file_path: 'notes.md',
+        old_string: 'approval-old-body',
+        new_string: 'approval-new-body',
+      },
+    ],
+  ])(
+    'shows available %s arguments inside the approval card',
+    async (toolName, input) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false, actions: true },
+        }),
+      );
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'tool_requested',
+            data: { toolCallId: 'call-1', toolName, input },
+          },
+        ],
+        lastEventId: 1,
+      });
+      provider = {
+        ...provider,
+        actions: {
+          listPending: vi
+            .fn()
+            .mockResolvedValue([{ ...pendingAction, toolName }]),
+          respond: vi.fn(),
+        },
+      };
+
+      await render('s1');
+      const card = container.querySelector('[data-testid="managed-approval"]')!;
+      const shownInput = card.querySelector('pre')?.textContent ?? '';
+      for (const value of Object.values(input)) {
+        expect(shownInput).toContain(value);
+      }
+      expect(card.textContent).not.toContain('Tool arguments are unavailable');
+      // Without the caveat there is no extra description to point at, and no
+      // ARIA IDREF is left dangling.
+      const describedBy =
+        card
+          .querySelector('[role="alertdialog"]')!
+          .getAttribute('aria-describedby') ?? '';
+      const referenced = describedBy.split(' ').filter(Boolean);
+      expect(referenced.length).toBeGreaterThan(0);
+      for (const id of referenced) {
+        expect(document.getElementById(id)).not.toBeNull();
+      }
+    },
+  );
+
+  it('offers a direct retry when pending approvals could not be loaded', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue([pendingAction]);
+    const respond = vi.fn();
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Pending approvals could not be loaded',
+    );
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Retry loading approvals',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry!.click();
+      await flush();
+    });
+    expect(listPending).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('names a failed background re-read as a refresh while the loaded card stays', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [event(1, 'Persisted answer')],
+      lastEventId: 1,
+    });
+    // The transcript reports an approval change, which re-reads the list. The
+    // report is held back until the first read has landed, so the re-read is
+    // what is being observed rather than the initial load.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(2, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      // A Session deleted while the tab is open: the re-read can never succeed.
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    // The approvals were loaded and one is on screen; only the refresh failed.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    const alert = container.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('Pending approvals could not be refreshed');
+    expect(alert).not.toContain('could not be loaded');
+  });
+
+  it('explains that a reader cannot answer a creator-only approval', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond: vi
+          .fn()
+          .mockRejectedValue(
+            new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+          ),
+      },
+    };
+    await render('s1');
+    const allow = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Yes, allow once'),
+    );
+    await act(async () => {
+      allow!.click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
+  });
+
+  it('does not read approvals for a Session without the actions capability', async () => {
+    const listPending = vi.fn().mockResolvedValue([]);
+    provider = {
+      ...provider,
+      actions: { listPending, respond: vi.fn() },
+    };
+
+    await render('s1');
+
+    expect(listPending).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
+  it('gates result transport on the server capability and can discover output without its event', async () => {
+    const listArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts,
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (node) => node.textContent === 'Outputs',
+      ),
+    ).toBe(false);
+    expect(listArtifacts).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      }),
+    );
+    await render(undefined);
+    await render('s1');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Outputs',
+    );
+    expect(button).toBeTruthy();
+    await act(async () => {
+      button!.click();
+      await flush();
+    });
+    expect(listArtifacts).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
+    );
+    expect(provider.toolResults!.readRange).not.toHaveBeenCalled();
+  });
+
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     mocks.features = [];
     const listSessions = vi.fn().mockResolvedValue({
@@ -203,6 +589,32 @@ describe('ManagedSessionsPage', () => {
     );
     expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('shows an existing empty bound Session without execution controls', async () => {
+    const bound = summary('bound', {
+      activeTurnId: undefined,
+      phase: 'created',
+      runtimeReady: false,
+      runtimeState: 'unknown',
+      workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      capabilities: { canSend: false, canCancel: false },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('bound');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('services/api');
+    expect(container.querySelector('[data-managed-progress]')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).not.toContain('Preparing environment');
   });
 
   async function click(label: string) {
@@ -656,5 +1068,111 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ lastEventId: 3 }),
     );
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+  it('keeps an open output panel mounted while refreshing the session', async () => {
+    const ready = summary('s1', {
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(ready);
+    const listArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: true } }],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const readRange = vi
+      .fn()
+      .mockResolvedValue(new TextEncoder().encode('hello'));
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts,
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: true } }),
+        readRange,
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    const click = async (label: string) => {
+      const button = [...document.body.querySelectorAll('button')].find(
+        (n) => n.textContent === label,
+      );
+      expect(button).toBeTruthy();
+      await act(async () => {
+        button!.click();
+        await flush();
+      });
+    };
+    await click('Outputs');
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    let complete!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await click('Refresh');
+    const during = document.body.querySelector('[role="dialog"]') !== null;
+    await act(async () => {
+      complete(ready);
+      await flush();
+    });
+    expect(during).toBe(true);
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
+    expect(readRange).toHaveBeenCalledTimes(1);
+    mocks.client.getSession.mockResolvedValueOnce(summary('s1'));
+    await click('Refresh');
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await click('Refresh');
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      complete(ready);
+      await flush();
+    });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+  it('forwards a message tool-result selection to its exact item', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      }),
+    );
+    const getResult = vi.fn().mockResolvedValue({
+      result: { ...result, session_id: 's1', artifacts: [] },
+      access: { can_read_content: false },
+    });
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult,
+        getArtifact: vi.fn(),
+        listArtifacts: vi.fn(),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((n) => n.textContent === 'Open tool output')!
+        .click();
+      await flush();
+    });
+    expect(getResult).toHaveBeenCalledWith(
+      's1',
+      'item-1',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });

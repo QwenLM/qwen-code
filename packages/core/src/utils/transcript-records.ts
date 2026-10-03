@@ -144,11 +144,13 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
+  'session_approval_mode',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
   'goal_turn_end',
   'turn_result',
+  'user_text_elements',
   ...ARTIFACT_RECORD_SUBTYPES,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);

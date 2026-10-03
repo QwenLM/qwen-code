@@ -54,7 +54,11 @@ export interface AgentViewSupervisorClientHandle {
     onEvent: (event: AgentViewSupervisorEvent) => void,
     onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
-  dispatch(prompt: string, cwd: string): Promise<unknown>;
+  dispatch(
+    prompt: string,
+    cwd: string,
+    env?: Record<string, string>,
+  ): Promise<unknown>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
@@ -151,9 +155,6 @@ export async function runAgentViewSupervisor(
     // `{ type: 'ready' }` worker event the wait resolves on, so leaving the
     // default made every dispatch burn the full worker-ready timeout, then
     // kill the PTY host it had just spawned and mark the session failed.
-    // Turning it off also flips the dispatch to `promptInArgv`, which is
-    // the other half of the same fix: the prompt then rides the worker's
-    // argv instead of a sideband control queue that nothing drains either.
     waitForWorkerReady: false,
     onShutdown: () => {
       closeRequested = true;
@@ -256,11 +257,11 @@ function createSupervisorHandle(
         ...authOptions,
         ...(onError ? { onError } : {}),
       }),
-    dispatch: (prompt: string, cwd: string) =>
+    dispatch: (prompt: string, cwd: string, env?: Record<string, string>) =>
       callAgentViewSupervisor(
         socketPath,
         'dispatch',
-        { prompt, cwd },
+        { prompt, cwd, ...(env ? { env } : {}) },
         {
           ...authOptions,
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,

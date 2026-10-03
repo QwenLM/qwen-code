@@ -1,12 +1,15 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -15,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -40,6 +44,7 @@ final class FaultGateRig implements AutoCloseable {
     static final String CLI_PROPERTY = "qwen.cli.entry";
     static final String HARNESS = "harness-1";
     static final String SESSION = "runtime-session-1";
+    static final String STORAGE = "storage-a";
     static final Duration OPERATION_LEASE = Duration.ofSeconds(2);
     static final Duration DISPATCH_LEASE = Duration.ofSeconds(2);
     static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
@@ -51,13 +56,32 @@ final class FaultGateRig implements AutoCloseable {
     enum Provisioner {
         /** The production provisioner alone: owns workers in memory. */
         LOCAL_PROCESS,
+        /** Production durable store; test host identity is injected only on non-Linux hosts. */
+        DURABLE_LOCAL_PROCESS,
+        TRUSTED_LOCAL_PROCESS,
         /** The production provisioner plus a pid record a restart adopts. */
         RECOVERABLE
     }
 
+    enum Placement {
+        /** Boot v1 and attestation v2: the tool path of FG1-FG4. */
+        LEGACY,
+        /**
+         * managed-context/1 (W0c): boot v2 and attestation v3 for the
+         * Workspace execution profile, and a Session context that acquire
+         * installs and activates before any tool runs.
+         */
+        MANAGED
+    }
+
     final Path root;
     final Path workspace;
+    final Placement placement;
+    /** Where the Session's tools run: the Workspace, or its context. */
+    final Path directory;
     final RuntimeScope scope;
+    /** The Session context a MANAGED acquire installs; null for LEGACY. */
+    final ContextBinding context;
     final JdbcToolExecutionRepository executions;
     final JdbcRuntimeBindingRepository bindings;
     private final Path cli;
@@ -67,8 +91,9 @@ final class FaultGateRig implements AutoCloseable {
     private final List<BrokerProcess> brokers = new ArrayList<>();
     private final Set<ProcessHandle> orphans = new HashSet<>();
 
-    private FaultGateRig(Path cli) throws Exception {
+    private FaultGateRig(Path cli, Placement placement) throws Exception {
         this.cli = cli;
+        this.placement = placement;
         root = Files.createTempDirectory("runtime-broker-fault-gate")
                 .toRealPath();
         workspace = Files.createDirectories(root.resolve("workspace"));
@@ -82,12 +107,29 @@ final class FaultGateRig implements AutoCloseable {
         executions = new JdbcToolExecutionRepository(dataSource);
         bindings = new JdbcRuntimeBindingRepository(dataSource,
                 AesGcmSecretProtector.fromBase64("fault-gate", SECRET_KEY));
-        scope = new RuntimeScope("tenant-a", "workspace-a", "1",
-                workspace.toString(), "sha256:" + "a".repeat(64),
-                "workspace");
+        if (placement == Placement.MANAGED) {
+            // The Workspace is the mount root; the context names a child.
+            directory = Files.createDirectories(workspace.resolve("project"));
+            scope = new RuntimeScope("tenant-a", "workspace-a", "1",
+                    workspace.toString(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+            context = new ContextBinding("tenant-a", "workspace-a", 1,
+                    STORAGE, "project",
+                    WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        } else {
+            directory = workspace;
+            scope = new RuntimeScope("tenant-a", "workspace-a", "1",
+                    workspace.toString(), "sha256:" + "a".repeat(64),
+                    "workspace");
+            context = null;
+        }
     }
 
     static FaultGateRig open() throws Exception {
+        return open(Placement.LEGACY);
+    }
+
+    static FaultGateRig open(Placement placement) throws Exception {
         if (System.getProperty("os.name").toLowerCase(Locale.ROOT)
                 .startsWith("windows")) {
             throw new AssertionError(
@@ -113,7 +155,7 @@ final class FaultGateRig implements AutoCloseable {
         if (!node.waitFor(30, TimeUnit.SECONDS) || node.exitValue() != 0) {
             throw new AssertionError("node --version failed");
         }
-        return new FaultGateRig(cli);
+        return new FaultGateRig(cli, placement);
     }
 
     FaultProxy proxy() throws IOException {
@@ -158,6 +200,9 @@ final class FaultGateRig implements AutoCloseable {
         config.put("node", "node");
         config.put("cli", cli.toString());
         config.put("stateDir", root.toString());
+        config.put("durable", provisioner == Provisioner.DURABLE_LOCAL_PROCESS
+                || provisioner == Provisioner.TRUSTED_LOCAL_PROCESS);
+        config.put("trustedReboot", provisioner == Provisioner.TRUSTED_LOCAL_PROCESS);
         config.put("records", provisioner == Provisioner.RECOVERABLE
                 ? root.resolve("records").toString() : null);
         config.put("proxyPort", proxy.port());
@@ -165,6 +210,14 @@ final class FaultGateRig implements AutoCloseable {
         config.put("dispatchLeaseMillis", DISPATCH_LEASE.toMillis());
         config.put("requestTimeoutMillis", requestTimeout.toMillis());
         config.put("scope", scopeConfig);
+        if (context != null) {
+            Map<String, Object> contextConfig = new LinkedHashMap<>();
+            contextConfig.put("storageId", context.getStorageId());
+            contextConfig.put("cwdRelative", context.getCwdRelative());
+            contextConfig.put("contextRevision",
+                    context.getContextRevision());
+            config.put("context", contextConfig);
+        }
         String file = name + "-" + brokers.size();
         Path configFile = root.resolve(file + ".json");
         Files.writeString(configFile, JSON.toJSONString(config));
@@ -180,6 +233,11 @@ final class FaultGateRig implements AutoCloseable {
         broker.kill();
     }
 
+    void closeBroker(BrokerProcess broker) throws InterruptedException {
+        orphans.addAll(broker.descendants());
+        broker.close();
+    }
+
     /** SIGKILLs a Broker's worker together with the tool processes below. */
     void killWorker(BrokerProcess broker) {
         List<ProcessHandle> workers = broker.workers();
@@ -189,25 +247,66 @@ final class FaultGateRig implements AutoCloseable {
         ProcessTrees.kill(workers.get(0), WAIT);
     }
 
+    record ToolCall(Map<String, Object> reference, String payloadJson) {
+        /** The raw reference of the immediate route: identity plus payload. */
+        Map<String, Object> immediateReference() {
+            Map<String, Object> raw = new LinkedHashMap<>(reference);
+            raw.putAll(JSON.parseObject(payloadJson));
+            return raw;
+        }
+    }
+
     /** A foreground shell call whose side effects land in the workspace. */
-    static Map<String, Object> shell(String callId, String command) {
+    static ToolCall shell(String callId, String command) {
+        return shell(SESSION, callId, command);
+    }
+
+    /** A foreground shell call of another Runtime Session. */
+    static ToolCall shell(String session, String callId,
+            String command) {
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("command", command);
         input.put("is_background", false);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("toolName", "run_shell_command");
+        payload.put("input", input);
+        String payloadJson = JSON.toJSONString(payload);
+        String digest;
+        try {
+            digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payloadJson.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
         Map<String, Object> reference = new LinkedHashMap<>();
-        reference.put("sessionId", SESSION);
+        reference.put("sessionId", session);
         reference.put("promptId", "prompt-1");
         reference.put("callId", callId);
-        reference.put("argsDigest", "digest-" + callId);
-        reference.put("toolName", "run_shell_command");
-        reference.put("input", input);
-        return reference;
+        reference.put("argsDigest", digest);
+        return new ToolCall(Map.copyOf(reference), payloadJson);
     }
 
     /** The lines a tool appended to a marker file in the workspace. */
     List<String> marker(String name) {
+        return lines(workspace.resolve(name));
+    }
+
+    /**
+     * A command that appends its own working directory to a file outside
+     * every Workspace, so a gate sees whether, and where, a tool ran.
+     */
+    String recordRun() {
+        return "pwd >> '" + root.resolve("runs") + "'";
+    }
+
+    /** The working directory of every tool run {@link #recordRun} saw. */
+    List<String> runs() {
+        return lines(root.resolve("runs"));
+    }
+
+    private static List<String> lines(Path file) {
         try {
-            return Files.readAllLines(workspace.resolve(name));
+            return Files.readAllLines(file);
         } catch (NoSuchFileException missing) {
             return List.of();
         } catch (IOException exception) {
@@ -264,8 +363,11 @@ final class FaultGateRig implements AutoCloseable {
     }
 
     RuntimeBindingRecord activeBinding() {
-        return bindings.findActive(new RuntimeProvisionRequest(scope, null,
-                LocalProcessRuntimeProvisioner.KIND));
+        return bindings.findActive(placement == Placement.MANAGED
+                ? new RuntimeProvisionRequest(scope, HARNESS,
+                        LocalProcessRuntimeProvisioner.KIND, STORAGE)
+                : new RuntimeProvisionRequest(scope, null,
+                        LocalProcessRuntimeProvisioner.KIND));
     }
 
     RuntimeSession session() {

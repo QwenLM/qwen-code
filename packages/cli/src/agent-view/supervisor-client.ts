@@ -88,7 +88,14 @@ export interface AgentViewSupervisorRequestMap {
   list: { cwd?: string } | undefined;
   subscribe: undefined;
   shutdown: { keepWorkers?: boolean } | undefined;
-  dispatch: { prompt: string; cwd: string };
+  dispatch: {
+    prompt: string;
+    cwd: string;
+    /** The launcher's environment; the worker runs under it rather than
+     * the long-lived supervisor's. Sideband identity keys are dropped
+     * server-side. */
+    env?: Record<string, string>;
+  };
   adopt: AgentViewSupervisorAdoptParams;
   workerEvent: AgentViewWorkerEvent & { token?: string };
   workerControl: { sessionId: string; token?: string };

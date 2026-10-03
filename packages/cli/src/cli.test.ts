@@ -60,6 +60,11 @@ const mocks = vi.hoisted(() => ({
   runAsAgentViewSupervisor: vi.fn(),
   runBackgroundDispatch: vi.fn(),
   runAgentViewPtyHostProcess: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -305,6 +310,37 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('version');
+    // A version token after a prompt-led --bg is a prompt word the gate
+    // declines by name on the default route, not a version request: the
+    // first positional names no parser-honoured command, so the launch
+    // stays visible to the gate. Intercepting here printed the version
+    // and cancelled the launch with exit 0 (#10943 R10-3).
+    expect(
+      resolveBootstrapRoute(['audit', 'this', BACKGROUND_FLAG, '-v']),
+    ).toBe('default');
+    // The interior position of the same prompt region: a `-v` sitting
+    // before the `--bg` of a prompt-led launch is a prompt word too — the
+    // launch must still reach the gate and be declined loudly, not print
+    // the version with exit 0 (#10943 R10-3).
+    expect(
+      resolveBootstrapRoute(['audit', '-v', 'this', BACKGROUND_FLAG]),
+    ).toBe('default');
+    // The subcommand-led sibling keeps the intercept: `mcp add` owns
+    // that argv and the gate never sees it.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'victim',
+        'node',
+        BACKGROUND_FLAG,
+        '-v',
+      ]),
+    ).toBe('version');
+    // Flag-led stays with the gate too.
+    expect(resolveBootstrapRoute([BACKGROUND_FLAG, '-v', 'audit'])).toBe(
+      'default',
+    );
     // Help still wins when no exact version token exists.
     expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['-p', 'hello', '-h'])).toBe('help');
@@ -890,6 +926,15 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
   it('rejects arguments on the hidden Runtime worker route', async () => {
     await runCliEntry(['managed-runtime-worker', '--help']);
 
@@ -1225,6 +1270,29 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('does not spawn the supervisor for a flag-led argv (#10943 R13-2)', async () => {
+      // `qwen --yolo --internal-agent-view-supervisor`: the flag is not
+      // the first routable token, so this is a user launch carrying an
+      // internal flag — not a spawn. The old shape test only excluded
+      // preceding *positionals*, and dash-led tokens slipped through.
+      await runCliEntry(['--yolo', INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not spawn the pty host for a flag-led argv (#10943 R13-2)', async () => {
+      await runCliEntry([
+        '--debug',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('does not treat a pty-host flag after `--` as a spawn', async () => {
       await runCliEntry([
         '-p',
@@ -1473,6 +1541,17 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('dispatches a prompt-led launch whose FIRST word is the English word help', async () => {
+      // yargs matches `help` on the last positional, not the first: the
+      // first-positional set carrying HELP_COMMAND misclassified
+      // `qwen help me fix the build --bg` as a parser-owned launch and the
+      // gate never dispatched it — a silent no-op for an ordinary prompt.
+      await runCliEntry(['help', 'me', 'fix', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('help me fix');
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
     it('dispatches a flag-led prompt ending in the word help', async () => {
       // The help-word bounce serves positional-led launches, where yargs
       // matches `help` as a command entrance. A flag-led launch has no
@@ -1645,6 +1724,21 @@ describe('runCliEntry', () => {
       expect(stderr.join('')).toContain('does not honor --version');
     });
 
+    it('declines a version token inside a prompt-led launch the same way', async () => {
+      // `qwen audit -v this --bg`: the version intercept read the interior
+      // `-v` as a version request, printed the version and exited 0 with no
+      // session and no diagnostic — the silent false-success the flag-led
+      // twin refuses loudly. The token is prompt data now, so the launch
+      // reaches the gate and is declined by name.
+      await runCliEntry(['audit', '-v', 'this', BACKGROUND_FLAG]);
+
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor -v');
+    });
+
     it('does not dispatch the launch the boolean off spelling turns off', async () => {
       // `bg` is declared `type: 'boolean'` in the help surface this PR
       // adds, so `--bg=false` / `--bg=0` is how a wrapper (`qwen
@@ -1776,8 +1870,11 @@ describe('runCliEntry', () => {
         expect(TOP_LEVEL_COMMAND_NAMES.has(name)).toBe(true);
       }
     }
-    // yargs' builtin help command is an entrance too.
-    expect(TOP_LEVEL_COMMAND_NAMES.has('help')).toBe(true);
+    // yargs' builtin help command is an entrance too, but it is matched on
+    // the LAST positional (the `lastPositionalArg(argv) === HELP_COMMAND`
+    // disjunct), not through this first-positional set — a leading `help`
+    // is an ordinary English prompt word.
+    expect(TOP_LEVEL_COMMAND_NAMES.has('help')).toBe(false);
   });
 
   it('loads gemini on the default path', async () => {

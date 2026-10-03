@@ -185,7 +185,14 @@ export async function runBackgroundDispatch(
     // starts. The returned session id is the output contract.
     const supervisor = await ensureAgentViewSupervisor();
     reachedDispatch = true;
-    ({ sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
+    // The supervisor is process-global and long-lived: without the
+    // launcher's environment the worker would run under whichever shell
+    // first started it — a stale API key, proxy, or PATH.
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === 'string') env[key] = value;
+    }
+    ({ sessionId } = (await supervisor.dispatch(prompt, cwd, env)) as {
       sessionId: string;
     });
   } catch (error) {

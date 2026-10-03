@@ -460,6 +460,14 @@ class AgentViewSupervisorProcessHandler
     if (!prompt.trim()) {
       throw new Error('Agent View dispatch prompt cannot be empty.');
     }
+    const envParam = params?.['env'];
+    const env: Record<string, string> = {};
+    if (envParam !== null && typeof envParam === 'object') {
+      // The wire carries JSON: non-string values are not an environment.
+      for (const [key, value] of Object.entries(envParam)) {
+        if (typeof value === 'string') env[key] = value;
+      }
+    }
     const store = {
       ...(this.options.globalDir ? { globalDir: this.options.globalDir } : {}),
     };
@@ -467,7 +475,7 @@ class AgentViewSupervisorProcessHandler
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
-      promptInArgv: !shouldWaitForWorkerReady(this.options),
+      env,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
@@ -529,6 +537,25 @@ class AgentViewSupervisorProcessHandler
       });
       if (shouldWaitForWorkerReady(this.options)) {
         await this.queuePromptForSession(result.sessionId, prompt);
+      } else {
+        // With the ready handshake off, nothing ever advances the record:
+        // the ready/state worker events have no producer on this path, so
+        // it would stay 'starting' forever — and updateExitedSession reads
+        // a still-'starting' exit-0 run as 'failed'. The completed launch
+        // (host spawned, prompt delivered in argv) is the only advance
+        // signal this configuration has, and the prompt is in flight, so
+        // the resting state is 'working' until the host exits.
+        await patchAgentViewSessionStateIf(
+          result.sessionId,
+          (existing) =>
+            existing.sessionState === 'starting'
+              ? {
+                  sessionState: 'working',
+                  updatedAt: new Date().toISOString(),
+                }
+              : undefined,
+          store,
+        );
       }
       const state = await readAgentViewSessionState(result.sessionId, store);
       const publishedAt = new Date().toISOString();

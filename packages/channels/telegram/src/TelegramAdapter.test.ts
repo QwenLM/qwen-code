@@ -145,7 +145,7 @@ function createChannel(
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: { setChannelRotation: vi.fn(), ...(router as object) } as never,
     },
   );
 }

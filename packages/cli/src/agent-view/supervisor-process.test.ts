@@ -175,7 +175,7 @@ describe('Agent View supervisor process helpers', () => {
     ).resolves.toMatchObject({
       sessionId,
       ownership: 'managed',
-      sessionState: 'starting',
+      sessionState: 'working',
       processState: 'starting',
     });
     await expect(
@@ -186,14 +186,18 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewLaunch(sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      argv: expect.arrayContaining([
-        '--session-id',
-        sessionId,
-        // Attached-value form: a bare token would be re-parsed by yargs
-        // when the prompt starts with '-'.
-        '--prompt-interactive=write tests',
-      ]),
+      argv: expect.arrayContaining(['--session-id', sessionId]),
+      env: expect.objectContaining({
+        QWEN_AGENT_VIEW_INITIAL_PROMPT: 'write tests',
+      }),
     });
+    // The prompt never touches argv: a spawned worker's command line is
+    // world-readable via /proc/<pid>/cmdline for its whole life, so it
+    // rides the owner-only environment channel instead.
+    const launch = await readAgentViewLaunch(sessionId, { globalDir });
+    expect(launch?.argv.some((token) => token.includes('write tests'))).toBe(
+      false,
+    );
     await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
       sessions: [expect.objectContaining({ sessionId })],
     });
@@ -208,7 +212,7 @@ describe('Agent View supervisor process helpers', () => {
         sessionId,
         state: expect.objectContaining({
           sessionId,
-          sessionState: 'starting',
+          sessionState: 'working',
         }),
         activity: expect.objectContaining({
           summary: 'write tests',
@@ -222,7 +226,7 @@ describe('Agent View supervisor process helpers', () => {
       sessionId,
       state: expect.objectContaining({
         sessionId,
-        sessionState: 'starting',
+        sessionState: 'working',
       }),
       activity: expect.objectContaining({
         summary: 'write tests',
@@ -245,12 +249,13 @@ describe('Agent View supervisor process helpers', () => {
       state: expect.objectContaining({ sessionId }),
     });
     expect(launchedArgv).toEqual(
-      expect.arrayContaining([
-        '--session-id',
-        sessionId,
-        '--prompt-interactive=write tests',
-      ]),
+      expect.arrayContaining(['--session-id', sessionId]),
     );
+    expect(
+      (launchedArgv ?? []).some((token: string) =>
+        token.includes('write tests'),
+      ),
+    ).toBe(false);
 
     // The producer side of the peek join: the roster rename `sessions
     // ps` shows, and the launch record with its env stripped. Without
@@ -387,6 +392,49 @@ describe('Agent View supervisor process helpers', () => {
           text: 'write tests',
         }),
       ],
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('advances the record out of starting on dispatch when the ready wait is off', async () => {
+    // No ready producer exists on this configuration: dispatch is the only
+    // advance signal. Without it the record stays 'starting' forever, and
+    // updateExitedSession reads a still-'starting' exit-0 run as 'failed'.
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    let host: FakePtyHost | undefined;
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      waitForWorkerReady: false,
+      launchPtyHost: async () => {
+        host = fakePtyHost();
+        return host;
+      },
+    });
+
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+
+    // The prompt rides the worker's argv, so the resting state after
+    // dispatch is 'working' until the host exits — never a permanent
+    // 'starting'.
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ sessionState: 'working' });
+
+    host!.resolveExit(0);
+    await vi.waitFor(async () => {
+      await expect(
+        readAgentViewSessionState(result.sessionId, { globalDir }),
+      ).resolves.toMatchObject({
+        sessionState: 'completed',
+        processState: 'exited',
+      });
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -1215,7 +1263,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      sessionState: 'starting',
+      sessionState: 'working',
     });
     await expect(
       handler.workerControl?.({
@@ -2817,7 +2865,7 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      sessionState: 'starting',
+      sessionState: 'working',
       processState: 'starting',
     });
 
@@ -3375,7 +3423,7 @@ describe('Agent View supervisor process helpers', () => {
       await expect(
         readAgentViewSessionState(result.sessionId, { globalDir }),
       ).resolves.toMatchObject({
-        sessionState: 'starting',
+        sessionState: 'working',
         processState: 'starting',
       });
     } finally {

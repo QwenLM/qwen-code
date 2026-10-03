@@ -16,6 +16,12 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation) {
+        throw unavailable();
+    }
+
+    @Override
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
@@ -40,7 +46,7 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void closeSession(String tenantId, String sessionId) {
+    public String closeSession(String tenantId, String sessionId) {
         throw unavailable();
     }
 

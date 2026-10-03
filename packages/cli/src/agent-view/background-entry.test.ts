@@ -324,8 +324,24 @@ describe('runBackgroundDispatch', () => {
     expect(supervisorDispatch).toHaveBeenCalledWith(
       'audit the release',
       '/w/app',
+      expect.any(Object),
     );
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+  });
+
+  it('forwards the launcher environment to the dispatch RPC', async () => {
+    // The supervisor is process-global and long-lived: without the
+    // launcher's env the worker runs under whichever shell first started
+    // it — a stale key, proxy, or PATH.
+    vi.stubEnv('QWEN_MODEL', 'from-launcher');
+
+    await runBackgroundDispatch('audit', '/w/app');
+
+    expect(supervisorDispatch).toHaveBeenCalledWith(
+      'audit',
+      '/w/app',
+      expect.objectContaining({ QWEN_MODEL: 'from-launcher' }),
+    );
   });
 
   it('prints the session id the dispatch RPC returns, and where to see it', async () => {
@@ -336,7 +352,11 @@ describe('runBackgroundDispatch', () => {
 
     await runBackgroundDispatch('audit', '/w/app');
 
-    expect(supervisorDispatch).toHaveBeenCalledWith('audit', '/w/app');
+    expect(supervisorDispatch).toHaveBeenCalledWith(
+      'audit',
+      '/w/app',
+      expect.any(Object),
+    );
     expect(stdout[0]).toContain('sess-rpc');
     expect(stdout.join('\n')).toContain('qwen sessions ps');
   });

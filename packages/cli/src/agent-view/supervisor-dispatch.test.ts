@@ -100,6 +100,28 @@ describe('dispatchAgentViewSession', () => {
     expect(argv[argv.indexOf('--session-id') + 1]).toBe(result.sessionId);
   });
 
+  it('carries the prompt and the launcher env in the launch record, never in argv', async () => {
+    const result = await dispatchAgentViewSession('write tests', '/repo/pkg', {
+      globalDir: tempDir,
+      token: 'token',
+      env: { QWEN_MODEL: 'from-launcher', QWEN_AGENT_VIEW_TOKEN: 'forged' },
+    });
+
+    const launch = await readAgentViewLaunch(result.sessionId, {
+      globalDir: tempDir,
+    });
+    // The launcher's environment reaches the worker, but a client can
+    // never mint the sideband identity.
+    expect(launch?.env['QWEN_MODEL']).toBe('from-launcher');
+    expect(launch?.env['QWEN_AGENT_VIEW_TOKEN']).toBe('token');
+    expect(launch?.env['QWEN_AGENT_VIEW_INITIAL_PROMPT']).toBe('write tests');
+    // argv is world-readable via /proc/<pid>/cmdline for the worker's
+    // whole life: the prompt must not appear there.
+    expect(launch?.argv.some((token) => token.includes('write tests'))).toBe(
+      false,
+    );
+  });
+
   it('rolls back session files and roster when a mid-dispatch write fails', async () => {
     // Fail the activity write: the session-state and launch writes have
     // already succeeded at that point, so rollback must actually remove the
@@ -145,14 +167,16 @@ describe('dispatchAgentViewSession', () => {
     expect(jobs).toEqual([]);
   });
 
-  it('rejects oversized UTF-8 argv prompts before creating a session', async () => {
+  it('rejects oversized UTF-8 launch prompts before creating a session', async () => {
+    // The cap guards the env channel now: the prompt travels in the
+    // worker's environment, which shares the OS env block's size budget.
     const prompt = '你'.repeat(Math.floor((16 * 1024) / 3) + 1);
 
     await expect(
       dispatchAgentViewSession(prompt, '/repo/pkg', {
         globalDir: tempDir,
       }),
-    ).rejects.toThrow('too large for argv');
+    ).rejects.toThrow('too large to launch');
 
     const paths = getAgentViewStorePaths({ globalDir: tempDir });
     await expect(fs.access(paths.jobsDir)).rejects.toMatchObject({
