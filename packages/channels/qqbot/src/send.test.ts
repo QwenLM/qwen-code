@@ -4980,7 +4980,15 @@ describe('a null route is not a delivered stash', () => {
   });
 
   it('drops a route that can never resolve instead of retrying it forever', async () => {
-    const ch = makeChannel({ maxFlushRetries: 0 });
+    // The chat type IS known (chatTypes), so the disposed guard is the only
+    // reason resolveRoute classifies the route permanent. Without it the guard
+    // falls through to a usable route and the stash is delivered; the
+    // no-chat-type guard would otherwise give the same permanent class and
+    // hide the branch this test names.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
     const chp = ch as unknown as Record<string, unknown>;
     chp['accessToken'] = 'test-token';
     chp['tokenExpiresAt'] = Date.now() + 3600_000;
