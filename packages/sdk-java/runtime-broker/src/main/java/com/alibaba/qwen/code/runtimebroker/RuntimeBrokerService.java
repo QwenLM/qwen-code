@@ -194,7 +194,6 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return CompletableFuture.completedFuture(null);
         }
         if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop()
-                || saved.getState() == RuntimeBindingRecord.State.LOST
                 || saved.getState() == RuntimeBindingRecord.State.OPERATOR_RECOVERY
                 || saved.getState() == RuntimeBindingRecord.State.FAILED) {
             return failed(conflict("workspace_close_identity_unverified", "Original worker needs recovery"));
@@ -214,8 +213,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (claimed == null) {
             return failed(unavailable("runtime_close_claim_pending", "Original binding is still claimed"));
         }
+        boolean lost = claimed.getState() == RuntimeBindingRecord.State.LOST;
+        if (lost && (sessionRepository.countActiveByBinding(claimed.getBindingId(), claimed.getGeneration()) != 0
+                || executionRepository.hasActiveByBinding(claimed.getBindingId(), claimed.getGeneration()))) {
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(conflict("workspace_close_execution_unsettled", "Lost Runtime resources require recovery"));
+        }
         var draining = bindingRepository.compareAndSet(claimed, claimed.withDrainRequested(true, clock.instant())
-                .withState(RuntimeBindingRecord.State.DRAINING,
+                .withState(lost ? RuntimeBindingRecord.State.LOST : RuntimeBindingRecord.State.DRAINING,
                         claimed.getLease(), clock.instant()));
         if (draining == null) {
             releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());

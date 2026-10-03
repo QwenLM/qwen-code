@@ -473,28 +473,239 @@ describe('ManagedSessionsPage', () => {
         capabilities: { canSend: false, canCancel: false, actions: true },
       }),
     );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
     provider = {
       ...provider,
       actions: {
         listPending: vi.fn().mockResolvedValue([pendingAction]),
-        respond: vi
-          .fn()
-          .mockRejectedValue(
-            new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
-          ),
+        respond,
       },
     };
     await render('s1');
-    const allow = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Yes, allow once'),
-    );
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
     await act(async () => {
-      allow!.click();
+      allow().click();
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'Only the Session creator can answer this approval.',
     );
+    // The refusal is final for this viewer, so the card stops offering the
+    // answer instead of sending one 403 per click.
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const second = {
+      ...pendingAction,
+      actionId: 'tool_approval_2',
+      functionCallId: 'call-2',
+    };
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_2', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([second]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(listPending).toHaveBeenCalledTimes(1);
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(allow().disabled).toBe(true);
+
+    // The refused Action left and the next one arrived: the refusal is a fact
+    // about the viewer and the Session, so the new card is just as dead
+    // instead of offering one more guaranteed 403.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_2');
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
+    // The per-Action alert left with the Action it described, but a dead card
+    // with no stated reason is indistinguishable from a stuck one — and the
+    // disabled options also drop out of sequential focus navigation — so the
+    // latch keeps the reason on screen. It is a status line, not a second
+    // alert, because it restates what the viewer was already told.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[role="status"]')).map(
+        (node) => node.textContent,
+      ),
+    ).toContain('Only the Session creator can answer this approval.');
+    // On screen is not enough: the reason is a sibling of the dialog, and a
+    // polite region that mounts with its text already in place announces
+    // nothing, so the dialog's own description is what carries the cause to a
+    // screen-reader user. Widening it must not drop the arguments caveat.
+    const card = container.querySelector('[data-testid="managed-approval"]')!;
+    const described = (
+      card
+        .querySelector('[role="alertdialog"]')!
+        .getAttribute('aria-describedby') ?? ''
+    )
+      .split(' ')
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' | ');
+    expect(described).toContain(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(described).toContain('Tool arguments are unavailable');
+  });
+
+  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'resolved' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+    const refusal = 'Only the Session creator can answer this approval.';
+
+    await render('s1');
+    await act(async () => flush());
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.textContent).toContain(refusal);
+
+    // The refused Action leaves and nothing replaces it. The latch outlives it,
+    // but the reason describes a card, so it leaves with the last one instead
+    // of explaining an approval that is not on screen.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain(refusal);
+  });
+
+  it('keeps a coded but retryable answer failure answerable', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // Every HTTP failure the Managed client builds carries a string code, so
+    // carrying a code is not what marks a refusal final: only the
+    // creator-only refusal is.
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue(undefined);
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
+    );
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
   });
 
   it('does not read approvals for a Session without the actions capability', async () => {
@@ -612,9 +823,43 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
     ).toContain('services/api');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('You cannot send messages in this Session');
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('lets the creator send a later Turn to a bound Session', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    await render('bound');
+
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).not.toContain('You cannot send messages in this Session');
+    expect(container.querySelector('textarea')).not.toBeNull();
+    await input('Run it again');
+    await click('Send');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      'bound',
+      { text: 'Run it again' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
   });
 
   async function click(label: string) {
