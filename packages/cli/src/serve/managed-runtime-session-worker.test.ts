@@ -793,6 +793,36 @@ describe.skipIf(process.platform === 'win32')(
       expect(await readFile(logFile, 'utf8')).toBe('');
     });
 
+    it('judges a command directory by the directory the worker is bound to', async () => {
+      const env = create('ok');
+      const other = path.join(root, 'other');
+      await mkdir(other);
+      // Had the session's directory moved, the worker would still be bound
+      // to the one it was created for.
+      vi.spyOn(config, 'getTargetDir').mockReturnValue(
+        path.join(root, 'below'),
+      );
+      await env.prepare(
+        {
+          id: 'other',
+          toolName: 'run_shell_command',
+          params: { command: 'pwd', directory: other },
+        },
+        signal,
+      );
+      await env.release('other', signal);
+      await expect(
+        env.prepare(
+          {
+            id: 'outside',
+            toolName: 'run_shell_command',
+            params: { command: 'pwd', directory: path.dirname(root) },
+          },
+          signal,
+        ),
+      ).rejects.toThrow(`only in ${root}.`);
+    });
+
     it('runs a command in a directory below the session directory', async () => {
       const env = create('ok');
       const below = path.join(root, 'below');
@@ -1022,10 +1052,72 @@ describe('currentCliWorkerLaunch', () => {
     expect(launch.env?.['NODE_OPTIONS']).toBe('--import tsx/esm');
   });
 
+  it('drops every spelling of an inspector flag from its arguments', () => {
+    process.execArgv = [
+      '--inspect',
+      '--inspect_brk=0',
+      '--inspect-brk-node',
+      '--inspect-wait=0',
+      '--inspect-port=9230',
+      '--debug_port',
+      '9230',
+      '--import',
+      'tsx/esm',
+    ];
+    expect(currentCliWorkerLaunch().args.slice(0, 2)).toEqual([
+      '--import',
+      'tsx/esm',
+    ]);
+  });
+
+  // An env file can set NODE_OPTIONS, and a config file its options.
+  it('reads no options file again', () => {
+    process.execArgv = [
+      '--env-file',
+      '.env',
+      '--env_file_if_exists=.env.local',
+      '--env-file-if-exists',
+      '.env.test',
+      '--experimental-config-file',
+      'node.config.json',
+      '--experimental-default-config-file',
+      '--import',
+      'tsx/esm',
+    ];
+    expect(currentCliWorkerLaunch().args.slice(0, 2)).toEqual([
+      '--import',
+      'tsx/esm',
+    ]);
+  });
+
   it.each([
     ['--inspect-brk --import tsx/esm', '--import tsx/esm'],
     ['--import tsx/esm --inspect-port 9230', '--import tsx/esm'],
     ['--inspect=0', undefined],
+    // Node reads `_` for `-` in option names, and a quoted option as one.
+    ['--inspect_brk --inspect-brk-node --import tsx/esm', '--import tsx/esm'],
+    ['"--inspect=0" --import tsx/esm', '--import tsx/esm'],
+    ['--inspect_port 9230 --import tsx/esm', '--import tsx/esm'],
+    // What it keeps is copied as written, quoted spacing included.
+    [
+      '--inspect-brk --require "/opt/a  b/hook.js"',
+      '--require "/opt/a  b/hook.js"',
+    ],
+    [
+      '--inspect-brk --require "/opt/a\tb/\\"hook\\".js"',
+      '--require "/opt/a\tb/\\"hook\\".js"',
+    ],
+    ['--require  "/opt/a  b/hook.js" ', '--require  "/opt/a  b/hook.js" '],
+    // An escaped quote keeps what follows inside the quoted option.
+    ['--inspect-brk --title "a\\" --inspect"', '--title "a\\" --inspect"'],
+    // Neither a run of spaces nor `""` is an entry: the port's value is
+    // still the one dropped.
+    ['--inspect-port  9230 --import tsx/esm', '--import tsx/esm'],
+    ['--inspect-port "" 9230 --import tsx/esm', '--import tsx/esm'],
+    // Outside quotes a backslash escapes nothing.
+    ['--inspect-brk --title a\\ --inspect', '--title a\\'],
+    // Node folds `_` only in an option's name, so this is no option.
+    ['__inspect --import tsx/esm', '__inspect --import tsx/esm'],
   ])(
     'opens no debugger in the worker from NODE_OPTIONS %j',
     (options, expected) => {

@@ -12034,6 +12034,14 @@ class QwenAgent implements Agent {
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
+        // A Managed session's Runtime worker is bound to the directory the
+        // session was admitted in, where M3 judged it.
+        if (config.getSessionExecutionEngine?.() === 'managed') {
+          throw RequestError.invalidParams(
+            { errorKind: 'unsupported_operation' },
+            'A Managed session cannot change its directory.',
+          );
+        }
         const standalone = isReservedStandaloneSessionSourceType(
           config.getSessionSourceType(),
         );

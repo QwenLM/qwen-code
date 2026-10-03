@@ -1603,6 +1603,19 @@ describe('Managed Runtime tools', () => {
     expect(order).toEqual(['dispose', 'closeSessionWriter']);
   });
 
+  it('stays in the directory its Runtime worker is bound to', async () => {
+    const below = path.join(projectDir, 'below');
+    await mkdir(below);
+    const config = managedConfig();
+    await expect(
+      config.relocateWorkingDirectory(below, undefined, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).rejects.toThrow('A Managed session cannot change its directory.');
+    expect(config.getTargetDir()).toBe(projectDir);
+  });
+
   it('builds no environment once its Runtime is closed or it shuts down', async () => {
     const factory = vi.fn(runtimeEnvironment);
     const closed = managedConfig({ managedRuntimeEnvironment: factory });

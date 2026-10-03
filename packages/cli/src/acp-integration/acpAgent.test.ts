@@ -7664,6 +7664,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('refuses to move a Managed session, whose Runtime worker is bound to its directory', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-managed-cwd-'),
+    );
+    const innerConfig = await setupSessionMocks(sessionId);
+    const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
+    Object.assign(innerConfig, {
+      getSessionExecutionEngine: vi.fn().mockReturnValue('managed'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory,
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).rejects.toMatchObject({
+        message: 'A Managed session cannot change its directory.',
+        errorKind: 'unsupported_operation',
+      });
+      // Refused before the session is drained or its guard suspended.
+      expect(lastSessionMock?.hardSuspendTodoStopGuard).not.toHaveBeenCalled();
+      expect(lastSessionMock?.beginCloseIfAvailable).not.toHaveBeenCalled();
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('reports an MCP refresh warning after changing the working directory', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const targetDir = await fs.mkdtemp(

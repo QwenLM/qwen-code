@@ -7619,6 +7619,10 @@ export class Config {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
+    if (this.sessionExecutionEngine === 'managed') {
+      // Its Runtime worker is bound to the directory it was admitted in.
+      throw new Error('A Managed session cannot change its directory.');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()

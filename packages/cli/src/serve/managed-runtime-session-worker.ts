@@ -88,24 +88,98 @@ class WorkerTransportError extends Error {
   }
 }
 
-const INSPECT_FLAG = /^--(inspect(-brk|-wait|-port)?|debug-port)($|=)/u;
+// Node reads `_` for `-` in option names, so `--inspect_brk` opens one too.
+const INSPECT_FLAGS: ReadonlySet<string> = new Set([
+  '--inspect',
+  '--inspect-brk',
+  '--inspect-brk-node',
+  '--inspect-wait',
+  '--inspect-port',
+  '--debug-port',
+]);
+// An options file would give the worker again what was removed from its
+// environment, such as an inspector flag in NODE_OPTIONS.
+const OPTIONS_FILE_FLAGS: ReadonlySet<string> = new Set([
+  '--env-file',
+  '--env-file-if-exists',
+  '--experimental-config-file',
+  '--experimental-default-config-file',
+]);
+// These take their value as the next entry unless it follows `=`.
+const SEPARATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--inspect-port',
+  '--debug-port',
+  '--env-file',
+  '--env-file-if-exists',
+  '--experimental-config-file',
+]);
 
-/**
- * Node options without the inspector flags, which would open a debugger, or
- * stop at the first line until one attaches, in the worker. The port flags
- * also take their value as the next entry.
- */
-export function withoutInspectFlags(options: readonly string[]): string[] {
-  const kept: string[] = [];
+/** The positions of the options the worker must not start with. */
+function withheldOptionIndexes(options: readonly string[]): Set<number> {
+  const indexes = new Set<number>();
   for (let index = 0; index < options.length; index++) {
     const option = options[index]!;
-    if (!INSPECT_FLAG.test(option)) {
-      kept.push(option);
-    } else if (option === '--inspect-port' || option === '--debug-port') {
-      index++;
+    if (!option.startsWith('--')) continue;
+    const flag = option.split('=', 1)[0]!.replaceAll('_', '-');
+    if (!INSPECT_FLAGS.has(flag) && !OPTIONS_FILE_FLAGS.has(flag)) continue;
+    indexes.add(index);
+    if (SEPARATE_VALUE_FLAGS.has(flag) && !option.includes('=')) {
+      indexes.add(++index);
     }
   }
-  return kept;
+  return indexes;
+}
+
+/**
+ * The Node options the worker starts with: these without the inspector flags,
+ * which would open a debugger, or stop at the first line until one attaches,
+ * and without options files.
+ */
+export function workerExecArgv(options: readonly string[]): string[] {
+  const indexes = withheldOptionIndexes(options);
+  return options.filter((_, index) => !indexes.has(index));
+}
+
+/**
+ * A `NODE_OPTIONS` value without its inspector flags, or the value itself when
+ * it holds none. Node splits the value at spaces outside double quotes, where
+ * a backslash escapes the next character; every option kept is copied as
+ * written, so a quoted path keeps its spacing.
+ */
+export function nodeOptionsWithoutInspectFlags(value: string): string {
+  const entries: Array<{ option: string; written: string }> = [];
+  let option = '';
+  let written = '';
+  let quoted = false;
+  const endEntry = (): void => {
+    // As in Node, an entry such as `""` names no option.
+    if (option !== '') entries.push({ option, written });
+    option = '';
+    written = '';
+  };
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!;
+    if (char === ' ' && !quoted) {
+      endEntry();
+      continue;
+    }
+    written += char;
+    if (char === '"') {
+      quoted = !quoted;
+    } else if (char === '\\' && quoted && index + 1 < value.length) {
+      option += value[++index];
+      written += value[index];
+    } else {
+      option += char;
+    }
+  }
+  endEntry();
+  const indexes = withheldOptionIndexes(entries.map((entry) => entry.option));
+  if (indexes.size === 0) return value;
+  return entries
+    .filter((_, index) => !indexes.has(index))
+    .map((entry) => entry.written)
+    .join(' ');
 }
 
 export interface ManagedRuntimeWorkerLaunch {
@@ -130,17 +204,17 @@ export function currentCliWorkerLaunch(): ManagedRuntimeWorkerLaunch {
   // Node reads inspector flags from NODE_OPTIONS too, where execArgv does not
   // show them, and on Windows under any spelling of its name.
   for (const key of Object.keys(env)) {
-    if (!isNodeOptionsEnvKey(key)) continue;
-    const nodeOptions = env[key]?.split(/\s+/u).filter(Boolean);
-    if (!nodeOptions?.some((option) => INSPECT_FLAG.test(option))) continue;
-    const kept = withoutInspectFlags(nodeOptions);
-    if (kept.length > 0) env[key] = kept.join(' ');
+    const nodeOptions = env[key];
+    if (!isNodeOptionsEnvKey(key) || nodeOptions === undefined) continue;
+    const kept = nodeOptionsWithoutInspectFlags(nodeOptions);
+    if (kept === nodeOptions) continue;
+    if (kept !== '') env[key] = kept;
     else delete env[key];
   }
   return {
     command: process.execPath,
     args: [
-      ...withoutInspectFlags(process.execArgv),
+      ...workerExecArgv(process.execArgv),
       cliEntry,
       'managed-runtime-worker',
     ],
@@ -726,9 +800,12 @@ export function createManagedRuntimeEnvironment(
   config: Config,
   launch?: () => ManagedRuntimeWorkerLaunch,
 ): ExecutionEnvironment {
+  // The worker is bound to this directory for its lifetime, so the host
+  // judges a Shell `directory` against the same one.
+  const sessionDirectory = config.getTargetDir();
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),
-    config.getTargetDir(),
+    sessionDirectory,
     launch,
   );
   const prepared = new LocalExecutionEnvironment(config, {
@@ -765,8 +842,8 @@ export function createManagedRuntimeEnvironment(
             ? 'A Managed session runs shell commands in the foreground only.'
             : typeof directory === 'string' &&
                 directory !== '' &&
-                !isWithin(config.getTargetDir(), directory)
-              ? `A Managed session runs shell commands only in ${config.getTargetDir()}.`
+                !isWithin(sessionDirectory, directory)
+              ? `A Managed session runs shell commands only in ${sessionDirectory}.`
               : undefined;
         if (refusal) {
           await prepared.release(request.id, signal);

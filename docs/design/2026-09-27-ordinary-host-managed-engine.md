@@ -840,15 +840,21 @@ parts, in this order, each with its own exit check:
   Nothing reaches a Broker, a tenant store or the network.
 - **Bound to the session's directory.** The worker resolves relative paths
   against it and refuses a Shell `directory` outside it. M3 already defers a
-  session whose directory is not the runtime workspace.
+  session whose directory is not the runtime workspace. The session keeps
+  that directory: `session/cd` is refused, because the worker and M3's
+  verdict are bound to it.
 - **Environment.** The worker inherits the Managed child's environment, as a
   Legacy Shell inherits its host's, so the workspace `.env` and the session
   variables reach its commands. The child's boot scrub removed the loader
   variables that only started it; the worker boots with the same ones and
   scrubs them in turn, so its commands never see them. Inspector flags, in
-  its arguments or in `NODE_OPTIONS`, are dropped, so the worker opens no
-  debugger and never waits for one. The private parent variables the child
-  deletes at startup never reach it.
+  its arguments or in `NODE_OPTIONS`, are dropped under every spelling Node
+  reads, so the worker opens no debugger and never waits for one; the options
+  kept are copied as written. Options files (`--env-file`, Node's config
+  file) are not read again, because they would give back what was removed and
+  resolve against the session's directory; options that only such a file
+  holds do not reach the worker. The private parent variables the child deletes
+  at startup never reach it.
 - **Lifetime.** The worker runs in its own process group, with an IPC channel
   that carries no messages. When the channel closes, however the child ended,
   the worker stops its calls, lets them settle and exits. The child tracks the
@@ -922,7 +928,8 @@ parts, in this order, each with its own exit check:
   settle a cancelled call within 15 seconds, it reports no result. The session
   is blocked: the turn fails with -32603 and `errorKind`
   `managed_runtime_outcome_unknown`, no request continues the conversation,
-  later turns fail the same way, and the worker is terminated. Side queries,
+  later turns fail the same way, a goal turn refused this way pauses its goal
+  instead of being retried, and the worker is terminated. Side queries,
   such as the title, and a compression attempt can still reach the model;
   none of them runs a tool. M5b makes the block durable.
 
@@ -984,9 +991,10 @@ parts, in this order, each with its own exit check:
   verified with M5c.
 - Results carry only model content, up to 1 MiB, and a call's parameters at
   most 256 KiB, so a larger Write fails before it runs.
-- The worker is bound to the session's directory at boot. Further workspace
-  directories, and a later working-directory change, are out of its reach. M6
-  decides them with its workspace-change handler.
+- The worker is bound to the session's directory at boot, and the session
+  refuses `session/cd`. Further workspace directories are out of its reach,
+  and a working-directory change needs a new worker; M6 decides both with its
+  workspace-change handler.
 - Runtime-backed edits record no file history or checkpoints, so rewinding a
   Managed session could not restore files; M4 already requires Managed
   sessions to refuse rewind.
