@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-基于包含 W1b 和可靠 Session close 的主干 `b3dda468f`，实现进行中。首版限定同一可信 Linux 主机、原存储可访问、已结算的 `hosted-workspace-files/1` Session，以及保持不变的绝对 `QWEN_HOME`/file-history 卷。只移动 Workspace root。排除 Shell/O2、MCP/Hook、外部 Memory root、不透明绝对路径、跨主机和源丢失恢复。所有保留成员参与，包括关闭、归档和删除记录；不支持或无法证明的成员阻止整个操作。
+已完成本地实现并整合主干 `5130c1a73`，包括 W1b、可靠 Session close、持久进程默认设置和输出回收；生产 Linux 验收仍待完成。首版限定同一可信 Linux 主机、原存储可访问、已结算的 `hosted-workspace-files/1` Session，以及保持不变的绝对 `QWEN_HOME`/file-history 卷。只移动 Workspace root。排除 Shell/O2、MCP/Hook、外部 Memory root、不透明绝对路径、跨主机和源丢失恢复。所有保留成员参与，包括关闭、归档和删除记录；不支持或无法证明的成员阻止整个操作。
 
 逻辑 storage、全部 ContextBinding 字段、私有 Session Store key、原创建回执、journal、消息和资源引用保持不可变。迁移不关闭公共 Session，也不重新开放关闭的 Session。
 
@@ -24,7 +24,7 @@
 
 最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。反向迁移需要新操作/capture 和更高 revision。
 
-长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b 与 V32 close 字节。
+长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close 和 V33–V34 定义/回收迁移字节，W1c 新增 V35。
 
 ## 部署与 Runtime 路由
 
