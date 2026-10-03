@@ -27,7 +27,11 @@ import type {
   PromptHookConfig,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionSubject,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -56,6 +60,12 @@ import { waitForTurn } from './hosted-turn-wait.js';
 export class HostedHookRecoveryRequiredError extends Error {
   constructor() {
     super('Hosted Hook requires reconciliation of its original execution.');
+  }
+}
+
+export class HostedHookInputConflictError extends Error {
+  constructor() {
+    super('Hook occurrence input conflict.');
   }
 }
 
@@ -169,6 +179,19 @@ function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+// Committed record revisions are immutable objects, so each is validated
+// once however often the Session's history is scanned.
+const parsedExecutions = new WeakMap<object, HookExecution>();
+
+function savedExecution(record: unknown): HookExecution {
+  let parsed = parsedExecutions.get(record as object);
+  if (parsed === undefined) {
+    parsed = parseHookExecution(record);
+    parsedExecutions.set(record as object, parsed);
+  }
+  return parsed;
+}
+
 export function hostedHookOccurrenceId(
   event: HookEventName,
   occurrenceId: string,
@@ -202,6 +225,7 @@ export class HostedHookSession {
   readonly broker: HostedWorkspaceBroker;
   private readonly ownsBroker: boolean;
   private acquired = false;
+  private acquiring?: Promise<void>;
   private readonly aggregator = new HookAggregator();
   private catalog?: ManagedHookCatalog;
   private registration?: HookRegistration;
@@ -224,8 +248,18 @@ export class HostedHookSession {
   >();
   private writes: Promise<void> = Promise.resolve();
   private occurrenceQueue: Promise<void> = Promise.resolve();
+  private readonly stopPlanPrompts = new Map<string, unknown>();
+  private children?: {
+    readonly sequence: number;
+    readonly byOccurrence: Map<string, HookExecution[]>;
+  };
   private messagesProvider?: () => Array<Record<string, unknown>>;
 
+  /**
+   * Construct only on a load activation. Release finds earlier owners by
+   * load activations alone, so an owner named after a Hook operation's
+   * activation or its restore would never be released by a successor.
+   */
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
@@ -275,24 +309,44 @@ export class HostedHookSession {
 
   async acquire(): Promise<void> {
     if (this.acquired) return;
-    await this.releaseEarlierOwners();
-    await this.broker.warm();
-    await this.broker.acquire();
-    if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
-    this.acquired = true;
+    // Parallel Hooks share one acquisition, so each earlier owner is
+    // released once.
+    this.acquiring ??= (async () => {
+      try {
+        await this.releaseEarlierOwners();
+        await this.broker.warm();
+        await this.broker.acquire();
+        if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
+        this.acquired = true;
+      } finally {
+        this.acquiring = undefined;
+      }
+    })();
+    await this.acquiring;
   }
 
   private async releaseEarlierOwners(): Promise<void> {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
+    const restores = new Set<string>();
     // Activation is durable before even the first catalog request acquires.
     for (const event of authority.eventsInSequenceRange(
       1,
       authority.committedSequence,
     )) {
       if (event.kind !== 'activation.changed') continue;
-      const id = `hooks-activation-${digest([event.payload['activationId'], event.payload['epoch']])}`;
+      // Only a load constructs a Hook owner. A Hook operation's activation,
+      // and the one it restores on finishing, never acquire.
+      const activationId = event.payload['activationId'] as string;
+      restores.add(managedHookRestoreActivationId(activationId));
+      if (
+        restores.has(activationId) ||
+        (event.payload['subject'] as ManagedSessionSubject).type ===
+          'hook_operation'
+      )
+        continue;
+      const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
       if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
         owners.set(id, true);
     }
@@ -336,7 +390,7 @@ export class HostedHookSession {
         'hook_execution',
         record.occurrenceId,
       );
-      return !marker || parseHookExecution(marker.record).resultRef === null;
+      return !marker || savedExecution(marker.record).resultRef === null;
     });
   }
 
@@ -367,8 +421,15 @@ export class HostedHookSession {
         !record.resultRef
       )
         continue;
-      const plan = await this.read<HookPlan>(record.planRef);
-      if (plan.input.prompt_id !== promptId) continue;
+      // A plan never changes, so each one is read once rather than on
+      // every turn of a long Session.
+      const planId = record.planRef.resourceId;
+      if (!this.stopPlanPrompts.has(planId))
+        this.stopPlanPrompts.set(
+          planId,
+          (await this.read<HookPlan>(record.planRef)).input.prompt_id,
+        );
+      if (this.stopPlanPrompts.get(planId) !== promptId) continue;
       const result = await this.read<{ output?: HookOutput }>(record.resultRef);
       const output =
         result.output && createHookOutput(HookEventName.Stop, result.output);
@@ -522,7 +583,7 @@ export class HostedHookSession {
     const running = this.occurrences.get(key);
     if (running) {
       if (!isDeepStrictEqual(running.input, input))
-        throw new Error('Hook occurrence input conflict.');
+        throw new HostedHookInputConflictError();
       return running.result;
     }
     const promise = this.occurrenceQueue.then(() =>
@@ -562,7 +623,7 @@ export class HostedHookSession {
           ? plan.refusedInputDigest !== semanticInputDigest(fields)
           : !isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields))
       )
-        throw new Error('Hook occurrence input conflict.');
+        throw new HostedHookInputConflictError();
       if (marker.run.execution === 'not_started_proven')
         return cancelledResult().output;
       if (marker.resultRef)
@@ -1189,7 +1250,27 @@ export class HostedHookSession {
   private executions(): HookExecution[] {
     return this.session.authority
       .extensionRecordsInDomain('hook_execution')
-      .map((entry) => parseHookExecution(entry.record));
+      .map((entry) => savedExecution(entry.record));
+  }
+
+  /**
+   * The child executions of an occurrence. Records change only by commit,
+   * so the grouping is rebuilt only after one, not for every occurrence a
+   * drain inspects.
+   */
+  private childrenOf(occurrenceId: string): HookExecution[] {
+    const sequence = this.session.authority.committedSequence;
+    if (this.children?.sequence !== sequence) {
+      const byOccurrence = new Map<string, HookExecution[]>();
+      for (const entry of this.executions()) {
+        if (entry.hookId === '__plan__') continue;
+        const siblings = byOccurrence.get(entry.occurrenceId);
+        if (siblings) siblings.push(entry);
+        else byOccurrence.set(entry.occurrenceId, [entry]);
+      }
+      this.children = { sequence, byOccurrence };
+    }
+    return this.children.byOccurrence.get(occurrenceId) ?? [];
   }
 
   async status(id: string, cancel = false): Promise<HookExecution> {
@@ -1226,9 +1307,7 @@ export class HostedHookSession {
       }
     }
     if (record.hookId === '__plan__') {
-      const children = this.executions().filter(
-        (entry) => entry.occurrenceId === id && entry.hookId !== '__plan__',
-      );
+      const children = this.childrenOf(id);
       if (cancel || record.cancelRequested) {
         const settled = await Promise.all(
           children.map((child) => this.status(child.hookExecutionId, true)),
