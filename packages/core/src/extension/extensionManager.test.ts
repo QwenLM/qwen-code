@@ -154,6 +154,10 @@ const fsProbe = vi.hoisted(() => ({
   falseExistsSyncFor: undefined as string | undefined,
   untypedDirentsFor: undefined as string | undefined,
   readdirSyncCalls: 0,
+  // Every directory argument handed to fs.promises.readdir; the Windows
+  // separator-parity witness asserts the root commands walk argument is
+  // path.join-normalized (R17-2).
+  readdirArgs: [] as string[],
 }));
 const emfileError = (): Error =>
   Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
@@ -236,6 +240,7 @@ vi.mock('node:fs', async (importOriginal) => {
         return actual.promises.readFile(...args);
       },
       readdir: async (...args: Parameters<typeof actual.promises.readdir>) => {
+        fsProbe.readdirArgs.push(String(args[0]));
         if (
           fsProbe.failReaddirFor !== undefined &&
           String(args[0]).includes(fsProbe.failReaddirFor)
@@ -3363,8 +3368,18 @@ describe('extension tests', () => {
         fs.writeFileSync(path.join(commandsDir, 'deploy.md'), 'Deploy it');
 
         const manager = createExtensionManager();
+        fsProbe.readdirArgs = [];
         await manager.refreshCache();
         expect(manager.getLoadedExtensions()[0]?.commands).toEqual(['deploy']);
+        // Separator-parity witness (R17-2): the root commands walk argument
+        // is path.join-normalized by the production call site, so the
+        // `${path.sep}commands` probe key below matches it on Windows too —
+        // a template-`${ext}/commands` call site would build a mixed-separator
+        // path the probe can never see there.
+        const commandsReads = fsProbe.readdirArgs.filter((arg) =>
+          arg.includes(`${path.sep}commands`),
+        );
+        expect(commandsReads[0]).toBe(path.join(extDir, 'commands'));
 
         fsProbe.failReaddirFor = `${path.sep}commands`;
         try {
