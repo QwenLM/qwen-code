@@ -627,7 +627,13 @@ public class HarnessCoordinator {
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     error.getClass().getSimpleName(), error);
             // A distinct code from the pre-admission arm: the Turn may have
-            // been admitted and executed, so blind retry is not safe.
+            // been admitted and executed, so blind retry is not safe. A
+            // Runtime Broker refusal keeps its own code — the generic one
+            // would name a component that did not fail.
+            if (error instanceof RuntimeBrokerException brokerError) {
+                return fail(turn, brokerError.getCode(),
+                        brokerError.getMessage());
+            }
             return fail(turn, "hosted_harness_unavailable_after_admission",
                     "Hosted Harness remained unavailable after Turn"
                             + " admission.");

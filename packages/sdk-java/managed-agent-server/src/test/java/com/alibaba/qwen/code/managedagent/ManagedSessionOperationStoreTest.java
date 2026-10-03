@@ -114,13 +114,20 @@ class ManagedSessionOperationStoreTest {
         OperationRecord claimed = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
 
-        // Fencing: another owner, an older generation, or an expired lease
-        // cannot terminate the operation.
+        // Fencing: another owner, a mismatched generation, or an expired
+        // lease cannot terminate the operation.
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "other", claimed.claimGeneration(), "some_code")).isFalse();
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "worker", claimed.claimGeneration() + 1, "some_code"))
                 .isFalse();
+        jdbc.update("UPDATE managed_agent_operation SET lease_until = 0"
+                + " WHERE operation_id = ?", operationId);
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration(), "some_code")).isFalse();
+        jdbc.update("UPDATE managed_agent_operation SET lease_until = ?"
+                + " WHERE operation_id = ?", databaseTime() + 60_000,
+                operationId);
 
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "worker", claimed.claimGeneration(),

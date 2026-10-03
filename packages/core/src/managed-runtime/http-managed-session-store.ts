@@ -54,14 +54,14 @@ const WRITER_TOKEN = new RegExp(
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 /**
- * Bounds on background seal retries. Attempts ride the renewal cadence
- * (~leaseDurationMs/2), so the attempt count alone gives no wall-clock
- * guarantee — at the contract maximum lease the cadence is 150s and ten
- * attempts would keep the grant live for ~25 minutes. The pending seal
- * therefore also abandons once it has been pending for two lease durations,
- * whichever bound trips first; past the bound the cadence stops and the
- * grant lapses, so a writer whose seal endpoint stays broken while renewal
- * still works stops blocking a takeover.
+ * Bounds on a pending seal. The wall-clock bound is the operative one:
+ * background retries ride the renewal cadence (~leaseDurationMs/2), so two
+ * lease durations admit about four of them before the cadence stops and the
+ * grant lapses — a writer whose seal endpoint stays broken while renewal
+ * still works stops blocking a takeover. The attempt bound is the backstop
+ * for a misbehaving clock (the elapsed check could otherwise never trip);
+ * it counts every seal call, so a caller that retries close() itself also
+ * consumes it.
  */
 const MAX_PENDING_SEAL_ATTEMPTS = 10;
 const MAX_PENDING_SEAL_LEASES = 2;

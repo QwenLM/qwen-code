@@ -323,6 +323,94 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // A delete of an already closed bound Session whose retention
+    // retirement keeps refusing (a residual live writer) must also keep
+    // waiting past the budget: the writer gate keys on the writer itself,
+    // not on the status the operation was admitted on.
+    @Test
+    void deleteOfAClosedSessionKeepsWaitingWhileAWriterIsLive() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-delete", OperationKind.DELETE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1, 10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "CLOSED", null, null, 0, 0, 0, 1, 1, null, 1,
+                        BOUND_WORKSPACE));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+        // completeOperation's retention retirement refuses while the
+        // residual writer holds the journal.
+        when(store.completeOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), eq(1L), anyBoolean()))
+                .thenThrow(new IllegalStateException(
+                        "Session deletion is waiting for its writer to"
+                                + " stop."));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-delete");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L), anyLong());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            // The closed-Session delete shape makes zero Runtime calls, in
+            // settle() and in the terminal arm alike.
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
+                    anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // A writer check that itself fails is treated as live: the operation
+    // keeps waiting rather than recording a failure it cannot verify.
+    @Test
+    void lifecycleOperationKeepsWaitingWhenTheWriterCheckFails() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session"))
+                .thenThrow(new IllegalStateException("harness unreachable"));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenThrow(new IllegalStateException("lock wait timeout"));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L), anyLong());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     // The terminal-record fallback keeps the blocked shape for a CLOSE: it
     // is the only kind the recovery scan re-drives from BLOCKED, so the
     // rescheduled operation must stay blocked-coded, not plainly retried.

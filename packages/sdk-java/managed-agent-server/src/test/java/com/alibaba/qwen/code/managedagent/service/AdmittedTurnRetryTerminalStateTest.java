@@ -88,7 +88,8 @@ class AdmittedTurnRetryTerminalStateTest {
     // The RuntimeBrokerException arm funnels into the same post-admission
     // budget: once the Turn may have been admitted, even a non-retryable
     // broker failure is retried while the budget lasts and terminates the
-    // Turn once the budget is spent.
+    // Turn once the budget is spent — keeping the broker's own failure code
+    // rather than blaming the Harness.
     @ParameterizedTest(name = "retryCount = {0}, fails = {1}")
     @CsvSource({"10, true", "9, false"})
     void brokerFailuresHonourThePostAdmissionBudget(int retryCount,
@@ -99,9 +100,7 @@ class AdmittedTurnRetryTerminalStateTest {
 
         if (expectFailure) {
             verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(),
-                    eq("hosted_harness_unavailable_after_admission"),
-                    anyString());
+                    anyString(), eq("workspace_unavailable"), anyString());
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong());

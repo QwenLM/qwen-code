@@ -262,7 +262,12 @@ the Hosted prompt ID when a matching Java Turn exists.
   retry budget is spent without the Harness ever answering, the operation
   completes as FAILED with `action_response_delivery_failed` and stays
   `java_durable` — the admission stage never claims a Harness confirmation
-  that did not happen. While the
+  that did not happen. That FAILED is not the end of the answer: while the
+  Action is still `requested` and the Session still accepts responses, a
+  retried request under the same key and digest re-admits the delivery on
+  the same operation row (back to `pending`, budget reset, receipt cleared)
+  instead of returning the stale failure forever — one row per key keeps a
+  second vote impossible. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
   operation stays `running` within that budget. The WebShell request gains
   `requestId`.

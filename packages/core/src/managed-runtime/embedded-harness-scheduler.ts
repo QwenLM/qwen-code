@@ -601,8 +601,10 @@ export class EmbeddedHarnessScheduler {
     if (this.disposed || this.fatalError) return;
     const activeKeys = new Set(this.active.keys());
     const seenSessions = new Set<string>();
+    const pendingKeys = new Set<string>();
     let expiry: number | undefined;
     for (const activation of this.store.listPending()) {
+      pendingKeys.add(activationKey(activation.descriptor));
       const key = sessionKey(activation.descriptor);
       if (seenSessions.has(key)) continue;
       seenSessions.add(key);
@@ -616,6 +618,13 @@ export class EmbeddedHarnessScheduler {
         expiry === undefined
           ? activation.lease!.expiresAt
           : Math.min(expiry, activation.lease!.expiresAt);
+    }
+    // An activation that is neither pending nor running can never be
+    // re-queued; drop its budget entry so the map tracks only live work.
+    for (const key of this.activationTransientFailures.keys()) {
+      if (!pendingKeys.has(key) && !activeKeys.has(key)) {
+        this.activationTransientFailures.delete(key);
+      }
     }
     if (expiry === undefined) return;
     const delay = Math.min(

@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import java.time.Clock;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,7 +51,7 @@ public class MessageMaterializer {
         // A session that stopped being a target (caught up or deleted) never
         // fails again; drop its entry so the map tracks only live failures.
         if (!failures.isEmpty()) {
-            java.util.Set<String> live = new java.util.HashSet<>();
+            Set<String> live = new HashSet<>();
             for (MaterializationTarget target : targets) {
                 live.add(target.tenantId() + "\n" + target.sessionId());
             }
