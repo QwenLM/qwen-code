@@ -166,10 +166,12 @@ re-stamps them. `expiresAt` may be absent from the payload (`timeOrNull`); a NUL
 column then fails the freshness check exactly like the journal scan reading
 the value as absent does. All three readers of the payload's `expiresAt` (the
 commit extraction and the two backfill scans) share one lenient helper — an
-integral number or an integral numeric string, else absent, with a width
-pre-check before any BigInteger materialization so an exponent-form string
-costs nothing — so the scan and the head columns can never disagree about
-representability.
+integral number or an integral numeric string of at most 19 integer digits
+and at most 19 decimal places, else absent, with width and scale pre-checks
+before any BigInteger materialization so an exponent-form string costs
+nothing in either direction (1e+N needs the giant integer, 1e-N expands
+10^N before dividing) — so the scan and the head columns can never disagree
+about representability.
 
 While a rolling fleet can still run a pre-V34 binary — which commits without
 maintaining the columns — the head is not yet trustworthy, so

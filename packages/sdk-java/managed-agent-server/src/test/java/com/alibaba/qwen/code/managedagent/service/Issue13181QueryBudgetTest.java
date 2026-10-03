@@ -235,16 +235,23 @@ class Issue13181QueryBudgetTest {
         // A caught-up session is not a target while its snapshot is fresh...
         assertThat(fixture.store.findMaterializationTargets(32))
                 .doesNotContain(new MaterializationTarget(tenant, sessionId));
-        // ...but is re-selected once the deferred snapshot ages out.
-        fixture.jdbc.update("UPDATE managed_agent_snapshot SET updated_at ="
-                        + " updated_at - 6000 WHERE tenant_id = ? AND"
-                        + " session_id = ?", tenant, sessionId);
+        // ...but is re-selected once the deferral MARKER alone ages out —
+        // the snapshot row stays fresh, so a regression to probing
+        // managed_agent_snapshot per row would not select it here.
         fixture.jdbc.update("UPDATE managed_agent_consumer_progress SET"
                         + " snapshot_stale_since = snapshot_stale_since - 6000"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 tenant, sessionId);
+        fixture.ledger.reset();
         assertThat(fixture.store.findMaterializationTargets(32))
                 .contains(new MaterializationTarget(tenant, sessionId));
+        assertThat(fixture.ledger.count("snapshot_stale_since"))
+                .isGreaterThan(0);
+        assertThat(fixture.ledger.count("managed_agent_snapshot")).isZero();
+        // The convergence tick still waits for the snapshot's own age.
+        fixture.jdbc.update("UPDATE managed_agent_snapshot SET updated_at ="
+                        + " updated_at - 6000 WHERE tenant_id = ? AND"
+                        + " session_id = ?", tenant, sessionId);
         // The re-selected tick has no new events; it converges the snapshot.
         fixture.ledger.reset();
         fixture.tx.executeWithoutResult(status -> fixture.store
@@ -738,8 +745,9 @@ class Issue13181QueryBudgetTest {
         long snapshotCovered = fixture.store
                 .findSnapshotCoveredSequences(tenant, List.of(sessionId))
                 .getOrDefault(sessionId, 0L);
-        assertThat(snapshotCovered).isLessThan(fixture.store
-                .requireSession(tenant, sessionId).lastSequence());
+        long lastSequence = fixture.store.requireSession(tenant, sessionId)
+                .lastSequence();
+        assertThat(snapshotCovered).isLessThan(lastSequence);
         fixture.ledger.reset();
         var transcript = fixture.service.transcript(tenant, null, sessionId,
                 null, 10);
@@ -751,7 +759,12 @@ class Issue13181QueryBudgetTest {
                         > transcript.coveredSequence())
                 .count()).isEqualTo(10);
         assertThat(transcript.hasMore()).isTrue();
-        assertThat(transcript.olderCursor()).isNotNull();
+        // Newest kept, not oldest: the tail ends at the session's last
+        // event, and the cursor names the oldest returned event.
+        assertThat(transcript.events().getLast().sequence())
+                .isEqualTo(lastSequence);
+        assertThat(transcript.olderCursor())
+                .isEqualTo(Long.toString(lastSequence - 9));
         assertThat(fixture.ledger.count("from managed_agent_event"))
                 .isEqualTo(2);
     }
@@ -1134,6 +1147,20 @@ class Issue13181QueryBudgetTest {
                 .put("phase", "active").put("expiresAt", "1e2147483647");
         append("activation.max-exponent",
                 event(journal.sequence + 1, "activation.changed", maxExponent)
+                        + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
+                        + " FROM qwen_managed_session_journal_head",
+                Long.class)).isNull();
+        // The positive-scale direction: 1e-N expands 10^N before dividing
+        // (measured ~56s of CPU for these 12 bytes without the bound), so
+        // the scale is pre-checked too.
+        ObjectNode tinyFraction = JSON.createObjectNode()
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
+                .put("phase", "active").put("expiresAt", "1e-100000000");
+        append("activation.tiny-fraction",
+                event(journal.sequence + 1, "activation.changed", tinyFraction)
                         + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");

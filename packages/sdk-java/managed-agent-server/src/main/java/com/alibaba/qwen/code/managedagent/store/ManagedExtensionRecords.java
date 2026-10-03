@@ -666,11 +666,13 @@ public final class ManagedExtensionRecords {
     /**
      * A millisecond timestamp read leniently, shared by the commit-side
      * extraction and the authorization journal scans: an integral number or
-     * an integral numeric string, else absent. Anything fractional, out of
-     * range, or otherwise shaped is absent, so the scans and the head columns
-     * can never disagree about whether a payload was representable. The width
-     * pre-check runs before any BigInteger materialization, so an
-     * exponent-form string cannot tax the reader.
+     * an integral numeric string of at most 19 integer digits and at most 19
+     * decimal places, else absent. Anything fractional, out of range, or
+     * otherwise shaped is absent, so the scans and the head columns can never
+     * disagree about whether a payload was representable. The width and scale
+     * pre-checks run before any BigInteger materialization, so an
+     * exponent-form string cannot tax the reader in either direction
+     * (1e+N needs the giant integer; 1e-N expands 10^N before dividing).
      */
     public static Long millisLenient(JsonNode node) {
         if (node == null || node.isNull()) {
@@ -683,8 +685,12 @@ public final class ManagedExtensionRecords {
                         : node.decimalValue();
                 // A long holds at most 19 integer digits; never materialize
                 // anything wider. Widen to long first: precision - scale can
-                // itself overflow int on an extreme exponent.
-                if ((long) value.precision() - value.scale() > 19) {
+                // itself overflow int on an extreme exponent. A scale beyond
+                // 19 decimal places is likewise absent: toBigIntegerExact on
+                // 1e-N expands 10^N before dividing, and a representable
+                // long never needs more places.
+                if ((long) value.precision() - value.scale() > 19
+                        || value.scale() > 19) {
                     return null;
                 }
                 return value.toBigIntegerExact().longValueExact();
