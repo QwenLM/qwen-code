@@ -82,6 +82,15 @@ slot 会记录一次已完成的读取——包括「Workspace 没有说明文�
 之前注入。会话级测试保持既有的恢复与不重复派发保证，并在断言派发计数的
 地方显式点名上下文读取。
 
+## 部署与升级顺序
+
+先升级 Broker 与 worker bundle，再升级 Hosted Harness。旧版 Broker 会以
+`400 runtime_control_operation_invalid` 拒绝 `workspace-context` 控制操作，
+旧版 worker 也会按自身封闭的操作联合拒绝它。由于读取是尽力而为的，这种版本
+错配对 API 和模型都不可见：没有任何 Session 能拿到 `QWEN.md` 或
+`AGENTS.md`，slot 永远不会锁定，每一轮都会重新读取。可观测信号是 Harness
+stderr 上反复出现的 `qwen serve: Hosted Workspace context read failed` 日志。
+
 ## 风险与未决问题
 
 上下文是否应持久固定（并经

@@ -98,6 +98,17 @@ fetch landing mid-turn is set before the next request. Session-level tests
 keep their recovery and redispatch guarantees, with the context reads named
 explicitly where dispatch counts are asserted.
 
+## Deployment and rollout
+
+Upgrade the Broker and worker bundle before the Hosted Harness. An older
+Broker rejects the `workspace-context` control with
+`400 runtime_control_operation_invalid`, and an older worker refuses it
+through its own closed operation union. Because the read is best-effort, the
+skew is silent to the API and the model: no Session receives `QWEN.md` or
+`AGENTS.md`, the slot never latches, and the read repeats on every turn. The
+signal is a recurring `qwen serve: Hosted Workspace context read failed`
+line on the Harness's stderr.
+
 ## Risks and open questions
 
 Whether the
