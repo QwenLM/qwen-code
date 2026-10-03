@@ -60,6 +60,7 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   renameSync: vi.fn(),
+  unlinkSync: vi.fn(),
   existsSync: vi.fn(() => false),
 }));
 
@@ -70,7 +71,13 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: mockFetchGatewayUrl,
 }));
 
-import { renameSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  renameSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+  existsSync,
+} from 'node:fs';
 vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
@@ -145,6 +152,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
     truncateCodePoints: real.truncateCodePoints,
+    truncateUtf16Units: real.truncateUtf16Units,
   };
 });
 
@@ -155,6 +163,10 @@ type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 afterEach(() => {
   vi.useRealTimers();
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
 });
 
 /** Create a mock Response-like object for sendQQMessage. */
@@ -172,6 +184,33 @@ function deferredPromise() {
     resolve = res;
   });
   return { promise, resolve };
+}
+
+/**
+ * Seed two sessions anchored to the same msgId with one msg_seq counter and
+ * no chat-level replyMsgId entry naming it. Both release tests share this:
+ * while one session still anchors msgId the counter must survive, and the
+ * release of the last anchor is what purges it.
+ */
+function anchorTwoSessionsToOneMsgId(
+  chp: Record<string, unknown>,
+  sessions: [string, string],
+  msgId: string,
+  seq: number,
+): {
+  sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+  seqMap: Map<string, number>;
+} {
+  const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+    string,
+    { msgId: string; timestamp: number }
+  >;
+  const seqMap = chp['msgSeqMap'] as Map<string, number>;
+  for (const sessionId of sessions) {
+    sessionAnchors.set(sessionId, { msgId, timestamp: Date.now() });
+  }
+  seqMap.set(msgId, seq);
+  return { sessionAnchors, seqMap };
 }
 
 describe('isValidChatId', () => {
@@ -289,6 +328,1583 @@ describe('session persistence paths', () => {
         'registerBridgeEvents'
       ],
     ).toBe(false);
+  });
+});
+
+describe('groupAllPolicy session-scope warning (no forcing)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        groupAllPolicy: 'log',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
+    // The user's scope choice is preserved — no forced flattening to 'single'.
+    expect(ch.config.sessionScope).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('Forcing');
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=keyword and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).toContain('WARNING');
+  });
+
+  it('emits NO warning when groupAllPolicy=all and sessionScope=thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('warns when groupAllPolicy=all and sessionScope=chat_thread (DMs become shared)', () => {
+    // chat_thread routes groups the same as thread (QQ has no threadId), but
+    // ChannelBase treats it as unconditionally shared, so it also turns every
+    // direct message into a shared session — the DM /clear rejection issue
+    // #8238 records. The warning must not offer it as an equal alternative.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'chat_thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('chat_thread');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain('makes every direct message a shared session');
+    // The operator warning also fires: chat_thread shares DMs with no
+    // operators configured.
+    expect(logged).toContain('makes every session shared');
+  });
+
+  it('warns when groupAllPolicy=all and sessionScope is single (all contexts collapse)', () => {
+    // 'single' is shared, but it merges every group and every DM into one
+    // `channel:__single__` context — the cross-group leakage issue #8238
+    // reports — so it must not be exempt from the scope warning.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
+    expect(ch.config.sessionScope).toBe('single');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain(
+      "'single' merges every group and direct message into one context",
+    );
+    // The operator warning fires too because 'single' shares every session.
+    expect(logged).toContain('makes every session shared');
+  });
+
+  it('emits NO warning for log policy with non-thread scope (baseline)', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('declares thread as defaultSessionScope, so zero-config defaults get per-group shared context', async () => {
+    const { plugin } = await import('./index.js');
+    expect(plugin.defaultSessionScope).toBe('thread');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is the CLI-filled default (thread)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { plugin } = await import('./index.js');
+    // Simulate parseChannelConfig (packages/cli/src/commands/channel/
+    // config-utils.ts): when the config omits sessionScope, the plugin's
+    // defaultSessionScope becomes the effective scope before construction.
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: plugin.defaultSessionScope as 'thread',
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+});
+
+describe('shared-session operator warning', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  it('warns when group access is enabled on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open' });
+    const logged = capturedStderr();
+    expect(logged).toContain('no operators are configured');
+    expect(logged).toContain('session-control commands');
+  });
+
+  it('warns for chat_thread and single shared scopes too', () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // Each scope separately: a shared containment check cannot tell which
+    // scope the warning came from, so dropping one from sharedScope survived.
+    makeChannel({ groupPolicy: 'allowlist', sessionScope: 'chat_thread' });
+    expect(capturedStderr()).toContain("shared sessionScope 'chat_thread'");
+    stderrSpy.mockClear();
+    makeChannel({ groupPolicy: 'pairing', sessionScope: 'single' });
+    expect(capturedStderr()).toContain("shared sessionScope 'single'");
+  });
+
+  it('warns for a DM-only channel on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // No group access at all: 'single' shares direct-message sessions too, so
+    // the lockout is identical and must be warned about.
+    const ch = makeChannel({ sessionScope: 'single' });
+    expect(ch.config.groupPolicy).toBe('disabled');
+    const logged = capturedStderr();
+    expect(logged).toContain('makes every session shared');
+    expect(logged).toContain('no operators are configured');
+  });
+
+  it('stays silent on the user scope, where a direct message is never shared', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when operators are configured', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', operators: ['member-1'] });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when group access is disabled', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'disabled' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning for a per-sender (user) scope', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+});
+
+describe('purgeSingleScopeOrphans', () => {
+  function makeChannelWithRouter(
+    router: unknown,
+    overrides: Record<string, unknown> = {},
+    bridge: unknown = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      bridge as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+  }
+
+  function callPurge(ch: QQChannelInstance): void {
+    (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
+  }
+
+  it('purges a legacy user-scope key that a message route suffixed', () => {
+    const removeSessionId = vi.fn(() => true);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = {
+      getAll: () => [
+        // The same unroutable user-era key, wrapped as [base, routeKey] by a
+        // message route (SessionRouter.routingKey).
+        {
+          key: JSON.stringify(['test-bot:u1:c1', '/review']),
+          sessionId: 'user-era-routed',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // A sibling channel's suffixed key stays untouched.
+        {
+          key: JSON.stringify(['other-bot:user-9:chat-9', '/review']),
+          sessionId: 'sibling-routed',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession },
+      ),
+    );
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-routed');
+  });
+
+  it('purges a bracketed channel name for bare and route-suffixed keys', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // A channel name may start with '['; its keys are not route wrappers.
+        {
+          key: '[QQ]:__single__',
+          sessionId: 'bracket-bare',
+          target: { channelName: '[QQ]' },
+        },
+        {
+          key: JSON.stringify(['[QQ]:__single__', '/review']),
+          sessionId: 'bracket-routed',
+          target: { channelName: '[QQ]' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      '[QQ]',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession: vi.fn().mockResolvedValue(undefined) } as never,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('bracket-bare');
+    expect(removeSessionId).toHaveBeenCalledWith('bracket-routed');
+  });
+
+  it('logs instead of silently skipping when the sessionScope is unrecognized', () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = { getAll: () => [], removeSessionId: vi.fn(() => true) };
+    callPurge(
+      makeChannelWithRouter(router, {
+        sessionScope: 'Threads',
+        purgeLegacySessions: true,
+      }),
+    );
+    // Fail closed must not be silent: the operator asked for a cleanup.
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'unrecognized sessionScope',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('records worktree isolation metadata in the rescue file', () => {
+    const store = '/tmp/test-qwen/routes.json';
+    const persisted = {
+      'test-bot:u1:c1': {
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        cwd: '/wt/one',
+        isolation: 'worktree',
+        workspaceCwd: '/ws/one',
+        turns: 3,
+        startedAt: 111,
+      },
+    };
+    vi.mocked(existsSync).mockImplementation(
+      (path: unknown) => String(path) === store,
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      String(path) === store ? JSON.stringify(persisted) : '') as never);
+    vi.mocked(writeFileSync).mockImplementation((() => undefined) as never);
+    const router = {
+      persistPath: store,
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId: vi.fn(() => true),
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession: vi.fn().mockResolvedValue(undefined) },
+      ),
+    );
+    const rescued = vi
+      .mocked(writeFileSync)
+      .mock.calls.map((call) => String(call[1]))
+      .find((text) => text.includes('worktree'));
+    expect(rescued).toBeDefined();
+    const record = (
+      JSON.parse(rescued!) as Array<{
+        routes: Array<Record<string, unknown>>;
+      }>
+    ).at(-1)!.routes[0];
+    // A hand-restore needs the isolation and its workspace root, not just cwd.
+    expect(record['isolation']).toBe('worktree');
+    expect(record['workspaceCwd']).toBe('/ws/one');
+    expect(record['cwd']).toBe('/wt/one');
+  });
+
+  it('leaves every doomed route in place by default, with no rescue file', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn((sid: string) =>
+      ['single-era-1', 'user-era-1'].includes(sid),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live single-scope route: the exact-match guard
+        // (entry.key === `${this.name}:__single__`) must NOT purge it — a
+        // suffix match would silently reset the sibling channel's session.
+        {
+          key: 'other-bot:__single__',
+          sessionId: 'sibling-live',
+          target: { channelName: 'other-bot' },
+        },
+        // Live two-part keys under thread scope are never purged.
+        {
+          key: 'test-bot:group-openid-1',
+          sessionId: 'normal-1',
+          target: { channelName: 'test-bot' },
+        },
+        // This channel's user-scope key under thread scope: doomed — under
+        // thread scope the routing key is `channel:chatId`, so a user-scope
+        // key can never resolve again.
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+        // Sibling channel's live user-scope route: the owned-by-name guard
+        // (entry.target?.channelName === this.name) must NOT purge it — a
+        // string-prefix match would hit a sibling whose name is a prefix of
+        // ours, and a suffix match would reset its live per-sender sessions.
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {}, { discardSession });
+    callPurge(ch);
+    // The default scope change must not delete persisted conversations as a
+    // side effect of upgrading: both doomed predicates are inert until the
+    // operator opts in, including the daemon-side release.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(writeFileSync)
+        .mock.calls.some((c) =>
+          String(c[0]).includes('test-bot-sessions-purged.json'),
+        ),
+    ).toBe(false);
+    // One line names the count, that nothing was removed, and the switch that
+    // would remove them; the two-purge-kind lines must not appear.
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'Left 2 orphaned session route(s) in place (nothing removed)',
+    );
+    expect(logged).toContain('set "purgeLegacySessions": true to delete them');
+    expect(logged).not.toContain('Purged ');
+    expect(logged).not.toContain('Saved ');
+  });
+
+  it('writes the rescue copy of the doomed routes before deleting any of them', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // Doomed: legacy single-scope orphan.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Doomed: this channel's unroutable user-scope key under thread scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Live thread route and a sibling channel's route: not doomed.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-thread',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+        {
+          key: 'other-bot:u9:c9',
+          sessionId: 'sibling',
+          target: { channelName: 'other-bot', senderId: 'u9', chatId: 'c9' },
+        },
+      ],
+      removeSessionId,
+    };
+    // This duck-typed router exposes no persistPath, so the fallback source of
+    // a route's cwd is globalSessionsPath — for a supplied router, the shared
+    // sessions.json, not the per-channel file: the router's getAll() does not
+    // report it. It has one doomed key but not the other, so the record must
+    // carry the cwd where it exists and omit it — never fabricate one — where
+    // it does not.
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        'test-bot:__single__': {
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+          cwd: '/work/single',
+        },
+      }),
+    );
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        {
+          discardSession,
+        },
+      ),
+    );
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).includes('test-bot-sessions-purged.json'),
+    );
+    expect(rescueIndex).toBeGreaterThanOrEqual(0);
+    const write = calls[rescueIndex];
+    expect(write[2]).toEqual({ mode: 0o600 });
+    const records = JSON.parse(write[1] as string) as Array<{
+      purgedAt: string;
+      sessionScope: string;
+      routes: unknown[];
+    }>;
+    expect(records).toHaveLength(1);
+    expect(records[0].sessionScope).toBe('thread');
+    expect(Number.isNaN(Date.parse(records[0].purgedAt))).toBe(false);
+    // Exactly the doomed routes, each tagged with the predicate that matched —
+    // the live/sibling routes must not appear.
+    expect(records[0].routes).toEqual([
+      {
+        kind: 'single',
+        key: 'test-bot:__single__',
+        sessionId: 'single-era-1',
+        target: { channelName: 'test-bot' },
+        cwd: '/work/single',
+      },
+      {
+        kind: 'user',
+        key: 'test-bot:u1:c1',
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+      },
+    ]);
+    // Written before the first deletion: removeSessionId() persists, so a
+    // rescue copy that only landed afterwards could not save anything. Compared
+    // against this call's own index, not the first writeFileSync of the test.
+    expect(
+      vi.mocked(writeFileSync).mock.invocationCallOrder[rescueIndex],
+    ).toBeLessThan(removeSessionId.mock.invocationCallOrder[0]);
+    // Both phases ran, and the two purge kinds are reported separately: the
+    // user-scope line is the one that says persisted conversations were
+    // deleted, so the two must not be merged under one label.
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(discardSession).toHaveBeenCalledWith('user-era-1');
+    expect(discardSession).not.toHaveBeenCalledWith('live-thread');
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-thread');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling');
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'Purged 1 orphaned single-scope session mapping(s)',
+    );
+    expect(logged).toContain('Purged 1 orphaned user-scope session mapping(s)');
+    expect(logged).toContain('Saved 2 session route(s) about to be purged to');
+    expect(logged).toContain(
+      join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+    );
+    expect(logged).not.toContain('in place');
+  });
+
+  it('does not fabricate a cwd for a doomed route whose stored entry has none (negative guard, not regression coverage)', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    // The stored entry exists for the doomed key but has no cwd (an older
+    // file), and the empty string is not a usable workspace either — both must
+    // leave the field off rather than resurrect the router's default. This
+    // passes even with the cwd attach reverted (the base attaches no cwd at
+    // all), so it guards against fabrication, not the attach's regression.
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        'test-bot:u1:c1': {
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+          cwd: '',
+        },
+      }),
+    );
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).includes('test-bot-sessions-purged.json'),
+    );
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
+      routes: Array<Record<string, unknown>>;
+    }>;
+    expect(records[0].routes).toEqual([
+      {
+        kind: 'user',
+        key: 'test-bot:u1:c1',
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+      },
+    ]);
+    expect('cwd' in records[0].routes[0]).toBe(false);
+  });
+
+  it("reads a doomed route's cwd from the router's own persisted store", () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    // In daemon mode the shared router persists to its own routes.json, not
+    // this channel's sessions.json, which may still hold a stale cwd from an
+    // earlier standalone `qwen channel start`. The record must carry the
+    // router's value, not the stale file's.
+    const persistPath = '/tmp/daemon-workspace/routes.json';
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+      persistPath,
+    };
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      String(path) === persistPath
+        ? JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/router',
+            },
+          })
+        : JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/stale-global',
+            },
+          })) as typeof readFileSync);
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).includes('test-bot-sessions-purged.json'),
+    );
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
+      routes: Array<Record<string, unknown>>;
+    }>;
+    expect(records[0].routes[0]['cwd']).toBe('/work/router');
+  });
+
+  it('falls back to the shared sessions file for a supplied router without a persistPath', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    // A supplied router (external/duck-typed) exposing no persistPath is the
+    // only case that reaches the fallback, where globalSessionsPath is the
+    // shared sessions.json — never the per-channel file.
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const sharedSessionsPath = join(
+      '/tmp/test-qwen',
+      'channels',
+      'sessions.json',
+    );
+    const readPaths: string[] = [];
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Path-aware: only the shared sessions file carries the cwd, so a lookup
+    // that fell back to any other path would produce no cwd at all (a blanket
+    // mockReturnValue made every path look alike and could not tell them
+    // apart).
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) => {
+      readPaths.push(String(path));
+      return String(path) === sharedSessionsPath
+        ? JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/standalone',
+            },
+          })
+        : '{}';
+    }) as never);
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    expect(readPaths).toContain(sharedSessionsPath);
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).includes('test-bot-sessions-purged.json'),
+    );
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
+      routes: Array<Record<string, unknown>>;
+    }>;
+    expect(records[0].routes[0]['cwd']).toBe('/work/standalone');
+  });
+
+  it('coerces persistPath off a real SessionRouter, so a rename cannot silently disable the lookup', async () => {
+    const { SessionRouter } = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const persistPath = '/tmp/real-router/routes.json';
+    // The purge reads the private field as a plain property, so every stub
+    // router above would keep passing if the real class renamed it and the
+    // daemon lookup silently fell back to the shared sessions file. Construct
+    // the real class — its constructor only stores the bridge, and no method
+    // that needs a working one is called — and pin the property it exposes.
+    const router = new SessionRouter(
+      {} as unknown as ChannelAgentBridge,
+      '/work',
+      'thread',
+      persistPath,
+    );
+    expect((router as unknown as Record<string, unknown>)['persistPath']).toBe(
+      persistPath,
+    );
+  });
+
+  it('writes no rescue file when nothing is purged', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-thread',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('does NOT purge live user-shaped routes when sessionScope is unrecognized', () => {
+    // SessionRouter.routingKey() falls through `case 'user': default:` for any
+    // value outside the SessionScope union, so an unrecognized scope value
+    // (operator typo) still builds live `<channel>:<sender>:<chat>` keys. The
+    // purge predicate must therefore only fire for scopes it recognises as
+    // non-user; `!== 'user'` instead treats a typo as "purge everything".
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'live-user-shaped',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'threads',
+      purgeLegacySessions: true,
+    });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it.each(['thread', 'chat_thread', 'single'] as const)(
+    'still purges a legacy user-scope key under recognized non-user scope %s',
+    (sessionScope) => {
+      // The fail-closed gate must not narrow to thread|chat_thread alone:
+      // under 'single' the live routing key is `<channel>:__single__`, so a
+      // persisted three-part user-era key is just as unroutable there.
+      const removeSessionId = vi.fn(() => true);
+      const router = {
+        getAll: () => [
+          {
+            key: 'test-bot:user-1:chat-1',
+            sessionId: 'user-era-1',
+            target: {
+              channelName: 'test-bot',
+              senderId: 'user-1',
+              chatId: 'chat-1',
+            },
+          },
+        ],
+        removeSessionId,
+      };
+      const ch = makeChannelWithRouter(router, {
+        sessionScope,
+        purgeLegacySessions: true,
+      });
+      callPurge(ch);
+      expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    },
+  );
+
+  it('leaves single-scope routes alone when sessionScope is unrecognized', () => {
+    // The other half of the fail-closed gate: with an unrecognized scope we
+    // cannot know the routing shape at all, so even a `__single__` key that a
+    // typo scope makes unreachable must be left for the operator to fix rather
+    // than purged on a guess about which keys a scope would build.
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-shaped',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'threads',
+      purgeLegacySessions: true,
+    });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
+    // restoreSessions() re-attaches orphaned sessions via bridge.loadSession;
+    // removeSessionId alone only clears the router maps, leaving the orphan
+    // alive in the daemon until the process ends. The purge must also
+    // discard the daemon-side session.
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(discardSession).toHaveBeenCalledTimes(1);
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+  });
+
+  it("purges this channel's unroutable user-scope legacy keys under thread scope, sparing a sibling channel", () => {
+    const removeSessionId = vi.fn(() => true);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = {
+      getAll: () => [
+        // User-scope key of THIS channel under thread scope: purged — under
+        // thread scope the routing key is `channel:chatId`, so the key can
+        // never resolve again and only inflates the persisted file (and
+        // loadSession's 32-session cap) forever.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'thread-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+        // Legacy single-scope orphan.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live user-scope route: the owned-by-name guard
+        // must keep it — the key shape alone is not enough to call it an
+        // orphan.
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+        // A sibling whose channel NAME has ours as a prefix: the ownership
+        // check compares channelName exactly, so a prefix match must not
+        // claim this route.
+        {
+          key: 'test-bot-2:user-9:chat-9',
+          sessionId: 'prefix-sibling-3part',
+          target: {
+            channelName: 'test-bot-2',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+    expect(removeSessionId).not.toHaveBeenCalledWith('prefix-sibling-3part');
+    // Both purged entries also release their daemon-side sessions.
+    expect(discardSession).toHaveBeenCalledTimes(2);
+    expect(discardSession).toHaveBeenCalledWith('user-scope-1');
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
+  });
+
+  it('classifies legacy user keys by the router key, not by colon count', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // Live thread-scope route of a channel whose NAME contains a colon:
+        // `qq:prod` + `:GROUP1`. The key has three colon-separated parts, but
+        // it is not the string the router builds for 'user' scope, so it must
+        // survive a cold start.
+        {
+          key: 'qq:prod:GROUP1',
+          sessionId: 'live-thread-1',
+          target: { channelName: 'qq:prod', senderId: 'u1', chatId: 'GROUP1' },
+        },
+        // A real legacy user-scope key of the same channel: exactly
+        // `${channelName}:${senderId}:${chatId}` — four parts, because the
+        // channel name itself has a colon.
+        {
+          key: 'qq:prod:sender:chat',
+          sessionId: 'legacy-user-1',
+          target: {
+            channelName: 'qq:prod',
+            senderId: 'sender',
+            chatId: 'chat',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'qq:prod',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      {} as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('legacy-user-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-thread-1');
+  });
+
+  it('keeps user-scope 3-part keys when sessionScope is user (live routing state)', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'live-user-session',
+          // Complete target: under 'user' scope this key is exactly what the
+          // router builds, so only the scope guard keeps it alive — an
+          // incomplete target would save it for the wrong reason.
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Under 'user' scope the single-era `channel:__single__` key is
+        // still dead weight: the single-scope router re-keys the global
+        // session as `channel:__single__`, which the user-scope router can
+        // never route to again — so it is purged even though the 3-part key
+        // above is live (thread 61).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'user',
+      purgeLegacySessions: true,
+    });
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-user-session');
+  });
+
+  it('is a safe no-op when bridge.discardSession rejects or throws', () => {
+    const discardSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('daemon error'))
+      .mockImplementationOnce(() => {
+        throw new Error('sync daemon error');
+      });
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:__single__', sessionId: 'single-era-2' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    // Neither an async rejection nor a synchronous throw aborts the purge.
+    expect(() => callPurge(ch)).not.toThrow();
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+  });
+
+  it('is a safe no-op when the router throws during purge', () => {
+    const ch = makeChannelWithRouter({
+      getAll: () => {
+        throw new Error('router unavailable');
+      },
+    });
+    expect(() => callPurge(ch)).not.toThrow();
+  });
+
+  it('is a safe no-op when getAll returns nothing', () => {
+    const removeSessionId = vi.fn();
+    const ch = makeChannelWithRouter({ getAll: () => [], removeSessionId });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live __single__ key under explicit single scope (not an orphan)', () => {
+    const removeSessionId = vi.fn();
+    const router = {
+      getAll: () => [
+        // Under 'single' scope, `channel:__single__` IS the live routing key —
+        // purging it would silently reset the user's global session on restart.
+        { key: 'test-bot:__single__', sessionId: 'live-session' },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'single',
+      purgeLegacySessions: true,
+    });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it("purges this channel's unroutable user-scope key under explicit single scope, keeping its live __single__ key", () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // The live single-scope routing key — kept.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'live-single',
+          target: { channelName: 'test-bot' },
+        },
+        // Under 'single' scope the routing key is `channel:__single__`, so a
+        // user-scope key can never resolve: this channel's own legacy entry
+        // is purged even under the explicit single scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // A sibling channel's user-scope key is never touched.
+        {
+          key: 'other-bot:u9:c9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'u9',
+            chatId: 'c9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'single',
+      purgeLegacySessions: true,
+    });
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-single');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+  });
+
+  it('deletes nothing when the rescue copy cannot be written (fail closed)', () => {
+    vi.mocked(writeFileSync).mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(
+      router,
+      { purgeLegacySessions: true },
+      { discardSession },
+    );
+    // A deletion that cannot be rescued first is not recoverable by hand, so
+    // the purge must abandon it rather than proceed.
+    expect(() => callPurge(ch)).not.toThrow();
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+    expect(logged).toContain('leaving 1 session route(s) in place');
+    expect(logged).toContain('disk full');
+    expect(logged).not.toContain('Saved ');
+    expect(logged).not.toContain('Purged ');
+  });
+
+  it('appends a second purge record instead of truncating the first', () => {
+    // A real purge deletes the routes it records, so a later run always sees a
+    // different doomed set; the earlier record is then the only copy of routes
+    // that are already gone and must survive the new write.
+    const files = new Map<string, string>();
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const runPurge = (
+      sender: string,
+      chat: string,
+      sessionId: string,
+    ): void => {
+      const removeSessionId = vi.fn(() => true);
+      const router = {
+        getAll: () => [
+          {
+            key: `test-bot:${sender}:${chat}`,
+            sessionId,
+            target: {
+              channelName: 'test-bot',
+              senderId: sender,
+              chatId: chat,
+            },
+          },
+        ],
+        removeSessionId,
+      };
+      callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+      expect(removeSessionId).toHaveBeenCalledWith(sessionId);
+    };
+    runPurge('u1', 'c1', 'user-era-1');
+    runPurge('u2', 'c2', 'user-era-2');
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(2);
+    expect(records[0].routes[0].sessionId).toBe('user-era-1');
+    expect(records[1].routes[0].sessionId).toBe('user-era-2');
+  });
+
+  it('keeps the earlier records when a torn rescue write fails mid-way', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const earlier = [
+      {
+        purgedAt: '2024-01-01T00:00:00.000Z',
+        sessionScope: 'thread',
+        routes: [{ kind: 'user', sessionId: 'already-gone' }],
+      },
+    ];
+    const files = new Map<string, string>([[target, JSON.stringify(earlier)]]);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    // A write that reaches the kernel and then fails (ENOSPC/EIO, a kill
+    // mid-write) has already truncated whatever it was about to replace. The
+    // real path must never be the target of that write.
+    vi.mocked(writeFileSync).mockImplementation(((path: unknown) => {
+      files.set(String(path), '');
+      throw new Error('no space left on device');
+    }) as typeof writeFileSync);
+
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession },
+      ),
+    );
+
+    // Fail closed: nothing was rescue-copied, so nothing is deleted.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+    // The only copy of the routes a previous purge already deleted survived.
+    expect(JSON.parse(files.get(target) as string)).toEqual(earlier);
+  });
+
+  it('removes the sibling temp file when the rescue write fails', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const tmp = `${target}.tmp`;
+    const earlier = [
+      {
+        purgedAt: '2024-01-01T00:00:00.000Z',
+        sessionScope: 'thread',
+        routes: [{ kind: 'user', sessionId: 'already-gone' }],
+      },
+    ];
+    const files = new Map<string, string>([[target, JSON.stringify(earlier)]]);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    // The sibling is created and then the write fails, leaving a zero/partial
+    // file behind on a real filesystem (the kernel witness: EFBIG).
+    vi.mocked(writeFileSync).mockImplementation(((path: unknown) => {
+      files.set(String(path), '');
+      throw new Error('file too large');
+    }) as typeof writeFileSync);
+    vi.mocked(unlinkSync).mockImplementation(((path: unknown) => {
+      files.delete(String(path));
+    }) as typeof unlinkSync);
+
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    // Fail closed, and leave no `.tmp` garbage behind.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(files.has(tmp)).toBe(false);
+    expect(files.get(target)).toBe(JSON.stringify(earlier));
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+  });
+
+  it('quarantines an unreadable rescue file instead of overwriting it', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const files = new Map<string, string>([[target, '{"truncated":']]);
+    const moves: Array<[string, string]> = [];
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      moves.push([String(from), String(to)]);
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
+
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const quarantine = moves.find(([from]) => from === target);
+    expect(quarantine?.[1]).toMatch(/\.corrupt-\d+$/);
+    expect(files.get(quarantine![1])).toBe('{"truncated":');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'quarantined to',
+    );
+    // The new record still lands on the real path, and the deletion proceeds.
+    expect(JSON.parse(files.get(target) as string)).toHaveLength(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+  });
+
+  it('keeps a legacy single-object rescue record instead of discarding it', () => {
+    // An earlier build wrote the record as a bare object. It is the only copy
+    // of routes that purge already deleted, so a later purge must carry it into
+    // the new records list rather than replace the file with the new record.
+    const legacy = {
+      purgedAt: '2024-01-01T00:00:00.000Z',
+      sessionScope: 'thread',
+      routes: [{ kind: 'user', key: 'test-bot:u0:c0', sessionId: 'legacy-1' }],
+    };
+    const files = new Map<string, string>([
+      [
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+        JSON.stringify(legacy),
+      ],
+    ]);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(2);
+    expect(records[0].routes[0].sessionId).toBe('legacy-1');
+    expect(records[1].routes[0].sessionId).toBe('user-era-1');
+  });
+
+  it('caps the rescue file at MAX_PURGE_RECORDS, dropping the oldest record', () => {
+    const cap = (QQChannel as unknown as { MAX_PURGE_RECORDS: number })
+      .MAX_PURGE_RECORDS;
+    // Seed exactly at the cap: the next purge appends one more, so the oldest
+    // record must roll off and the new record must survive as the last entry.
+    const prior = Array.from({ length: cap }, (_v, i) => ({
+      purgedAt: new Date(i).toISOString(),
+      sessionScope: 'thread',
+      routes: [{ kind: 'user', sessionId: `prior-${i}` }],
+    }));
+    const files = new Map<string, string>([
+      [
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+        JSON.stringify(prior),
+      ],
+    ]);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(cap);
+    expect(records[0].routes[0].sessionId).toBe('prior-1');
+    expect(records.at(-1)!.routes[0].sessionId).toBe('user-era-1');
+    expect(records.some((r) => r.routes[0].sessionId === 'prior-0')).toBe(
+      false,
+    );
   });
 });
 
@@ -1201,6 +2817,13 @@ describe('sendMessage', () => {
       replyMsgId: 'msg-old',
       replyMsgIdTimestamp: Date.now() - 300_001,
     });
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    // Seed the counter so the cleanup below is observable: with no session
+    // anchored to msg-old, the expired-entry path must purge the orphaned
+    // seq (previously the map never held this key, so `has === false` was a
+    // vacuous pass).
+    seqMap.set('msg-old', 5);
 
     await ch.sendMessage('test-chat-id', 'hello');
 
@@ -1215,11 +2838,50 @@ describe('sendMessage', () => {
     expect(body['msg_id']).toBeUndefined();
     expect(body['msg_seq']).toBeUndefined();
     // Verify expired entries were cleaned from maps
-    const chp = ch as unknown as Record<string, unknown>;
     const replyMap = chp['replyMsgId'] as Map<string, unknown>;
-    const seqMap = chp['msgSeqMap'] as Map<string, unknown>;
     expect(replyMap.has('test-chat-id')).toBe(false);
     expect(seqMap.has('msg-old')).toBe(false);
+  });
+
+  it('keeps msg_seq of an expired chat entry that is still session-anchored (sendMessage)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat-level entry for msg-OLD has expired past the TTL, but a
+    // session is still streaming under msg-OLD (fresh anchor). The
+    // expired-entry path must evict the chat entry yet keep the msg_seq
+    // counter alive so the tail send does not reset the sequence.
+    sessionAnchors.set('sess-A', { msgId: 'msg-OLD', timestamp: Date.now() });
+    replyMap.set('test-chat-id', {
+      msgId: 'msg-OLD',
+      timestamp: Date.now() - ttl - 1,
+    });
+    seqMap.set('msg-OLD', 3);
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // Anchored msg_seq survives (isMsgIdAnchoredBySession guard).
+    expect(seqMap.get('msg-OLD')).toBe(3);
+    // The expired chat entry is evicted.
+    expect(replyMap.has('test-chat-id')).toBe(false);
+    // Send went out without a stale msg_id/msg_seq.
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
   });
 
   it('increments msg_seq on consecutive sendMessage calls', async () => {
@@ -1412,6 +3074,46 @@ describe('sendMessage', () => {
     saveSpy.mockRestore();
   });
 
+  it('does not roll back a seq a concurrent send consumed before a 429', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-429-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      // A sibling session anchored to the same msgId consumed a seq while this
+      // markdown attempt was in flight.
+      msgSeqMap.set('msg-429-race', 5);
+      return mockResponse(false, 429);
+    });
+
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
+
+    // The rollback is conditional: an unconditional one would forget the seq
+    // the sibling accepted and later sends would replay a deduped pair.
+    expect(msgSeqMap.get('msg-429-race')).toBe(5);
+  });
+
+  it('does not roll back a seq a concurrent send consumed before a markdown fallback', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-fb-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-fb-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      msgSeqMap.set('msg-fb-race', 7);
+      return mockResponse(false, 500);
+    });
+    // The active-markdown retry (no msg_id) succeeds.
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(msgSeqMap.get('msg-fb-race')).toBe(7);
+  });
+
   it('stops silently at 429 when no replyMsgId is set', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
 
@@ -1602,7 +3304,7 @@ describe('lifecycle status hooks', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+  it('sets the reply anchor at prompt start and releases it at prompt end', () => {
     const ch = makeChannel();
     const chp = ch as unknown as {
       onPromptStart: (
@@ -1616,11 +3318,26 @@ describe('lifecycle status hooks', () => {
         messageId?: string,
       ) => void;
     };
+    const sessionAnchors = (ch as unknown as Record<string, unknown>)[
+      'sessionReplyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
 
     expect(() => {
+      // Inbound turn: anchor to the triggering message's id.
       chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
-      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
     }).not.toThrow();
+    expect(sessionAnchors.get('session-1')!.msgId).toBe('msg-1');
+
+    // Proactive turn (loop/webhook/cron): no messageId → clear the anchor.
+    chp.onPromptStart('test-chat-id', 'session-1');
+    expect(sessionAnchors.has('session-1')).toBe(false);
+
+    expect(() => {
+      // onPromptEnd releases the anchor.
+      chp.onPromptStart('test-chat-id', 'session-2', 'msg-2');
+      chp.onPromptEnd('test-chat-id', 'session-2', 'msg-2');
+    }).not.toThrow();
+    expect(sessionAnchors.has('session-2')).toBe(false);
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
@@ -1644,6 +3361,36 @@ describe('lifecycle status hooks', () => {
     }).not.toThrow();
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('releaseSessionReplyAnchor keeps msg_seq while another session is anchored to the same msgId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const release = (
+      chp['releaseSessionReplyAnchor'] as (
+        sessionId: string,
+        expectedMsgId?: string,
+      ) => void
+    ).bind(ch);
+    const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+      chp,
+      ['sess-A', 'sess-B'],
+      'msg-X',
+      4,
+    );
+
+    // Releasing one must NOT purge the seq — the other session still needs it
+    // (isMsgIdAnchoredBySession guard).
+    release('sess-A', 'msg-X');
+    expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(sessionAnchors.has('sess-B')).toBe(true);
+    expect(seqMap.get('msg-X')).toBe(4);
+
+    // Releasing the LAST session anchored to msg-X orphans it: the seq is
+    // finally purged.
+    release('sess-B', 'msg-X');
+    expect(sessionAnchors.has('sess-B')).toBe(false);
+    expect(seqMap.has('msg-X')).toBe(false);
   });
 });
 
@@ -2254,6 +4001,245 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
+  it('keeps msg_seq of an expired replyMsgId that is still session-anchored', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat entry for msg-A expired past the TTL, but a session is still
+    // streaming under msg-A: cleanup must evict the chat entry yet keep the
+    // msg_seq counter alive so the tail send doesn't reset the sequence.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: Date.now() });
+    replyMsgId.set('test-chat', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - ttl - 1000,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // The expired chat entry is gone, but the anchored msg_seq survives.
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
+  it('reclaims a msg_seq counter orphaned by a vetoed release on the next tick', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<
+      string,
+      {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn: number;
+      }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    const stale = Date.now() - ttl - 1000;
+
+    // Both naming entries are past the TTL, but the stream entry still holds a
+    // residual, so the sweep's release is vetoed: the session anchor entry
+    // disappears while the counter survives with nothing left to name it.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: stale });
+    replyMsgId.set('test-chat', { msgId: 'msg-A', timestamp: stale });
+    streamState.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: 'T1-resid',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-A',
+      turn: 1,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Tick 1: the naming entries are gone and the live residual legitimately
+    // keeps the counter.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    // The last holder disappears. No naming entry is left that could reach the
+    // counter — the orphan shape this reclaim exists for.
+    streamState.delete('sess-1');
+
+    // Tick 2: the sweep iterates the counter map itself, so the orphan is
+    // visited and reclaimed.
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-A')).toBe(false);
+
+    ch.disconnect();
+  });
+
+  it('keeps a msg_seq counter named only by replyContextByMessageId', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyContexts = chp['replyContextByMessageId'] as Map<
+      string,
+      { chatId: string; msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // The chat anchor has moved on to a newer message, and there is no session
+    // anchor, stream entry or in-flight send. But the routing map still names
+    // msg-A (fresh, so the sweep's TTL loop keeps it), and a send resolves its
+    // outgoing msg_id out of that map — so its counter still has a holder.
+    replyMsgId.set('test-chat', { msgId: 'msg-NEW', timestamp: Date.now() });
+    replyContexts.set('msg-A', {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    expect(sessionAnchors.size).toBe(0);
+    expect(streamState.size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Without the routing-map holder the orphan pass reclaims msg-A on this
+    // tick, and a send resumed under it restarts msg_seq at 1 — colliding with
+    // an already-accepted (msg-A, 1) that QQ dedupes and silently drops.
+    expect(replyContexts.has('msg-A')).toBe(true);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
+  it('reclaims the group reply entry counter immediately when nothing else holds it', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    vi.spyOn(ch, 'onSessionDied').mockImplementation(() => {});
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    expect(replyMsgId.has(groupId)).toBe(false);
+    // The entry was the last holder: the reclaim now runs after it is removed,
+    // so the counter is dropped without waiting for the next sweep tick.
+    expect(msgSeqMap.has('msg-X')).toBe(false);
+  });
+
+  it('reclaims a msg_seq counter orphaned by group removal on the next tick', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    const state = {
+      chatId: groupId,
+      buffer: '',
+      timer: null as ReturnType<typeof setTimeout> | null,
+      retryCount: 0,
+      msgId: 'msg-X',
+      turn: 1,
+    };
+    streamState.set('sess-1', state);
+    // A genuine in-flight send owns the counter: it is what vetoes the release
+    // the teardown performs before destroying the entry.
+    flushingSessions.set('sess-1', state);
+    sessionAnchors.set('sess-1', { msgId: 'msg-X', timestamp: Date.now() });
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    // The mock ChannelBase has no onSessionDied; it is irrelevant here anyway
+    // (the entry is already destroyed), so stub it out to isolate the
+    // group-removal teardown under test.
+    const onSessionDiedSpy = vi
+      .spyOn(ch, 'onSessionDied')
+      .mockImplementation(() => {});
+
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    // Every holder is destroyed, but the release ran first and was vetoed by
+    // the in-flight marker, and the naming entries are gone — so the counter
+    // is orphaned with nothing left that could name it.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(streamState.has('sess-1')).toBe(false);
+    expect(flushingSessions.has('sess-1')).toBe(false);
+    expect(replyMsgId.has(groupId)).toBe(false);
+    expect(msgSeqMap.get('msg-X')).toBe(2);
+
+    // One tick of the safety net reclaims it.
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-X')).toBe(false);
+
+    onSessionDiedSpy.mockRestore();
+    ch.disconnect();
+  });
+
   it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
@@ -2306,6 +4292,14 @@ describe('replyMsgId cleanup timer', () => {
   // ---------------------------------------------------------------------------
   // flushAndTrack transient vs permanent error handling
   // ---------------------------------------------------------------------------
+  // PORT NOTE (main + PR #8241 merge): on main, `flushAndTrack` delivers
+  // through the private `sendMessageWithReplyContext(chatId, text,
+  // replyContext, sourceLabel, msgIdOverride)` — the PR was written when
+  // `sendMessage` was still the delivery point, so these spies originally
+  // targeted `sendMessage` and never intercepted the send (main's own copies
+  // of the tests were correspondingly weak and only asserted "state kept").
+  // The spy target below is the only change; every assertion is the PR's.
+  // ---------------------------------------------------------------------------
   describe('flushAndTrack transient errors', () => {
     function makeChannelForFlush(): QQChannelInstance {
       const ch = new QQChannel(
@@ -2334,7 +4328,12 @@ describe('replyMsgId cleanup timer', () => {
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        // Distinct seed text so the re-buffer ORDER is observable: the
+        // failed send's text must come FIRST, the concurrently accumulated
+        // buffer SECOND (current.buffer = buffer + (current.buffer || '')).
+        // A reversed implementation would produce 'accumulatedflushed-text'
+        // and fail this gate (thread 69).
+        buffer: 'accumulated',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2349,15 +4348,13 @@ describe('replyMsgId cleanup timer', () => {
       >;
       streamState.set('session-1', state);
 
-      // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      // Spy on sendMessageWithReplyContext to throw RATE_LIMITED
+      vi.spyOn(
+        QQChannel.prototype as unknown as {
+          sendMessageWithReplyContext: () => Promise<void>;
+        },
+        'sendMessageWithReplyContext',
+      ).mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
 
       // Call flushAndTrack
       (
@@ -2367,144 +4364,369 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('session-1', 'flushed-text', state, 'test');
 
-      // Drain microtask queue so the .catch() handler runs
-      // (must NOT advance timers — that would fire the retry setTimeout)
-      await Promise.resolve();
+      // Drain the full microtask chain so the .catch() handler actually runs
+      // before asserting. A single `await Promise.resolve()` is NOT enough —
+      // the rejected sendMessage promise needs several microtask hops
+      // (P → .then → .catch → .finally) to settle, and one await resumes the
+      // test before the catch handler has executed. advanceTimersByTimeAsync
+      // flushes the microtask queue (advancing 0ms does NOT fire the retry
+      // setTimeout).
+      await vi.advanceTimersByTimeAsync(0);
 
-      // RATE_LIMITED is transient — streamState should keep the entry
+      // RATE_LIMITED is transient — the entry stays, the buffer is re-buffered
+      // and a retry timer is armed.
       expect(streamState.has('session-1')).toBe(true);
+      // catch re-buffered: current.buffer = buffer + (current.buffer || '')
+      expect(state.buffer).toBe('flushed-textaccumulated');
+      // retryCount incremented by the re-buffer path
+      expect(state.retryCount).toBe(1);
+      // retry timer armed (IDLE_FLUSH_MS) — 0ms advance must not have fired it
+      expect(state.timer).not.toBeNull();
 
-      sendSpy.mockRestore();
       vi.useRealTimers();
     });
 
     describe('flushAndTrack permanent errors', () => {
-      function makeChannelForPerm(): QQChannelInstance {
-        const ch = new QQChannel(
-          'test-bot',
-          {
-            type: 'qq',
-            token: '',
-            senderPolicy: 'open' as const,
-            allowedUsers: [],
-            sessionScope: 'user' as const,
-            cwd: '/tmp',
-            groupPolicy: 'disabled' as const,
-            groups: {},
-            appID: 'test-app-id',
-            appSecret: 'test-secret',
-          },
-          {} as unknown as ChannelAgentBridge,
-        );
-        return ch;
+      type PermFailureState = {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn?: number;
+      };
+
+      /**
+       * Seed the streamState entry a terminal flush failure reads, plus the
+       * per-session reply anchor and msg_seq counter that name it — the anchor
+       * onPromptStart sets from the triggering message's id. `buffer` is
+       * pre-filled because chunks can accumulate between the caller's clear
+       * and the send's completion. No chat-level replyMsgId entry points at
+       * the anchor, so releasing the session must cascade: session anchor
+       * dropped + orphaned seq purged (persisted via saveQQState).
+       * `anchorMsgId` may differ from `msgId` to model a successor turn's
+       * anchor that a flush without its own anchor must keep.
+       */
+      function seedPermFailure(
+        chp: Record<string, unknown>,
+        opts: {
+          sessionId: string;
+          msgId?: string;
+          anchorMsgId?: string;
+          seq?: number;
+          turn?: number;
+        },
+      ): {
+        state: PermFailureState;
+        streamState: Map<string, PermFailureState>;
+        sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+        seqMap: Map<string, number>;
+      } {
+        const state: PermFailureState = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null,
+          retryCount: 0,
+          msgId: opts.msgId,
+        };
+        if (opts.turn !== undefined) state.turn = opts.turn;
+        const streamState = chp['streamState'] as Map<string, PermFailureState>;
+        streamState.set(opts.sessionId, state);
+
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        const anchorMsgId = opts.anchorMsgId ?? opts.msgId;
+        if (anchorMsgId !== undefined) {
+          sessionAnchors.set(opts.sessionId, {
+            msgId: anchorMsgId,
+            timestamp: Date.now(),
+          });
+          seqMap.set(anchorMsgId, opts.seq ?? 4);
+        }
+        return { state, streamState, sessionAnchors, seqMap };
       }
 
-      it('keeps streamState on RETRY_EXHAUSTED when buffer has concurrent chunks', async () => {
-        vi.useFakeTimers();
-        const ch = makeChannelForPerm();
-        const chp = ch as unknown as Record<string, unknown>;
+      /** Arm the flush's delivery to reject with `code` and no retry. */
+      function rejectFlush(code: string, message: string): void {
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(new DeliveryError(code, message));
+      }
 
-        const state = {
-          chatId: 'test-chat-id',
-          // Set buffer to simulate concurrent chunks arriving during the in-flight send.
-          // Production code clears state.buffer before calling flushAndTrack, but new chunks
-          // can accumulate in state.buffer between the clear and the send's completion.
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-          }
-        >;
-        streamState.set('session-perm', state);
-
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-          );
-
+      /**
+       * Run `flushAndTrack` for a seeded session and drain the full microtask
+       * chain so the .catch() handler runs — a single await
+       * Promise.resolve() resumes the test before the catch executes.
+       */
+      async function runFlush(
+        chp: Record<string, unknown>,
+        sessionId: string,
+        state: PermFailureState,
+      ): Promise<void> {
         (
           chp['flushAndTrack'] as (
             sessionId: string,
             buffer: string,
-            state: typeof state,
+            state: PermFailureState,
             logLabel: string,
           ) => void
-        )('session-perm', 'test buffer', state, 'test');
+        )(sessionId, 'test buffer', state, 'test');
+        await vi.advanceTimersByTimeAsync(0);
+      }
 
-        await Promise.resolve();
+      it('deletes streamState and releases anchor on RETRY_EXHAUSTED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-perm', msgId: 'msg-X' },
+        );
 
-        expect(streamState.has('session-perm')).toBe(true);
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
 
-        sendSpy.mockRestore();
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-perm', state);
+
+        // RETRY_EXHAUSTED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter — whose
+        // removal is persisted (saveQQState must have been called).
+        expect(streamState.has('session-perm')).toBe(false);
+        expect(sessionAnchors.has('session-perm')).toBe(false);
+        expect(seqMap.has('msg-X')).toBe(false);
+        expect(saveSpy).toHaveBeenCalled();
+
         vi.useRealTimers();
       });
 
-      it('keeps streamState on ACTIVE_MSG_DISABLED (permanent error)', async () => {
+      it('reports the residual buffered during a permanent failure, not just the payload', async () => {
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-residual',
+          msgId: 'msg-R',
+        });
+        // A chunk arrived while the send was in flight: it sits in
+        // state.buffer, is dropped with the entry, and must be counted in the
+        // loss log — the failed payload alone under-reports what is lost.
+        state.buffer = 'stale-tail';
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
 
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-          }
-        >;
-        streamState.set('session-ads', state);
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-residual', state);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError(
-              'ACTIVE_MSG_DISABLED',
-              'active messages disabled',
-            ),
-          );
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropping 11 chars');
+        expect(logged).toContain('plus 10 chars buffered in flight');
 
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('reports only the in-flight text beyond the residual a boundary already sealed', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-sealed-residual',
+          msgId: 'msg-SR',
+          turn: 1,
+        });
+        // captureBoundaryClear only seals the residual of the turn that owns
+        // the counter, so the entry and the counter must agree.
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        turnCounter.set('session-sealed-residual', 1);
+        // Keep the handoff on its stash write instead of a live delivery.
+        const activePromptSessions = chp['activePromptSessions'] as Set<string>;
+        activePromptSessions.add('session-sealed-residual');
+
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        state.buffer = 'stale-tail';
         (
           chp['flushAndTrack'] as (
             sessionId: string,
             buffer: string,
-            state: typeof state,
+            state: PermFailureState,
             logLabel: string,
           ) => void
-        )('session-ads', 'test buffer', state, 'test');
+        )('session-sealed-residual', 'test buffer', state, 'test');
+        // A boundary clears the bridge's collection while the send is in
+        // flight: the live turn's residual is copied into sealedPre and the
+        // flight is flagged 'residual'. 'EXTRA' then arrives after the capture.
+        (chp['captureBoundaryClear'] as (sessionId: string) => void)(
+          'session-sealed-residual',
+        );
+        state.buffer += 'EXTRA';
+        await vi.advanceTimersByTimeAsync(0);
 
-        await Promise.resolve();
+        // The captured 10-char head ('stale-tail') is folded into the handoff
+        // seal and delivered separately, so it is not dropped here: only the 5
+        // chars that arrived after the capture are (15 in the buffer - 10
+        // preserved). Counting the whole buffer would report those 10 twice.
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropping 11 chars');
+        expect(logged).toContain('plus 5 chars buffered in flight');
+        expect(logged).not.toContain('plus 15 chars buffered in flight');
 
-        expect(streamState.has('session-ads')).toBe(true);
-
-        sendSpy.mockRestore();
+        stderrSpy.mockRestore();
         vi.useRealTimers();
+      });
+
+      it('clears pending-cleanup flags on RETRY_EXHAUSTED (permanent-catch teardown)', async () => {
+        // A dead-session tail chain (pendingStreamDelete + flushedSessions +
+        // turnCounter parked) that hits a permanent failure must be torn
+        // down entirely by the catch branch — onResponseComplete/onPromptEnd
+        // would otherwise have cleaned these, but the permanent failure
+        // settles the turn without them (thread 53).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-pc', msgId: 'msg-P', turn: 1 },
+        );
+
+        const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+        const flushedSessions = chp['flushedSessions'] as Set<string>;
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        pendingStreamDelete.add('session-pc');
+        flushedSessions.add('session-pc');
+        turnCounter.set('session-pc', 1);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-pc', state);
+
+        // The permanent-catch branch deletes the stream entry, clears the
+        // pending-delete flag, and drops the deferred turn's flushedSessions
+        // + turnCounter records.
+        expect(streamState.has('session-pc')).toBe(false);
+        expect(pendingStreamDelete.has('session-pc')).toBe(false);
+        expect(flushedSessions.has('session-pc')).toBe(false);
+        expect(turnCounter.has('session-pc')).toBe(false);
+        // The anchor + orphaned seq are released/cascaded as usual.
+        expect(sessionAnchors.has('session-pc')).toBe(false);
+        expect(seqMap.has('msg-P')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('keeps the successor anchor when the failed flush had no own msgId', async () => {
+        // A flush started without a per-session reply anchor (msgId
+        // undefined, e.g. a proactive turn) that fails permanently must NOT
+        // release — the release path is guarded on state.msgId, and an
+        // unconditional release here would delete the successor turn's
+        // anchor (thread 54).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-guard', anchorMsgId: 'msg-B', seq: 1, turn: 1 },
+        );
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-guard', state);
+
+        // The failed flush's stream entry is dropped...
+        expect(streamState.has('session-guard')).toBe(false);
+        // ...but the successor's anchor and its seq survive untouched.
+        expect(sessionAnchors.get('session-guard')!.msgId).toBe('msg-B');
+        expect(seqMap.get('msg-B')).toBe(1);
+
+        vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on ACTIVE_MSG_DISABLED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-ads', msgId: 'msg-Y' },
+        );
+
+        rejectFlush('ACTIVE_MSG_DISABLED', 'active messages disabled');
+        await runFlush(chp, 'session-ads', state);
+
+        // ACTIVE_MSG_DISABLED is permanent: the entry is dropped and the
+        // reply anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-ads')).toBe(false);
+        expect(sessionAnchors.has('session-ads')).toBe(false);
+        expect(seqMap.has('msg-Y')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on FALLBACK_FAILED', async () => {
+        // FALLBACK_FAILED is the passive-markdown → active-message fallback
+        // exhaustion: permanent, same teardown as RETRY_EXHAUSTED (thread
+        // 67 — this code path previously had zero coverage).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-fb', msgId: 'msg-Z' },
+        );
+
+        rejectFlush('FALLBACK_FAILED', 'passive fallback failed');
+        await runFlush(chp, 'session-fb', state);
+
+        // FALLBACK_FAILED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-fb')).toBe(false);
+        expect(sessionAnchors.has('session-fb')).toBe(false);
+        expect(seqMap.has('msg-Z')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('does not call saveQQState when another session still anchors the released msgId', () => {
+        // The release cascade is what persists (msgSeqMap.delete → saveQQState);
+        // when a sibling session still anchors the same msgId the counter is
+        // kept and nothing must be written (thread 52 keep-scenario gate).
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+          chp,
+          ['s-1', 's-2'],
+          'msg-K',
+          3,
+        );
+
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        (chp['releaseSessionReplyAnchor'] as (sessionId: string) => void)(
+          's-1',
+        );
+
+        // s-1's own anchor is released, but msg-K is still live (s-2 holds
+        // it), so its seq counter survives — and no state write happens.
+        expect(sessionAnchors.has('s-1')).toBe(false);
+        expect(sessionAnchors.get('s-2')!.msgId).toBe('msg-K');
+        expect(seqMap.get('msg-K')).toBe(3);
+        expect(saveSpy).not.toHaveBeenCalled();
       });
     });
   });
@@ -2680,5 +4902,330 @@ describe('replyMsgId cleanup timer', () => {
       const parsed = JSON.parse(sentPayload!);
       expect(parsed.op).toBe(2); // IDENTIFY (no sessionId to resume)
     });
+  });
+});
+
+// deliverCancelledStash's text has no second copy — onPromptEnd deletes its
+// stash (and handOffSealedPre clears sealedPre) before the call. But
+// sendMessageWithReplyContext returns normally without sending when
+// resolveRoute yields null (token refresh failure, empty token, chat type
+// cleared), so "no exception" cannot mean "delivered": a transient class the
+// loop cannot see would otherwise drop the text with no retry and no drop log.
+describe('a null route is not a delivered stash', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  const drain = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
+    mockFetchGatewayUrl.mockResolvedValue('wss://gateway.qq.test/ws');
+    vi.useFakeTimers();
+  });
+
+  it('re-attempts a cancelled stash whose first route resolution fails', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    // Expired token: resolveRoute refreshes it, and the first refresh fails
+    // with the transient class resolveRoute turns into a null route.
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    mockFetchAccessToken.mockRejectedValueOnce(new Error('network blip'));
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // Nothing reached the wire, so the anchor must NOT have been released.
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+
+    // The retry window re-attempts, resolves a route, and sends.
+    await vi.advanceTimersByTimeAsync(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body['markdown'] as Record<string, string>)['content']).toBe(
+      'STASH',
+    );
+    expect(body['msg_id']).toBe('msg-A');
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('resolves the route once, so no stale probe can drop the stash', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    // Count the resolutions the send path performs: it must consult the route
+    // exactly once, so the route it reports on is the one it sends with. A
+    // pre-probe would resolve twice and could go stale in between.
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('holds the msg seq counter while a send waits on a token refresh', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const inFlight = chp['inFlightMsgSeqSends'] as Map<string, number>;
+
+    // The token refresh hangs: the send is suspended inside resolveRoute, after
+    // the in-flight marker was taken, so the counter cannot be reclaimed while
+    // it is in the air.
+    let releaseToken!: (v: { accessToken: string; expiresIn: number }) => void;
+    mockFetchAccessToken.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseToken = resolve;
+      }),
+    );
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect([...inFlight.entries()]).toEqual([['msg-A', 1]]);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    releaseToken({ accessToken: 'refreshed-token', expiresIn: 7200 });
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(inFlight.size).toBe(0);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('drops a route that can never resolve instead of retrying it forever', async () => {
+    // The chat type IS known (chatTypes), so the disposed guard is the only
+    // reason resolveRoute classifies the route permanent. Without it the guard
+    // falls through to a usable route and the stash is delivered; the
+    // no-chat-type guard would otherwise give the same permanent class and
+    // hide the branch this test names.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    chp['disposed'] = true;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // `maxFlushRetries: 0` is documented as unlimited, but a permanently
+    // unavailable route cannot become sendable: 10 minutes of backoff windows.
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a mis-typed chatType once instead of retrying it forever', async () => {
+    // resolveRoute accepts only 'group' | 'c2c'; nothing validates chatTypes at
+    // runtime, so a truthy-but-bogus value must classify as permanent.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'bogus' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('delivers once through a valid chatTypes config value', async () => {
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
+  });
+});
+
+describe('disconnect clears routing state', () => {
+  it('clears the chat type map on disconnect', () => {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    const chatTypeMap = chp['chatTypeMap'] as Map<string, string>;
+    chatTypeMap.set('test-chat', 'c2c');
+    expect(chatTypeMap.size).toBe(1);
+
+    ch.disconnect();
+
+    // resetRoutingState drops the routing maps: keeping a stale chat type
+    // would let a later resolveRoute classify a removed chat as deliverable.
+    expect(chatTypeMap.size).toBe(0);
   });
 });

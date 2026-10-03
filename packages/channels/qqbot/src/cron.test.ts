@@ -80,6 +80,17 @@ vi.mock('@qwen-code/channel-base', () => ({
   sanitizeLogText: (text: string, _maxLen: number): string =>
     String(text).slice(0, 200),
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
+  // code-point boundaries, so a pair is never split.
+  truncateUtf16Units: (text: string, max: number): string => {
+    if (text.length <= max) return text;
+    let kept = '';
+    for (const ch of text) {
+      if (kept.length + ch.length > max) break;
+      kept += ch;
+    }
+    return kept;
+  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -746,5 +757,14 @@ describe('prompt/cron textChunk discriminator (#6094)', () => {
 
     const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
     expect(cronBuffer.get('sess-died')?.buffer).toBe('cron after death');
+  });
+});
+
+describe('channel-base test double', () => {
+  it('exports truncateUtf16Units, which QQChannel imports', async () => {
+    const base = await import('@qwen-code/channel-base');
+    expect(
+      typeof (base as { truncateUtf16Units?: unknown }).truncateUtf16Units,
+    ).toBe('function');
   });
 });

@@ -18,6 +18,17 @@ vi.mock('node:fs', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
+  // code-point boundaries, so a pair is never split.
+  truncateUtf16Units: (text: string, max: number): string => {
+    if (text.length <= max) return text;
+    let kept = '';
+    for (const ch of text) {
+      if (kept.length + ch.length > max) break;
+      kept += ch;
+    }
+    return kept;
+  },
 }));
 
 const { getCredsFilePath, loadCredentials, saveCredentials } = await import(
@@ -88,5 +99,14 @@ describe('saveCredentials', () => {
       JSON.stringify({ appId: 'app-id', appSecret: 'app-secret' }),
       { mode: 0o600 },
     );
+  });
+});
+
+describe('channel-base test double', () => {
+  it('exports truncateUtf16Units, which QQChannel imports', async () => {
+    const base = await import('@qwen-code/channel-base');
+    expect(
+      typeof (base as { truncateUtf16Units?: unknown }).truncateUtf16Units,
+    ).toBe('function');
   });
 });
