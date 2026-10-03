@@ -95,6 +95,7 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 ## Prerequisites
 
 - Java 21
+- Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
@@ -597,10 +598,17 @@ artifacts, before enabling the local-process provisioner in a container.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. The optional
-real-MySQL profile also verifies schema upgrade, exact bytes, public
-Item/Snapshot projection, and the independent-JVM Managed Session Store
-crash/takeover path:
+Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
+warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To run the static
+gates without the test suite, use `mvn verify -DskipTests` — it also runs
+Checkstyle and the Spring Boot repackage, and the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
+optional real-MySQL profile also verifies schema upgrade,
+exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+Session Store crash/takeover path:
 
 ```bash
 mvn -Pmysql-integration \
@@ -628,7 +636,8 @@ script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
 starts its own temporary MySQL server and exits before starting anything else
 when a command or a required file is missing.
 
-Build the required artifacts first, then run:
+Build the required artifacts first, then run (the Maven steps need Maven
+3.8.9+ — the SpotBugs gate rides the `verify` phase that `install` traverses):
 
 ```bash
 npm run build && npm run bundle
