@@ -188,6 +188,57 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(response.getHeader("Content-Range")).isNull();
     }
 
+    @Test
+    void revocationInsideTheShippedWindowStillShipsARange() throws Exception {
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.setup();
+        var fixture = source.fixture;
+        var sessions = source.sessions;
+        var stdout = source.stdout;
+        AtomicInteger calls = new AtomicInteger();
+        ManagedArtifactPolicy policy =
+                new ManagedArtifactPolicy() {
+                    public String version() {
+                        return fixture.policy().version();
+                    }
+
+                    public boolean publishOriginal(String t, String w, String s) {
+                        return true;
+                    }
+
+                    public boolean publishPreview(String t, String w, String s) {
+                        return true;
+                    }
+
+                    public boolean readOriginal(String t, String a, String w, String s) {
+                        return calls.incrementAndGet() < 3;
+                    }
+                };
+        // The shipped 5s default is left in place: a Range read is a single
+        // write inside the armed window, so a revocation landing after
+        // admission does not stop the body — the accepted in-window
+        // exposure, pinned so the default's behavior is asserted somewhere.
+        var mvc =
+                mvc(
+                        new ManagedArtifactService(
+                                sessions,
+                                fixture.results(),
+                                fixture.reader(),
+                                policy,
+                                fixture.properties()));
+        var route =
+                ROOT
+                        + "/artifacts/"
+                        + stdout.path("id").asText()
+                        + "/content?revision="
+                        + stdout.path("revision").asText();
+        mvc.perform(asReader(get(route)).header("Range", "bytes=0-2"))
+                .andExpect(status().isPartialContent())
+                .andExpect(content().string("abc"));
+        // Admission plus the first guard; the window covered the rest.
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void midstreamRevocationOrDeletionStopsAfterTheFirstByte(boolean deleteSession)

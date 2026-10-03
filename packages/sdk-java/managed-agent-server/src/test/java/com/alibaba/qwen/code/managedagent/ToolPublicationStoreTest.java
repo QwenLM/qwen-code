@@ -82,7 +82,6 @@ class ToolPublicationStoreTest {
     private ToolPublicationStore store;
     private ObjectNode binding;
     private JsonNode checkpoint;
-    private JsonNode args;
 
     @BeforeEach
     void setup() {
@@ -100,7 +99,6 @@ class ToolPublicationStoreTest {
         store = journal.store;
         binding = journal.binding;
         checkpoint = journal.checkpoint;
-        args = journal.args;
         projectionProperties = new ManagedAgentProperties();
         projectionProperties.getArtifacts().setEnabled(true);
         publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
@@ -1369,6 +1367,101 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("Activation is not active");
     }
 
+    // Ambiguous evidence fails closed on both read paths: two tool.intent
+    // lines sharing one sequence are never silently resolved.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void duplicateIntentLinesAtOneSequenceAreFenced(boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        ObjectNode intentA = JSON.createObjectNode().put("executionCallId", "execution-2")
+                .put("outcomeSource", "runtime");
+        intentA.set("argsRef", binding.get("argsRef"));
+        ObjectNode intentB = intentA.deepCopy();
+        ObjectNode second = addSecondExecutionWith(event(3, "tool.intent", intentA)
+                + event(3, "tool.intent", intentB) + "{}\n", 2);
+        ObjectNode candidate = request("reserve");
+        candidate.set("binding", second);
+        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Intent sequence conflicts");
+    }
+
+    // A journal line scoped to another Session (or a version the reader
+    // does not know) must not serve as publication evidence.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void foreignScopedIntentLinesAreFenced(boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2")
+                .put("outcomeSource", "runtime");
+        intent.set("argsRef", binding.get("argsRef"));
+        JsonNode foreignKey = JSON.createObjectNode().put("tenantId", "tenant-1")
+                .put("workspaceId", "workspace-1").put("sessionId", "session-9");
+        ObjectNode second = addSecondExecutionWith(
+                event(3, "tool.intent", intent, foreignKey, 1) + "{}\n");
+        ObjectNode candidate = request("reserve");
+        candidate.set("binding", second);
+        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Journal event scope conflicts");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unknownVersionIntentLinesAreFenced(boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2")
+                .put("outcomeSource", "runtime");
+        intent.set("argsRef", binding.get("argsRef"));
+        ObjectNode second = addSecondExecutionWith(
+                event(3, "tool.intent", intent, binding.get("sessionKey"), 2) + "{}\n");
+        ObjectNode candidate = request("reserve");
+        candidate.set("binding", second);
+        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Journal event scope conflicts");
+    }
+
+    @Test
+    void aJournalHoleAboveTheIntentFencesTheHeadPath() {
+        store = newStore(10 * ALLOCATION, 10, true);
+        reserve();
+        append("tool.wait", event(3, "checkpoint.saved", JSON.createObjectNode()) + "{}\n", 1,
+                List.of(), null);
+        // A revision vanishes between the intent's and the locked head.
+        jdbc.update("DELETE FROM qwen_managed_session_journal_tx WHERE tenant_id = 'tenant-1'"
+                + " AND session_id = 'session-1' AND journal_revision = 3");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Committed journal evidence is missing");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aCorruptedJournalRowAboveTheIntentFencesBothPaths(
+            boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        reserve();
+        append("tool.wait", event(3, "checkpoint.saved", JSON.createObjectNode()) + "{}\n", 1,
+                List.of(), null);
+        // A damaged write zeroed a revision's byte_length between the
+        // intent's and the head: both paths must refuse the evidence.
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET byte_length = 0"
+                + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
+                + " AND journal_revision = 3");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining(journalHeadAuthorization
+                        ? "journal evidence is missing" : "failed verification");
+    }
+
+    @Test
+    void anOverlappingJournalRangeFencesTheHeadPath() {
+        store = newStore(10 * ALLOCATION, 10, true);
+        reserve();
+        // The intent's sequence suddenly matches two revisions.
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET last_sequence = 2"
+                + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
+                + " AND journal_revision = 1");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Committed journal evidence is missing");
+    }
+
     @Test
     void disabledJournalHeadAuthorizationKeepsScanningTheJournal() {
         store = newStore(10 * ALLOCATION, 10, false);
@@ -1394,20 +1487,24 @@ class ToolPublicationStoreTest {
         reserve();
         // Two activation changes in one transaction: the head must record
         // the last one, as the journal scans do. The two payloads differ in
-        // phase AND expiry, so all four columns discriminate last from
-        // first.
+        // every column, so all four discriminate last from first.
         ObjectNode firstActive = activation("active");
         firstActive.put("expiresAt", System.currentTimeMillis() + 180_000);
         ObjectNode lastReleased = activation("released");
+        lastReleased.put("activationId", "activation-2").put("epoch", 2);
         lastReleased.put("expiresAt", System.currentTimeMillis() + 60_000);
         append("activation.rotate",
                 event(3, "activation.changed", firstActive)
                         + event(4, "activation.changed", lastReleased) + "{}\n",
                 2, List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
-        assertThat(jdbc.queryForObject("SELECT activation_phase FROM qwen_managed_session_journal_head",
-                String.class)).isEqualTo("released");
-        assertThat(jdbc.queryForObject("SELECT activation_expires_at FROM qwen_managed_session_journal_head",
-                Long.class)).isEqualTo(lastReleased.get("expiresAt").asLong());
+        var rotated = jdbc.queryForMap("SELECT activation_id,"
+                + " activation_phase, activation_event_epoch,"
+                + " activation_expires_at FROM qwen_managed_session_journal_head");
+        assertThat(rotated.get("activation_id")).isEqualTo("activation-2");
+        assertThat(rotated.get("activation_phase")).isEqualTo("released");
+        assertThat(rotated.get("activation_event_epoch")).isEqualTo(2L);
+        assertThat(rotated.get("activation_expires_at"))
+                .isEqualTo(lastReleased.get("expiresAt").asLong());
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
         // The two scans' intra-record ordering must agree with the head:
@@ -1666,6 +1763,17 @@ class ToolPublicationStoreTest {
     }
 
     private ObjectNode addSecondExecution() {
+        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2").put("outcomeSource", "runtime");
+        intent.set("argsRef", binding.get("argsRef"));
+        return addSecondExecutionWith(event(3, "tool.intent", intent) + "{}\n");
+    }
+
+    private ObjectNode addSecondExecutionWith(String intentRecords) {
+        return addSecondExecutionWith(intentRecords, 1);
+    }
+
+    private ObjectNode addSecondExecutionWith(String intentRecords,
+            int eventCount) {
         ObjectNode second = binding.deepCopy().put("publicationId", "pub-2").put("executionCallId", "execution-2")
                 .put("captureId", "capture-2").put("modelCallId", "model-2").put("intentSequence", 3);
         ((ObjectNode) second.get("reference")).put("callId", "runtime-call-2");
@@ -1677,9 +1785,7 @@ class ToolPublicationStoreTest {
         checkpoint = nextCheckpoint;
         binding.set("checkpointRef", ref("checkpoint-2", "managed-checkpoint", checkpoint));
         second.set("checkpointRef", binding.get("checkpointRef"));
-        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2").put("outcomeSource", "runtime");
-        intent.set("argsRef", binding.get("argsRef"));
-        append("tool.dispatch", event(3, "tool.intent", intent) + "{}\n", 1,
+        append("tool.dispatch", intentRecords, eventCount,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-2");
         String digest = binding.path("requestDigest").asText();
         executions.findOrCreate(ToolExecutionRecord.prepared("execution-2", "idempotency-2", "binding-1", 1,
@@ -1713,6 +1819,11 @@ class ToolPublicationStoreTest {
 
     private String event(long number, String kind, JsonNode payload) {
         return journal.event(number, kind, payload);
+    }
+
+    private String event(long number, String kind, JsonNode payload,
+            JsonNode sessionKey, int v) {
+        return journal.event(number, kind, payload, sessionKey, v);
     }
 
     record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,

@@ -486,19 +486,13 @@ public class ManagedAgentService {
                 List<EventRecord> events = new ArrayList<>(
                         store.findControlEvents(tenantId, sessionId,
                                 snapshot.coveredSequence()));
-                // A lagging snapshot's tail is capped at the caller's limit,
-                // newest events kept; the client pages the rest.
-                EventPage tail = store.findNewestTailEvents(tenantId,
-                        sessionId, snapshot.coveredSequence(), limit);
-                events.addAll(tail.events());
-                String olderCursor = tail.hasMore() && !tail.events().isEmpty()
-                        ? Long.toString(tail.events().get(0).sequence())
-                        : null;
+                events.addAll(tailEvents(tenantId, sessionId,
+                        snapshot.coveredSequence(), visibleSequence));
                 return new WebShellTranscript(snapshot.items().stream()
                         .map(this::webShellItem).toList(),
                         events.stream().map(this::webShellEvent).toList(),
-                        snapshot.coveredSequence(), olderCursor,
-                        tail.hasMore(), visibleSequence);
+                        snapshot.coveredSequence(), null, false,
+                        visibleSequence);
             }
         }
         EventPage page = store.findTranscriptEvents(tenantId, sessionId,
@@ -772,6 +766,27 @@ public class ManagedAgentService {
     private WebShellContentPart webShellContentPart(ItemPartRecord part) {
         return new WebShellContentPart(part.partId(), part.type(), part.text(),
                 part.firstSequence(), part.lastSequence());
+    }
+
+    private List<EventRecord> tailEvents(String tenantId, String sessionId,
+            long afterSequence, long throughSequence) {
+        List<EventRecord> result = new ArrayList<>();
+        long cursor = afterSequence;
+        while (cursor < throughSequence) {
+            List<EventRecord> page = store.findEvents(tenantId, sessionId,
+                    cursor, 100);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (EventRecord event : page) {
+                if (event.sequence() > throughSequence) {
+                    return List.copyOf(result);
+                }
+                result.add(event);
+                cursor = event.sequence();
+            }
+        }
+        return List.copyOf(result);
     }
 
     private void dispatch(String tenantId, Admission admission) {

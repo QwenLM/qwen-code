@@ -203,9 +203,15 @@ public final class PublicationJournalFixture {
     }
 
     public String event(long number, String kind, JsonNode payload) {
-        ObjectNode event = JSON.createObjectNode().put("v", 1)
+        return event(number, kind, payload, binding.get("sessionKey"), 1);
+    }
+
+    /** The same event line with a caller-chosen scope and version. */
+    public String event(long number, String kind, JsonNode payload,
+            JsonNode sessionKey, int v) {
+        ObjectNode event = JSON.createObjectNode().put("v", v)
                 .put("sequence", number).put("kind", kind);
-        event.set("sessionKey", binding.get("sessionKey"));
+        event.set("sessionKey", sessionKey);
         event.set("payload", payload);
         event.set("subject", JSON.createObjectNode().put("type", "activation")
                 .put("activationId", ACTIVATION_ID).put("epoch", 1));

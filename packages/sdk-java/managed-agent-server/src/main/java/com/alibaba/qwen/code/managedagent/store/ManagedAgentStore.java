@@ -1266,22 +1266,6 @@ public class ManagedAgentStore implements AgentStateStore {
                 eventMapper, tenantId, sessionId, throughSequence);
     }
 
-    /** The newest events of a Session past a sequence, capped at the limit,
-     *  in ascending order; hasMore reports that the tail continues. */
-    public EventPage findNewestTailEvents(String tenantId, String sessionId,
-            long afterSequence, int limit) {
-        requireSession(tenantId, sessionId);
-        List<EventRecord> rows = jdbc.query("SELECT * FROM"
-                        + " managed_agent_event WHERE tenant_id = ? AND"
-                        + " session_id = ? AND sequence_id > ? ORDER BY"
-                        + " sequence_id DESC LIMIT ?",
-                eventMapper, tenantId, sessionId, afterSequence, limit + 1);
-        boolean hasMore = rows.size() > limit;
-        rows = new ArrayList<>(hasMore ? rows.subList(0, limit) : rows);
-        java.util.Collections.reverse(rows);
-        return new EventPage(List.copyOf(rows), hasMore);
-    }
-
     public EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit) {
         requireSession(tenantId, sessionId);

@@ -278,6 +278,89 @@ class ManagedEventStreamServiceTest {
         }
     }
 
+    // An idle stream's revocation is observed by the loop-head recheck:
+    // nothing is published, and the stream completes at its first wake past
+    // the window — closure within the interval plus one poll interval, as
+    // the ReadGrant javadoc states.
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    void idleStreamClosesAfterRevocationAtTheNextWake(boolean webShell)
+            throws Exception {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
+        ManagedAgentService agentService = new ManagedAgentService(store,
+                null, null, null, registry);
+        SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
+                null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        AtomicBoolean revoked = new AtomicBoolean();
+        AtomicInteger grantChecks = new AtomicInteger();
+        when(registry.canRead("tenant", "actor", "ws-a"))
+                .thenAnswer(ignored -> {
+                    grantChecks.incrementAndGet();
+                    return !revoked.get();
+                });
+        when(store.findReplayWindow("tenant", "session"))
+                .thenReturn(new ReplayWindow(0, 0));
+        when(store.findEvents("tenant", "session", 0, 100))
+                .thenReturn(List.of());
+        AtomicInteger sent = new AtomicInteger();
+        AtomicBoolean failed = new AtomicBoolean();
+        CountDownLatch stopped = new CountDownLatch(1);
+        SseEmitter emitter = new SseEmitter() {
+            @Override
+            public void send(SseEventBuilder builder) {
+                sent.incrementAndGet();
+            }
+
+            @Override
+            public void complete() {
+                stopped.countDown();
+            }
+
+            @Override
+            public void completeWithError(Throwable error) {
+                failed.set(true);
+                stopped.countDown();
+            }
+        };
+        SessionEventHub hub = new SessionEventHub();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getEvents().setReadGrantRecheckInterval(
+                Duration.ofMillis(500));
+        properties.getEvents().setPollInterval(Duration.ofSeconds(1));
+        properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(30));
+        ManagedEventStreamService service = new ManagedEventStreamService(
+                agentService, hub, executor, properties) {
+            @Override
+            SseEmitter emitter() {
+                return emitter;
+            }
+        };
+        try {
+            if (webShell) {
+                service.webShellStream("tenant", "actor", "session", 0);
+            } else {
+                service.publicStream("tenant", "actor", "session", 0);
+            }
+            // Admission plus the first in-loop check arm the window; revoke
+            // only after both, so closure must come from a LATER recheck.
+            org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(2))
+                    .until(() -> grantChecks.get() == 2);
+            revoked.set(true);
+            assertThat(stopped.await(4, TimeUnit.SECONDS)).isTrue();
+            assertThat(sent.get()).isZero();
+            assertThat(failed).isFalse();
+            assertThat(grantChecks.get()).isGreaterThanOrEqualTo(3);
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(2, TimeUnit.SECONDS))
+                    .isTrue();
+        }
+    }
+
     // A successful recheck re-anchors the window: the steady-state grant
     // check rate stays bounded for the stream's whole life.
     @Test

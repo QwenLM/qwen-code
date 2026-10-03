@@ -44,8 +44,12 @@ Out of scope: splitting `ManagedAgentStore`, and moving the seal/finish
 byte-rehash off the request thread. The rehash is an integrity commitment
 over mutable object storage; making it asynchronous changes the seal API
 contract (clients would have to poll `operationStatus`). The database side of
-that path is still fixed here: its heartbeat re-authorization becomes O(1)
-via Section 6. The contract change is tracked by the follow-up issue #13242.
+that path is fixed here but opt-in at runtime: its heartbeat
+re-authorization becomes O(1) via Section 6 once an operator enables
+`journal-head-authorization` after the fleet fully runs the V35 code (the
+rollout is Section 9; the flip itself is tracked by the follow-up issue
+#13295); until then the heartbeat pays the legacy journal scan, unchanged
+from before. The contract change is tracked by the follow-up issue #13242.
 
 ## 3. Snapshot rewrite gating
 
@@ -77,14 +81,11 @@ the marker keeps the tick's scan free of a per-row snapshot lookup.
 All snapshot readers (`listPublicItems`, `transcript`, SSE resync frames,
 `advanceReplayFloor`) already key off the snapshot's own `covered_sequence`,
 so a staler snapshot is self-consistent; `transcript` additionally tails
-events past the snapshot (bounded by the caller's `limit`, the newest kept
-with the truncation reported for paging), so a WebShell stream's event view
-does not lose freshness — its items array is the snapshot's and lags by the
-same bound Section 9 states for `listPublicItems`. A backward walk across
-the page seam can return the first page's inlined control events a second
-time (the cursor path serves the raw stream before the cursor, unfiltered);
-event sequences are stable identifiers and clients deduplicate on them, as
-the WebShell client's merge does.
+events past the snapshot (the cursor-less page serves every event after the
+snapshot, as the published contract promises, so the stream can resume at
+the reported watermark with no band unserved), so a WebShell stream's event
+view does not lose freshness — its items array is the snapshot's and lags
+by the same bound Section 9 states for `listPublicItems`.
 
 ## 4. SSE read-grant recheck window
 
@@ -201,9 +202,14 @@ record — before reading anything else, so a fenced activation pays no journal
 statement at all — and reads the `tool.intent` at its own revision directly:
 the binding carries `intentSequence`, so one indexed range read over
 `last_sequence` (migration `V38`) resolves the revision, one verified page
-fetches it, and one indexed count proves the chain from that revision up to
-the locked head is gap-free, exactly what the legacy walk established per
-revision. Legacy rows keep the previous combined scan, backfilling the head
+fetches it, and one indexed count (bounded by the same byte-length tripwire
+the legacy walk applied per revision) proves the chain from that revision
+up to the locked head is gap-free. The statement count is constant — four
+journal statements regardless of journal depth — while the locate's row
+cost grows with the distance between the intent and the head, exactly as
+the legacy walk's did (it paid the same distance in full locked row reads,
+so the head path is strictly lighter, not asymptotically constant).
+Legacy rows keep the previous combined scan, backfilling the head
 on success.
 
 ## 7. Artifact download revalidation throttle
@@ -232,8 +238,9 @@ keep reading the rows of a session being deleted.
   prepared statements) pins per-endpoint query budgets: a 20-session page of
   `listPublicSessions` ≤ 3 queries (4 for workspace-bound rows, adding the
   close-state batch) and `listWebShellSessions` ≤ 3 (a bound page whose
-  submit-shaped sessions include creator-owned ones costs 5, adding the
-  creator-marker and grant batches), with the
+  submit-shaped sessions include creator-owned ones costs 6 — page, latest
+  turns, environment events, close-state, creator-marker, grant; 5 when the
+  page carries no Turns and the environment-event batch is skipped), with the
   batch turn reads asserted to project the summary column list and the
   admission-order selection rules exercised through the page (a two-Turn
   session admitted out of `created_at` order with inverted environment-event
@@ -297,6 +304,14 @@ keep reading the rows of a session being deleted.
   `journal-head-authorization` flag (default off) still ships as the
   deliberate operator switch; enable it once the fleet fully runs the V35
   code, knowing residual skew is detected and repaired rather than trusted.
+- The head path's chain proof (Section 6) is a count with the legacy walk's
+  byte-length tripwire, not a per-line parse of the intermediate revisions:
+  a line carrying a foreign scope in a journal written before this change
+  would be caught by the legacy scan but not re-read after the head is
+  backfilled. Commits now reject foreign-scoped `activation.changed` lines
+  (the only lines whose payload the head persists), so the residual is
+  confined to journals already written by a misbehaving writer — and such a
+  writer could equally have written correctly scoped forgeries.
 - Follow-up: move the seal/finish stream rehash off the request thread
   (requires an asynchronous seal contract — issue #13242), and consider
   splitting `ManagedAgentStore` as noted in the issue.

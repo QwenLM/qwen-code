@@ -57,6 +57,11 @@ public final class ToolPublicationStore {
         this.journalHeadAuthorization = journalHeadAuthorization;
     }
 
+    // For the configuration-wiring test.
+    public boolean journalHeadAuthorization() {
+        return journalHeadAuthorization;
+    }
+
     public JsonNode apply(JsonNode input, String writerToken, String publicationToken) {
         JsonNode request = ToolPublicationContract.parse("request", input);
         String operation = text(request, "operation");
@@ -223,10 +228,10 @@ public final class ToolPublicationStore {
     }
 
     /**
-     * Backfills the head's activation columns from a journal scan; a payload
-     * wider than the columns is skipped instead of failing, so authorization
-     * keeps reading the journal, exactly as before the columns existed. A
-     * head already holding exactly these values is not rewritten.
+     * Backfills the head's activation columns from a journal scan; a head
+     * already holding exactly these values is not rewritten. Both callers
+     * reach this only after requiring an `active` phase and the binding's
+     * contract-validated id, so the values always fit the columns.
      */
     private void backfillActivation(String tenant, String session,
             String activationId, String phase, long epoch, Long expiresAt,
@@ -235,19 +240,14 @@ public final class ToolPublicationStore {
                 journalRevision)) {
             return;
         }
-        if ((activationId == null || activationId.length()
-                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
-                && (phase == null || phase.length()
-                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS)) {
-            jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                            + " activation_id = ?, activation_phase = ?,"
-                            + " activation_event_epoch = ?,"
-                            + " activation_expires_at = ?,"
-                            + " activation_head_revision = ? WHERE tenant_id = ?"
-                            + " AND session_id = ?",
-                    activationId, phase, epoch, expiresAt, journalRevision,
-                    tenant, session);
-        }
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " activation_id = ?, activation_phase = ?,"
+                        + " activation_event_epoch = ?,"
+                        + " activation_expires_at = ?,"
+                        + " activation_head_revision = ? WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                activationId, phase, epoch, expiresAt, journalRevision,
+                tenant, session);
     }
 
     private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {
@@ -423,6 +423,7 @@ public final class ToolPublicationStore {
                         require("tool.intent".equals(text(event, "kind")), "Intent sequence conflicts");
                         require(page.transactions().get(0).writerGeneration() == b.get("writerGeneration").longValue(),
                                 "Original intent writer conflicts");
+                        require(intent == null, "Intent sequence conflicts");
                         intent = event;
                     }
                 }
@@ -495,13 +496,16 @@ public final class ToolPublicationStore {
                 headRevision);
         require(revisions.size() == 1, "Committed journal evidence is missing");
         long revision = revisions.get(0);
-        // The legacy walk proved the chain contiguous down from the head;
-        // the same proof here is one indexed count.
+        // The legacy walk proved the chain contiguous down from the head
+        // and sane (the byte-length tripwire); the same proof here is one
+        // indexed count with the same bounds.
         Long above = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " qwen_managed_session_journal_tx WHERE tenant_id = ?"
                         + " AND session_id = ? AND journal_revision > ?"
-                        + " AND journal_revision <= ?",
-                Long.class, tenant, session, revision, headRevision);
+                        + " AND journal_revision <= ?"
+                        + " AND byte_length >= 1 AND byte_length <= ?",
+                Long.class, tenant, session, revision, headRevision,
+                ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);
         require(above != null && above == headRevision - revision,
                 "Committed journal evidence is missing");
         var page = sessions.transactions(tenant, text(key, "workspaceId"),
@@ -534,6 +538,7 @@ public final class ToolPublicationStore {
                 require(page.transactions().get(0).writerGeneration()
                         == b.get("writerGeneration").longValue(),
                         "Original intent writer conflicts");
+                require(intent == null, "Intent sequence conflicts");
                 intent = event;
             }
         }

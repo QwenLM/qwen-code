@@ -206,6 +206,16 @@ public class ManagedExtensionRecordStore {
                     .textValue())) {
                 require(index < eventCount,
                         "Activation change has an invalid journal position");
+                // The capture writes durable authorization state, so it
+                // applies the same scope check both read paths enforce —
+                // a line naming another Session is refused, not promoted.
+                JsonNode key = event.path("sessionKey");
+                require(event.path("v").asInt() == 1
+                        && tenantId.equals(key.path("tenantId").textValue())
+                        && workspaceId.equals(
+                                key.path("workspaceId").textValue())
+                        && sessionId.equals(key.path("sessionId")
+                                .textValue()), "Journal event scope conflicts");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(event.path("kind").asText())) {

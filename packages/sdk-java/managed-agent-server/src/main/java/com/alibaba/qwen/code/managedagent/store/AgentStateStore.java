@@ -183,11 +183,6 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
-    /** The newest events past a sequence, capped at the limit, in ascending
-     *  order; hasMore reports that the tail continues. */
-    EventPage findNewestTailEvents(String tenantId, String sessionId,
-            long afterSequence, int limit);
-
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 

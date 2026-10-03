@@ -258,6 +258,17 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void transcriptContractPromisesTheFullTailPastTheSnapshot() {
+        // The cursor-less transcript serves every event after the Snapshot;
+        // a server-side paging change that leaves this published sentence
+        // stale must turn the suite red, so pin the sentence itself.
+        String description = CONTRACT.operation("webShellTranscript").node()
+                .path("description").asText();
+        assertThat(description).contains("and every event after it");
+        assertThat(description).contains("limit bounds the page of events");
+    }
+
+    @Test
     void mappedRoutesMatchTheSpec() {
         Map<String, String> statuses = new TreeMap<>();
         for (Operation operation : CONTRACT.operations()) {

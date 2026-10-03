@@ -136,8 +136,20 @@ class ManagedAgentPropertiesTest {
         });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
-                .withInitializer(ctx -> yaml.forEach(
-                        ctx.getEnvironment().getPropertySources()::addLast))
+                .withInitializer(ctx -> {
+                    // The yaml's ${QWEN_*} placeholders must resolve to
+                    // their shipped defaults regardless of the ambient shell.
+                    java.util.Map<String, Object> ambient =
+                            new java.util.LinkedHashMap<>(System.getenv());
+                    ambient.keySet().removeIf(name -> name
+                            .startsWith("QWEN_MANAGED_AGENT_"));
+                    ctx.getEnvironment().getPropertySources().replace(
+                            "systemEnvironment",
+                            new org.springframework.core.env.MapPropertySource(
+                                    "systemEnvironment", ambient));
+                    yaml.forEach(ctx.getEnvironment().getPropertySources()
+                            ::addLast);
+                })
                 .run(started -> {
                     assertThat(started).hasNotFailed();
                     ManagedAgentProperties bound = started

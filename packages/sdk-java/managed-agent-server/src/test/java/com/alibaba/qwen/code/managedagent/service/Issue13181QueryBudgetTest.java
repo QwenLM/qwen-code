@@ -73,8 +73,11 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * production store/service classes exactly as the runtime wiring does.
  *
  * <ol>
- *   <li>materializeNextBatch rewrites the snapshot on catch-up or every
- *       SNAPSHOT_REFRESH_EVENTS, not on every batch.</li>
+ *   <li>materializeNextBatch rewrites the snapshot only at creation, at
+ *       every SNAPSHOT_REFRESH_EVENTS covered events, on a batch carrying a
+ *       terminal event, or on a caught-up batch once the previous write is
+ *       SNAPSHOT_REFRESH_MILLIS old — not on every batch; a deferred write
+ *       converges via the snapshot_stale_since marker.</li>
  *   <li>The SSE fan-out re-checks the workspace read grant once per recheck
  *       window, not per delivered event.</li>
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
@@ -93,7 +96,7 @@ class Issue13181QueryBudgetTest {
     private ObjectNode checkpoint;
 
     @Test
-    void materializationRewritesTheSnapshotOnCatchUpOnly() {
+    void materializationRewritesTheSnapshotAtCreationAndTerminalEvents() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = fixture.store.insertSessionCommand(tenant,
@@ -122,38 +125,47 @@ class Issue13181QueryBudgetTest {
         List<Long> itemReads = new ArrayList<>();
         List<Long> partReads = new ArrayList<>();
         List<Long> snapshotWrites = new ArrayList<>();
+        List<Long> totals = new ArrayList<>();
         for (int batch = 0; batch < batches; batch++) {
             fixture.ledger.reset();
             fixture.tx.executeWithoutResult(status -> fixture.store
                     .materializeNextBatch(tenant, sessionId, perBatch));
             itemRowsRead.add(fixture.ledger.rows(
                     "from managed_agent_item where", "order by first_sequence"));
-            itemReads.add(fixture.ledger.count(
-                    "from managed_agent_item where", "order by first_sequence"));
+            // The single fragment also counts the per-event attributes read
+            // (the trailing " where" keeps managed_agent_item_part out).
+            itemReads.add(fixture.ledger.count("from managed_agent_item where"));
             partReads.add(fixture.ledger.count(
                     "from managed_agent_item_part where"));
             snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
                     + fixture.ledger.count("update managed_agent_snapshot set"));
+            totals.add(fixture.ledger.total());
         }
         System.out.println("[issue-13181] materializeNextBatch per batch:"
                 + " itemRowsRead=" + itemRowsRead
                 + " itemReads=" + itemReads
                 + " partReads=" + partReads
-                + " snapshotRewrites=" + snapshotWrites);
+                + " snapshotRewrites=" + snapshotWrites
+                + " totals=" + totals);
         // The first batch inserts the snapshot row; the intermediate batches
         // leave it alone; the batch carrying the terminal event rewrites it.
         assertThat(snapshotWrites)
                 .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
-        // The whole item table is read exactly once per writing batch — the
-        // count (not only the row total) is pinned, so an N+1 decomposition
-        // of allItems would show here. The parts read rides the same
-        // discipline.
+        // The whole item table is read exactly once per writing batch, and
+        // the per-event attributes read fires once per tool event — one item
+        // statement per covered event plus the page read, nothing more. The
+        // parts read rides the same discipline.
         assertThat(itemReads)
-                .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
+                .containsExactly(10L, 10L, 10L, 10L, 10L, 10L, 10L, 10L, 2L);
         // The parts read rides the same discipline; the last batch also
         // projects the text delta, which reads the part it continues.
         assertThat(partReads)
                 .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 2L);
+        // Hot path 1 is bounded the same way hot path 3 is: the whole
+        // batch's statement count is pinned, so any added per-row read
+        // shows here.
+        assertThat(totals)
+                .containsExactly(35L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 17L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -322,11 +334,27 @@ class Issue13181QueryBudgetTest {
                 false, "debounce-1");
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 200));
+        Long marker = fixture.jdbc.queryForObject(
+                "SELECT snapshot_stale_since FROM"
+                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                Long.class, tenant, sessionId);
+        assertThat(marker).isNotNull();
         fixture.ledger.reset();
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 200));
         assertThat(fixture.ledger.count("update managed_agent_snapshot set"))
                 .isZero();
+        // The not-aged exit must leave the deferral marker untouched —
+        // clearing or re-stamping it would stop the aged reselection from
+        // ever converging the snapshot.
+        assertThat(fixture.jdbc.queryForObject(
+                "SELECT snapshot_stale_since FROM"
+                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                Long.class, tenant, sessionId)).isEqualTo(marker);
+        assertThat(fixture.store.findMaterializationTargets(32))
+                .doesNotContain(new MaterializationTarget(tenant, sessionId));
     }
 
     @Test
@@ -792,7 +820,7 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void transcriptTailIsBoundedByTheCallerLimit() {
+    void transcriptServesEveryEventPastTheSnapshot() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = fixture.store.insertSessionCommand(tenant,
@@ -827,22 +855,21 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         var transcript = fixture.service.transcript(tenant, null, sessionId,
                 null, 10);
-        // The tail is capped at the caller's limit, newest events kept,
-        // with the truncation reported for paging. The tail read is one
-        // bounded query (plus the control-event read), not a page loop.
+        // The published contract: the cursor-less page serves every event
+        // after the snapshot, so the stream can resume at the reported
+        // watermark with no band left unserved; the tail read pages the
+        // events table in bounded reads (two pages for 150 events).
         assertThat(transcript.events().stream()
                 .filter(event -> event.sequence()
                         > transcript.coveredSequence())
-                .count()).isEqualTo(10);
-        assertThat(transcript.hasMore()).isTrue();
-        // Newest kept, not oldest: the tail ends at the session's last
-        // event, and the cursor names the oldest returned event.
+                .count()).isEqualTo(lastSequence - snapshotCovered);
         assertThat(transcript.events().getLast().sequence())
                 .isEqualTo(lastSequence);
-        assertThat(transcript.olderCursor())
-                .isEqualTo(Long.toString(lastSequence - 9));
-        assertThat(fixture.ledger.count("from managed_agent_event"))
-                .isEqualTo(2);
+        assertThat(transcript.hasMore()).isFalse();
+        assertThat(transcript.olderCursor()).isNull();
+        assertThat(transcript.lastSequence()).isEqualTo(lastSequence);
+        assertThat(fixture.ledger.count("from managed_agent_event",
+                "sequence_id >")).isEqualTo(2);
     }
 
     @Test
@@ -1314,6 +1341,84 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void activationChangeBeyondTheDeclaredEventsIsRejectedAtCommit() {
+        Fixture fixture = new Fixture();
+        publicationFixture(fixture);
+        // The activation line sits past the declared event count (the
+        // commit marker's slot): refused, never captured into the head
+        // columns.
+        assertThatThrownBy(() -> append("activation.misplaced",
+                event(journal.sequence + 1, "tool.progress",
+                        JSON.createObjectNode())
+                        + event(journal.sequence + 2, "activation.changed",
+                                activation("released")),
+                1, List.of(), null))
+                .hasMessageContaining("invalid journal position");
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
+                        + " qwen_managed_session_journal_head", String.class))
+                .isEqualTo("active");
+    }
+
+    @Test
+    void foreignScopedActivationChangeIsRejectedAtCommit() {
+        Fixture fixture = new Fixture();
+        publicationFixture(fixture);
+        JsonNode foreignKey = JSON.createObjectNode().put("tenantId", "tenant-1")
+                .put("workspaceId", "workspace-1").put("sessionId", "session-9");
+        assertThatThrownBy(() -> append("activation.foreign",
+                event(journal.sequence + 1, "activation.changed",
+                        activation("active"), foreignKey, 1) + "{}\n",
+                1, List.of(), null))
+                .hasMessageContaining("Journal event scope conflicts");
+        // A version the reader does not know is refused the same way.
+        assertThatThrownBy(() -> append("activation.unknown-version",
+                event(journal.sequence + 1, "activation.changed",
+                        activation("active"), binding.get("sessionKey"), 2)
+                        + "{}\n",
+                1, List.of(), null))
+                .hasMessageContaining("Journal event scope conflicts");
+        // The head columns keep the previous activation.
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
+                        + " qwen_managed_session_journal_head", String.class))
+                .isEqualTo("active");
+    }
+
+    @Test
+    void oversizedActivationPhaseBlanksTheHeadColumnsCleanly() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        // The phase arm of the width guard: a 33+ character phase with a
+        // conforming id blanks the columns instead of failing the commit,
+        // and the stamp still advances.
+        append("activation.wide-phase",
+                event(journal.sequence + 1, "activation.changed",
+                        JSON.createObjectNode()
+                                .put("activationId", ACTIVATION_ID)
+                                .put("epoch", 1)
+                                .put("phase", "active-" + "a".repeat(40))
+                                .put("expiresAt",
+                                        System.currentTimeMillis() + 180000))
+                        + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
+                        + " qwen_managed_session_journal_head", String.class))
+                .isNull();
+        var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
+                + " journal_revision FROM qwen_managed_session_journal_head");
+        assertThat(head.get("activation_head_revision"))
+                .isEqualTo(head.get("journal_revision"));
+        // Authorization reads the journal and fences the unknown phase.
+        fixture.ledger.reset();
+        assertThatThrownBy(() -> publication.store().verifyDispatch(
+                publication.executions().findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isGreaterThan(0);
+    }
+
+    @Test
     void oversizedJournalActivationFencesAuthorizationCleanly() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
@@ -1465,6 +1570,11 @@ class Issue13181QueryBudgetTest {
 
     private String event(long number, String kind, JsonNode payload) {
         return journal.event(number, kind, payload);
+    }
+
+    private String event(long number, String kind, JsonNode payload,
+            JsonNode sessionKey, int v) {
+        return journal.event(number, kind, payload, sessionKey, v);
     }
 
     private void append(String operation, String records, int events,
