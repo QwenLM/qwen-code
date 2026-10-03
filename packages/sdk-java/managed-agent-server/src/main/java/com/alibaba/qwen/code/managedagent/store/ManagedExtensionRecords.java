@@ -142,11 +142,27 @@ public final class ManagedExtensionRecords {
     private static final List<String> MONITOR_FIXED = List.of("monitorId",
             "ownerScopeId", "commandRef", "maxEvents", "idleTimeoutMs",
             "debounceMs");
+    private static final Set<String> CHILD_KEYS = Set.of("kind", "shellId",
+            "ownerScopeId", "commandRef", "startReceiptRef", "outputRef",
+            "stopReason", "exitCode", "exitSignal", "run");
+    private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
+            "ownerScopeId", "commandRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
             "executionCallId", "effectId", "dispatchId", "deliveryId");
 
     private ManagedExtensionRecords() {
     }
+
+    /** Why a background Shell ended, by the state its run ended in. */
+    public static final Map<String, List<String>> CHILD_STOP_REASONS =
+            Map.of("settled", List.of("exited"), "failed",
+                    List.of("start_failed", "process_failed",
+                            "quota_exceeded"),
+                    "cancelled", List.of("stop_requested"));
+    public static final String CHILD_RUN_KIND = "managed-child_run";
+
+    private static final Pattern EXIT_SIGNAL = Pattern.compile(
+            "[A-Z][A-Z0-9]{0,15}");
 
     /** A record that breaks the contract. */
     public static final class InvalidRecordException
@@ -601,6 +617,157 @@ public final class ManagedExtensionRecords {
         return accepts(() -> requireMonitorRun(monitor))
                 && isRunStart(monitor.get("run"))
                 && monitor.get("outputRef").isNull();
+    }
+
+    /**
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "shell"}): one background Shell per record (H3 of
+     * #12827; see managed-child-run-record.ts for the same rules).
+     */
+    public static void requireChildRun(JsonNode child) {
+        closed(child, CHILD_KEYS, "childRun");
+        require("shell".equals(child.get("kind").textValue()),
+                "childRun.kind must be 'shell' in schema version 1");
+        JsonNode run = child.get("run");
+        requireRun(run);
+        // A background Shell is started by one tool call and is observed
+        // through its task projection and output Artifact; it has no
+        // delivery line.
+        require(!run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("delivery").isNull()
+                && run.get("definition").isNull(),
+                "childRun.run must name its start call and nothing else");
+        id(child.get("shellId"), "childRun.shellId");
+        id(child.get("ownerScopeId"), "childRun.ownerScopeId");
+        durableRef(child.get("commandRef"), "childRun.commandRef");
+        String execution = text(run, "execution");
+        JsonNode startReceipt = child.get("startReceiptRef");
+        if (!startReceipt.isNull()) {
+            durableRef(startReceipt, "childRun.startReceiptRef");
+        }
+        require(startReceipt.isNull() || execution != null
+                && !"intent".equals(execution)
+                && !"dispatch_started".equals(execution)
+                && !"not_started_proven".equals(execution),
+                "childRun.startReceiptRef must be null before the process "
+                        + "starts");
+        require(!startReceipt.isNull()
+                || !"running_attached".equals(execution)
+                        && !"settled".equals(execution),
+                "childRun.startReceiptRef must be set once the process "
+                        + "started");
+        require(startReceipt.isNull() || !run.get("runtime").isNull(),
+                "childRun.startReceiptRef needs the Runtime binding that "
+                        + "started it");
+        JsonNode output = child.get("outputRef");
+        if (!output.isNull()) {
+            durableRef(output, "childRun.outputRef");
+            require(MONITOR_OUTPUT_KIND.equals(output.get("kind").textValue())
+                    && output.get("schemaVersion").asLong() == 1,
+                    "childRun.outputRef must reference "
+                            + MONITOR_OUTPUT_KIND + " version 1");
+        }
+        // Output needs a started process: nothing writes the manifest
+        // before one.
+        require(output.isNull() || !startReceipt.isNull(),
+                "childRun.outputRef needs a start receipt");
+        String stopReason = nullableOneOf(child.get("stopReason"),
+                concat(concat(CHILD_STOP_REASONS.get("settled"),
+                        CHILD_STOP_REASONS.get("failed")),
+                        CHILD_STOP_REASONS.get("cancelled")),
+                "childRun.stopReason");
+        JsonNode exitCode = child.get("exitCode");
+        if (!exitCode.isNull()) {
+            count(exitCode, 0, 255, "childRun.exitCode");
+        }
+        JsonNode exitSignal = child.get("exitSignal");
+        require(exitSignal.isNull()
+                || EXIT_SIGNAL.matcher(exitSignal.textValue()).matches(),
+                "childRun.exitSignal must be an uppercase signal name");
+        String state = text(run, "state");
+        String reason = text(run, "reason");
+        require((stopReason == null) != TERMINAL.contains(state),
+                "childRun.stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_STOP_REASONS.get(state).contains(stopReason),
+                "childRun.stopReason does not fit the " + state + " state");
+        require(!"settled".equals(state) || "settled".equals(execution)
+                && !startReceipt.isNull(),
+                "childRun.run settles only with a process that started and "
+                        + "ended");
+        require(!"start_failed".equals(stopReason)
+                || startReceipt.isNull() && execution != null,
+                "childRun.stopReason start_failed needs a process that "
+                        + "never started");
+        require(!"process_failed".equals(stopReason) || !startReceipt.isNull(),
+                "childRun.stopReason process_failed needs a process that "
+                        + "started");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "childRun.stopReason is quota_exceeded exactly for a "
+                        + "quota reason");
+        // Exit evidence is proven exactly when a Shell exits: any other
+        // end carries no exit status.
+        require("exited".equals(stopReason)
+                ? !exitCode.isNull() || !exitSignal.isNull()
+                : exitCode.isNull() && exitSignal.isNull(),
+                "childRun exitCode or exitSignal is proven exactly when it "
+                        + "exits");
+    }
+
+    /**
+     * Whether {@code child} may be the first revision of a background
+     * Shell: its run opens, and it has written no output, which needs a
+     * started process.
+     */
+    public static boolean isChildRunStart(JsonNode child) {
+        return accepts(() -> requireChildRun(child))
+                && isRunStart(child.get("run"))
+                && child.get("outputRef").isNull();
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as the next revision
+     * of one background Shell: its identity is fixed, its run moves
+     * forward, its start receipt is set once unless the Runtime rebuilt
+     * under a later generation, its output may grow but is never removed,
+     * exit evidence is set once, and nothing changes once it ended.
+     */
+    public static boolean isChildRunSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireChildRun(previous))
+                || !accepts(() -> requireChildRun(next))) {
+            return false;
+        }
+        for (String key : CHILD_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                || !previous.get("outputRef").isNull()
+                        && next.get("outputRef").isNull()
+                || !previous.get("exitCode").isNull()
+                        && !same(previous.get("exitCode"),
+                                next.get("exitCode"))
+                || !previous.get("exitSignal").isNull()
+                        && !same(previous.get("exitSignal"),
+                                next.get("exitSignal"))) {
+            return false;
+        }
+        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+            return same(previous, next);
+        }
+        JsonNode runtimeBefore = previous.get("run").get("runtime");
+        boolean rebuilt = !runtimeBefore.isNull()
+                && !same(runtimeBefore, next.get("run").get("runtime"));
+        boolean sameReceipt = same(previous.get("startReceiptRef"),
+                next.get("startReceiptRef"));
+        return previous.get("startReceiptRef").isNull()
+                || (rebuilt ? !sameReceipt : sameReceipt);
     }
 
     /**

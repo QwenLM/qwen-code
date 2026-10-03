@@ -47,7 +47,12 @@ public final class ManagedExtensionProjection {
                     ManagedHookRecords::requireExecution,
                     body -> body.get("hookExecutionId").textValue(),
                     ManagedHookRecords::isExecutionStart,
-                    ManagedHookRecords::isExecutionSuccessor));
+                    ManagedHookRecords::isExecutionSuccessor),
+            "child_run", new Body("background_shell",
+                    ManagedExtensionRecords::requireChildRun,
+                    body -> body.get("shellId").textValue(),
+                    ManagedExtensionRecords::isChildRunStart,
+                    ManagedExtensionRecords::isChildRunSuccessor));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
