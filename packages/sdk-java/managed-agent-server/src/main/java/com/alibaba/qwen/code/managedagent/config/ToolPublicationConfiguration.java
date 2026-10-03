@@ -16,6 +16,7 @@ import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.CredentialsProviderFactory;
+import com.aliyun.oss.common.auth.CredentialsProvider;
 import com.aliyun.oss.common.comm.SignVersion;
 import java.net.URI;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -32,6 +33,10 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class ToolPublicationConfiguration {
     @Bean(destroyMethod = "shutdown")
     public OSS toolPublicationOss(ManagedAgentProperties properties) throws Exception {
+        return buildOss(properties, CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider());
+    }
+
+    public static OSS buildOss(ManagedAgentProperties properties, CredentialsProvider credentials) {
         var settings = properties.getToolPublication();
         URI endpoint = URI.create(required(settings.getOssEndpoint(), "OSS endpoint"));
         String region = required(settings.getOssRegion(), "OSS region");
@@ -48,7 +53,7 @@ public class ToolPublicationConfiguration {
         AliyunToolPublicationObjectStore.configureClientRetries(client);
         return OSSClientBuilder.create().endpoint(endpoint.toString())
                 .region(region)
-                .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())
+                .credentialsProvider(credentials)
                 .clientConfiguration(client).build();
     }
 
