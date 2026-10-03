@@ -6,10 +6,10 @@
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
-  APPROVAL_MODES,
   type AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -31,17 +31,19 @@ import {
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
+  AGENT_HOST_TOOL_NAMES,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isGatedMcpScope,
   isTruthy,
   parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
-  parseBooleanEnvFlag,
+  resolveUsageStatisticsEnabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
@@ -57,6 +59,10 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
@@ -69,6 +75,7 @@ import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
+import { createBundledMem0Server } from './mem0-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -102,9 +109,9 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
-import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -126,6 +133,10 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
+import { checkAdvisorModelAvailability } from './advisor-model.js';
+import { parseApprovalModeValue } from './approval-mode-value.js';
+
+export { parseApprovalModeValue };
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -148,37 +159,10 @@ function isSkillLevel(value: unknown): value is SkillLevel {
   return SKILL_LEVELS.includes(value as SkillLevel);
 }
 
-function formatApprovalModeError(value: string): Error {
-  return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
-      ', ',
-    )}`,
-  );
-}
-
-/**
- * Normalizes an approval-mode spelling exactly the way boot accepts it:
- * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
- * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
- * daemon's reload convergence so a settings file reload agrees with boot for
- * every accepted spelling.
- */
-export function parseApprovalModeValue(value: string): ApprovalMode {
-  const normalized = value.trim().toLowerCase();
-  const canonical =
-    normalized === 'auto_edit' || normalized === 'autoedit'
-      ? ApprovalMode.AUTO_EDIT
-      : normalized;
-  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
-  if (approvalMode === undefined) {
-    throw formatApprovalModeError(value);
-  }
-  return approvalMode;
-}
-
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -207,6 +191,8 @@ export interface CliArgs {
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
+  /** Set only by the daemon's Managed engine factory; see `llm.tsx`. */
+  acpExecutionEngine?: 'managed' | undefined;
   experimentalLsp: boolean | undefined;
   restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
@@ -628,6 +614,7 @@ export async function parseArguments(): Promise<CliArgs> {
       yargsInstance
         .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
+        .option('advisor', DEFAULT_COMMAND_OPTIONS.advisor)
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],
           string: true,
@@ -656,6 +643,13 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean' as const,
           description:
             'Starts the agent in ACP mode (deprecated, use --acp instead)',
+          hidden: true,
+        })
+        .option('acp-execution-engine', {
+          type: 'string' as const,
+          choices: ['managed'] as const,
+          description:
+            'Private to qwen serve: the execution engine this ACP host runs',
           hidden: true,
         })
         .option('experimental-skills', {
@@ -895,16 +889,22 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     .command(boardCommand)
-    // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
     .command(sandboxCommand);
+
+  // /review skill helpers (presubmit checks, cleanup). The module pulls in
+  // every review subcommand, so it is only loaded when it can match.
+  if (rawArgv.includes('review')) {
+    const { reviewCommand } = await import('../commands/review.js');
+    yargsInstance.command(reviewCommand);
+  }
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -937,16 +937,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1243,6 +1247,58 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(
+  config: Config,
+  rawModel: string,
+  startupContext: {
+    fastModel?: string;
+    currentModel?: string;
+    currentAuthType?: AuthType;
+  },
+): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const availability = checkAdvisorModelAvailability(
+    config,
+    modelName,
+    startupContext,
+  );
+  if (!availability.available) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        availability.availableModelIds,
+      ),
+    );
+  }
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1647,26 +1703,30 @@ export async function loadCliConfig(
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
+    /** Daemon-owned remote-runtime session with no ambient executable inputs. */
+    agentHostReadOnly?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
+    /** Engine a paired host selected; the Config persists or verifies it. */
+    executionEngine?: SessionExecutionEngine;
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
-  const sshWorkspace = readSshWorkspace(cwd);
+  const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
+  const sshWorkspace = agentHostReadOnly ? undefined : readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const executionSandboxSettings = validateExecutionSandboxSelection(
-    settings,
-    argv,
-  );
+  const executionSandboxSettings = agentHostReadOnly
+    ? undefined
+    : validateExecutionSandboxSelection(settings, argv);
   const sandboxEnabled = Boolean(
     executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
   );
@@ -1695,7 +1755,8 @@ export async function loadCliConfig(
     );
   }
   const safeMode =
-    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+    agentHostReadOnly ||
+    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
@@ -1791,14 +1852,19 @@ export async function loadCliConfig(
         settings.context?.fileFiltering?.customIgnoreFiles,
       );
 
-  const includeDirectories = provisionalWorkspace
-    ? []
-    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
-        .map(resolvePath)
-        .concat((argv.includeDirectories || []).map(resolvePath));
+  const includeDirectories =
+    provisionalWorkspace || agentHostReadOnly
+      ? []
+      : (bareMode || safeMode
+          ? []
+          : (settings.context?.includeDirectories ?? [])
+        )
+          .map(resolvePath)
+          .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
+    !agentHostReadOnly &&
     !sshWorkspace &&
     !provisionalWorkspace &&
     !bareMode &&
@@ -2177,10 +2243,12 @@ export async function loadCliConfig(
     }
   }
 
-  const sandboxConfig = await loadSandboxConfig(
-    bareMode || safeMode ? ({} as Settings) : settings,
-    argv,
-  );
+  const sandboxConfig = agentHostReadOnly
+    ? undefined
+    : await loadSandboxConfig(
+        bareMode || safeMode ? ({} as Settings) : settings,
+        argv,
+      );
   if (shellExecutionSandbox && sandboxConfig) {
     throw new Error(
       'Tool execution sandbox cannot be combined with a whole-CLI sandbox.',
@@ -2201,7 +2269,12 @@ export async function loadCliConfig(
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
-      sessionData = await sessionService.loadLastSession();
+      sessionData = await sessionService.loadLastSession({
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
+      });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
@@ -2239,6 +2312,10 @@ export async function loadCliConfig(
         writeStderrLine(message);
         process.exit(1);
       }
+    }
+
+    if (sessionId) {
+      sessionService.assertLegacySessionExecution(sessionId);
     }
 
     if (argv.forkSession && sessionId) {
@@ -2328,18 +2405,58 @@ export async function loadCliConfig(
   // and compute which gated (project/workspace) servers are still pending
   // approval (#4615), so the discovery layer can skip them with no connection
   // side effect. Loading `.mcp.json` is a pure read.
-  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
-  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // Top tier = bundled Mem0, session-injected (ACP/IDE), and `--mcp-config`.
+  // CLI wins over the session source. All sit above settings/`.mcp.json`
   // and are never gated (#4615).
-  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const cliMcpServers = agentHostReadOnly
+    ? undefined
+    : parseMcpConfig(argv.mcpConfig);
+  const mem0Server =
+    bareMode ||
+    safeMode ||
+    sshWorkspace ||
+    provisionalWorkspace ||
+    !trustedFolder ||
+    settings.memory?.mem0 == null
+      ? undefined
+      : createBundledMem0Server(
+          settings.memory.mem0,
+          cwd,
+          interactive && !isAcpMode && !settings.disableAllHooks,
+        );
   const topTierMcpServers =
-    sessionMcpServers || cliMcpServers
-      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+    !agentHostReadOnly && (sessionMcpServers || cliMcpServers || mem0Server)
+      ? {
+          ...(mem0Server ? { 'external-context': mem0Server } : {}),
+          ...sessionMcpServers,
+          ...(cliMcpServers ?? {}),
+        }
       : undefined;
+  // Only operator-owned configuration conflicts with `memory.mem0`. An entry a
+  // checked-in `.qwen/settings.json` ('workspace') or `.mcp.json` ('project')
+  // contributes is not the operator's, and aborting over it would wedge every
+  // operator who configured `memory.mem0` inside a folder they do not own and
+  // cannot fix — before `assembleMcpServers` ever applied the approval gate that
+  // would have held such a server pending anyway. Gated-scope entries are
+  // overridden by the built-in binding instead (topTierMcpServers spreads last
+  // below), exactly as a `.mcp.json` entry of the same name always has been.
+  const settingsExternalContext = settings.mcpServers?.['external-context'];
+  if (
+    mem0Server &&
+    ((settingsExternalContext !== undefined &&
+      !isGatedMcpScope(settingsExternalContext.scope)) ||
+      sessionMcpServers?.['external-context'] ||
+      cliMcpServers?.['external-context'])
+  ) {
+    throw new Error(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  }
   // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
   // ambient, file-sourced state they're meant to distrust) — but top-tier
-  // servers are an explicit, per-invocation argument from the caller (ACP
-  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // session/CLI servers are explicit, per-invocation arguments from the caller
+  // (ACP `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // Bundled Mem0 is excluded from these modes by its gate above.
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
@@ -2354,6 +2471,8 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const advisorModel =
+    bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
   // `undefined` is the meaningful third state here: it defers to core's
   // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
@@ -2370,6 +2489,7 @@ export async function loadCliConfig(
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
+    sessionExecutionEngine: hostPolicy?.executionEngine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2440,6 +2560,7 @@ export async function loadCliConfig(
     eagerTools,
     codeModeOnly:
       !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
+    freeform: settings.tools?.freeform === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2501,10 +2622,9 @@ export async function loadCliConfig(
     // "prompt"` still initializes eagerly because it auto-submits after render.
     deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
-    usageStatisticsEnabled:
-      parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
-      settings.privacy?.usageStatisticsEnabled ??
-      true,
+    usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+      settings.privacy?.usageStatisticsEnabled,
+    ),
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2546,6 +2666,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    agentCollaborationEnabled:
+      settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
@@ -2670,6 +2792,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
+    enableStructuredMemoryRecall:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableStructuredRecall ?? false),
     enableAutoSkill:
       bareMode || safeMode
         ? false
@@ -2681,6 +2807,8 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel,
+    advisorMaxUses: settings.advisorMaxUses,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:
@@ -2700,6 +2828,7 @@ export async function loadCliConfig(
       settings.hooks,
       hooksConfig,
       bareMode || safeMode,
+      mem0Server,
     ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
@@ -2754,6 +2883,21 @@ export async function loadCliConfig(
     executionEnvironmentFactory: agentExecutionFactory(),
   };
 
+  if (agentHostReadOnly) {
+    configParams.coreTools = [...AGENT_HOST_TOOL_NAMES];
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.topTierMcpServers = undefined;
+    configParams.pendingMcpServers = undefined;
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.sessionWorkflowEnabled = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.cronEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.omniEnabled = false;
+  }
+
   if (sshWorkspace) {
     configParams.executionEnvironment = new SshExecutionEnvironment(
       sshWorkspace,
@@ -2773,6 +2917,7 @@ export async function loadCliConfig(
     configParams.enableManagedAutoDream = false;
     configParams.enableTeamMemory = false;
     configParams.enableTeamMemorySync = false;
+    configParams.enableStructuredMemoryRecall = false;
     configParams.enableAutoSkill = false;
     configParams.fileCheckpointingEnabled = false;
     configParams.artifactEnabled = false;
@@ -2785,6 +2930,13 @@ export async function loadCliConfig(
   }
 
   const config = new Config(configParams);
+  if (advisorModel) {
+    validateCliAdvisorModel(config, advisorModel, {
+      fastModel: settings.fastModel,
+      currentModel: resolvedModel,
+      currentAuthType: selectedAuthType,
+    });
+  }
 
   // Load the selected transport only when an external subagent is requested.
   config.setExternalAgentExecutor({

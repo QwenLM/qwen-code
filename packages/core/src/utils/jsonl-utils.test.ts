@@ -49,11 +49,11 @@ afterEach(() => {
   _resetEnsuredDirsCacheForTest();
 });
 
+const tmpPath = (prefix: string) =>
+  path.join(tmpRoot, `${prefix}-${Math.random().toString(36).slice(2)}.jsonl`);
+
 function tmpFile(content: string): string {
-  const p = path.join(
-    tmpRoot,
-    `t-${Math.random().toString(36).slice(2)}.jsonl`,
-  );
+  const p = tmpPath('t');
   fs.writeFileSync(p, content, 'utf8');
   return p;
 }
@@ -68,23 +68,29 @@ async function waitForStreamClosed(
   expect(getStream()?.closed).toBe(true);
 }
 
-async function withCapturedReadStream<T>(
-  operation: () => Promise<T>,
-): Promise<T> {
-  let capturedStream: fs.ReadStream | undefined;
+/** Spies on fs.createReadStream, passing through and keeping the last stream. */
+function spyOnReadStreams() {
   const originalCreateReadStream = fs.createReadStream.bind(fs);
+  const captured: { stream?: fs.ReadStream } = {};
   const spy = vi
     .spyOn(fs, 'createReadStream')
     .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
-      const stream = originalCreateReadStream(...args);
-      capturedStream = stream;
-      return stream;
+      captured.stream = originalCreateReadStream(...args);
+      return captured.stream;
     });
+  return { spy, captured };
+}
 
+async function withCapturedReadStream<T>(
+  content: string,
+  operation: (file: string) => Promise<T>,
+): Promise<T> {
+  const file = tmpFile(content);
+  const { spy, captured } = spyOnReadStreams();
   try {
-    const result = await operation();
-    expect(capturedStream).toBeDefined();
-    await waitForStreamClosed(() => capturedStream);
+    const result = await operation(file);
+    expect(captured.stream).toBeDefined();
+    await waitForStreamClosed(() => captured.stream);
     return result;
   } finally {
     spy.mockRestore();
@@ -135,44 +141,43 @@ describe('_recoverObjectsFromLine', () => {
 });
 
 describe('parseLineTolerant', () => {
+  const parse = (line: string) => parseLineTolerant(line, '/tmp/x.jsonl');
+
   it('returns the parsed object for a well-formed line', () => {
-    expect(parseLineTolerant<{ a: number }>('{"a":1}', '/tmp/x.jsonl')).toEqual(
-      [{ a: 1 }],
-    );
+    expect(parse('{"a":1}')).toEqual([{ a: 1 }]);
   });
 
   it('recovers both records from a `}{`-glued line', () => {
-    expect(
-      parseLineTolerant<{ uuid: string }>(
-        '{"uuid":"a"}{"uuid":"b"}',
-        '/tmp/x.jsonl',
-      ),
-    ).toEqual([{ uuid: 'a' }, { uuid: 'b' }]);
+    expect(parse('{"uuid":"a"}{"uuid":"b"}')).toEqual([
+      { uuid: 'a' },
+      { uuid: 'b' },
+    ]);
   });
 
   it('returns [] when nothing balanced can be recovered', () => {
-    expect(parseLineTolerant('not-json', '/tmp/x.jsonl')).toEqual([]);
+    expect(parse('not-json')).toEqual([]);
   });
 
   it('filters non-object JSON values (e.g. bare `null`) instead of forwarding them', () => {
-    // Without the filter, callers that do `record.type` would crash on the
-    // returned scalar; integration sites then propagate to outer catches and
+    // Unfiltered, `record.type` callers crash on the scalar and outer catches
     // zero out whole counts.
-    expect(parseLineTolerant('null', '/tmp/x.jsonl')).toEqual([]);
-    expect(parseLineTolerant('42', '/tmp/x.jsonl')).toEqual([]);
-    expect(parseLineTolerant('"a string"', '/tmp/x.jsonl')).toEqual([]);
+    expect(parse('null')).toEqual([]);
+    expect(parse('42')).toEqual([]);
+    expect(parse('"a string"')).toEqual([]);
   });
 
   it('filters bare JSON arrays (typeof [] === "object" trap)', () => {
-    // Docstring promises only objects flow through. Arrays would otherwise
-    // slip past the `typeof === 'object'` check and force callers to add
-    // their own `Array.isArray` guards before `record.type`.
-    expect(parseLineTolerant('[1,2,3]', '/tmp/x.jsonl')).toEqual([]);
-    expect(parseLineTolerant('[]', '/tmp/x.jsonl')).toEqual([]);
+    // Docstring promises only objects; arrays pass `typeof === 'object'` and
+    // would force callers to add `Array.isArray` guards before `record.type`.
+    expect(parse('[1,2,3]')).toEqual([]);
+    expect(parse('[]')).toEqual([]);
   });
 });
 
 describe('read() / readLines() with malformed lines', () => {
+  const readIntegrity = (content: string, count: number) =>
+    readLinesWithIntegrity<{ i: number }>(tmpFile(content), count);
+
   it('reads a clean file unchanged', async () => {
     const file = tmpFile('{"a":1}\n{"a":2}\n{"a":3}\n');
     expect(await read<{ a: number }>(file)).toEqual([
@@ -243,10 +248,8 @@ describe('read() / readLines() with malformed lines', () => {
   });
 
   it('reports complete recovery for glued object records', async () => {
-    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
-
     await expect(
-      readLinesWithIntegrity<{ i: number }>(file, 5),
+      readIntegrity('{"i":1}{"i":2}\n{"i":3}\n', 5),
     ).resolves.toEqual({
       records: [{ i: 1 }, { i: 2 }, { i: 3 }],
       complete: true,
@@ -259,28 +262,22 @@ describe('read() / readLines() with malformed lines', () => {
     ['an invalid middle fragment', '{"i":1}{"invalid":}{"i":2}\n{"i":3}\n'],
     ['a non-object value', '{"i":1}\nnull\n{"i":3}\n'],
   ])('reports incomplete recovery for %s', async (_name, content) => {
-    const file = tmpFile(content);
-
-    await expect(
-      readLinesWithIntegrity<{ i: number }>(file, 5),
-    ).resolves.toMatchObject({ complete: false });
+    await expect(readIntegrity(content, 5)).resolves.toMatchObject({
+      complete: false,
+    });
   });
 
   it('measures completeness against a line budget, not a record budget', async () => {
     // Line 1 alone satisfies a 2-record budget; the corrupt line 2 must still
     // be scanned because the budget counts physical lines.
-    const file = tmpFile('{"i":1}{"i":2}\n{"i":\n');
-
     await expect(
-      readLinesWithIntegrity<{ i: number }>(file, 2),
+      readIntegrity('{"i":1}{"i":2}\n{"i":\n', 2),
     ).resolves.toMatchObject({ complete: false });
   });
 
   it('returns every record recovered from the scanned lines', async () => {
-    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
-
     await expect(
-      readLinesWithIntegrity<{ i: number }>(file, 1),
+      readIntegrity('{"i":1}{"i":2}\n{"i":3}\n', 1),
     ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
@@ -299,10 +296,8 @@ describe('read() / readLines() with malformed lines', () => {
   });
 
   it('drops scalar / array lines so callers do not see non-object records', async () => {
-    // Locks in the broader semantic change beyond #3681 Item 1: read() and
-    // readLines() now silently skip well-formed JSON that is not an object.
-    // Pre-#3692 these would have round-tripped through `JSON.parse(line)`
-    // and surfaced as `null` / `42` / `"s"` / `[1,2]` array elements.
+    // Beyond #3681 Item 1, read()/readLines() skip well-formed non-object
+    // JSON; pre-#3692 `null` / `42` / `"s"` / `[1,2]` surfaced as elements.
     const file = tmpFile('{"a":1}\nnull\n42\n"a string"\n[1,2,3]\n{"a":2}\n');
     expect(await read<{ a: number }>(file)).toEqual([{ a: 1 }, { a: 2 }]);
     expect(await readLines<{ a: number }>(file, 10)).toEqual([
@@ -319,13 +314,7 @@ describe('reader resource cleanup', () => {
     );
     const controller = new AbortController();
     const reason = new Error('jsonl scan cancelled');
-    const originalCreateReadStream = fs.createReadStream.bind(fs);
-    const spy = vi
-      .spyOn(fs, 'createReadStream')
-      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) =>
-        originalCreateReadStream(...args),
-      );
-
+    const { spy } = spyOnReadStreams();
     try {
       const readPromise = readLines<{ i: number }>(file, 1_000, {
         signal: controller.signal,
@@ -344,22 +333,13 @@ describe('reader resource cleanup', () => {
     const file = tmpFile('{"i":1}\n{"i":2}\n');
     const controller = new AbortController();
     const reason = new Error('cancelled during stream cleanup');
-    let capturedStream: fs.ReadStream | undefined;
-    const originalCreateReadStream = fs.createReadStream.bind(fs);
-    const spy = vi
-      .spyOn(fs, 'createReadStream')
-      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
-        const stream = originalCreateReadStream(...args);
-        capturedStream = stream;
-        return stream;
-      });
-
+    const { spy, captured } = spyOnReadStreams();
     try {
       const readPromise = readLines<{ i: number }>(file, 1, {
         signal: controller.signal,
       });
-      expect(capturedStream).toBeDefined();
-      capturedStream!.once('close', () => controller.abort(reason));
+      expect(captured.stream).toBeDefined();
+      captured.stream!.once('close', () => controller.abort(reason));
 
       await expect(readPromise).rejects.toBe(reason);
     } finally {
@@ -368,29 +348,25 @@ describe('reader resource cleanup', () => {
   });
 
   it('closes the file stream after readLines stops at the requested limit', async () => {
-    const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
-
-    const result = await withCapturedReadStream(() =>
-      readLines<{ i: number }>(file, 1),
+    const result = await withCapturedReadStream(
+      '{"i":1}\n{"i":2}\n{"i":3}\n',
+      (file) => readLines<{ i: number }>(file, 1),
     );
 
     expect(result).toEqual([{ i: 1 }]);
   });
 
   it('closes the file stream after an integrity-aware read', async () => {
-    const file = tmpFile('{"i":1}{"i":2}\n{"i":3}\n');
-
-    const result = await withCapturedReadStream(() =>
-      readLinesWithIntegrity<{ i: number }>(file, 1),
+    const result = await withCapturedReadStream(
+      '{"i":1}{"i":2}\n{"i":3}\n',
+      (file) => readLinesWithIntegrity<{ i: number }>(file, 1),
     );
 
     expect(result).toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
   it('closes the file stream after read consumes all lines', async () => {
-    const file = tmpFile('{"i":1}\n{"i":2}\n');
-
-    const result = await withCapturedReadStream(() =>
+    const result = await withCapturedReadStream('{"i":1}\n{"i":2}\n', (file) =>
       read<{ i: number }>(file),
     );
 
@@ -398,24 +374,21 @@ describe('reader resource cleanup', () => {
   });
 
   it('closes the file stream after countLines consumes all lines', async () => {
-    const file = tmpFile('{"i":1}\n\n{"i":2}\n');
-
-    const result = await withCapturedReadStream(() => countLines(file));
+    const result = await withCapturedReadStream(
+      '{"i":1}\n\n{"i":2}\n',
+      countLines,
+    );
 
     expect(result).toBe(2);
   });
 });
 
-// PR #4333 review fold-in: smoke tests for the three write paths. Downstream
-// callers (chatRecordingService, sessionService) mock these entirely, so a
-// regression in flush:true or atomicWriteFileSync wiring would otherwise go
-// undetected. Tests use real fs and assert roundtrip integrity.
+// PR #4333: real-fs roundtrip smoke tests for the three write paths. Callers
+// (chatRecordingService, sessionService) mock these entirely, so flush:true or
+// atomicWriteFileSync wiring regressions would otherwise go undetected.
 describe('writeLine / writeLineSync / write', () => {
   it('writeLine round-trips through read() with flush:true appended records', async () => {
-    const file = path.join(
-      tmpRoot,
-      `wl-${Math.random().toString(36).slice(2)}.jsonl`,
-    );
+    const file = tmpPath('wl');
     await writeLine(file, { kind: 'a', n: 1 });
     await writeLine(file, { kind: 'b', n: 2 });
     await writeLine(file, { kind: 'c', n: 3 });
@@ -434,10 +407,7 @@ describe('writeLine / writeLineSync / write', () => {
   });
 
   it('writeLineSync appends well-formed records with trailing newlines', () => {
-    const file = path.join(
-      tmpRoot,
-      `wls-${Math.random().toString(36).slice(2)}.jsonl`,
-    );
+    const file = tmpPath('wls');
     writeLineSync(file, { sync: true, i: 0 });
     writeLineSync(file, { sync: true, i: 1 });
 
@@ -447,10 +417,7 @@ describe('writeLine / writeLineSync / write', () => {
   });
 
   it('write() full-file replaces existing content via atomic write', async () => {
-    const file = path.join(
-      tmpRoot,
-      `wf-${Math.random().toString(36).slice(2)}.jsonl`,
-    );
+    const file = tmpPath('wf');
     await writeLine(file, { v: 1 });
     await writeLine(file, { v: 2 });
     expect((await read(file)).length).toBe(2);
@@ -466,16 +433,11 @@ describe('writeLine / writeLineSync / write', () => {
     expect(dirEntries).toEqual([path.basename(file)]);
   });
 
-  // The other write() test targets a path inside the pre-created tmpRoot,
-  // so the `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })`
-  // branch is never exercised. A regression that dropped that branch would
-  // make write() fail with ENOENT only when callers target a brand-new
-  // subdirectory.
+  // The other write() tests target the pre-created tmpRoot, so only the
+  // parent-dirs case exercises the mkdirSync branch; dropping it would make
+  // write() fail with ENOENT only for a brand-new subdirectory.
   it('write() with an empty array leaves a genuinely empty file', async () => {
-    const file = path.join(
-      tmpRoot,
-      `we-${Math.random().toString(36).slice(2)}.jsonl`,
-    );
+    const file = tmpPath('we');
     await writeLine(file, { v: 1 });
     expect(exists(file)).toBe(true);
 

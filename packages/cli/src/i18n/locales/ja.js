@@ -148,6 +148,8 @@ export default {
     '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'このターンまで会話を巻き戻せません。モデル履歴と対応しなくなっています（再試行後など）。より最近のターンをお試しください。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1388,6 +1390,9 @@ export default {
     'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated usage, including the conversation': '推定使用量（会話を含む）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'プロバイダーの使用量はまだありません。以下は会話を含むローカル推定値です。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
   'Context window': 'コンテキストウィンドウ',
   tokens: 'トークン',
@@ -1403,7 +1408,7 @@ export default {
   Messages: 'メッセージ',
   'Startup context': '起動時コンテキスト',
   Unattributed: '未分類',
-  'Cached prefix': 'キャッシュ済みプレフィックス',
+  'Cached prefix': 'プレフィックスキャッシュ',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',

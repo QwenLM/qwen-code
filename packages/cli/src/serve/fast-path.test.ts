@@ -465,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    expect(runServeSource).not.toMatch(/import \{ SessionService \} from/);
+    expect(runServeSource).toMatch(
+      /await import\(\s*'@qwen-code\/qwen-code-core\/services\/sessionService\.js'/,
+    );
     // web-shell-static (express-static/CSP machinery) must stay out of the
     // fast-path static closure at every depth, including transitive edges
     // through server/self-origin.js and web-shell-preauth.js; the static
@@ -731,6 +735,37 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['profile', ['--profile', 'hosted-harness']],
+      [
+        'hosted-harness-capability-digest',
+        ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
+      ],
+      ['experimental-paired-engines', ['--experimental-paired-engines']],
+      ['experimental-managed-agents', ['--experimental-managed-agents']],
+      [
+        'experimental-managed-runtime-worker',
+        ['--experimental-managed-runtime-worker'],
+      ],
+      [
+        'experimental-managed-runtime-auto-local',
+        ['--experimental-managed-runtime-auto-local'],
+      ],
+      [
+        'experimental-managed-runtime-url',
+        ['--experimental-managed-runtime-url', 'http://127.0.0.1:3001'],
+      ],
+      [
+        'experimental-managed-runtime-token',
+        ['--experimental-managed-runtime-token', 'test-token'],
+      ],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:3002'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
@@ -742,14 +777,41 @@ describe('serve fast path argument parsing', () => {
         ['--external-tool-guard-timeout-ms', '3000'],
       ],
       ['channel', ['--channel', 'telegram']],
+      // The managed Agent Host worker flags. A Host runs its own `qwen serve`
+      // that only reaches out, so these have to be reachable the same way
+      // every other serve option is.
+      ['agent-host-server', ['--agent-host-server', 'https://example.invalid']],
+      ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
+      ['agent-host-name', ['--agent-host-name', 'builder']],
+      ['agent-host-allow-http', ['--agent-host-allow-http']],
+      ['join', ['--join', 'https://example.invalid/join/ws_1']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      // The fast path exists to start a plain daemon without loading the full
+      // CLI. A managed Agent Host is a different mode — it enrols, polls and
+      // launches an executor — so these hand off rather than being taught to
+      // the fast path.
+      'agent-host-allow-http',
+      'agent-host-name',
+      'agent-host-server',
+      'agent-host-workspace-id',
       'channel',
+      'profile',
+      'hosted-harness-capability-digest',
+      'experimental-paired-engines',
+      'experimental-managed-agents',
+      'experimental-managed-runtime-worker',
+      'experimental-managed-runtime-auto-local',
+      'experimental-managed-runtime-url',
+      'experimental-managed-runtime-token',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
+      'join',
       'help',
       'local-control',
       'local-control-address',

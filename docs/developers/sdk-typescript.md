@@ -185,15 +185,22 @@ The SDK requires the daemon's `session_id_override` capability before sending th
 
 This option always creates a new thread session and is not an idempotent attach. If the create outcome is ambiguous, use the known ID with load or resume. Omitting the option preserves the existing create-or-attach behavior.
 
+## Daemon startup model and reasoning selection
+
+`DaemonClient.createOrAttachSession` and `createStandaloneSession` accept `startupConfig: { modelServiceId, reasoningEffort? }` and preflight `session_startup_config` before creation. The model is required; omit reasoning for model-only selection, including models with no reasoning control. An explicit effort is validated against the model. The SDK checks `modelApplied: true` and the canonical `startupConfigApplied` response; model-only confirmation omits reasoning fields.
+
+Startup selection does not save shared defaults or impose a lifetime pin. Definite selection rejection fails creation; uncertain standalone creation retains its existing recovery result. A successful response whose startup confirmation is missing or mismatched is rejected directly and does not trigger standalone recovery/adoption. See the [protocol](./qwen-serve-protocol.md#capabilities).
+
 ## Talking to running sessions
 
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
 sessions running as the same user on the same machine — a voice front-end, a
 relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
-`list_agents` of every session that has `agents.crossSessionMessaging` turned
-on — which is also what lets those sessions message it by name with
-`send_message`. It can message them back. It runs on Node only and needs
-nothing beyond Node itself.
+`list_agents` of every session that takes part in cross-session messaging — its
+`agents.crossSessionMessaging` setting is on, and it was not started with
+`--bare` or `--safe-mode` — which is also what lets those sessions message it
+by name with `send_message`. It can message them back. It runs on Node only and
+needs nothing beyond Node itself.
 
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
@@ -239,9 +246,11 @@ await endpoint.send({
 Things to know:
 
 - A session has an inbox only while its `agents.crossSessionMessaging` setting
-  is on, which it is by default. A session that turned it off does not appear
-  in `list()`, and its own `list_agents` and `send_message` cannot see or
-  reach the program either. `qwen sessions ps` lists the program regardless.
+  is on, which it is by default, and it was not started with `--bare` or
+  `--safe-mode` — those turn messaging off whatever the setting says. A session
+  that turned it off does not appear in `list()`, and its own `list_agents` and
+  `send_message` cannot see or reach the program either. `qwen sessions ps`
+  lists the program regardless.
 - A message is delivered without review in exactly two cases: the send
   presents a controller token (`controller: true`), or its `fromMode` names the
   receiving session's own review class. `fromMode` is a claim nothing

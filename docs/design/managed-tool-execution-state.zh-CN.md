@@ -137,5 +137,6 @@ workspace 值。调用引用与结果属于 Broker 私有载荷；若没有独�
 ## 后续工作
 
 该契约的 JDBC 实现见 `JdbcToolExecutionRepository`，参见
-`managed-runtime-broker-jdbc.md`。Runtime 派发集成在响应不明确后必须查询原
-`executionCallId`，不能重放 Tool 调用。
+`managed-runtime-broker-jdbc.md`。响应不明确后，Broker 可以按需按原始 `reference`
+查询原调用，只在 Runtime 给出终态证据时调用 `resolveUnknown`，从不重放 Tool
+调用。参见 `managed-runtime-broker-service-core.zh-CN.md` 的 UNKNOWN 对账一节。
