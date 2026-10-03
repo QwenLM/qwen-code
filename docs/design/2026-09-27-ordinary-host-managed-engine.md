@@ -964,7 +964,9 @@ alone says which call took effect.
   host asserts none of these on read: the gating fields are the call id, the
   argument digest and the incarnation. A call cancelled while its worker
   starts is not sent and commits nothing; a call whose admission write fails
-  is not dispatched, and the turn fails with the recording error.
+  is not dispatched, and the turn fails with the recording error; a call
+  cancelled after its admission settles as cancelled without contacting the
+  worker.
 - **Committed as each settles, before the model continues.** A call the
   worker settles, however it settles, publishes a `managed-tool-outcome`
   resource with its execution status and wire payload, appends its
@@ -1232,8 +1234,9 @@ M5b:
    and the `await_runtime` checkpoint covering it: the worker receives no
    `execute` whose admission has not landed, and the checkpoint binding names
    the worker's incarnation. A call whose admission write fails is not
-   dispatched, and one cancelled while its worker starts sends nothing and
-   commits nothing.
+   dispatched, one cancelled while its worker starts sends nothing and
+   commits nothing, and one cancelled after its admission settles as
+   cancelled without reaching the worker.
 2. Each settled call commits its `managed-tool-outcome`, `tool.receipt` and
    checkpoint settlement before the model loop receives the result; a turn
    stopped between two calls has the first call's receipt in the sealed log,

@@ -712,7 +712,7 @@ M2 一样，它不在 daemon 各构造点注册任何东西，因此 M6 之前�
   `capabilityVersion`、以宿主审批契约作为 `policyVersion`、以公开的 prompt 级标识
   作为 `modelMessageId`，以及调用在 prompt 内的序号。本地宿主在读取时不校验这些
   字段：起约束作用的是 call id、参数摘要与 incarnation。worker 启动期间被取消的
-  调用不会发出，也不提交任何内容；准入写入失败的调用不会派发，回合以记录错误失败。
+  调用不会发出，也不提交任何内容；准入写入失败的调用不会派发，回合以记录错误失败；准入之后才被取消的调用以已取消结算，不接触 worker。
 - **每个结果一经结束即提交，模型才能继续。** worker 以任何方式结束的调用，先发布
   带执行状态与线上负载的 `managed-tool-outcome` 资源，追加其 `tool.receipt`，再经
   `resolveAwaitRuntime` 结束其 checkpoint 条目，结果随后才返回给模型循环。被
@@ -900,7 +900,7 @@ M5b：
 1. 通过带真实子进程的双引擎 Bridge，Managed 会话的每次写入、编辑、读取与命令，之前都有
    已提交的 `tool.intent` 与覆盖它的 `await_runtime` checkpoint：worker 不会收到准入未
    落盘的 `execute`，checkpoint 的 binding 写明 worker 的 incarnation。准入写入失败的
-   调用不派发；worker 启动期间被取消的调用不发送也不提交。
+   调用不派发；worker 启动期间被取消的调用不发送也不提交；准入之后才被取消的调用以已取消结算，不会到达 worker。
 2. 每个结束的调用先把 `managed-tool-outcome`、`tool.receipt` 与其 checkpoint 结算提交
    落盘，结果才到达模型循环；在两次调用之间停止的回合，其 log 封存时带第一个调用的
    receipt；崩溃不会留下模型已见却未提交的结果。

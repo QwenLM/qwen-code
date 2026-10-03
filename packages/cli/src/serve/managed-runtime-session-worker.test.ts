@@ -894,6 +894,38 @@ describe.skipIf(process.platform === 'win32')(
       ]);
     });
 
+    it('settles a call cancelled after its admission without dispatching it', async () => {
+      const env = create('ok');
+      let release!: () => void;
+      outcomeWaiters.admit = new Promise((resolve) => {
+        release = resolve;
+      });
+      const controller = new AbortController();
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        controller.signal,
+      );
+      const result = env.execute('write', controller.signal);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.abort();
+      release();
+      const settled = await result;
+      expect(settled.error?.message).toBe('The tool call was cancelled.');
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          functionCallId: 'write',
+          executionStatus: 'cancelled',
+        }),
+      ]);
+      // The worker heard nothing: the admission stands, the cancelled
+      // settlement closes it.
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+    });
+
     it.each([true, 'true'])(
       'refuses a background command (%j) before it asks or starts a worker',
       async (isBackground) => {

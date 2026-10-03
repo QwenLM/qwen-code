@@ -912,6 +912,21 @@ export function createManagedRuntimeEnvironment(
         toolDefinition: prepared.toolDefinition(call.toolName),
         workerIncarnation: started.boot.runtimeIncarnation,
       });
+      // Cancelled between the admission and the dispatch: the worker never
+      // hears the call, so its outcome is known — cancelled — and settles
+      // the same way, without contacting the worker.
+      if (signal.aborted) {
+        const payload: ManagedToolResultPayload = {
+          executionStatus: 'cancelled',
+          responseParts: [],
+        };
+        await outcomes.settle({
+          functionCallId: call.id,
+          executionStatus: payload.executionStatus,
+          payload,
+        });
+        return toToolResult(payload);
+      }
       try {
         const payload = await worker.executeIn(
           started,
