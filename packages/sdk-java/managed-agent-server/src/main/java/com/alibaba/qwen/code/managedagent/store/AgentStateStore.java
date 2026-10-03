@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
@@ -59,6 +60,16 @@ public interface AgentStateStore {
             SessionMutationKind kind, String title, String harnessBootId);
 
     /**
+     * Retires the command row of a Session mutation the Harness refused
+     * before completion, so the refusal does not leave the Session's
+     * later lifecycle changes blocked by a {@code PENDING} row nothing
+     * completes. The receipt and digest survive for same-content retries
+     * and concurrent completion; completed outcomes remain replayable.
+     */
+    void abandonSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId);
+
+    /**
      * Admits a close, archive or delete, or returns the operation that the
      * same actor already admitted under the key. An archive completes here;
      * a close or delete waits for {@link #completeOperation}.
@@ -66,6 +77,34 @@ public interface AgentStateStore {
     OperationAdmission beginOperation(String tenantId, String sessionId,
             OperationKind kind, String actorDigest, String idempotencyKey,
             String requestDigest);
+
+    default boolean workspaceFilesEnabled() {
+        return false;
+    }
+
+    default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest, boolean supported) {
+        throw new UnsupportedOperationException("Workspace close is unavailable");
+    }
+
+    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
+            OperationKind kind, String actorId, String actorDigest, String key,
+            String digest, boolean closeSupported);
+
+    boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
+
+    SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
+            String actorId, String scopedKey, String requestDigest);
+
+    default boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, Duration duration) {
+        return false;
+    }
+
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt) {
+        throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
 
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);

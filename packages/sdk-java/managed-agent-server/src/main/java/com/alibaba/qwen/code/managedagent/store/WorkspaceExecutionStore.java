@@ -196,6 +196,13 @@ public class WorkspaceExecutionStore {
         });
     }
 
+    public boolean hasHolder(RuntimeBindingRecord saved) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND holder_key IS NOT NULL",
+                Integer.class, saved.getBindingId(), saved.getGeneration());
+        return count != null && count > 0;
+    }
+
     public void releaseLost(RuntimeBindingRecord saved) {
         if (!saved.getRequest().isManagedContext() || saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.hasStoppedWriters() || saved.getOperationOwner() == null) {

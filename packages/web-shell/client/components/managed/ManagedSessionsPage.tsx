@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
+import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Textarea } from '../ui/textarea';
@@ -10,6 +18,9 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
+import { useManagedActions } from './use-managed-actions';
+import { toManagedPermissionRequest } from './managed-approval';
+import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
@@ -55,20 +66,6 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   } catch {
     // The in-memory attempt still preserves retries when storage is disabled.
   }
-}
-
-function isNonRetryableClientError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('status' in error)) {
-    return false;
-  }
-  const status = (error as { status?: unknown }).status;
-  return (
-    typeof status === 'number' &&
-    status >= 400 &&
-    status < 500 &&
-    status !== 408 &&
-    status !== 429
-  );
 }
 
 export function ManagedSessionsPage({
@@ -160,6 +157,32 @@ function ManagedSessionsContent({
     () => managedEventsToMessages(detail.events, t('managed.truncated')),
     [detail.events, t],
   );
+  // The caveat sits beside the card rather than inside the panel, so the panel
+  // is told about it: without this the dialog describes only the tool name and
+  // a screen-reader user confirms an approval whose arguments are missing.
+  const argumentsCaveatId = useId();
+  const answerNoticeId = useId();
+  const approvals = useManagedActions(
+    provider,
+    enabled ? sessionId : undefined,
+    clientId,
+    // Unknown while the summary reloads, so the shown approval is kept.
+    detail.summary ? detail.summary.capabilities.actions === true : undefined,
+    detail.events,
+  );
+  const pendingApproval = useMemo(
+    () =>
+      approvals.action
+        ? toManagedPermissionRequest(approvals.action, messages)
+        : null,
+    [approvals.action, messages],
+  );
+  // The reason line below is mounted exactly when this holds, so the dialog can
+  // point at it without ever leaving a dangling IDREF. A latch-only render has
+  // no `alert` node and no operable option left, so this line is the only place
+  // a screen-reader user can hear why the card is dead.
+  const answerNoticeShown =
+    approvals.answerError !== undefined || approvals.respondForbidden;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -462,9 +485,11 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
-              <p className="text-muted-foreground">
-                {t('managed.workspaceExecutionUnavailable')}
-              </p>
+              {!summary.capabilities.workspaceTurns && (
+                <p className="text-muted-foreground">
+                  {t('managed.workspaceExecutionUnavailable')}
+                </p>
+              )}
             </div>
           )}
           {summary?.failure && (
@@ -490,7 +515,7 @@ function ManagedSessionsContent({
                     ? openResult
                     : undefined
                 }
-                pendingApproval={null}
+                pendingApproval={pendingApproval}
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
@@ -514,6 +539,77 @@ function ManagedSessionsContent({
               {t('managed.uncertain')}
             </p>
           )}
+          {pendingApproval && (
+            <div className="shrink-0" data-testid="managed-approval">
+              <ToolApproval
+                request={pendingApproval}
+                variant="floating"
+                keyboardActive={false}
+                // Only the Session creator may answer; once the service says
+                // so, that is true of every approval this Session raises, so
+                // the latch is scoped to the Session rather than the Action.
+                disabled={approvals.respondForbidden}
+                extraDescriptionId={
+                  [
+                    pendingApproval.rawInput === undefined
+                      ? argumentsCaveatId
+                      : null,
+                    answerNoticeShown ? answerNoticeId : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' ') || undefined
+                }
+                onConfirm={(actionId, optionId) =>
+                  approvals.respond(actionId, optionId)
+                }
+              />
+              {pendingApproval.rawInput === undefined && (
+                <p
+                  id={argumentsCaveatId}
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                >
+                  {t('managed.approval.argumentsUnavailable')}
+                </p>
+              )}
+            </div>
+          )}
+          {approvals.loadError !== undefined && (
+            <div
+              role="alert"
+              className="flex items-center gap-2 text-sm text-destructive"
+            >
+              <span>
+                {t(
+                  approvals.loaded
+                    ? 'managed.approval.refreshFailed'
+                    : 'managed.approval.loadFailed',
+                )}
+              </span>
+              <Button variant="outline" size="sm" onClick={approvals.retry}>
+                {t('managed.approval.retry')}
+              </Button>
+            </div>
+          )}
+          {/* `answerError` is only exposed for the Action on screen, so this
+              guard only bounds the latch: the reason describes a card, and
+              once the Session has none there is nothing left to explain. */}
+          {pendingApproval !== null && answerNoticeShown && (
+            <p
+              id={answerNoticeId}
+              // The first refusal is news; the latch that keeps every later
+              // approval of this Session disabled only restates it, so it is
+              // a status line rather than a second alert.
+              role={approvals.answerError !== undefined ? 'alert' : 'status'}
+              className="text-sm text-destructive"
+            >
+              {t(
+                approvals.respondForbidden
+                  ? 'managed.approval.forbidden'
+                  : 'managed.approval.failed',
+              )}
+            </p>
+          )}
           <ManagedSessionProgress
             summary={summary}
             submitting={
@@ -521,7 +617,7 @@ function ManagedSessionsContent({
             }
             loading={detail.loading}
           />
-          {!summary?.workspace &&
+          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <form
               className="flex shrink-0 flex-col gap-2"

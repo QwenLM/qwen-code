@@ -62,6 +62,24 @@ class ConnectionRecoveryDeviceTest {
         }
     }
 
+    @Test fun microphoneAuthorizedConnectionIsNotSavedOrAutomaticallyRestored() = withFixture { _, profile ->
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val activity = activity(scenario)
+            navigate(connect(activity, profile))
+            val saved = Bundle()
+            instrumentation.runOnMainSync {
+                MainActivity::class.java.getDeclaredField("microphoneAuthorized").apply {
+                    isAccessible = true
+                    setBoolean(activity, true)
+                }
+                instrumentation.callActivityOnSaveInstanceState(activity, saved)
+            }
+            assertFalse("Microphone-authorized connections must not be saved for automatic recovery", saved.containsKey("connection-recovery"))
+            scenario.recreate()
+            assertConnections(activity(scenario))
+        }
+    }
+
     @Test fun renameRestoresButCredentialRotationDoesNot() = withFixture { _, profile ->
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             navigate(connect(activity(scenario), profile))

@@ -86,11 +86,13 @@ const RUN_STAGES = new Set([
  */
 export function RunRowView({
   row,
+  agent,
   hideAgent = false,
   onOpenAgentSession,
   onCancelRun,
 }: {
   row: RunRow;
+  agent?: { status?: string; runtime?: { label: string; status: string } };
   hideAgent?: boolean;
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun?: (runId: string) => void;
@@ -109,7 +111,9 @@ export function RunRowView({
   const quiet = progress && now - progress.activityAt > 15000;
   const state =
     row.run.status === 'queued'
-      ? t('collab.runRow.queued')
+      ? agent?.status === 'offline' || agent?.runtime?.status === 'offline'
+        ? t('collab.runRow.hostOffline', { host: agent.runtime?.label ?? '' })
+        : t('collab.runRow.queued')
       : row.run.status === 'running'
         ? progress
           ? progress.stage === 'awaiting_approval'
@@ -215,7 +219,9 @@ export function RunRowView({
         <span className={styles.runError}>
           {row.run.error === 'agent_run_stalled'
             ? t('collab.runRow.stalled')
-            : row.run.error}
+            : row.run.error === 'agent_program_unavailable'
+              ? t('collab.runRow.programUnavailable')
+              : row.run.error}
         </span>
       ) : null}
     </div>

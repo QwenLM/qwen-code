@@ -34,6 +34,7 @@ import type {
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
+import type { ManagedHookRuntime } from './managed-hook-runtime.js';
 import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type { ManagedMcpOperationView } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
@@ -211,7 +212,9 @@ export class ManagedToolExecutor {
     this.assertLegacySession(sessionId);
     if (
       this.closing ||
-      this.hasActiveSession(sessionId) ||
+      this.hasActiveToolSession(sessionId) ||
+      (operation.action === 'rewind' &&
+        this.hooks?.hasHolds(sessionId) === true) ||
       [...this.entries.values()].some(
         (entry) =>
           entry.reference.sessionId === sessionId && entry.state === 'unknown',
@@ -276,6 +279,7 @@ export class ManagedToolExecutor {
     private readonly toolsFor: ManagedToolSetResolver,
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
+    private readonly hooks?: ManagedHookRuntime,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -667,6 +671,13 @@ export class ManagedToolExecutor {
 
   /** Read-only lookup; never creates or advances an invocation. */
   hasActiveSession(sessionId: string): boolean {
+    return (
+      this.hooks?.hasHolds(sessionId) === true ||
+      this.hasActiveToolSession(sessionId)
+    );
+  }
+
+  private hasActiveToolSession(sessionId: string): boolean {
     if (this.historyControls.has(sessionId)) return true;
     return (
       this.mcp?.hasHolds(sessionId) === true ||
@@ -735,7 +746,7 @@ export class ManagedToolExecutor {
 
   async close(): Promise<void> {
     this.closing = true;
-    await this.mcp?.close();
+    await Promise.all([this.mcp?.close(), this.hooks?.close()]);
     for (const entry of this.entries.values()) {
       if (entry.state === 'executing' || entry.state === 'cancel_requested') {
         entry.controller.abort();

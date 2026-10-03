@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
+  // The shared approval card asks whether a tool is an agent launch.
+  isAgentTool: () => false,
 }));
 vi.mock('../MessageList', () => ({
   MessageList: ({
@@ -35,17 +37,24 @@ vi.mock('../MessageList', () => ({
     hasOlderHistory,
     onLoadOlderHistory,
     onToolResultOpen,
+    pendingApproval,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
     onToolResultOpen?: (itemId: string) => void;
+    pendingApproval?: unknown;
   }) => (
     <>
       <button onClick={() => onToolResultOpen?.('item-1')}>
         Open tool output
       </button>
       <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+      {/* The real MessageList keys its folding off this prop, so the mock has
+          to expose it for the join between the two to be observed. */}
+      <pre data-testid="message-list-pending-approval">
+        {JSON.stringify(pendingApproval ?? null)}
+      </pre>
       {hasOlderHistory && (
         <button onClick={() => void onLoadOlderHistory()}>Older history</button>
       )}
@@ -90,6 +99,21 @@ function event(id: number, text: string): ManagedAgentSessionEvent {
 async function flush() {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
+
+const pendingAction = {
+  actionId: 'tool_approval_1',
+  sessionId: 's1',
+  turnId: 'p1',
+  functionCallId: 'call-1',
+  toolName: 'write_file',
+  inputRevision: 1,
+  policyRevision: 'hosted-tool-approval/1',
+  expiresAt: Date.now() + 600_000,
+  options: [
+    { id: 'allow', label: 'Allow' },
+    { id: 'deny', label: 'Deny' },
+  ],
+};
 
 describe('ManagedSessionsPage', () => {
   let container: HTMLDivElement;
@@ -179,6 +203,525 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('keeps the shown approval while a reload has not returned the Session yet', async () => {
+    let hold = false;
+    let release: (() => void) | undefined;
+    mocks.client.getSession.mockImplementation(async (id: string) => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+      return summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      });
+    });
+    const listPending = vi.fn().mockResolvedValue([pendingAction]);
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+
+    hold = true;
+    const refresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Refresh',
+    );
+    await act(async () => {
+      refresh!.click();
+      await flush();
+    });
+    // The reload has not returned the Session summary, so the capability is
+    // unknown: the card stays and nothing is read yet.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    hold = false;
+    await act(async () => {
+      release?.();
+      await flush();
+    });
+  });
+
+  it('shows a pending Hosted approval and answers it with the chosen option', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    const action = pendingAction;
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([action])
+      .mockResolvedValue([]);
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+
+    const card = container.querySelector('[data-testid="managed-approval"]');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('Tool arguments are unavailable');
+    // The caveat sits beside the panel, so the panel has to be told about it:
+    // the description a screen-reader user hears must reach it.
+    const dialog = card!.querySelector('[role="alertdialog"]')!;
+    const caveatId = card!
+      .querySelector('p[role="status"]')!
+      .getAttribute('id') as string;
+    expect(caveatId).toBeTruthy();
+    expect(dialog.getAttribute('aria-describedby')).toContain(caveatId);
+    // The transcript row that carries the tool call keeps the approval card
+    // reachable: MessageList folds turns by this prop.
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_1');
+    const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Yes, allow once'),
+    );
+    expect(allow).toBeDefined();
+    await act(async () => {
+      allow!.click();
+      await flush();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Retry the same option',
+    );
+    const retry = Array.from(
+      container.querySelectorAll('[data-testid="managed-approval"] button'),
+    ).find((button) => button.textContent?.includes('Yes, allow once'));
+    await act(async () => {
+      (retry as HTMLButtonElement).click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(respond).toHaveBeenCalledWith(action, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    // The answered Action left, so the warning that described it leaves too.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toBe('null');
+  });
+
+  it.each([
+    ['write_file', { file_path: 'notes.md', content: 'approval-write-body' }],
+    [
+      'edit',
+      {
+        file_path: 'notes.md',
+        old_string: 'approval-old-body',
+        new_string: 'approval-new-body',
+      },
+    ],
+  ])(
+    'shows available %s arguments inside the approval card',
+    async (toolName, input) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false, actions: true },
+        }),
+      );
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'tool_requested',
+            data: { toolCallId: 'call-1', toolName, input },
+          },
+        ],
+        lastEventId: 1,
+      });
+      provider = {
+        ...provider,
+        actions: {
+          listPending: vi
+            .fn()
+            .mockResolvedValue([{ ...pendingAction, toolName }]),
+          respond: vi.fn(),
+        },
+      };
+
+      await render('s1');
+      const card = container.querySelector('[data-testid="managed-approval"]')!;
+      const shownInput = card.querySelector('pre')?.textContent ?? '';
+      for (const value of Object.values(input)) {
+        expect(shownInput).toContain(value);
+      }
+      expect(card.textContent).not.toContain('Tool arguments are unavailable');
+      // Without the caveat there is no extra description to point at, and no
+      // ARIA IDREF is left dangling.
+      const describedBy =
+        card
+          .querySelector('[role="alertdialog"]')!
+          .getAttribute('aria-describedby') ?? '';
+      const referenced = describedBy.split(' ').filter(Boolean);
+      expect(referenced.length).toBeGreaterThan(0);
+      for (const id of referenced) {
+        expect(document.getElementById(id)).not.toBeNull();
+      }
+    },
+  );
+
+  it('offers a direct retry when pending approvals could not be loaded', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue([pendingAction]);
+    const respond = vi.fn();
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Pending approvals could not be loaded',
+    );
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Retry loading approvals',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry!.click();
+      await flush();
+    });
+    expect(listPending).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('names a failed background re-read as a refresh while the loaded card stays', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [event(1, 'Persisted answer')],
+      lastEventId: 1,
+    });
+    // The transcript reports an approval change, which re-reads the list. The
+    // report is held back until the first read has landed, so the re-read is
+    // what is being observed rather than the initial load.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(2, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      // A Session deleted while the tab is open: the re-read can never succeed.
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    // The approvals were loaded and one is on screen; only the refresh failed.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    const alert = container.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('Pending approvals could not be refreshed');
+    expect(alert).not.toContain('could not be loaded');
+  });
+
+  it('explains that a reader cannot answer a creator-only approval', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
+    // The refusal is final for this viewer, so the card stops offering the
+    // answer instead of sending one 403 per click.
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const second = {
+      ...pendingAction,
+      actionId: 'tool_approval_2',
+      functionCallId: 'call-2',
+    };
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_2', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([second]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(listPending).toHaveBeenCalledTimes(1);
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(allow().disabled).toBe(true);
+
+    // The refused Action left and the next one arrived: the refusal is a fact
+    // about the viewer and the Session, so the new card is just as dead
+    // instead of offering one more guaranteed 403.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_2');
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
+    // The per-Action alert left with the Action it described, but a dead card
+    // with no stated reason is indistinguishable from a stuck one — and the
+    // disabled options also drop out of sequential focus navigation — so the
+    // latch keeps the reason on screen. It is a status line, not a second
+    // alert, because it restates what the viewer was already told.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[role="status"]')).map(
+        (node) => node.textContent,
+      ),
+    ).toContain('Only the Session creator can answer this approval.');
+    // On screen is not enough: the reason is a sibling of the dialog, and a
+    // polite region that mounts with its text already in place announces
+    // nothing, so the dialog's own description is what carries the cause to a
+    // screen-reader user. Widening it must not drop the arguments caveat.
+    const card = container.querySelector('[data-testid="managed-approval"]')!;
+    const described = (
+      card
+        .querySelector('[role="alertdialog"]')!
+        .getAttribute('aria-describedby') ?? ''
+    )
+      .split(' ')
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' | ');
+    expect(described).toContain(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(described).toContain('Tool arguments are unavailable');
+  });
+
+  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'resolved' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+    const refusal = 'Only the Session creator can answer this approval.';
+
+    await render('s1');
+    await act(async () => flush());
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.textContent).toContain(refusal);
+
+    // The refused Action leaves and nothing replaces it. The latch outlives it,
+    // but the reason describes a card, so it leaves with the last one instead
+    // of explaining an approval that is not on screen.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain(refusal);
+  });
+
+  it('keeps a coded but retryable answer failure answerable', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // Every HTTP failure the Managed client builds carries a string code, so
+    // carrying a code is not what marks a refusal final: only the
+    // creator-only refusal is.
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue(undefined);
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
+    );
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not read approvals for a Session without the actions capability', async () => {
+    const listPending = vi.fn().mockResolvedValue([]);
+    provider = {
+      ...provider,
+      actions: { listPending, respond: vi.fn() },
+    };
+
+    await render('s1');
+
+    expect(listPending).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
 
   it('gates result transport on the server capability and can discover output without its event', async () => {
     const listArtifacts = vi.fn().mockResolvedValue({
@@ -280,9 +823,43 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
     ).toContain('services/api');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('You cannot send messages in this Session');
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('lets the creator send a later Turn to a bound Session', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    await render('bound');
+
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).not.toContain('You cannot send messages in this Session');
+    expect(container.querySelector('textarea')).not.toBeNull();
+    await input('Run it again');
+    await click('Send');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      'bound',
+      { text: 'Run it again' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
   });
 
   async function click(label: string) {
@@ -705,7 +1282,62 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
   });
 
-  it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
+  it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
+    vi.useFakeTimers();
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(3, 'Recent')],
+        olderCursor: '3',
+        lastEventId: 3,
+      })
+      .mockResolvedValueOnce({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'accepted',
+            data: { prompt: [{ type: 'text', text: 'Original question' }] },
+          },
+          event(2, 'Earlier '),
+        ],
+        olderCursor: '1',
+        lastEventId: 3,
+      })
+      // The gap resync's snapshot window sits right above the paged page,
+      // and older events still exist below it.
+      .mockResolvedValue({
+        events: [event(3, 'Recent'), event(4, ' New')],
+        olderCursor: '3',
+        lastEventId: 4,
+      });
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await gapGate;
+      yield { ...event(3, ''), type: 'stream_gap' };
+    });
+    await render('s1');
+    await click('Older history');
+    expect(container.textContent).toContain('Original question');
+    await act(async () => {
+      deliverGap();
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+    });
+    // The paged page survives the gap resync; wholesale replacement would
+    // drop it.
+    expect(container.textContent).toContain('Original question');
+    expect(container.textContent).toContain('Earlier');
+    expect(container.textContent).toContain('Recent New');
+    expect(
+      [...document.body.querySelectorAll('button')].some(
+        (n) => n.textContent === 'Older history',
+      ),
+    ).toBe(true);
+  });
+
+  it('deduplicates replay and merges a gapped stream with a durable snapshot', async () => {
     vi.useFakeTimers();
     mocks.client.getTranscript
       .mockResolvedValueOnce({ events: [event(1, 'First')], lastEventId: 1 })
