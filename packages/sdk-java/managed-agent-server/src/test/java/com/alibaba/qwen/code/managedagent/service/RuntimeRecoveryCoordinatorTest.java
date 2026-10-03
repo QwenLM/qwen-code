@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -11,6 +12,21 @@ import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 
 class RuntimeRecoveryCoordinatorTest {
+    @Test
+    void anErrorReleasesTheScanLatchAndStillEscapes() {
+        var bindings = mock(RuntimeBindingRepository.class);
+        var service = mock(RuntimeBrokerService.class);
+        var coordinator = new RuntimeRecoveryCoordinator(service, bindings);
+        when(bindings.findRecoveryCandidates("local-process", null, 8))
+                .thenThrow(new OutOfMemoryError("probe"))
+                .thenReturn(List.of());
+
+        assertThrows(OutOfMemoryError.class, coordinator::scan);
+        coordinator.scan();
+        verify(bindings, times(2)).findRecoveryCandidates("local-process", null, 8);
+        coordinator.close();
+    }
+
     @Test
     void blockedFirstPageCannotStarveLaterBindingsAndBatchesNeverOverlap() {
         var bindings = mock(RuntimeBindingRepository.class);

@@ -21,6 +21,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
   Content,
@@ -34,6 +35,7 @@ import type {
   ContentGeneratorConfig,
   Extension,
   LlmChat,
+  ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -1131,6 +1133,11 @@ describe('Session', () => {
       isTrusted: false,
       user: { settings: {} },
       workspace: { settings: {} },
+      forScope: vi.fn((scope: SettingScope) =>
+        scope === SettingScope.Workspace
+          ? mockSettings.workspace
+          : mockSettings.user,
+      ),
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
       reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
@@ -8492,6 +8499,193 @@ describe('Session', () => {
         authType: AuthType.USE_OPENAI,
       });
     });
+
+    it.each([
+      ['configured Responses', ['responses'], AuthType.USE_OPENAI],
+      ['configured Chat', ['chat-completions'], AuthType.USE_OPENAI],
+      ['raw', [], AuthType.USE_OPENAI_RESPONSES],
+      ['runtime', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      [
+        'duplicate Responses',
+        ['chat-completions', 'responses'],
+        AuthType.USE_OPENAI_RESPONSES,
+      ],
+      [
+        'duplicate Chat',
+        ['chat-completions', 'responses'],
+        AuthType.USE_OPENAI,
+      ],
+      ['Workspace', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      ['inherited Workspace', ['responses'], AuthType.USE_OPENAI],
+      [
+        'invalid reload',
+        ['responses', 'invalid'],
+        AuthType.USE_OPENAI_RESPONSES,
+      ],
+    ] as const)(
+      'persists the auth choice for %s',
+      async (scenario, wires, expectedAuth) => {
+        const modelId = 'gpt-6-astra';
+        const baseUrl = 'https://api.example/v1';
+        const isChat = scenario.endsWith('Chat');
+        const authType = isChat
+          ? AuthType.USE_OPENAI
+          : AuthType.USE_OPENAI_RESPONSES;
+        const scope = scenario.endsWith('Workspace')
+          ? SettingScope.Workspace
+          : SettingScope.User;
+        const owner =
+          scope === SettingScope.Workspace
+            ? mockSettings.workspace
+            : mockSettings.user;
+        Object.assign(mockSettings, {
+          isTrusted: scope === SettingScope.Workspace,
+        });
+        mockSettings.user.settings.security = {
+          auth: { selectedType: AuthType.USE_OPENAI },
+        };
+        owner.settings.security = {
+          auth: {
+            selectedType:
+              scenario === 'Workspace' || isChat
+                ? AuthType.USE_OPENAI_RESPONSES
+                : AuthType.USE_OPENAI,
+          },
+        };
+        if (scenario === 'inherited Workspace') {
+          delete owner.settings.security;
+          mockSettings.merged.security = mockSettings.user.settings.security;
+        }
+        owner.settings.modelProviders = {
+          openai: wires.map((wireApi) => ({
+            id: wireApi === 'invalid' ? 'broken' : modelId,
+            baseUrl,
+            wireApi: wireApi as ProviderModelConfig['wireApi'],
+          })),
+        };
+        mockSettings.merged.modelProviders = owner.settings.modelProviders;
+        const models = wires
+          .filter((wire) => wire !== 'invalid')
+          .map((wire) => ({
+            id: modelId,
+            label: wire,
+            authType:
+              wire === 'responses'
+                ? AuthType.USE_OPENAI_RESPONSES
+                : AuthType.USE_OPENAI,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+          }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType,
+          model: modelId,
+        } as ReturnType<Config['getContentGeneratorConfig']>);
+        const snapshotId = `$runtime|${authType}|${modelId}`;
+        const selectedId =
+          scenario === 'runtime'
+            ? `${snapshotId}(${authType})`
+            : (buildAcpModelOptions(models).find(
+                (option) => option.model.authType === authType,
+              )?.modelId ?? `${modelId}(${authType})`);
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: selectedId,
+        });
+
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([[scope, 'security.auth.selectedType', expectedAuth]]);
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          authType,
+          scenario === 'runtime' ? snapshotId : modelId,
+          scenario === 'raw' || scenario === 'runtime'
+            ? undefined
+            : { baseUrl },
+        );
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith(expect.objectContaining({ authType }));
+      },
+    );
+
+    it.each([
+      {
+        scenario: 'a workspace-only auth choice',
+        selectedType: undefined,
+        wires: ['responses'],
+      },
+      {
+        scenario: 'the same id at endpoints with different wires',
+        selectedType: AuthType.USE_OPENAI,
+        wires: ['responses', 'chat-completions'],
+      },
+    ] as const)(
+      'keeps the effective auth for $scenario',
+      async ({ selectedType, wires }) => {
+        const providers = wires.map((wireApi) => ({
+          id: 'shared-model',
+          baseUrl: `https://${wireApi}.example/v1`,
+          wireApi,
+        }));
+        mockSettings.user.settings = {
+          security: { auth: { selectedType } },
+          modelProviders: { openai: providers },
+        };
+        mockSettings.workspace.settings = {
+          security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        };
+        Object.assign(mockSettings, {
+          isTrusted: true,
+          merged: {
+            ...mockSettings.user.settings,
+            security: mockSettings.workspace.settings.security,
+          },
+        });
+        const models = providers.map(({ wireApi, ...model }) => ({
+          ...model,
+          label: wireApi,
+          registryBaseUrl: model.baseUrl,
+          authType:
+            wireApi === 'responses'
+              ? AuthType.USE_OPENAI_RESPONSES
+              : AuthType.USE_OPENAI,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        const target = buildAcpModelOptions(models).find(
+          (option) => option.model.authType === AuthType.USE_OPENAI_RESPONSES,
+        )!;
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: target.modelId,
+        });
+
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([
+          [
+            SettingScope.User,
+            'security.auth.selectedType',
+            AuthType.USE_OPENAI_RESPONSES,
+          ],
+        ]);
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'model.baseUrl',
+          'https://responses.example/v1',
+        );
+      },
+    );
 
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
@@ -29950,6 +30144,130 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
+      describe('in a blocked Managed session', () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-blocked',
+        };
+        const turnKey = 'goal-runtime:turn-blocked';
+        const block = new ManagedRuntimeOutcomeUnknownError(
+          'A cancelled Runtime tool call did not settle.',
+        );
+
+        beforeEach(() => {
+          mockConfig.getManagedSessionBlock = vi.fn().mockReturnValue(block);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockChat.sendMessageStream = vi.fn();
+        });
+
+        function goalSnapshot(status: 'active' | 'paused') {
+          return {
+            v: 2,
+            activity: 'running',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'check weather',
+              status,
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          };
+        }
+
+        // Every continuation is refused before the model, so handing the
+        // permit back for another one would loop without end.
+        it('pauses the Goal instead of queueing another continuation', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(goalSnapshot('active'));
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: 'goal-1',
+              expectedRevision: 1,
+              reason: core.GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
+            }),
+          );
+          expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        });
+
+        it('names the block when the turn that met it pauses the Goal', async () => {
+          // The turn reached the model before the session was blocked.
+          mockConfig.getManagedSessionBlock = vi
+            .fn()
+            .mockReturnValueOnce(undefined)
+            .mockReturnValue(block);
+          mockGoalRuntime.getSnapshot.mockReturnValue(goalSnapshot('active'));
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockRejectedValue(new Error(block.message));
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: 'goal-1',
+              expectedRevision: 1,
+              reason: core.GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
+            }),
+          );
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it.each([
+          [
+            'a pause it could not record',
+            () => {
+              mockGoalRuntime.getSnapshot.mockReturnValue(
+                goalSnapshot('active'),
+              );
+              mockGoalRuntime.dispatch.mockRejectedValueOnce(
+                new Error('write failed'),
+              );
+            },
+          ],
+          [
+            'a Goal no longer active',
+            () =>
+              mockGoalRuntime.getSnapshot.mockReturnValue(
+                goalSnapshot('paused'),
+              ),
+          ],
+        ])('queues no continuation after %s', async (_case, arrange) => {
+          arrange();
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+              requeue: false,
+            }),
+          );
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledOnce();
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        });
+      });
+
       it('keeps a Goal turn graceful when loop protection stops it', async () => {
         // Goal continuations are non-interactive and bypass the bridge: a
         // rejection would settle the turn as failed and pause the goal
@@ -37199,6 +37517,260 @@ describe('Session', () => {
               errorType: core.ToolErrorType.EXECUTION_DENIED,
             }),
           );
+        });
+      });
+
+      describe('Managed Runtime outcome', () => {
+        it('fails the turn, reporting no result, when a call outcome is unknown', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'The Runtime worker stopped answering for a tool call.',
+            { cause: new Error('read ECONNRESET') },
+          );
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: vi.fn().mockRejectedValue(unknown),
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'write_file',
+                      args: { file_path: '/tmp/test.txt', content: 'x' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'write the file' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            // The cause tells an operator why the outcome was lost.
+            message: `${unknown.message} (read ECONNRESET)`,
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          // No failure result for the model to act on, and no next request.
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it.each([false, true])(
+          'fails a cancelled turn whose call outcome became unknown (daemon context: %s)',
+          async (withContext) => {
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            const unknown = new ManagedRuntimeOutcomeUnknownError(
+              'A cancelled Runtime tool call did not settle.',
+            );
+            let started!: () => void;
+            const executing = new Promise<void>((resolve) => {
+              started = resolve;
+            });
+            const tool = {
+              name: 'run_shell_command',
+              kind: core.Kind.Execute,
+              build: vi.fn().mockReturnValue({
+                params: { command: 'sleep 100' },
+                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                execute: vi.fn((signal: AbortSignal) => {
+                  started();
+                  return new Promise((_resolve, reject) => {
+                    // The worker never settles the cancel.
+                    signal.addEventListener('abort', () => reject(unknown), {
+                      once: true,
+                    });
+                  });
+                }),
+              }),
+            };
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'run_shell_command',
+                        args: { command: 'sleep 100' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+            const running = session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'run' }],
+              },
+              withContext
+                ? {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                    originatorClientId: 'client-1',
+                  }
+                : undefined,
+            );
+            const outcome = running.catch((error: unknown) => error);
+            await executing;
+            void session.cancelPendingPrompt();
+            // Not a cancellation: the session is blocked.
+            expect(await outcome).toMatchObject({
+              code: -32603,
+              data: { errorKind: 'managed_runtime_outcome_unknown' },
+            });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).not.toHaveBeenCalled();
+          },
+        );
+
+        it('releases a prepared call the user rejected', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const execute = vi.fn();
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Confirm write',
+                prompt: 'write',
+                onConfirm: vi.fn(),
+              }),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          vi.mocked(mockClient.requestPermission).mockResolvedValue({
+            outcome: { outcome: 'cancelled' },
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(execute).not.toHaveBeenCalled();
+        });
+
+        it('releases a prepared call that permission denied', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn(),
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          // The execution environment's slot does not outlive the call.
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(
+            tool.build.mock.results[0]!.value.execute,
+          ).not.toHaveBeenCalled();
+        });
+
+        it('refuses a turn in a session that is blocked', async () => {
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'A cancelled Runtime tool call did not settle.',
+          );
+          mockConfig.getManagedSessionBlock = vi.fn().mockReturnValue(unknown);
+          mockChat.sendMessageStream = vi.fn();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'continue' }],
+            }),
+          ).rejects.toMatchObject({
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
         });
       });
 

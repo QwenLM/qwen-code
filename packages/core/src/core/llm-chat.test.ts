@@ -960,6 +960,19 @@ describe('LlmChat', async () => {
       };
     }
 
+    it('sends nothing for a Managed session that a lost tool outcome blocked', async () => {
+      const blocked = new Error('outcome unknown');
+      (
+        mockConfig as Config & { getManagedSessionBlock: () => Error }
+      ).getManagedSessionBlock = () => blocked;
+      const history = chat.getHistory();
+      await expect(sendAny('continue', 'prompt-id-blocked')).rejects.toBe(
+        blocked,
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(chat.getHistory()).toEqual(history);
+    });
+
     it('releases the sleep inhibitor after the stream is consumed', async () => {
       mockStream(textStream('done'));
       await sendDrain('test message', 'prompt-id-sleep-inhibitor');

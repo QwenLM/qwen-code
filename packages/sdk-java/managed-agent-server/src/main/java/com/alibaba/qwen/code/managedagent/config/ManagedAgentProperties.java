@@ -420,8 +420,8 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
-        private boolean durableLocalProcess;
-        private boolean trustedLocalRebootRecovery;
+        private boolean durableLocalProcess = true;
+        private boolean trustedLocalRebootRecovery = true;
         private boolean operatorRecoveryEnabled;
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";

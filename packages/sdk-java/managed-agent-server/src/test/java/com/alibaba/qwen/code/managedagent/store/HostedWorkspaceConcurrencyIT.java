@@ -259,6 +259,9 @@ class HostedWorkspaceConcurrencyIT {
         broker.setWorkspaceCwd(root.toString());
         broker.setProvisioner("local-process");
         broker.setDurableLocalProcess(LINUX);
+        // Linux brokers run the production-default combination; elsewhere the
+        // legacy combination keeps this IT runnable on developer hosts.
+        broker.setTrustedLocalRebootRecovery(LINUX);
         broker.setStateDirectory(state.toString());
         broker.setNodeExecutable(System.getProperty("node.executable", "node"));
         String bundle = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().toString();

@@ -209,9 +209,14 @@ describe.skipIf(process.platform === 'win32')('Managed engine host', () => {
 
     expect(await prompt(session.sessionId)).toBe('MANAGED_REPLY');
     expect(modelRequests.length).toBeGreaterThan(0);
-    // The host offers the model no tool it would run itself, and sends no
-    // empty tool list, which some providers reject.
-    expect(modelRequests.every((body) => !('tools' in body))).toBe(true);
+    // The prompt's one conversation request declares only the tools the
+    // Runtime worker runs, not image generation, which the host would run
+    // itself; side queries, such as memory extraction, declare none.
+    const declaring = modelRequests.filter((body) => body.tools);
+    expect(declaring).toHaveLength(1);
+    expect(
+      declaring[0]!.tools!.map((tool) => tool.function?.name).sort(),
+    ).toEqual(['edit', 'read_file', 'run_shell_command', 'write_file']);
 
     await bridge!.closeSession(session.sessionId);
     const [managed] = started.managed;
