@@ -22,6 +22,8 @@ vi.mock('./telemetry-context.js', () => ({
 }));
 
 import {
+  ACCESS_LOG_ERROR_CODE_LOCAL,
+  ACCESS_LOG_ERROR_REASON_LOCAL,
   ACCESS_LOG_REJECT_LOCAL,
   installAccessLogMiddleware,
 } from './access-log.js';
@@ -132,6 +134,55 @@ describe('installAccessLogMiddleware', () => {
       'request completed',
       expect.objectContaining({ route: 'GET /failure', status: 400 }),
     );
+  });
+
+  it('logs the rejecting branch code and reason on error responses', () => {
+    const h = harness();
+    h.begin({
+      path: '/conflict',
+      status: 409,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'hosted_turn_recovery_required',
+        [ACCESS_LOG_ERROR_REASON_LOCAL]: 'restore_blocked',
+      },
+    }).response.emit('finish');
+
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({
+        route: 'GET /conflict',
+        status: 409,
+        code: 'hosted_turn_recovery_required',
+        reason: 'restore_blocked',
+      }),
+    );
+
+    h.begin({
+      path: '/conflict-without-branch',
+      status: 409,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'hosted_turn_active',
+      },
+    }).response.emit('finish');
+    const codeOnly = vi.mocked(h.logger.warn).mock.calls.at(-1)?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect(codeOnly).toMatchObject({ code: 'hosted_turn_active' });
+    expect('reason' in (codeOnly ?? {})).toBe(false);
+
+    h.begin({
+      path: '/success',
+      status: 200,
+      locals: {
+        [ACCESS_LOG_ERROR_CODE_LOCAL]: 'never_logged',
+        [ACCESS_LOG_ERROR_REASON_LOCAL]: 'never_logged',
+      },
+    }).response.emit('finish');
+    const success = vi.mocked(h.logger.info).mock.calls.at(-1)?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect('code' in (success ?? {})).toBe(false);
+    expect('reason' in (success ?? {})).toBe(false);
   });
 
   it('joins the request log line to the caller trace when telemetry is off', () => {
