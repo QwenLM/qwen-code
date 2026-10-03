@@ -1222,6 +1222,7 @@ import {
   type GoalSnapshotV2,
   type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
+import { refreshExtensionRuntime } from '@qwen-code/qwen-code-core/extension/extension-runtime-refresh.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -10614,6 +10615,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
     expect(refreshCacheIfSourcesChanged).toHaveBeenCalledTimes(2);
     expect(skillRefreshCache).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resyncs every extension consumer when a given-up startup recovers under a read', async () => {
+    // R18-1: a startup whose extension refresh gave up left the hook
+    // registry (and MCP/context) built from the empty startup set. The
+    // recovery under this same status read must resync every
+    // extension-derived consumer — not just the skill cache — or the
+    // recovered extension reports loaded and active while its hooks never
+    // fire. syncExtensionConsumers is bound to the real
+    // refreshExtensionRuntime so the hook reload itself is asserted, not
+    // just the call wiring; removing the changed-branch resync call turns
+    // this case red.
+    const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
+    const hookReload = vi.fn().mockResolvedValue(undefined);
+    const refreshCacheIfSourcesChanged = vi.fn().mockResolvedValue(true);
+    const consumePendingStartupExtensionRecovery = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValue(false);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        refreshCache: skillRefreshCache,
+        getCachedSkills: vi.fn().mockReturnValue([]),
+      }),
+      getSubagentManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+      }),
+      getHookSystem: vi.fn().mockReturnValue({ reload: hookReload }),
+      getSettingsMcpServers: vi.fn().mockReturnValue({}),
+      reinitializeMcpServers: vi.fn().mockResolvedValue(undefined),
+      refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
+      consumePendingStartupExtensionRecovery,
+      syncExtensionConsumers: () =>
+        refreshExtensionRuntime(mockConfig as Config),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
+    expect(hookReload).toHaveBeenCalledOnce();
+
+    // The flag is consumed: a later recovery does not resync again.
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {});
+    expect(hookReload).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;

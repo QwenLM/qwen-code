@@ -208,6 +208,7 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
+import { refreshExtensionRuntime } from '../extension/extension-runtime-refresh.js';
 import {
   HookSystem,
   createHookOutput,
@@ -4585,6 +4586,7 @@ export class Config {
       if (refreshed && !initialExtensionRefreshSucceeded) {
         await this.hookSystem?.reload();
         await this.skillManager?.refreshCache({ throwOnError: true });
+        this.startupExtensionRecoveryPending = false;
       }
     }
     recordStartupEvent('config_initialize_extensions_final_end');
@@ -10746,8 +10748,29 @@ export class Config {
       this.debugLogger.warn(
         `Extension load still exhausted; continuing without it: ${getErrorMessage(error)}`,
       );
+      // The cache was committed empty and its fingerprint never stamped, so
+      // a later recovery (the daemon's source revalidation) will silently
+      // repopulate the cache. Consumers built from the empty startup set —
+      // hooks, MCP servers, context — must resync when that happens (R18-1).
+      this.startupExtensionRecoveryPending = true;
       return false;
     }
+  }
+
+  // True once a startup refresh gave up unstamped; consumed by the first
+  // successful post-startup refresh to resync consumers exactly once.
+  private startupExtensionRecoveryPending = false;
+
+  /** True (and resets) exactly once per startup give-up. */
+  consumePendingStartupExtensionRecovery(): boolean {
+    const pending = this.startupExtensionRecoveryPending;
+    this.startupExtensionRecoveryPending = false;
+    return pending;
+  }
+
+  /** Resyncs every extension-derived consumer after a recovered refresh. */
+  async syncExtensionConsumers(): Promise<void> {
+    await refreshExtensionRuntime(this);
   }
 
   getExtensionManager(): ExtensionManager {
