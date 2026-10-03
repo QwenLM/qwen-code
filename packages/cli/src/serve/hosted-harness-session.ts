@@ -147,8 +147,13 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
-  /** A recovery load acquired the Runtime Session for this promptId;
-   * whichever terminal route runs must release it. */
+  /** A recovery load acquired the Runtime Session for this promptId. On
+   * the cancellation path, only the terminal success route and session
+   * teardown hand it back; retry-inviting refusals deliberately leave it
+   * owed, because a release persists RELEASED forever while a stranded
+   * READY lease is re-admitted against the current checkpoint or
+   * re-acquired idempotently. The continuation route keeps its #13083
+   * handback discipline (a recorded follow-up). */
   runtimeLeaseHeld?: string;
 }
 
@@ -1233,14 +1238,18 @@ async function executeHostedTurn(
         await session.managed.sink.write(turnResult);
       }),
   );
-  await running.finally(() =>
-    toolTurn?.close().catch((cause: unknown) => {
+  // Session availability must not gate on publisher cleanup: the drain is
+  // unbounded, and a stalled Session Store would otherwise leave the Session
+  // permanently unavailable and undeletable. Each turn owns its publisher,
+  // so a next turn shares no listener or capture state with this drain.
+  await running.finally(() => {
+    void toolTurn?.close().catch((cause: unknown) => {
       session.blocked = true;
       writeStderrLineSafe(
         'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
       );
-    }),
-  );
+    });
+  });
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -1712,9 +1721,14 @@ export function registerHostedHarnessSessionRoutes(
           !session.hooks &&
           !recovery)
       ) {
-        // The Session is closed without being registered, so no later route
-        // can hand back a lease the takeover acquired; release it here.
-        await releaseLeaseNow(session);
+        // A retry-inviting refusal keeps a takeover-adopted lease owed on
+        // the Broker side: the coordinator's retried load re-acquires the
+        // READY identity idempotently, while a release would persist
+        // RELEASED and wedge every retry with runtime_session_not_acquirable.
+        // This Session, though, is closed before registration, so no route
+        // can ever see the owed lease again — record it and say so, or the
+        // strand is silent until retirement.
+        noteOwedAdoption(session, sessionId);
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -1723,7 +1737,8 @@ export function registerHostedHarnessSessionRoutes(
         try {
           await stores.assertWritable();
         } catch {
-          await releaseLeaseNow(session);
+          // Same owed-lease discipline as the refusal above.
+          noteOwedAdoption(session, sessionId);
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1779,6 +1794,9 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      // The registered Session now carries the owed lease itself; the
+      // refusal-time record is discharged.
+      refusedAdoptions.delete(sessionId);
       res.status(200).json({
         sessionId,
         clientId: session.clientId,
@@ -2432,10 +2450,32 @@ export function registerHostedHarnessSessionRoutes(
     session.managed.activation.activationId === activationId &&
     unsettledPromptId(session) === promptId;
 
-  // A recovery load may hold the Runtime Session; whichever terminal route
-  // runs must release it, or the workspace lease stays pinned forever. The
-  // flag clears only once the release is confirmed, so a failed handback
-  // stays owed and the next terminal route retries it.
+  // A takeover adoption owed on a Session closed before ever registering
+  // can never be handed back by a route — every discharger resolves the
+  // Session through this map. Record the stranded identity so it is neither
+  // silent nor wedged by a release; the next successful load of the id
+  // drains the record.
+  const refusedAdoptions = new Map<string, string>();
+  const noteOwedAdoption = (
+    session: HostedSession,
+    sessionId: string,
+  ): void => {
+    const runtimeSessionId = session.runtimeLeaseHeld;
+    if (runtimeSessionId === undefined || refusedAdoptions.has(sessionId))
+      return;
+    refusedAdoptions.set(sessionId, runtimeSessionId);
+    writeStderrLineSafe(
+      `qwen serve: Hosted Harness takeover of session ${sessionId} adopted Runtime Session ${runtimeSessionId} but refuses the load: the lease stays owed until this session loads successfully or retires.`,
+    );
+  };
+
+  // A recovery load may hold the Runtime Session. On the cancellation
+  // path, terminal routes hand it back — or the workspace lease stays
+  // pinned forever — but retry-inviting refusals must not (see the field
+  // doc): a release persists RELEASED. The continuation route keeps its
+  // #13083 handback discipline (recorded follow-up). The flag clears only
+  // once the release is confirmed, so a failed handback stays owed and the
+  // next terminal route retries it.
   const releaseRecoveredRuntime = (session: HostedSession): void => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -2459,7 +2499,8 @@ export function registerHostedHarnessSessionRoutes(
   };
 
   // Awaited variant for exits after which no route can retry the handback
-  // (session close, load refusals of an unregistered Session).
+  // (session close/detach). Retry-inviting refusals must not call it: see
+  // the owed-lease comment at the blocked cancel refusal.
   const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -2713,16 +2754,16 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       } finally {
-        try {
-          await toolTurn?.close();
-        } catch (cause) {
+        // Clear availability before the unbounded publisher drain, per the
+        // discipline in executeHostedTurn.
+        releaseRecoveredRuntime(session);
+        session.active = undefined;
+        void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,
           );
-        }
-        releaseRecoveredRuntime(session);
-        session.active = undefined;
+        });
       }
     })();
   });
@@ -2738,7 +2779,10 @@ export function registerHostedHarnessSessionRoutes(
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
     if (session.blocked) {
-      releaseRecoveredRuntime(session);
+      // A retry-inviting refusal: keep an adopted lease owed with the
+      // still-READY identity — the next takeover re-acquires it
+      // idempotently, while a release would persist RELEASED and wedge
+      // every retry with runtime_session_not_acquirable.
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     // A cancellation whose reply was lost is replayed by the coordinator: it
@@ -2757,19 +2801,30 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
+    // A redriven cancellation carries its load-time identity, but the
+    // checkpoint may legitimately have advanced underneath: an earlier
+    // attempt settled the executions and then failed before the terminal
+    // record. The coordinator never re-loads an attached Session, so the
+    // fence is the activation plus the unsettled Turn — admit those against
+    // the current checkpoint instead of refusing the only retry there is.
+    const attachedToUnsettled =
+      session.managed.activation.activationId === activationId &&
+      unsettledPromptId(session) === promptId;
+    if (!attachedToUnsettled) {
       if (settledReplay(session, promptId, res)) {
         releaseRecoveredRuntime(session);
         return;
       }
-      releaseRecoveredRuntime(session);
+      // A foreign-epoch cancel against a stranger's or settled Turn is not a
+      // teardown: keep the lease owed and re-acquirable — the same owed
+      // discipline as the refusals above. Only a genuinely settled replay
+      // hands it back.
       return error(res, 409, 'hosted_recovery_identity_mismatch');
     }
     const sessionId = req.params['id'];
     // Symmetric with the continue route: without the tool profile or the
     // Broker there is no way to prove the parked executions stopped.
     if (!session.toolProfile || !brokerOptions) {
-      releaseRecoveredRuntime(session);
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     // A checkpoint whose authorization is no longer readable cannot prove
@@ -2785,7 +2840,8 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_mcp_operation_active');
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (cancelAuthorization?.status !== 'runnable') {
-      releaseRecoveredRuntime(session);
+      // Retry-inviting refusal: keep the adopted lease owed (see the
+      // blocked refusal above).
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     session.admissions.set(promptId, {
@@ -2821,17 +2877,6 @@ export function registerHostedHarnessSessionRoutes(
             pendingUndo: null,
           });
         }
-        // The original owner's Runtime Session keeps the Workspace lease
-        // pinned; a passive takeover never re-acquired it, so release it
-        // here once the executions are confirmed stopped.
-        await broker.release().catch((cause: unknown) => {
-          if (
-            cause instanceof HostedWorkspaceBrokerRejection &&
-            cause.status === 404
-          )
-            return;
-          throw cause;
-        });
         await session.managed.sink.write(
           record(session, sessionId, 'system', null, {
             subtype: 'turn_result',
@@ -2843,6 +2888,35 @@ export function registerHostedHarnessSessionRoutes(
             },
           }),
         );
+        // The original owner's Runtime Session keeps the Workspace lease
+        // pinned; the passive takeover adopted it on load. Release only
+        // after the terminal record is durable: the release persists
+        // RELEASED (a same-identity re-acquire then conflicts forever), so a
+        // failure between release and settle would wedge the Turn without a
+        // retry, while a stranded READY lease is re-acquired idempotently.
+        // It must also stay after the stop loop: the Broker refuses with
+        // runtime_session_busy while an execution is active.
+        const handedBack = await broker.release().then(
+          () => true,
+          (cause: unknown) => {
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 404
+            )
+              return true;
+            // The Turn is already durable, so a handback failure must not
+            // refuse an answered cancellation. Leave the lease owed; later
+            // replays and the session close retry it.
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness could not hand back the recovered Runtime ${promptId} for session ${sessionId}: ${String(cause)}`,
+            );
+            return false;
+          },
+        );
+        if (handedBack)
+          // The release discharged the lease the load adopted, or it never
+          // existed; the teardown skips what is now a redundant handback.
+          session.runtimeLeaseHeld = undefined;
         // Answer at the admission watermark: the cancelled turn_result
         // streams in from there, and a replayed cancel replays it exactly.
         res.status(200).json({
@@ -2860,7 +2934,9 @@ export function registerHostedHarnessSessionRoutes(
         session.admissions.delete(promptId);
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {
-        releaseRecoveredRuntime(session);
+        // No handback here: the coordinator retries a failed cancel, and a
+        // release would wedge that retry; the success path above already
+        // released and discharged the flag itself.
         session.active = undefined;
       }
     })();

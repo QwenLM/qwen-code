@@ -60,6 +60,16 @@ public interface AgentStateStore {
             SessionMutationKind kind, String title, String harnessBootId);
 
     /**
+     * Retires the command row of a Session mutation the Harness refused
+     * before completion, so the refusal does not leave the Session's
+     * later lifecycle changes blocked by a {@code PENDING} row nothing
+     * completes. The receipt and digest survive for same-content retries
+     * and concurrent completion; completed outcomes remain replayable.
+     */
+    void abandonSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId);
+
+    /**
      * Admits a close, archive or delete, or returns the operation that the
      * same actor already admitted under the key. An archive completes here;
      * a close or delete waits for {@link #completeOperation}.
