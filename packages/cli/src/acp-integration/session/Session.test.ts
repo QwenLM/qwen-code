@@ -609,6 +609,7 @@ describe('Session', () => {
     registerTool: ReturnType<typeof vi.fn>;
     registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
+    unrevealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
@@ -967,6 +968,7 @@ describe('Session', () => {
       registerTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
+      unrevealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
@@ -39372,7 +39374,15 @@ describe('Session', () => {
         undefined,
       );
       expect(mockLlmClient.setTools).toHaveBeenCalledTimes(2);
-
+      // propose_goal is natively deferred: the arm/clear pair must also
+      // reveal/unreveal it, or the tool is filtered out of every
+      // announcement and no ACP/daemon model can ever discover it.
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'propose_goal',
+      );
+      expect(mockToolRegistry.unrevealDeferredTool).toHaveBeenCalledWith(
+        'propose_goal',
+      );
       vi.mocked(mockConfig.setGoalProposalTurnKey).mockClear();
       mockLlmClient.setTools.mockClear();
       await session.prompt({

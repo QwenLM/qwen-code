@@ -58,15 +58,31 @@ export function goalToolResultProvenance(
   if (
     lowerToolName === ToolNames.GET_GOAL ||
     lowerToolName === ToolNames.UPDATE_GOAL ||
-    // Discovery is bookkeeping too: a `tool_search` schema lookup during a
-    // Goal turn is the Goal's own navigation, not evidence about the world —
-    // otherwise the finishing turn's `tool_search select:update_goal` enters
-    // the catalog as an `external_fact` and reads as progress.
-    requestName === ToolNames.TOOL_SEARCH
+    // Only the discovery that IS Goal bookkeeping counts: a `select:` lookup
+    // naming a Goal tool. An unconditional tool_search stamp would also
+    // swallow keyword discovery about the objective's own work — e.g.
+    // `tool_search wiki fetch` returning "No tools found" is exactly the
+    // external_fact a blocked/infeasible proposal is proved with.
+    (requestName === ToolNames.TOOL_SEARCH &&
+      selectsGoalTool(request.args?.['query']))
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
   return { goalContext: { ...goalContext } };
+}
+
+/** Whether a tool_search query is a `select:` lookup naming a Goal tool. */
+function selectsGoalTool(query: unknown): boolean {
+  if (typeof query !== 'string' || !query.startsWith('select:')) return false;
+  const goalTools = new Set([
+    ToolNames.GET_GOAL,
+    ToolNames.UPDATE_GOAL,
+    ToolNames.PROPOSE_GOAL,
+  ]);
+  return query
+    .slice('select:'.length)
+    .split(',')
+    .some((name) => goalTools.has(canonicalToolName(name.trim())));
 }
 
 /**

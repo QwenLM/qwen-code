@@ -5557,6 +5557,9 @@ export class Session implements SessionContext {
         this.config.getGoalProposalHostSupported() &&
         this.config.setGoalProposalTurnKey(undefined)
       ) {
+        this.config
+          .getToolRegistry()
+          .unrevealDeferredTool(ToolNames.PROPOSE_GOAL);
         try {
           await this.config.getLlmClient().setTools();
         } catch (error) {
@@ -6037,6 +6040,12 @@ export class Session implements SessionContext {
             responseCapture.goalProposalTurn?.turnKey,
           )
         ) {
+          // propose_goal is natively deferred: the key arms only inside a
+          // prompt, so without the reveal it would be filtered out of every
+          // announcement and never be discoverable in ACP/daemon sessions.
+          this.config
+            .getToolRegistry()
+            .revealDeferredTool(ToolNames.PROPOSE_GOAL);
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
@@ -9191,7 +9200,14 @@ export class Session implements SessionContext {
       toolRun.repeatedToolFailureBatch?.observations.some(
         (observation) =>
           canonicalToolName(observation.policyToolName ?? '') ===
-            ToolNames.AGENT && observation.executionStatus !== 'not_started',
+            ToolNames.AGENT &&
+          // Match the core client's exclusion: a cancelled (or refused)
+          // bridged call means nothing was delegated, so it must not force
+          // the reminder. The observation carries no error text, so the
+          // prefix check is not available here; 'cancelled' is the
+          // observable half of it.
+          observation.executionStatus !== 'not_started' &&
+          observation.executionStatus !== 'cancelled',
       );
     const activeTodoReminder = carriesAgentToolResult
       ? this.config.takeActiveTodoReminder(promptId, true)

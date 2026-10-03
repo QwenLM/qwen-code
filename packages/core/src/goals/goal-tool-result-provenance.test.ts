@@ -60,6 +60,27 @@ describe('goalToolResultProvenance', () => {
     ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
   });
 
+  it('keeps keyword and non-Goal discovery as evidence during a Goal turn', () => {
+    // The stamp is only for select:-of-a-Goal-tool bookkeeping: a keyword
+    // search about the objective's own work (e.g. "wiki fetch" returning
+    // "No tools found") is exactly the external_fact a blocked/infeasible
+    // proposal is proved with, and must keep its ordinary stamp.
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'wiki fetch' },
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit });
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'select:read_file' },
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit });
+  });
+
   it.each([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL])(
     'marks a bridged %s result as the Goal’s own bookkeeping',
     (name) => {
