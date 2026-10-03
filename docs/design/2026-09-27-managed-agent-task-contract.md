@@ -3,7 +3,7 @@
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
 Status: H0a implemented as a contract only (every route and schema it added, and every property it added to an existing schema, was `planned`); H0b has landed; H0c marks the four task read routes and their schemas `partial` and drops the marker from `capabilities.tasks`, serves the task list and detail and announces task changes ([design](2026-09-27-managed-extension-authority.md)); task events, cancel and H1 to H6 are pending
-Date: 2026-09-27
+Date: 2026-09-27; contract follow-up: 2026-09-29
 Issue: [#12827](https://github.com/QwenLM/qwen-code/issues/12827), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
 ## 1. Problem
@@ -49,6 +49,8 @@ has nothing to plan against except those daemon routes.
 
 ## 4. Decisions
 
+The 2026-09-29 follow-up settles A1–A8 of [#12847](https://github.com/QwenLM/qwen-code/issues/12847) in contract v1.23.0. Events and cancel remain `planned`; no runtime behavior is added. A9 and the task-route part of A10 landed in #12966. The original H0a scope and validation below remain historical.
+
 ### 4.1 Everything added is `planned`
 
 Every route and schema added here carries
@@ -67,7 +69,16 @@ routes declare `202` with `PublicCommandOperation`, as the planned
 insulated, until any WebShell route that returns `WebShellCommandOperation`
 becomes `partial`. A separate planned operation schema would have kept the
 value out, at the cost of a second operation model for one command; this
-change accepts the visibility instead.
+change accepts the visibility instead. D4 has since exposed the shared
+command operation in generated types, including `task_cancel`. The follow-up
+keeps its new task-cancel-only condition `planned` as a whole, so the generator
+does not retain requirements on filtered fields. The cancel slice must remove
+that marker together with `task_id`/`taskId` and `failure_code`/`failureCode`
+when it serves the route; no shared status enum is narrowed. It must also
+persist the new fields: `managed_agent_operation` has no `task_id` or
+`failure_code` column, so a migration adds both, and the worker writes
+`failure_code` in the same transaction as the `FAILED` transition, so the
+reason survives re-lease and restart (section 7).
 
 ### 4.2 `PublicTask`
 
@@ -110,9 +121,11 @@ The design's shape changes in five places:
   (`created_at`, `expires_at`), and the server fills them from `clock.millis()`.
 - **`created_at`.** The list is ordered by creation, and a `pending` task has
   no `started_at`, so the view needs a creation time.
-- **Bounded `artifact_refs`.** A long-running Monitor can rotate many
-  Artifacts. The view lists the newest 100, oldest first; older Artifacts stay
-  readable through the Session artifact routes.
+- **Bounded `artifact_refs`.** The view lists the newest 100, oldest first.
+  A task must not rotate past the bound until older Artifacts can be
+  enumerated and attributed to it (sections 4.7 and 7): an evicted Artifact
+  stays readable by id through the Session artifact routes but is no longer
+  discoverable from the task.
 
 Optional fields are omitted, never `null`, as in the Action family; records
 that implement the view need `@JsonInclude(NON_NULL)`, which several API
@@ -149,31 +162,62 @@ These invariants are schema conditionals:
   the chunk was cut and the full output is in an Artifact;
 - `artifact`, the `artifact_id` of an Artifact that received task output.
 
-Conditionals forbid the fields of one type on another. The set of types is
-open: a later minor version may add a type together with the optional fields
-it needs, as section 5 of the API contract allows. Clients ignore task event
-types they do not know; task events carry no terminal flag, so that section's
-refresh rule for unknown terminal events does not apply. Every event carries `schema_version` and
-`projection_version`, as section 5 of the API contract requires of public
-events. High-volume logs and Monitor raw lines go into Artifacts or this
-paged stream and stay out of the Session event stream, as design section 11
-and API contract section 6 require, and events are retained for a bounded time
-rather than kept forever. Events expire only from the oldest end, so the
-retained events have no gaps: an output event that is not yet in an Artifact
-also holds back the expiry of every later event, and a cursor older than the
-oldest retained event is the only way to miss one, which `cursor_expired`
-reports.
+Conditionals forbid the fields of one known type on another. The type set is
+open. Within a major version, clients ignore unknown optional fields and
+unknown task event types, while still checkpointing their cursors. Task events
+have no terminal flag. The closed schemas validate what a server emits for its
+own contract version; strict response validation against an older minor
+version is not supported. Adding a new optional field is allowed; reusing an
+existing field forbidden for a known type is not. This follows API contract
+section 5 and keeps the current flat event shape (A8).
 
-Every event carries `cursor`, the position after it, which also serves as its
-identity. A consumer that stores the cursor with each event it applies resumes
-after a crash without applying an output chunk twice. A page's `next_cursor`
-is the cursor of its last event, so an event held back by `limit` is never
-passed; on an empty page it is the requested position, or the start of the
-retained events when `after` was omitted. Unlike list pages,
-`next_cursor` is required and never `null`: a running task can produce more
-events, so a caller that reached the end still needs a position to poll from.
-`after` accepts an event's or a page's cursor, or a task's `output_cursor`;
-without `after` the page starts at the oldest retained event.
+Every event carries `schema_version` and `projection_version`. Its identity,
+position, payload and accepted versions survive projection rebuilds, restarts
+and archival unchanged. A cursor is never reassigned, even if backed by
+Artifact offsets; archival must preserve its logical position (A5). Stability
+does not prevent normal retention expiry.
+
+Events are published as a committed prefix for each task: after any event,
+page or `output_cursor` position is returned, no event may later become
+visible at or before it. Allocating an increasing sequence before commit is
+not sufficient; concurrent writers must serialize publication or readers must
+wait behind unfinished writes. This requires neither global ordering across
+tasks nor gapless internal sequence numbers (A2).
+
+Every event carries `cursor`, the opaque position after it, which also serves
+as its identity. A consumer atomically applies an event and saves its cursor
+to avoid applying the same chunk twice after a crash. A page's `next_cursor`
+is its last event's cursor, so `limit` never skips an event. On an empty page it
+is the requested position, or the retention floor when `after` was omitted.
+It is required and never `null`, including when no events remain.
+
+The durable retention floor is the position after the newest expired event,
+or the stream's initial position if nothing has expired. Only an oldest
+prefix may expire. A cursor strictly below the floor returns
+`409 cursor_expired`; equality is valid. The floor survives an empty retained
+set, restarts and projection rebuilds. For example, after events 1 through 10
+expire, the cursor after event 10 is valid, but the cursor after event 9 is
+expired even if the retained set is empty. These are logical positions, not
+client-comparable cursor strings (A1).
+
+`after` accepts an event cursor, a page cursor or the task's `output_cursor`;
+without it, reading starts at the floor. `output_cursor` is the committed tail
+at the view read and intentionally skips earlier output. Recovery must keep
+the event page's checkpoint, not replace it with a later task view's tail.
+
+High-volume logs and Monitor raw lines go into Artifacts or this bounded-chunk
+paged stream, never one Session event per raw line. Time-based retention is a
+target under healthy archival, not an unconditional deletion deadline. Any
+task that produces output requires `capabilities.artifacts`, including a task
+whose output goes only to Artifacts. An output event holds back expiry of
+itself and every later event until its full text is durably archived and
+available through task Artifact discovery as defined in section 4.7 (A3–A4).
+An archival failure must not advance the floor past that output. H3 must bound
+the durable backlog and specify producer backpressure and admission blocking
+before capacity is exhausted; an adapter unable to preserve accepted output
+under that policy must not enable output-producing tasks. Output is not
+silently discarded to meet a retention target. Those runtime mechanisms are
+an H3 acceptance gate, not implemented by this contract change.
 
 This stream departs from the Session event history in section 4 of the API
 contract, which uses a public integer `sequence`, reads events strictly after
@@ -212,20 +256,73 @@ Cancel reuses the command operation model instead of a new one:
   gains `taskId` in the same way.
 - The operation is read back through the existing
   `GET .../operations/{operationId}` and WebShell `operations/query`.
-- Checks run in a fixed order: access (`404` when the caller cannot read
-  the task, then `403 task_forbidden` when it may not cancel it), idempotent
-  replay, then task state. A retry by the same actor with the same
-  `Idempotency-Key` and request therefore replays the original operation even
-  after the task settled, as the cwd change and API contract sections 3 and
-  10 require, so a lost `202` does not turn into a `409` for the caller that
-  made the request while the idempotency record is retained.
-- `202` and a `completed` operation mean that the authority recorded the
-  cancel, not that the task stopped. The task becomes `cancelled` only after
-  its physical execution settles, and an unknown outcome becomes
-  `recovery_blocked`. This follows design section 3.2: a logical settle never
-  covers a process that has not drained.
-- A new key is accepted only while `action_capabilities` contains `cancel`. A
-  settled task never advertises it, so the same rule covers both cases.
+
+After the trusted tenant/actor filter and request decoding, cancel checks run
+in this order (A6):
+
+1. Validate the key: missing is `400 invalid_request`, malformed is
+   `400 invalid_idempotency_key`.
+2. Check current access: `404` for an unreadable Session or task, then
+   `403 task_forbidden` for a readable task the actor may not cancel.
+3. Look up the retained idempotency record in the
+   tenant/Session/operation-kind/actor/key domain. The request digest includes
+   the task ID and excludes trace-only request IDs. A different digest is
+   `409 idempotency_conflict`; the same digest returns the same operation ID
+   with its latest durable state and `replayed: true`.
+4. Only for a new request, check task support (`400 unsupported_feature`),
+   then that the Session is `active` (`409 session_not_active` otherwise,
+   including `closing`, `closed`, `archived` and `deleting`), then that
+   `action_capabilities` includes `cancel`
+   (`409 task_action_unavailable` otherwise).
+5. Atomically recheck new-request admission conditions and create the
+   operation, serializing competing requests with Session/task transitions.
+   A concurrent same-key winner is handled by step 3, not as a new request.
+   Admission requires no other open (`pending` or `running`) operation on
+   the Session: cancel operations share the durable operation table with the
+   lifecycle commands, which admit one open operation per Session, so an open
+   operation of any kind answers `409 session_operation_active`, and an open
+   cancel blocks close, archive and delete the same way.
+
+A retained key therefore survives capability and state changes, but never
+bypasses current access checks. Missing/deleted resources or revoked access
+can still produce `404` or `403`; the replay promise is conditional on access
+and record retention. A legal same-key retry cannot become a new-request
+`400` or `409` merely because support was disabled or the task settled.
+
+Cancel operations have these outcomes (A7):
+
+| Result                | Meaning                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP `202`            | Java durably accepted the command and owns its delivery; it does not prove owner acceptance or physical stop.                                                    |
+| `pending` / `running` | Delivery or confirmation is outstanding; retryable transport failures stay here.                                                                                 |
+| `completed`           | The task authority durably recorded the cancellation and returned the operation's receipt. It does not prove physical stop.                                      |
+| `failed`              | The command definitively was not accepted and will not be delivered again; `failure_code` explains why.                                                          |
+| `recovery_blocked`    | Recovery cannot determine whether the authority accepted the command. Do not report success or automatically re-execute it without reconciliation.               |
+| `cancelled`           | Not produced for `task_cancel`: this contract has no mechanism to withdraw a cancellation command. The shared status remains available to other operation kinds. |
+
+A `task_cancel` operation's other state fields follow its outcome.
+`pending` and `running` carry `admission_stage: java_durable`, with
+`delivery_state` `pending` between attempts and `leased` during one, and
+no `receipt_id`. `completed` carries `admission_stage: harness_confirmed`,
+`delivery_state: confirmed` and the task authority's `receipt_id`.
+`failed` and `recovery_blocked` carry `admission_stage: java_durable` and
+`delivery_state: blocked` — delivery has stopped, so a definitively rejected
+or unreconciled command is never claimed and driven again — and no
+`receipt_id`; `failed` adds `failure_code`. `blocked` means delivery is
+not attempted again without reconciliation; no other operation kind produces
+it today.
+
+The task becomes `cancelled` only when cancellation physically settles it. A
+natural completion that wins the race keeps its own terminal outcome; command
+acceptance never overwrites it. An unknown physical outcome makes the task
+`recovery_blocked` independently of the operation's acceptance outcome.
+
+Different keys that each pass admission —
+including step 5, no other open operation on the Session — create different
+operations. Their physical stop requests may be coalesced or repeated safely,
+and each operation must receive its own recorded outcome. A later request that finds no `cancel`
+capability gets `409 task_action_unavailable`; two different keys do not
+promise two accepted operations. No route for cancelling an operation is added.
 
 ### 4.5 WebShell adapter
 
@@ -269,34 +366,64 @@ declare.
 Errors keep `ErrorEnvelope` and the shared `BadRequest`, `Forbidden`,
 `NotFound`, `Conflict` and `CursorExpired` responses. The codes are those the
 API contract already froze, `invalid_idempotency_key`, which the idempotent
-routes already return, and three new task codes:
+routes already return, the tenant filter's `invalid_tenant` and
+`actor_scope_mismatch`, and three new task codes:
 
-| Status | Code                      | When                                                                                     |
-| ------ | ------------------------- | ---------------------------------------------------------------------------------------- |
-| `400`  | `invalid_cursor`          | The task list cursor is malformed.                                                       |
-| `400`  | `invalid_event_cursor`    | `after` is malformed or belongs to another task.                                         |
-| `400`  | `invalid_limit`           | `limit` is outside 1 to 100.                                                             |
-| `400`  | `invalid_request`         | `Idempotency-Key` is missing.                                                            |
-| `400`  | `invalid_idempotency_key` | `Idempotency-Key` is malformed, as on the other idempotent routes.                       |
-| `400`  | `unsupported_feature`     | The Session does not serve tasks (`capabilities.tasks` is `false`).                      |
-| `403`  | `task_forbidden`          | The caller can read the task but may not cancel it. New.                                 |
-| `404`  | `session_not_found`       | The Session is absent or outside the caller's scope.                                     |
-| `404`  | `task_not_found`          | The task is absent or outside the caller's scope. New.                                   |
-| `409`  | `cursor_expired`          | `after` is older than the retained events.                                               |
-| `409`  | `task_action_unavailable` | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New. |
-| `409`  | `idempotency_conflict`    | The key was used with a different request.                                               |
+| Status | Code                       | When                                                                                             |
+| ------ | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `400`  | `invalid_tenant`           | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                                      |
+| `400`  | `invalid_cursor`           | The task list cursor is malformed.                                                               |
+| `400`  | `invalid_event_cursor`     | `after` is malformed or belongs to another task.                                                 |
+| `400`  | `invalid_limit`            | `limit` is outside 1 to 100.                                                                     |
+| `400`  | `invalid_request`          | `Idempotency-Key` is missing.                                                                    |
+| `400`  | `invalid_idempotency_key`  | `Idempotency-Key` is malformed, as on the other idempotent routes.                               |
+| `400`  | `unsupported_feature`      | The Session does not serve tasks (`capabilities.tasks` is `false`).                              |
+| `403`  | `task_forbidden`           | The caller can read the task but may not cancel it. New.                                         |
+| `403`  | `actor_scope_mismatch`     | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).          |
+| `404`  | `session_not_found`        | The Session is absent or outside the caller's scope.                                             |
+| `404`  | `task_not_found`           | The task is absent or outside the caller's scope. New.                                           |
+| `409`  | `cursor_expired`           | `after` is strictly below the durable retention floor, even with no retained events.             |
+| `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.         |
+| `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                       |
+| `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes. |
+| `409`  | `idempotency_conflict`     | The key was used with a different request.                                                       |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract
-section 10 requires, so the read routes declare no `403`; only cancel does. `cursor_expired` leaves the envelope's
+section 10 requires. The only `403` a read route answers is the tenant
+filter's `actor_scope_mismatch`, for an authenticated actor from another
+tenant or with an invalid ID. The filter covers every `/v1/agents/` and
+WebShell route; the task read routes declare it from `1.21.0`, as the
+Session and Turn reads do, and cancel adds `task_forbidden`. `cursor_expired`
+leaves the envelope's
 `replay_floor_sequence` and `snapshot_through_sequence` absent, because task
-cursors are opaque. An output event expires only after its text is in an
-Artifact, so a caller that first reads the retained events from the start and
-only then the task's Artifacts misses no output: every event that expired
-before the event read began was archived before it. The opposite order can
-miss an event that is archived and expired between the two reads. The
-guarantee also needs `artifact_refs` to list every Artifact of the task (see
-Artifact attribution in section 7). Joining the two without overlap depends on
-how output is segmented, which H3 defines.
+cursors are opaque. Recovery after `cursor_expired` proceeds as follows (A3):
+
+1. Read one retained event page from the floor by omitting `after` and save
+   its `next_cursor`. Do not wait for `has_more` to become false: an active
+   producer may keep adding events indefinitely.
+2. Read a fresh task view **after** those event reads, then discover and read
+   its Artifacts. Do not reuse `artifact_refs` cached before the event read.
+3. Resume events from the saved page cursor, including events held back by
+   the first page limit. If the floor overtakes the reader, restart recovery;
+   do not treat another `409` as an empty page. H3 defines stable output
+   segment identities/ranges for joining Artifacts and events without overlap.
+
+Before an output event expires, its full text must be durably readable in an
+Artifact and that Artifact must be discoverable by the recovery reads. Merely
+writing a blob, or updating a projection that a subsequent read can still lag
+behind, is insufficient. The server must enforce this visibility barrier before
+advancing the floor. Truncated events likewise require their full output to
+be durably readable and discoverable when published.
+
+Until older Artifacts can be enumerated and attributed to a task, a task must
+not rotate beyond the 100 entries in `artifact_refs`. H3 must enforce that
+bound or land the attribution mechanism with O2/O4 before enabling rotation
+past it. Once that mechanism exists, recovery must enumerate older Artifacts
+as well as the newest references; the bounded view alone is not complete.
+These guarantees hold while the task and its Artifacts remain readable under
+their resource retention and authorization rules. They do not promise recovery
+after those resources are deleted. Concurrent retention may require another
+recovery pass; it must never silently skip unarchived output.
 
 ## 5. Contract test changes
 
@@ -318,16 +445,43 @@ one shape per event type, the event versions, list and page cursors, and the
 and, except the public-only `object` check, checked again, renamed to
 camelCase, against the WebShell mirror, so a
 conditional copied wrongly into one surface fails the test. The WebShell
-cancel and event query requests are checked as well.
+cancel and event query requests are checked as well. From `1.21.0` it also
+requires the tenant filter's `403` on the four `planned` task routes, which
+`ManagedAgentApiContractTest` cannot probe.
 
 ## 6. Validation
+
+### 6.1 Contract follow-up acceptance
+
+The follow-up adds schema instances for empty event pages, closed event
+objects with an open type set, and task-cancel outcomes on both surfaces and
+through the operation unions. Regeneration must not expose planned routes or
+fields; the shared operation description may change. Schema tests do not prove
+the runtime guarantees above. Before H3 or the cancel slice marks its routes
+`partial`, it must demonstrate:
+
+- expiry below/equal to the floor, including an empty retained set;
+- delayed concurrent commits cannot appear behind a returned cursor;
+- cursor and accepted-event identity survive restart, rebuild and archival;
+- delayed Artifact projection, archival failure and the 100-reference bound
+  cannot silently lose output; recovery joins segments without duplication;
+- a Session that advertises `capabilities.tasks` without
+  `capabilities.artifacts` admits no output-producing task, including one
+  whose output goes only to Artifacts;
+- replay after capability/session/task changes, revoked access, conflicting
+  digests and concurrent same/different keys follows section 4.4;
+- lost cancellation receipts are reconciled, not reported as definite failure
+  or physical task settlement.
+
+### 6.2 Historical H0a validation
 
 - `npm run generate:managed-agent-api` in `packages/web-shell` leaves
   `client/components/managed/generated/managed-agent-api.ts` unchanged, and
   `managed-agent-api.test.ts` passes.
 - `ManagedAgentApiContractTest` (5 tests), `PlannedTaskContractTest` (5
   tests, 103 validations: 50 public, 49 WebShell mirrors and 4 WebShell
-  requests) and `ManagedSessionStoreContractFixtureTest` (3 tests) pass
+  requests; `1.21.0` adds a sixth test, see section 5) and
+  `ManagedSessionStoreContractFixtureTest` (3 tests) pass
   without new gap lines.
 - Mutations fail the matching gate:
   - Removing, on one surface, the conditionals of the task, the task event,
@@ -366,10 +520,18 @@ cancel and event query requests are checked as well.
 - **Artifact attribution.** `PublicArtifact` has no task reference and the
   artifact list has no task filter, so an Artifact beyond the newest 100 in
   `artifact_refs` cannot be tied back to its task. The Artifact slices (O2,
-  O4) should add one of the two before a task can rotate that many.
+  O4) must land one of the two before a task can rotate that many.
+- **Cancel operation storage.** `managed_agent_operation` (V17) has no
+  `task_id` or `failure_code` column. The cancel slice migrates both in and
+  writes `failure_code` in the same transaction as the `FAILED` transition,
+  so the reason a leased worker learns survives re-lease and restart (section
+  4.1).
 - **Legacy states.** The daemon's task status includes `paused`, and
-  workflow runs add `pausing`; `TaskState` has neither. The adapter slice (H3
-  or H4) maps them, most likely to `waiting`, or the design adds a state.
+  workflow runs add `pausing`; `TaskState` has neither. Decided in #12847
+  (A9): the adapter slice (H3 or H4) maps both to `waiting`, and `TaskState`
+  gains no state. H0c made `TaskState` `partial` with its eight values, and
+  under section 5 of the API contract a new value would now be a breaking
+  change.
 - **Later additions.** Query filters (`kind`, `state`), a `send_input` route
   and any display label are additive `planned` changes. `SessionTaskView`
   has no title; the first slice that renders tasks in WebShell should decide

@@ -208,7 +208,9 @@ describe('OverlayFs', () => {
       await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
       await writeFile(await overlay.redirectWrite(writable), 'applied edit');
 
-      await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
+      await expect(overlay.applyToReal()).rejects.toThrow(
+        `Could not apply 1 of 2 file(s) to disk: ${blocked}`,
+      );
 
       // The file that could be copied is on disk with the edit in it.
       expect(await readFile(writable, 'utf-8')).toBe('applied edit');

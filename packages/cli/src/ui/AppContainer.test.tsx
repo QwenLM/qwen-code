@@ -11,11 +11,27 @@ const {
   buildWakeRepaintSpy,
   readCronTasksMock,
   restoreWorktreeContextMock,
+  debugLoggerMock,
+  generatePromptSuggestionMock,
+  startSpeculationMock,
+  acceptSpeculationMock,
+  logSpeculationMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
   readCronTasksMock: vi.fn(),
   restoreWorktreeContextMock: vi.fn(),
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    isEnabled: vi.fn(() => false),
+  },
+  generatePromptSuggestionMock: vi.fn(),
+  startSpeculationMock: vi.fn(),
+  acceptSpeculationMock: vi.fn(),
+  logSpeculationMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
@@ -41,6 +57,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     // Control the resume-time worktree restore so tests can pin how the
     // container surfaces its outcomes without a real sidecar on disk.
     restoreWorktreeContext: restoreWorktreeContextMock,
+    createDebugLogger: () => debugLoggerMock,
+    generatePromptSuggestion: generatePromptSuggestionMock,
+    startSpeculation: startSpeculationMock,
+    acceptSpeculation: acceptSpeculationMock,
+    logSpeculation: logSpeculationMock,
   };
 });
 
@@ -105,6 +126,8 @@ import {
   describeDeliveryStatus,
   describeDropReason,
   PEER_ADMISSION_LIMITS,
+  markApiHistoryPrompt,
+  CompressionStatus,
   WorktreeRestoreRefusedError,
   type DropNotice,
   type HeldMessage,
@@ -355,6 +378,115 @@ describe('AppContainer State Management', () => {
         ?.removeSessionsMessages,
     ).toBeInstanceOf(Function);
     unmount();
+  });
+
+  it('logs the cause and records a failed speculation before resubmitting', async () => {
+    const suggestion = 'apply the speculative edit';
+    const cause = Object.assign(new Error('directory is blocked'), {
+      code: 'EEXIST',
+    });
+    const failure = new Error('Could not apply 1 of 1 file(s)', { cause });
+    const spec = {
+      id: 'spec-1',
+      status: 'completed',
+      suggestion,
+      overlayFs: null,
+      abortController: new AbortController(),
+      messages: [{ role: 'model', parts: [{ text: 'speculated' }] }],
+      startTime: Date.now(),
+      toolUseCount: 1,
+    };
+    const addMessage = vi.fn();
+    const submitQuery = vi.fn().mockResolvedValue(undefined);
+    const llmClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
+      isInitialized: vi.fn().mockReturnValue(false),
+      getHistoryTail: vi.fn().mockReturnValue([]),
+    } as unknown as LlmClient;
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(llmClient);
+    mockSettings.merged.ui = {
+      ...mockSettings.merged.ui,
+      enableSpeculation: true,
+    };
+    generatePromptSuggestionMock.mockResolvedValue({ suggestion });
+    startSpeculationMock.mockResolvedValue(spec);
+    acceptSpeculationMock.mockRejectedValue(failure);
+    mockedUseMessageQueue.mockReturnValue({
+      messageQueue: [],
+      addMessage,
+      clearQueue: vi.fn(),
+      getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      popAllMessages: vi.fn().mockReturnValue(null),
+      drainQueue: vi.fn().mockReturnValue([]),
+      popNextSubmission: vi.fn().mockReturnValue(null),
+    });
+
+    mockedUseLlmStream.mockReturnValue({
+      streamingState: StreamingState.Responding,
+      submitQuery,
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+    });
+    const view = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    mockedUseLlmStream.mockReturnValue({
+      streamingState: StreamingState.Idle,
+      submitQuery,
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+    });
+    await act(async () => {
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+    });
+    await vi.waitFor(() => expect(startSpeculationMock).toHaveBeenCalledOnce());
+    await act(async () => {
+      capturedUIActions.handleFinalSubmit(suggestion, {
+        submittedPrompt: suggestion,
+      });
+    });
+    await vi.waitFor(() => expect(addMessage).toHaveBeenCalledOnce());
+
+    expect(acceptSpeculationMock).toHaveBeenCalledOnce();
+    expect(addMessage).toHaveBeenCalledWith(
+      suggestion,
+      false,
+      suggestion,
+      false,
+    );
+    expect(logSpeculationMock).toHaveBeenCalledOnce();
+    const event = logSpeculationMock.mock.calls[0]![1] as { outcome: string };
+    expect(event.outcome).toBe('failed');
+    expect(debugLoggerMock.error).toHaveBeenCalledWith(
+      'Failed to accept speculation, resubmitting normally',
+      failure,
+      'Cause:',
+      cause,
+    );
+    view.unmount();
   });
 
   // One test below runs the real config.initialize(), which warms the tool
@@ -773,10 +905,14 @@ describe('AppContainer State Management', () => {
     promptId,
   });
 
-  const apiUser = (text: string): Content => ({
-    role: 'user',
-    parts: [{ text }],
-  });
+  const apiUser = (text: string, promptId?: string): Content => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text }],
+    };
+    markApiHistoryPrompt(content, promptId);
+    return content;
+  };
 
   const apiModel = (text: string): Content => ({
     role: 'model',
@@ -833,9 +969,9 @@ describe('AppContainer State Management', () => {
     });
 
     const apiHistory = options.apiHistory ?? [
-      apiUser('first prompt'),
+      apiUser('first prompt', 'prompt-1'),
       apiModel('first response'),
-      apiUser('second prompt'),
+      apiUser('second prompt', 'prompt-2'),
       apiModel('second response'),
     ];
     const getHistoryShallow = vi.fn(() => apiHistory);
@@ -7724,7 +7860,22 @@ describe('AppContainer State Management', () => {
 
     it('bails before file restore when the target turn is compressed', async () => {
       const harness = renderRewindHarness({
-        apiHistory: [apiUser('first prompt'), apiModel('first response')],
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          {
+            id: 5,
+            type: 'compression',
+            compression: {
+              isPending: false,
+              originalTokenCount: 100,
+              newTokenCount: 40,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          } as HistoryItem,
+        ],
       });
 
       await runRewind(harness.target, 'both');
@@ -7736,6 +7887,32 @@ describe('AppContainer State Management', () => {
         expect.objectContaining({
           type: 'error',
           text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('names an unresolved identity instead of compression, e.g. after a retry', async () => {
+      // A retry re-sends the prompt unmarked, so the retained turn keeps its
+      // promptId in the UI but has no matching model-history entry.
+      const harness = renderRewindHarness({
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('second prompt'),
+          apiModel('second response'),
+        ],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
         }),
         expect.any(Number),
       );
@@ -8121,6 +8298,58 @@ describe('AppContainer State Management', () => {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('seeds the prompt counter past ACP-minted promptIds on resume', async () => {
+      // ACP and headless mint `sessionId########<n>` 1-based and skip
+      // turns that write no record, while the TUI mint is pre-increment.
+      // Seeding the resume from a bare user-message count therefore
+      // re-mints the id the last resumed turn wears; the seed must come
+      // from the highest claimed turn (+1 for the pre-increment mint).
+      const sessionId = mockConfig.getSessionId();
+      const seedPromptCount = vi.fn();
+      mockedUseSessionStats.mockReturnValue({
+        stats: {},
+        seedPromptCount,
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId,
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:03Z',
+          messages: [1, 2, 3].map((turn) => ({
+            uuid: `u${turn}`,
+            parentUuid: null,
+            sessionId,
+            timestamp: `2024-01-01T00:00:0${turn}Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+            cwd: '/test/workspace',
+            version: '1.0.0',
+            promptId: `${sessionId}########${turn}`,
+          })),
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u3',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Seed 4, not the record count 3: the next pre-increment mint is
+      // then `${sessionId}########4`, above every id the transcript wears.
+      await vi.waitFor(() => {
+        expect(seedPromptCount).toHaveBeenCalledWith(4);
+      });
     });
 
     it('does not consume the latch on a whitespace-only prompt', () => {

@@ -3094,23 +3094,33 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
-  it('shows context usage for this pane session', async () => {
-    render();
+  it.each(['idle', 'responding'])(
+    'shows context usage for this pane session while %s',
+    async (state) => {
+      streamingStateValue = state;
+      render();
 
-    await act(async () => {
-      latestChatEditorProps.onShowContextUsage();
-    });
+      await act(async () => {
+        latestChatEditorProps.onShowContextUsage();
+      });
 
-    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
-    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
-    expect(transcriptDispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
-      }),
-    ]);
-  });
+      if (state === 'idle')
+        expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+      else expect(appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+      expect(transcriptDispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Context Usage',
+          data: {
+            type: 'web-shell:context-usage:v1:',
+            status: { usage: { totalTokens: 1200, contextWindowSize: 8192 } },
+          },
+        }),
+      ]);
+    },
+  );
 
   it('hides model setup dynamically while preserving model and session commands', () => {
     connectionState.commands = [

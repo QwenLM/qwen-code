@@ -338,14 +338,12 @@ async function checkOriginFileChanged(
     return true;
   }
 
-  if (originalStats.mtimeMs < backupStats.mtimeMs) return false;
-
   try {
     const [originalContent, backupContent] = await Promise.all([
-      readFile(originalFile, 'utf-8'),
-      readFile(backupPath, 'utf-8'),
+      readFile(originalFile),
+      readFile(backupPath),
     ]);
-    return originalContent !== backupContent;
+    return !originalContent.equals(backupContent);
   } catch {
     return true;
   }
@@ -590,7 +588,8 @@ export class FileHistoryService {
     const trackedFiles = new Set<string>();
     const migrated: FileHistorySnapshot[] = [];
     for (const snapshot of snapshots) {
-      const trackedFileBackups: Record<string, FileHistoryBackup> = {};
+      const trackedFileBackups: Record<string, FileHistoryBackup> =
+        Object.create(null);
       for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
         const trackingPath = this.maybeShortenFilePath(p);
         trackedFiles.add(trackingPath);
@@ -634,7 +633,13 @@ export class FileHistoryService {
             );
             return false;
           }
-          return await pathExists(backupPath);
+          try {
+            await stat(backupPath);
+            return true;
+          } catch (error) {
+            if (isENOENT(error)) return false;
+            throw error;
+          }
         }),
       );
       for (let j = 0; j < batch.length; j++) {
@@ -724,7 +729,8 @@ export class FileHistoryService {
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
 
-    const trackedFileBackups: Record<string, FileHistoryBackup> = {};
+    const trackedFileBackups: Record<string, FileHistoryBackup> =
+      Object.create(null);
     const mostRecent = this.state.snapshots.at(-1);
 
     if (mostRecent) {
@@ -830,6 +836,17 @@ export class FileHistoryService {
     truncateHistory = true,
   ): Promise<RewindResult> {
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
+
+    // Refuse a shared key before truncation can prune the wrong backups.
+    let matches = 0;
+    for (const snapshot of this.state.snapshots) {
+      if (snapshot.promptId === promptId) matches++;
+    }
+    if (matches > 1) {
+      throw new Error(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+    }
 
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) {

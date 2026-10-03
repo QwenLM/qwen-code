@@ -18,6 +18,7 @@ import {
   OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS,
   analyzeToolResultRetention,
 } from './tool-result-retention.js';
+import { content, fnResponse } from '../test-utils/model-fixtures.js';
 
 // Mirrors `createFunctionResponsePart`: results keep media on nested parts.
 const PARTS_KEY = 'parts';
@@ -25,10 +26,7 @@ const PARTS_KEY = 'parts';
 const WRAPPER_FLOOR_CHARS = 64;
 
 function toolResultContent(output: string, name = 'shell'): Content {
-  return {
-    role: 'user',
-    parts: [{ functionResponse: { name, response: { output } } }],
-  };
+  return content('user', { functionResponse: { name, response: { output } } });
 }
 
 function textContent(text: string): Content {
@@ -153,10 +151,9 @@ describe('analyzeToolResultRetention', () => {
 
   it('handles tool results without a response payload', () => {
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [{ functionResponse: { name: 'shell', response: undefined } }],
-      },
+      content('user', {
+        functionResponse: { name: 'shell', response: undefined },
+      }),
     ]);
     expect(stats.toolResultCount).toBe(1);
     // No payload at all: only the wrapper floor counts.
@@ -173,18 +170,13 @@ describe('analyzeToolResultRetention', () => {
 
   it('bills nested media parts at the image estimate, not base64 length', () => {
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: 'img' },
-              [PARTS_KEY]: [{ inlineData: {} }],
-            },
-          },
-        ],
-      },
+      content('user', {
+        functionResponse: {
+          name: 'read_file',
+          response: { output: 'img' },
+          [PARTS_KEY]: [{ inlineData: {} }],
+        },
+      }),
     ]);
     const imageChars = DEFAULT_IMAGE_TOKEN_ESTIMATE * TOKEN_TO_CHAR_RATIO;
     expect(stats.totalChars).toBe(
@@ -196,18 +188,13 @@ describe('analyzeToolResultRetention', () => {
     const customEstimate = 800;
     const stats = analyzeToolResultRetention(
       [
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: 'read_file',
-                response: { output: 'img' },
-                [PARTS_KEY]: [{ inlineData: {} }],
-              },
-            },
-          ],
-        },
+        content('user', {
+          functionResponse: {
+            name: 'read_file',
+            response: { output: 'img' },
+            [PARTS_KEY]: [{ inlineData: {} }],
+          },
+        }),
       ],
       { imageTokenEstimate: customEstimate },
     );
@@ -221,10 +208,9 @@ describe('analyzeToolResultRetention', () => {
     const circular: Record<string, unknown> = { content: [{ text: 'data' }] };
     circular['self'] = circular;
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [{ functionResponse: { name: 'mcp', response: circular } }],
-      },
+      content('user', {
+        functionResponse: { name: 'mcp', response: circular },
+      }),
     ]);
     // No string output and no nested parts: only the wrapper floor counts.
     expect(stats.toolResultCount).toBe(1);
@@ -237,57 +223,25 @@ describe('analyzeToolResultRetention', () => {
     const stub =
       '<persisted-output>job-123</persisted-output>' + 'x'.repeat(100_000);
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'shell',
-              response: { error: stub },
-            },
-          },
-        ],
-      },
+      content('user', fnResponse('shell', { error: stub })),
     ]);
     expect(stats.oversizedResultCount).toBe(0);
   });
 
   it('flags oversized error-key results without a sentinel', () => {
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'shell',
-              response: { error: 'e'.repeat(65_000) },
-            },
-          },
-        ],
-      },
+      content('user', fnResponse('shell', { error: 'e'.repeat(65_000) })),
     ]);
     expect(stats.oversizedResultCount).toBe(1);
   });
 
   it('aggregates multiple functionResponse parts in a single Content', () => {
     const stats = analyzeToolResultRetention([
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'shell',
-              response: { output: 'x'.repeat(100) },
-            },
-          },
-          {
-            functionResponse: {
-              name: 'shell',
-              response: { output: 'y'.repeat(200) },
-            },
-          },
-        ],
-      },
+      content(
+        'user',
+        fnResponse('shell', { output: 'x'.repeat(100) }),
+        fnResponse('shell', { output: 'y'.repeat(200) }),
+      ),
     ]);
     expect(stats.toolResultCount).toBe(2);
     expect(stats.totalChars).toBe(100 + 200 + 2 * WRAPPER_FLOOR_CHARS);

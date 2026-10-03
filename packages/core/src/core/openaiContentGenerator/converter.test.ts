@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
+import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { RequestContext } from './types.js';
@@ -15,6 +16,7 @@ import {
   type GenerateContentResponse,
   type GenerateContentParameters,
   type Content,
+  type FunctionCall,
   type Part,
   type Tool,
   type CallableTool,
@@ -31,6 +33,191 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../../test-utils/model-fixtures.js';
+
+type Message = OpenAI.Chat.ChatCompletionMessageParam;
+/** Loose view of an OpenAI content part, for reading converted messages. */
+type WirePart = {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+  input_audio?: { data: string; format: string };
+  video_url?: { url: string };
+  file?: { filename: string; file_data: string };
+};
+
+const baseRequestContext = (): RequestContext => ({
+  model: 'test-model',
+  modalities: { image: true, pdf: true, audio: true, video: true },
+  startTime: 0,
+});
+
+function openAIStreamChunk(
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+): OpenAI.Chat.ChatCompletionChunk {
+  return {
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  } as unknown as OpenAI.Chat.ChatCompletionChunk;
+}
+
+const partsOf = (response: GenerateContentResponse) =>
+  response.candidates?.[0]?.content?.parts;
+
+/** Streams one delta chunk and returns the converted parts. */
+const streamParts = (
+  ctx: RequestContext,
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+) =>
+  partsOf(
+    OpenAIContentConverter.convertOpenAIChunkToLlm(
+      openAIStreamChunk(delta, finishReason),
+      ctx,
+    ),
+  );
+
+/**
+ * Streams each step's delta through `ctx`, then expects each step's parts in
+ * order; returns the parts.
+ */
+const expectSteps = (
+  ctx: RequestContext,
+  steps: Array<[Record<string, unknown>, Part[], string?]>,
+) => {
+  const results = steps.map(([delta, , finishReason = null]) =>
+    streamParts(ctx, delta, finishReason),
+  );
+  steps.forEach(([, expected], i) => expect(results[i]).toEqual(expected));
+  return results;
+};
+
+const expectThrowType = (act: () => unknown, type: string) =>
+  expect(act).toThrowError(expect.objectContaining({ type }));
+
+/** One assertion each for the call's name, args and id. */
+const expectFnCall = (
+  fn: FunctionCall | undefined,
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+) => {
+  expect(fn?.name).toBe(name);
+  expect(fn?.args).toEqual(args);
+  expect(fn?.id).toBe(id);
+};
+
+/** One assertion per expected item, in order. */
+const expectEach = (actual: unknown[], expected: unknown[]) =>
+  expected.forEach((value, index) => expect(actual[index]).toEqual(value));
+
+const thoughtPart = (text: string): Part => ({ text, thought: true });
+
+const inline = (
+  mimeType: string,
+  data: string,
+  displayName?: string,
+): Part => ({
+  inlineData: {
+    mimeType,
+    data,
+    ...(displayName !== undefined ? { displayName } : {}),
+  },
+});
+
+const fileRef = (
+  mimeType: string,
+  fileUri: string,
+  displayName?: string,
+): Part => ({
+  fileData: {
+    mimeType,
+    fileUri,
+    ...(displayName !== undefined ? { displayName } : {}),
+  },
+});
+
+/** A `functionResponse` part that also carries nested `parts`. */
+const fnResult = (
+  name: string,
+  response: Record<string, unknown>,
+  id: string,
+  parts: unknown[],
+): Part => ({
+  functionResponse: { id, name, response, parts: parts as Part[] },
+});
+
+/** A model turn calling `name` as `id`, then the user turn answering it. */
+const exchange = (
+  id: string,
+  name: string,
+  response: Record<string, unknown>,
+  parts?: unknown[],
+  args: Record<string, unknown> = {},
+): Content[] => [
+  content('model', fnCall(name, args, id)),
+  content(
+    'user',
+    parts
+      ? fnResult(name, response, id, parts)
+      : fnResponse(name, response, id),
+  ),
+];
+
+const req = (...contents: Content[]): GenerateContentParameters => ({
+  model: 'models/test',
+  contents,
+});
+
+const byRole = (messages: Message[], role: Message['role']) =>
+  messages.filter((m) => m.role === role);
+const findRole = (messages: Message[], role: Message['role']) =>
+  messages.find((m) => m.role === role);
+const wireParts = (message: Message | undefined) =>
+  message?.content as WirePart[];
+/** The tool message's parts, after checking it exists with array content. */
+const toolPartsOf = (messages: Message[]) => {
+  const toolMessage = findRole(messages, 'tool');
+  expect(toolMessage).toBeDefined();
+  expect(Array.isArray(toolMessage?.content)).toBe(true);
+  return wireParts(toolMessage);
+};
+const typesOf = (parts: WirePart[]) => parts.map((p) => p.type);
+const partOf = (parts: WirePart[], type: string) =>
+  parts.find((p) => p.type === type);
+const imageUrlOf = (parts: WirePart[]) =>
+  partOf(parts, 'image_url')?.image_url?.url;
+const toolReply = (tool_call_id: string) => ({ role: 'tool', tool_call_id });
+const textsOf = (parts: WirePart[]) =>
+  parts.filter((p) => p.type === 'text').map((p) => p.text);
+/** Expects exactly [text containing each fragment, PNG image_url]. */
+const expectTextThenPng = (parts: WirePart[], ...fragments: string[]) => {
+  expect(parts).toHaveLength(2);
+  expect(parts[0].type).toBe('text');
+  for (const fragment of fragments) {
+    expect(parts[0].text).toContain(fragment);
+  }
+  expect(parts[1].type).toBe('image_url');
+  expect(parts[1].image_url?.url).toContain('data:image/png');
+};
+/** Ids of an assistant message's tool calls (undefined when it has none). */
+const callIdsOf = (message: Message | undefined) =>
+  (
+    message as OpenAI.Chat.ChatCompletionAssistantMessageParam | undefined
+  )?.tool_calls?.map((toolCall) => toolCall.id);
+const toolCallIdsOf = (messages: Message[]) =>
+  messages
+    .filter(
+      (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+        message.role === 'tool' && 'tool_call_id' in message,
+    )
+    .map((message) => message.tool_call_id);
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -38,138 +225,241 @@ describe('OpenAIContentConverter', () => {
 
   beforeEach(() => {
     converter = OpenAIContentConverter;
-    requestContext = {
-      model: 'test-model',
-      modalities: {
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      },
-      startTime: 0,
-    };
+    requestContext = baseRequestContext();
   });
 
-  function withStreamParser(
-    toolCallParser: StreamingToolCallParser = new StreamingToolCallParser(),
-  ): RequestContext {
-    return {
+  const toOpenAI = (
+    request: GenerateContentParameters,
+    overrides: Partial<RequestContext> = {},
+  ) =>
+    converter.convertLlmRequestToOpenAI(request, {
       ...requestContext,
-      toolCallParser,
-    };
-  }
+      ...overrides,
+    });
 
-  function withTaggedThinkingOptions(): RequestContext {
-    return {
-      ...requestContext,
-      responseParsingOptions: { taggedThinkingTags: true },
-    };
-  }
+  /** Converts a request holding `contents`, overriding the default context. */
+  const toMessagesWith = (
+    overrides: Partial<RequestContext>,
+    ...contents: Content[]
+  ) => toOpenAI(req(...contents), overrides);
+  const toMessages = (...contents: Content[]) =>
+    toMessagesWith({}, ...contents);
+  /** Same, with strict OpenAI tool-result media splitting (splitToolMedia). */
+  const toSplitMessages = (...contents: Content[]) =>
+    toMessagesWith({ splitToolMedia: true }, ...contents);
 
-  function withTaggedThinkingStreamParser(): RequestContext {
-    return {
-      ...withStreamParser(),
-      responseParsingOptions: { taggedThinkingTags: true },
-      taggedThinkingParser: new TaggedThinkingParser(),
-    };
-  }
+  const toLlm = (
+    choices: unknown[],
+    extra: Record<string, unknown> = {},
+    ctx: RequestContext = requestContext,
+  ) =>
+    converter.convertOpenAIResponseToLlm(
+      {
+        object: 'chat.completion',
+        id: 'chatcmpl',
+        created: 123,
+        model: 'test-model',
+        choices,
+        ...extra,
+      } as unknown as OpenAI.Chat.ChatCompletion,
+      ctx,
+    );
+  const choice = (
+    message: Record<string, unknown>,
+    finish_reason: unknown = 'stop',
+  ) => ({
+    index: 0,
+    message: { role: 'assistant', ...message },
+    finish_reason,
+    logprobs: null,
+  });
 
-  function withQwen3TaggedThinkingStreamParser(): RequestContext {
-    return {
-      ...withStreamParser(),
-      model: 'qwen3.8-max',
-      responseParsingOptions: {
-        contentOnlyThinkingTagLeaks: true,
-        taggedThinkingTagsAfterReasoning: true,
+  it('re-encodes Freeform exec history as Chat function messages', () => {
+    const source = String.raw`text("one\\ntwo");`;
+    const messages = toMessages(
+      ...exchange('call_exec', 'exec', { output: 'done' }, undefined, {
+        source,
+      }),
+    );
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_exec',
+            type: 'function',
+            function: { name: 'exec', arguments: JSON.stringify({ source }) },
+          },
+        ],
       },
-    };
-  }
+      {
+        role: 'tool',
+        tool_call_id: 'call_exec',
+        content: [{ type: 'text', text: 'done' }],
+      },
+    ]);
+  });
 
-  function openAIStreamChunk(
-    delta: Record<string, unknown>,
-    finishReason: string | null = null,
-  ): OpenAI.Chat.ChatCompletionChunk {
-    return {
-      choices: [{ index: 0, delta, finish_reason: finishReason }],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk;
-  }
+  const withStreamParser = (
+    toolCallParser = new StreamingToolCallParser(),
+  ): RequestContext => ({ ...requestContext, toolCallParser });
+  const withTaggedThinkingOptions = (): RequestContext => ({
+    ...requestContext,
+    responseParsingOptions: { taggedThinkingTags: true },
+  });
+  const withTaggedThinkingStreamParser = (): RequestContext => ({
+    ...withStreamParser(),
+    responseParsingOptions: { taggedThinkingTags: true },
+    taggedThinkingParser: new TaggedThinkingParser(),
+  });
+  const withQwen3TaggedThinkingStreamParser = (): RequestContext => ({
+    ...withStreamParser(),
+    model: 'qwen3.8-max',
+    responseParsingOptions: {
+      contentOnlyThinkingTagLeaks: true,
+      taggedThinkingTagsAfterReasoning: true,
+    },
+  });
 
-  function hasOpenAIToolCalls(
-    message: OpenAI.Chat.ChatCompletionMessageParam,
+  const hasOpenAIToolCalls = (
+    message: Message,
   ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
     tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
-  } {
-    return (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      Array.isArray(message.tool_calls)
-    );
-  }
+  } =>
+    message.role === 'assistant' &&
+    'tool_calls' in message &&
+    Array.isArray(message.tool_calls);
 
-  function isOpenAISplitMediaMessage(
-    message: OpenAI.Chat.ChatCompletionMessageParam,
-  ): boolean {
-    return (
-      message.role === 'user' &&
-      Array.isArray(message.content) &&
-      message.content.some((part) => {
-        const typedPart = part as { type?: string };
-        return (
-          typedPart.type === 'image_url' ||
-          typedPart.type === 'input_audio' ||
-          typedPart.type === 'video_url' ||
-          typedPart.type === 'file'
-        );
-      })
+  const isOpenAISplitMediaMessage = (message: Message) =>
+    message.role === 'user' &&
+    Array.isArray(message.content) &&
+    message.content.some((part) =>
+      ['image_url', 'input_audio', 'video_url', 'file'].includes(
+        (part as { type?: string }).type ?? '',
+      ),
     );
-  }
 
   describe('stream-local parser state', () => {
-    const streamChunk = (
-      id: string,
+    /** Sends one chunk (provider model 'test') and returns the converted response. */
+    const send = (
+      stream: RequestContext,
       delta: Record<string, unknown>,
       finishReason: string | null = null,
     ) =>
-      ({
-        id,
-        created: 1,
-        model: 'test',
-        choices: [{ index: 0, delta, finish_reason: finishReason }],
-      }) as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-    const emitReasoning = (stream: RequestContext) =>
       converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', { reasoning_content: 'Let me check.' }),
+        {
+          ...openAIStreamChunk(delta, finishReason),
+          id: 'chunk',
+          created: 1,
+          model: 'test',
+        },
         stream,
       );
+
+    const toolCall = (
+      index: number,
+      id: string,
+      name: string,
+      args = '{}',
+    ) => ({
+      index,
+      id,
+      function: { name, arguments: args },
+    });
+
+    const readCallPart = {
+      functionCall: { id: 'call_read', name: 'read_file', args: {} },
+    };
+
+    const contentOnlyStream = () => ({
+      ...withStreamParser(),
+      responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+    });
+
+    const emitReasoning = (stream: RequestContext, text = 'Let me check.') =>
+      send(stream, { reasoning_content: text });
+    /** A plain-parser stream that has already emitted `text` as reasoning. */
+    const afterReasoning = (text?: string) => {
+      const stream = withStreamParser();
+      emitReasoning(stream, text);
+      return stream;
+    };
 
     const emitToolCall = (
       stream: RequestContext,
       content: string,
       toolArguments = '{}',
     ) =>
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('tool-call', {
-          content,
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_read',
-              function: { name: 'read_file', arguments: toolArguments },
-            },
-          ],
-        }),
-        stream,
-      );
+      send(stream, {
+        content,
+        tool_calls: [toolCall(0, 'call_read', 'read_file', toolArguments)],
+      });
 
     const finishStream = (
       stream: RequestContext,
       finishReason = 'tool_calls',
+    ) => send(stream, {}, finishReason);
+    const finishedCall = (stream: RequestContext) =>
+      partsOf(finishStream(stream))?.find((p: Part) => p.functionCall)
+        ?.functionCall;
+    const openCall = (id: string, name: string, args: string) => ({
+      tool_calls: [
+        { ...toolCall(0, id, name, args), type: 'function' as const },
+      ],
+    });
+    const expectHeld = (...responses: GenerateContentResponse[]) =>
+      responses.forEach((response) => expect(partsOf(response)).toEqual([]));
+    const expectLeakOn = (
+      stream: RequestContext,
+      delta: Record<string, unknown>,
+      finishReason: string | null = null,
     ) =>
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('finish', {}, finishReason),
-        stream,
+      expectThrowType(
+        () => send(stream, delta, finishReason),
+        'PROTOCOL_TAG_LEAK',
       );
+
+    const expectSanitized = (
+      stream: RequestContext,
+      tagName: string,
+      toolCallCount: number,
+    ) =>
+      expect(stream.protocolTagSanitized).toEqual({ tagName, toolCallCount });
+
+    const expectUnsanitizedLeak = (
+      stream: RequestContext,
+      act: () => unknown = () => finishStream(stream),
+    ) => {
+      expectThrowType(act, 'PROTOCOL_TAG_LEAK');
+      expect(stream.protocolTagSanitized).toBeUndefined();
+    };
+
+    /** Sends each content chunk, finishing with 'stop' on the last one. */
+    const sendAll = (stream: RequestContext, chunks: string[]) =>
+      chunks.flatMap(
+        (content, index) =>
+          partsOf(
+            send(
+              stream,
+              { content },
+              index === chunks.length - 1 ? 'stop' : null,
+            ),
+          ) ?? [],
+      );
+
+    /** Holds each content chunk and the tool-call chunk carrying `tag`, then recovers the call. */
+    const expectRecovered = (held: string[], tag: string) => {
+      const stream = afterReasoning();
+      const responses = held.map((content) => send(stream, { content }));
+      responses.push(emitToolCall(stream, tag));
+      const finish = finishStream(stream);
+
+      expectHeld(...responses);
+      expect(partsOf(finish)).toEqual([readCallPart]);
+      expectSanitized(stream, 'think', 1);
+    };
 
     it('creates fresh parser instances', () => {
       const ctx1 = new StreamingToolCallParser();
@@ -181,19 +471,15 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('preserves the provider model from stream chunks', () => {
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk('model', { content: 'ok' }),
-        withStreamParser(),
-      );
+      const response = send(withStreamParser(), { content: 'ok' });
 
       expect(response.modelVersion).toBe('test');
     });
 
     it('isolates two contexts so writes to one do not leak into the other', () => {
-      // Regression for issue #3516: previously the parser lived on the
-      // Converter as an instance field, so two concurrent streams sharing
-      // the same Config.contentGenerator would overwrite each other's
-      // tool-call buffers. Per-stream contexts eliminate that contention.
+      // Regression for issue #3516: the parser used to be a Converter instance
+      // field, so two concurrent streams sharing one Config.contentGenerator
+      // overwrote each other's tool-call buffers.
       const ctx1 = new StreamingToolCallParser();
       const ctx2 = new StreamingToolCallParser();
 
@@ -206,440 +492,223 @@ describe('OpenAIContentConverter', () => {
       expect(ctx2.getToolCallMeta(0).id).toBe('call_B');
     });
 
+    const shellCall = (id: string) => [
+      { id, name: 'shell', args: { cmd: 'echo hi' }, index: 0 },
+    ];
+
     it('ignores replay chunks after an id already has complete JSON args', () => {
       const parser = new StreamingToolCallParser();
-
       parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
       parser.addChunk(0, '{"cmd":"echo hi"}', 'dup_id_0001', 'shell');
 
       expect(parser.getBuffer(0)).toBe('{"cmd":"echo hi"}');
-      expect(parser.getCompletedToolCalls()).toEqual([
-        {
-          id: 'dup_id_0001',
-          name: 'shell',
-          args: { cmd: 'echo hi' },
-          index: 0,
-        },
-      ]);
+      expect(parser.getCompletedToolCalls()).toEqual(shellCall('dup_id_0001'));
     });
 
     it('keeps accumulating normal fragmented JSON before it is complete', () => {
       const parser = new StreamingToolCallParser();
-
       parser.addChunk(0, '{"cmd"', 'call_fragmented', 'shell');
       parser.addChunk(0, ':"echo hi"}', 'call_fragmented', 'shell');
 
-      expect(parser.getCompletedToolCalls()).toEqual([
-        {
-          id: 'call_fragmented',
-          name: 'shell',
-          args: { cmd: 'echo hi' },
-          index: 0,
-        },
-      ]);
+      expect(parser.getCompletedToolCalls()).toEqual(
+        shellCall('call_fragmented'),
+      );
     });
 
     it('demuxes interleaved chunks from two concurrent streams correctly (#3516)', () => {
-      // Real-world shape: two subagents share one Config (hence one
-      // Converter). Their OpenAI streams run concurrently; chunks arrive
-      // interleaved at the event loop. Under the pre-fix architecture
-      // this corrupted both tool calls; under per-stream contexts each
-      // stream's chunks stay in their own parser and close cleanly.
-      const streamA = withStreamParser(new StreamingToolCallParser());
-      const streamB = withStreamParser(new StreamingToolCallParser());
+      // Two subagents share one Config (hence one Converter) and their streams
+      // interleave. Pre-fix every chunk fed one shared parser and both calls
+      // were corrupted; per-stream contexts keep each stream's chunks apart.
+      const streamA = withStreamParser();
+      const streamB = withStreamParser();
+      const args = (argsText: string) => ({
+        tool_calls: [{ index: 0, function: { arguments: argsText } }],
+      });
 
-      const openerA = {
-        object: 'chat.completion.chunk',
-        id: 'A-open',
-        created: 1,
-        model: 'test',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call_A',
-                  type: 'function' as const,
-                  function: {
-                    name: 'read_file',
-                    arguments: '{"file_path":"/a',
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      send(streamA, openCall('call_A', 'read_file', '{"file_path":"/a'));
+      send(streamB, openCall('call_B', 'read_file', '{"file_path":"/b'));
+      send(streamA, args('/x.ts"}'));
+      send(streamB, args('/y.ts"}'));
 
-      const openerB = {
-        ...openerA,
-        id: 'B-open',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call_B',
-                  type: 'function' as const,
-                  function: {
-                    name: 'read_file',
-                    arguments: '{"file_path":"/b',
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      const contA = {
-        ...openerA,
-        id: 'A-cont',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [{ index: 0, function: { arguments: '/x.ts"}' } }],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      const contB = {
-        ...openerB,
-        id: 'B-cont',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [{ index: 0, function: { arguments: '/y.ts"}' } }],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      const finisher = (id: string) =>
-        ({
-          object: 'chat.completion.chunk',
-          id,
-          created: 2,
-          model: 'test',
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: 'tool_calls',
-              logprobs: null,
-            },
-          ],
-        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      // Interleave the two streams. Pre-fix this produced corrupt JSON
-      // because every chunk fed the same shared parser.
-      converter.convertOpenAIChunkToLlm(openerA, streamA);
-      converter.convertOpenAIChunkToLlm(openerB, streamB);
-      converter.convertOpenAIChunkToLlm(contA, streamA);
-      converter.convertOpenAIChunkToLlm(contB, streamB);
-
-      const resultA = converter.convertOpenAIChunkToLlm(
-        finisher('A-finish'),
-        streamA,
-      );
-      const resultB = converter.convertOpenAIChunkToLlm(
-        finisher('B-finish'),
-        streamB,
-      );
-
-      const fnA = resultA.candidates?.[0]?.content?.parts?.find(
-        (p: Part) => p.functionCall,
-      )?.functionCall;
-      const fnB = resultB.candidates?.[0]?.content?.parts?.find(
-        (p: Part) => p.functionCall,
-      )?.functionCall;
-
-      expect(fnA?.name).toBe('read_file');
-      expect(fnA?.args).toEqual({ file_path: '/a/x.ts' });
-      expect(fnA?.id).toBe('call_A');
-
-      expect(fnB?.name).toBe('read_file');
-      expect(fnB?.args).toEqual({ file_path: '/b/y.ts' });
-      expect(fnB?.id).toBe('call_B');
+      expectFnCall(finishedCall(streamA), 'call_A', 'read_file', {
+        file_path: '/a/x.ts',
+      });
+      expectFnCall(finishedCall(streamB), 'call_B', 'read_file', {
+        file_path: '/b/y.ts',
+      });
     });
 
     it('emits no-argument tool calls that stream an empty arguments string', () => {
-      // Providers may finish a no-argument tool call with `arguments: ""`
-      // and no follow-up fragment (e.g. llama.cpp-style servers). The call
-      // must reach the caller with empty args instead of being dropped,
-      // which would make the whole turn look empty and trigger retries.
-      const stream = withStreamParser(new StreamingToolCallParser());
+      // Providers (e.g. llama.cpp-style servers) may finish a no-argument call
+      // with `arguments: ""` and no follow-up fragment. Dropping it would make
+      // the turn look empty and trigger retries.
+      const stream = withStreamParser();
+      send(stream, openCall('call_noargs', 'list_sessions', ''));
 
-      const opener = {
-        object: 'chat.completion.chunk',
-        id: 'noargs-open',
-        created: 1,
-        model: 'test',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call_noargs',
-                  type: 'function' as const,
-                  function: { name: 'list_sessions', arguments: '' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      const finisher = {
-        object: 'chat.completion.chunk',
-        id: 'noargs-finish',
-        created: 2,
-        model: 'test',
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: 'tool_calls',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      converter.convertOpenAIChunkToLlm(opener, stream);
-      const result = converter.convertOpenAIChunkToLlm(finisher, stream);
-
-      const fn = result.candidates?.[0]?.content?.parts?.find(
-        (p: Part) => p.functionCall,
-      )?.functionCall;
-
-      expect(fn?.name).toBe('list_sessions');
-      expect(fn?.args).toEqual({});
-      expect(fn?.id).toBe('call_noargs');
+      expectFnCall(finishedCall(stream), 'call_noargs', 'list_sessions', {});
     });
 
     it('ignores a phantom slot beside a valid tool call', () => {
       const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('open', {
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_edit',
-              function: { name: 'edit', arguments: '{}' },
-            },
-            { index: 1, function: {} },
-          ],
-        }),
-        stream,
-      );
+      send(stream, {
+        tool_calls: [
+          toolCall(0, 'call_edit', 'edit'),
+          { index: 1, function: {} },
+        ],
+      });
 
-      const result = converter.convertOpenAIChunkToLlm(
-        streamChunk('finish', {}, 'tool_calls'),
-        stream,
-      );
+      const result = finishStream(stream);
 
-      expect(result.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_edit', name: 'edit', args: {} },
-        },
+      expect(partsOf(result)).toEqual([
+        { functionCall: { id: 'call_edit', name: 'edit', args: {} } },
       ]);
       expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
 
-    it('rejects a tool-call finish without a completed named call', () => {
+    it.each([
+      [
+        'rejects a tool-call finish without a completed named call',
+        [{ index: 0, function: {} }],
+        'tool_calls',
+      ],
+      [
+        'rejects an invalid tool-call index on a stop finish',
+        [toolCall(Number.MAX_SAFE_INTEGER + 1, 'call_invalid', 'read_file')],
+        'stop',
+      ],
+      [
+        'rejects valid tool calls accompanied by an invalid index',
+        [
+          toolCall(0, 'call_read', 'read_file'),
+          toolCall(Number.MAX_SAFE_INTEGER + 1, 'call_invalid', 'write_file'),
+        ],
+        'tool_calls',
+      ],
+    ])('%s', (_title, tool_calls, finishReason) => {
       const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('open', { tool_calls: [{ index: 0, function: {} }] }),
-        stream,
-      );
+      send(stream, { tool_calls });
 
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('finish', {}, 'tool_calls'),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+      expectThrowType(
+        () => finishStream(stream, finishReason),
+        'MALFORMED_TOOL_CALL',
+      );
     });
 
     it('rejects a tool call that never provides a function name', () => {
       const stream = withStreamParser();
-      const partial = converter.convertOpenAIChunkToLlm(
-        streamChunk('open', {
-          content: 'discard me',
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_without_name',
-              function: { arguments: '{"path":"a.ts"}' },
-            },
-          ],
-        }),
-        stream,
-      );
+      const partial = send(stream, {
+        content: 'discard me',
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_without_name',
+            function: { arguments: '{"path":"a.ts"}' },
+          },
+        ],
+      });
 
-      expect(partial.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('finish', {}, 'stop'),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }));
+      expect(partsOf(partial)).toEqual([]);
+      expectThrowType(
+        () => finishStream(stream, 'stop'),
+        'MALFORMED_TOOL_CALL',
+      );
     });
 
     it('rejects a protocol-tag recovery with a whitespace-only function name', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('tool-call', {
-          content: '</think>',
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_blank',
-              function: { name: '   ', arguments: '{}' },
-            },
-          ],
-        }),
-        stream,
-      );
+      const stream = afterReasoning();
+      send(stream, {
+        content: '</think>',
+        tool_calls: [toolCall(0, 'call_blank', '   ')],
+      });
 
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-      expect(stream.protocolTagSanitized).toBeUndefined();
+      expectUnsanitizedLeak(stream);
     });
 
     it('rejects the recorded cross-channel thinking-tag leak', () => {
       const stream = withStreamParser();
-      const reasoning = converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', {
-          reasoning_content: 'Let me check<think>',
-        }),
-        stream,
-      );
+      const reasoning = emitReasoning(stream, 'Let me check<think>');
 
-      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('content', { content: 'the result\n</think>\n' }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expect(partsOf(reasoning)).toEqual([]);
+      expectLeakOn(stream, { content: 'the result\n</think>\n' });
     });
 
-    it('rejects the recorded content-only nested thinking-tag leak', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const opening = converter.convertOpenAIChunkToLlm(
-        streamChunk('opening', { content: '<think>\n\n' }),
-        stream,
-      );
-      const repeatedOpening = converter.convertOpenAIChunkToLlm(
-        streamChunk('repeated-opening', { content: '</think><thi' }),
-        stream,
-      );
-
-      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([]);
-      const nestedOpening = converter.convertOpenAIChunkToLlm(
-        streamChunk('nested-opening', { content: 'nk>9<think>-3' }),
-        stream,
-      );
-
-      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-    });
-
-    it('rejects the recorded production unclosed <thinking> content leak (issue #6666)', () => {
-      // Production capture shape (sanitized): a hybrid-thinking model
-      // skipped the reasoning channel entirely and streamed its thinking as
-      // literal <thinking> text inside content — no reasoning_content on
-      // any chunk, no tool calls, and the tag is never closed before stop.
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const opening = converter.convertOpenAIChunkToLlm(
-        streamChunk('opening', { content: '<thi' }),
-        stream,
-      );
-      const body = converter.convertOpenAIChunkToLlm(
-        streamChunk('body', {
-          content:
-            'nking>\nThe user wants to query the compute resources for ' +
+    it.each([
+      [
+        'rejects the recorded content-only nested thinking-tag leak',
+        ['<think>\n\n', '</think><thi', 'nk>9<think>-3'],
+        'tool_calls',
+      ],
+      [
+        // Sanitized production capture: a hybrid-thinking model skipped the
+        // reasoning channel and streamed its thinking as literal <thinking>
+        // content (no reasoning_content, no tool calls), never closing the tag.
+        'rejects the recorded production unclosed <thinking> content leak (issue #6666)',
+        [
+          '<thi',
+          'nking>\nThe user wants to query the compute resources for ' +
             'project space 10088. Let me check the available APIs.',
-        }),
-        stream,
-      );
+        ],
+        'stop',
+      ],
+      [
+        'rejects an unclosed whitespace-only block at stream finish',
+        [`<thinking>${' '.repeat(128)}`],
+        'stop',
+      ],
+      [
+        'fails closed for a long suspicious prefix at stream finish',
+        ['<think></think><think>9<think>' + 'x'.repeat(257)],
+        'stop',
+      ],
+    ])('%s', (_title, chunks, finishReason) => {
+      const stream = contentOnlyStream();
 
-      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(body.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      expectHeld(...chunks.map((content) => send(stream, { content })));
+      expectThrowType(
+        () => finishStream(stream, finishReason),
+        'PROTOCOL_TAG_LEAK',
       );
     });
 
     it('holds a long confirmed opening tag until its closing tag arrives', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const stream = contentOnlyStream();
       const text = `<thinking>${'x'.repeat(200)}</thinking>`;
 
-      const opening = converter.convertOpenAIChunkToLlm(
-        streamChunk('long-balanced', {
-          content: `<thinking>${'x'.repeat(200)}`,
-        }),
-        stream,
-      );
-      const closing = converter.convertOpenAIChunkToLlm(
-        streamChunk('long-balanced', { content: '</thinking>' }, 'stop'),
-        stream,
-      );
+      const opening = send(stream, {
+        content: `<thinking>${'x'.repeat(200)}`,
+      });
+      const closing = send(stream, { content: '</thinking>' }, 'stop');
 
-      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(closing.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+      expect(partsOf(opening)).toEqual([]);
+      expect(partsOf(closing)).toEqual([{ text }]);
     });
 
-    it('leaks the production <thinking> shape without provider provenance', () => {
-      // Control for the test above: without contentOnlyThinkingTagLeaks the
-      // same stream passes through verbatim — the defense is provider-gated,
-      // so endpoints whose provider does not opt in remain exposed.
-      const stream = withStreamParser();
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk(
-          'literal',
-          {
-            content:
-              '<thinking>\nThe user wants to query the compute resources.',
-          },
-          'stop',
-        ),
-        stream,
-      );
+    it.each([
+      [
+        // Control for the #6666 leak: without contentOnlyThinkingTagLeaks the
+        // stream passes through verbatim; the defense is provider-gated, so
+        // endpoints whose provider does not opt in remain exposed.
+        'leaks the production <thinking> shape without provider provenance',
+        withStreamParser,
+        '<thinking>\nThe user wants to query the compute resources.',
+        'stop',
+      ],
+      [
+        'preserves a leak-shaped literal without provider provenance',
+        withStreamParser,
+        '<think>\n\n</think><think>9<think>-3',
+        'stop',
+      ],
+      [
+        'releases a long unconfirmed prefix before the stream finishes',
+        contentOnlyStream,
+        `<think${' '.repeat(257)}`,
+        null,
+      ],
+    ])('%s', (_title, makeStream, text, finishReason) => {
+      const response = send(makeStream(), { content: text }, finishReason);
 
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        {
-          text: '<thinking>\nThe user wants to query the compute resources.',
-        },
-      ]);
+      expect(partsOf(response)).toEqual([{ text }]);
     });
 
     it.each([
@@ -651,62 +720,10 @@ describe('OpenAIContentConverter', () => {
       ],
       ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
     ])('preserves content-only %s', (_name, chunks) => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const parts = chunks.flatMap((content, index) => {
-        const response = converter.convertOpenAIChunkToLlm(
-          streamChunk(
-            `literal-${index}`,
-            { content },
-            index === chunks.length - 1 ? 'stop' : null,
-          ),
-          stream,
-        );
-        return response.candidates?.[0]?.content?.parts ?? [];
-      });
+      const parts = sendAll(contentOnlyStream(), chunks);
 
       expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
       expect(parts.every((part) => part.thought !== true)).toBe(true);
-    });
-
-    it('releases a long unconfirmed prefix before the stream finishes', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const text = `<think${' '.repeat(257)}`;
-
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk('literal', { content: text }),
-        stream,
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
-    });
-
-    it('rejects an unclosed whitespace-only block at stream finish', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk('unclosed', {
-          content: `<thinking>${' '.repeat(128)}`,
-        }),
-        stream,
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-    });
-
-    it('preserves a leak-shaped literal without provider provenance', () => {
-      const stream = withStreamParser();
-      const text = '<think>\n\n</think><think>9<think>-3';
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk('literal', { content: text }, 'stop'),
-        stream,
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
     });
 
     it.each([
@@ -722,54 +739,16 @@ describe('OpenAIContentConverter', () => {
         ],
       ],
     ])('preserves balanced nested literals %s', (_name, chunks) => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const parts = chunks.flatMap((content, index) => {
-        const response = converter.convertOpenAIChunkToLlm(
-          streamChunk(
-            `balanced-${index}`,
-            { content },
-            index === chunks.length - 1 ? 'stop' : null,
-          ),
-          stream,
-        );
-        return response.candidates?.[0]?.content?.parts ?? [];
-      });
+      const parts = sendAll(contentOnlyStream(), chunks);
 
       expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
     });
 
     it('rejects an unclosed outer block containing a balanced nested block', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk(
-            'nested-unclosed',
-            {
-              content: '<thinking><thinking>inner</thinking>outer text',
-            },
-            'stop',
-          ),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
-    });
-
-    it('fails closed for a long suspicious prefix at stream finish', () => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const content = '<think></think><think>9<think>' + 'x'.repeat(257);
-
-      const response = converter.convertOpenAIChunkToLlm(
-        streamChunk('long-leak', { content }),
-        stream,
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      expectLeakOn(
+        contentOnlyStream(),
+        { content: '<thinking><thinking>inner</thinking>outer text' },
+        'stop',
       );
     });
 
@@ -777,31 +756,14 @@ describe('OpenAIContentConverter', () => {
       '<thinking></thinking><thinking>9<thinking>-3',
       '<think ></think ><think >9<think >-3',
     ])('rejects provider-tag grammar variant %s', (content) => {
-      const stream = withStreamParser();
-      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('variant', { content }, 'stop'),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expectLeakOn(contentOnlyStream(), { content }, 'stop');
     });
 
     it('rejects closing-tag recovery after a tag leaked in reasoning', () => {
-      const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', {
-          reasoning_content: 'Let me check<think>',
-        }),
-        stream,
-      );
+      const stream = afterReasoning('Let me check<think>');
       emitToolCall(stream, '</think>');
 
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-      expect(stream.protocolTagSanitized).toBeUndefined();
+      expectUnsanitizedLeak(stream);
     });
 
     it.each([
@@ -815,121 +777,39 @@ describe('OpenAIContentConverter', () => {
         const leakedTag = emitToolCall(stream, tag);
         const finish = finishStream(stream);
 
-        expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
-          { thought: true, text: 'Let me check.' },
-        ]);
-        expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
-        expect(finish.candidates?.[0]?.content?.parts).toEqual([
-          {
-            functionCall: { id: 'call_read', name: 'read_file', args: {} },
-          },
-        ]);
-        expect(stream.protocolTagSanitized).toEqual({
-          tagName,
-          toolCallCount: 1,
-        });
+        expect(partsOf(reasoning)).toEqual([thoughtPart('Let me check.')]);
+        expect(partsOf(leakedTag)).toEqual([]);
+        expect(partsOf(finish)).toEqual([readCallPart]);
+        expectSanitized(stream, tagName, 1);
       },
     );
 
     it('sanitizes a standalone closing thinking tag split across chunks', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      const firstHalf = converter.convertOpenAIChunkToLlm(
-        streamChunk('tag-start', { content: '\n</thi' }),
-        stream,
-      );
-      const secondHalf = emitToolCall(stream, 'nk>\n');
-      const finish = finishStream(stream);
-
-      expect(firstHalf.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(secondHalf.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-      ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 1,
-      });
+      expectRecovered(['\n</thi'], 'nk>\n');
     });
 
-    it('sanitizes a standalone closing thinking tag with multiple tool calls', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('tool-calls', {
-          content: '</think>',
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_read',
-              function: { name: 'read_file', arguments: '{}' },
-            },
-            {
-              index: 1,
-              id: 'call_list',
-              function: { name: 'list_directory', arguments: '{}' },
-            },
-          ],
-        }),
-        stream,
-      );
+    it.each([
+      [
+        'sanitizes a standalone closing thinking tag with multiple tool calls',
+        1,
+      ],
+      ['recovers complete same-index tool calls with distinct IDs', 0],
+    ])('%s', (_title, secondIndex) => {
+      const stream = afterReasoning();
+      send(stream, {
+        content: '</think>',
+        tool_calls: [
+          toolCall(0, 'call_read', 'read_file'),
+          toolCall(secondIndex, 'call_list', 'list_directory'),
+        ],
+      });
       const finish = finishStream(stream);
 
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-        {
-          functionCall: { id: 'call_list', name: 'list_directory', args: {} },
-        },
+      expect(partsOf(finish)).toEqual([
+        readCallPart,
+        { functionCall: { id: 'call_list', name: 'list_directory', args: {} } },
       ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 2,
-      });
-    });
-
-    it('recovers complete same-index tool calls with distinct IDs', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('tool-calls', {
-          content: '</think>',
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_read',
-              function: { name: 'read_file', arguments: '{}' },
-            },
-            {
-              index: 0,
-              id: 'call_list',
-              function: { name: 'list_directory', arguments: '{}' },
-            },
-          ],
-        }),
-        stream,
-      );
-      const finish = finishStream(stream);
-
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-        {
-          functionCall: {
-            id: 'call_list',
-            name: 'list_directory',
-            args: {},
-          },
-        },
-      ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 2,
-      });
+      expectSanitized(stream, 'think', 2);
     });
 
     it.each([
@@ -938,236 +818,77 @@ describe('OpenAIContentConverter', () => {
     ] as const)(
       'rejects a protocol-tag recovery when a new id relabels %s nameless arguments',
       (_state, oldArguments, newArguments) => {
-        const stream = withStreamParser();
-        emitReasoning(stream);
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('old-arguments', {
-            content: '</think>',
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call_old',
-                function: { arguments: oldArguments },
-              },
-            ],
-          }),
-          stream,
-        );
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('new-name', {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call_new',
-                function: { name: 'read_file', arguments: newArguments },
-              },
-            ],
-          }),
-          stream,
-        );
+        const stream = afterReasoning();
+        send(stream, {
+          content: '</think>',
+          tool_calls: [
+            { index: 0, id: 'call_old', function: { arguments: oldArguments } },
+          ],
+        });
+        send(stream, {
+          tool_calls: [toolCall(0, 'call_new', 'read_file', newArguments)],
+        });
 
-        expect(() => finishStream(stream)).toThrowError(
-          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-        );
-        expect(stream.protocolTagSanitized).toBeUndefined();
+        expectUnsanitizedLeak(stream);
       },
     );
 
     it('buffers leading whitespace before a split standalone closing tag', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      const whitespace = converter.convertOpenAIChunkToLlm(
-        streamChunk('whitespace', { content: '\n' }),
-        stream,
-      );
-      const tag = emitToolCall(stream, '</think>');
-      const finish = finishStream(stream);
-
-      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-      ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 1,
-      });
+      expectRecovered(['\n'], '</think>');
     });
 
-    it('buffers long whitespace without treating it as a protocol tag', () => {
-      const stream = withStreamParser();
-      const whitespace = ' '.repeat(129);
-      emitReasoning(stream);
-
-      const pending = converter.convertOpenAIChunkToLlm(
-        streamChunk('whitespace', { content: whitespace }),
-        stream,
-      );
+    it.each([
+      [
+        'buffers long whitespace without treating it as a protocol tag',
+        ' '.repeat(129),
+      ],
+      ['emits trailing whitespace when the stream finishes', ' \n'],
+    ])('%s', (_title, whitespace) => {
+      const stream = afterReasoning();
+      const pending = send(stream, { content: whitespace });
       const finish = finishStream(stream, 'stop');
 
-      expect(pending.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        { text: whitespace },
-      ]);
-    });
-
-    it('emits trailing whitespace when the stream finishes', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      const whitespace = converter.convertOpenAIChunkToLlm(
-        streamChunk('whitespace', { content: ' \n' }),
-        stream,
-      );
-      const finish = finishStream(stream, 'stop');
-
-      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([{ text: ' \n' }]);
+      expect(partsOf(pending)).toEqual([]);
+      expect(partsOf(finish)).toEqual([{ text: whitespace }]);
       expect(stream.pendingThinkingTagCandidate).toBeUndefined();
     });
 
     it('ignores an exact cumulative replay of a deferred closing tag', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('tag', { content: '</THINK>' }),
+      const stream = afterReasoning();
+      send(stream, { content: '</THINK>' });
+      const finish = send(
         stream,
-      );
-      const finish = converter.convertOpenAIChunkToLlm(
-        streamChunk(
-          'finish',
-          {
-            content: '</THINK>',
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call_read',
-                function: { name: 'read_file', arguments: '{}' },
-              },
-            ],
-          },
-          'tool_calls',
-        ),
-        stream,
+        {
+          content: '</THINK>',
+          tool_calls: [toolCall(0, 'call_read', 'read_file')],
+        },
+        'tool_calls',
       );
 
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-      ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 1,
-      });
+      expect(partsOf(finish)).toEqual([readCallPart]);
+      expectSanitized(stream, 'think', 1);
     });
 
     it('ignores cumulative replays of an incomplete closing tag', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      const first = converter.convertOpenAIChunkToLlm(
-        streamChunk('tag-prefix', { content: '</thi' }),
-        stream,
-      );
-      const replay = converter.convertOpenAIChunkToLlm(
-        streamChunk('tag-prefix-replay', { content: '</thi' }),
-        stream,
-      );
-      const tag = emitToolCall(stream, '</think>');
-      const finish = finishStream(stream);
-
-      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(tag.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        {
-          functionCall: { id: 'call_read', name: 'read_file', args: {} },
-        },
-      ]);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 1,
-      });
-    });
-
-    it('rejects an invalid tool-call index on a stop finish', () => {
-      const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('invalid-tool-call', {
-          tool_calls: [
-            {
-              index: Number.MAX_SAFE_INTEGER + 1,
-              id: 'call_invalid',
-              function: { name: 'read_file', arguments: '{}' },
-            },
-          ],
-        }),
-        stream,
-      );
-
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
-      );
-    });
-
-    it('rejects valid tool calls accompanied by an invalid index', () => {
-      const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('mixed-tool-calls', {
-          tool_calls: [
-            {
-              index: 0,
-              id: 'call_read',
-              function: { name: 'read_file', arguments: '{}' },
-            },
-            {
-              index: Number.MAX_SAFE_INTEGER + 1,
-              id: 'call_invalid',
-              function: { name: 'write_file', arguments: '{}' },
-            },
-          ],
-        }),
-        stream,
-      );
-
-      expect(() => finishStream(stream)).toThrowError(
-        expect.objectContaining({ type: 'MALFORMED_TOOL_CALL' }),
-      );
+      expectRecovered(['</thi', '</thi'], '</think>');
     });
 
     it('releases a split tag-like prefix when it becomes ordinary text', () => {
-      const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
-        stream,
-      );
-      const prefix = converter.convertOpenAIChunkToLlm(
-        streamChunk('prefix', { content: '</thi' }),
-        stream,
-      );
-      const suffix = converter.convertOpenAIChunkToLlm(
-        streamChunk('suffix', { content: 'ng is not a tag.' }),
-        stream,
-      );
+      const stream = afterReasoning('Explain the syntax.');
+      const prefix = send(stream, { content: '</thi' });
+      const suffix = send(stream, { content: 'ng is not a tag.' });
 
-      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(suffix.candidates?.[0]?.content?.parts).toEqual([
-        { text: '</thing is not a tag.' },
-      ]);
+      expect(partsOf(prefix)).toEqual([]);
+      expect(partsOf(suffix)).toEqual([{ text: '</thing is not a tag.' }]);
       expect(stream.protocolTagSanitized).toBeUndefined();
     });
 
     it('does not accumulate whitespace after a complete closing tag candidate', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
+      const stream = afterReasoning();
       emitToolCall(stream, '</think>');
 
       for (let i = 0; i < 1_000; i++) {
-        converter.convertOpenAIChunkToLlm(
-          streamChunk(`whitespace-${i}`, { content: ' ' }),
-          stream,
-        );
+        send(stream, { content: ' ' });
       }
 
       expect(stream.pendingThinkingTagCandidate).toEqual({
@@ -1175,222 +896,117 @@ describe('OpenAIContentConverter', () => {
         closingTagName: 'think',
       });
       finishStream(stream);
-      expect(stream.protocolTagSanitized).toEqual({
-        tagName: 'think',
-        toolCallCount: 1,
-      });
+      expectSanitized(stream, 'think', 1);
     });
 
     it('rejects a standalone closing thinking tag without a complete tool call', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      const leakedTag = converter.convertOpenAIChunkToLlm(
-        streamChunk('content', { content: '</think>' }),
-        stream,
-      );
+      const stream = afterReasoning();
+      const leakedTag = send(stream, { content: '</think>' });
 
-      expect(leakedTag.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(() => finishStream(stream, 'stop')).toThrowError(
-        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-      );
-      expect(stream.protocolTagSanitized).toBeUndefined();
+      expect(partsOf(leakedTag)).toEqual([]);
+      expectUnsanitizedLeak(stream, () => finishStream(stream, 'stop'));
     });
 
     it.each(['stop', 'length', 'content_filter', 'unknown'])(
       'rejects recovery when the stream finishes with %s',
       (finishReason) => {
-        const stream = withStreamParser();
-        emitReasoning(stream);
+        const stream = afterReasoning();
         emitToolCall(stream, '</think>');
 
-        expect(() => finishStream(stream, finishReason)).toThrowError(
-          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-        );
-        expect(stream.protocolTagSanitized).toBeUndefined();
+        expectUnsanitizedLeak(stream, () => finishStream(stream, finishReason));
       },
     );
 
     it('rejects visible content after a deferred closing thinking tag', () => {
-      const stream = withStreamParser();
-      emitReasoning(stream);
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('content', { content: '</think>' }),
-        stream,
-      );
+      const stream = afterReasoning();
+      send(stream, { content: '</think>' });
 
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('content-after-tag', { content: 'unexpected' }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
-      expect(stream.protocolTagSanitized).toBeUndefined();
+      expectUnsanitizedLeak(stream, () =>
+        send(stream, { content: 'unexpected' }),
+      );
     });
 
     it.each(['{"path":', '{bad}', 'null', '[]', '42', '   '])(
       'rejects a standalone closing thinking tag with unsafe tool arguments %s',
       (toolArguments) => {
-        const stream = withStreamParser();
-        emitReasoning(stream);
+        const stream = afterReasoning();
         emitToolCall(stream, '</think>', toolArguments);
 
-        expect(() => finishStream(stream)).toThrowError(
-          expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
-        );
-        expect(stream.protocolTagSanitized).toBeUndefined();
+        expectUnsanitizedLeak(stream);
       },
     );
 
     it('rejects a closing tag split after a visible line break', () => {
-      const stream = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', {
-          reasoning_content: 'Let me check<think>',
-        }),
-        stream,
-      );
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('content', { content: 'the result\n' }),
-        stream,
-      );
-      converter.convertOpenAIChunkToLlm(
-        streamChunk('blank-lines', { content: '\n'.repeat(256) }),
-        stream,
-      );
+      const stream = afterReasoning('Let me check<think>');
+      send(stream, { content: 'the result\n' });
+      send(stream, { content: '\n'.repeat(256) });
 
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          streamChunk('closing-tag', { content: '</think>\n' }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      expectLeakOn(stream, { content: '</think>\n' });
     });
 
     it('preserves a split literal closing tag after ordinary reasoning', () => {
       const stream = withStreamParser();
-      const reasoning = converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', { reasoning_content: 'Explain the syntax.' }),
-        stream,
-      );
-      const prefix = converter.convertOpenAIChunkToLlm(
-        streamChunk('prefix', { content: 'Use ' }),
-        stream,
-      );
-      const closingTag = converter.convertOpenAIChunkToLlm(
-        streamChunk('closing-tag', { content: '</think> to close the tag.' }),
-        stream,
-      );
+      const reasoning = emitReasoning(stream, 'Explain the syntax.');
+      const prefix = send(stream, { content: 'Use ' });
+      const closingTag = send(stream, {
+        content: '</think> to close the tag.',
+      });
 
-      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
-        { thought: true, text: 'Explain the syntax.' },
-      ]);
-      expect(prefix.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'Use ' },
-      ]);
-      expect(closingTag.candidates?.[0]?.content?.parts).toEqual([
+      expect(partsOf(reasoning)).toEqual([thoughtPart('Explain the syntax.')]);
+      expect(partsOf(prefix)).toEqual([{ text: 'Use ' }]);
+      expect(partsOf(closingTag)).toEqual([
         { text: '</think> to close the tag.' },
       ]);
     });
 
     it('releases inline thinking-tag references in both channels', () => {
       const stream = withStreamParser();
-      const reasoning = converter.convertOpenAIChunkToLlm(
-        streamChunk('reasoning', {
-          reasoning_content: 'The format may contain <think> tags.',
-        }),
+      const reasoning = emitReasoning(
         stream,
+        'The format may contain <think> tags.',
       );
-      const content = converter.convertOpenAIChunkToLlm(
-        streamChunk('content', { content: 'Use </think> to close the tag.' }),
-        stream,
-      );
-      const finish = converter.convertOpenAIChunkToLlm(
-        streamChunk('finish', {}, 'stop'),
-        stream,
-      );
+      const content = send(stream, {
+        content: 'Use </think> to close the tag.',
+      });
+      const finish = finishStream(stream, 'stop');
 
-      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(content.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finish.candidates?.[0]?.content?.parts).toEqual([
-        { thought: true, text: 'The format may contain <think> tags.' },
+      expectHeld(reasoning, content);
+      expect(partsOf(finish)).toEqual([
+        thoughtPart('The format may contain <think> tags.'),
         { text: 'Use </think> to close the tag.' },
       ]);
     });
   });
 
   describe('convertLlmRequestToOpenAI', () => {
-    const createRequestWithFunctionResponse = (
-      response: Record<string, unknown>,
-    ): GenerateContentParameters => {
-      const contents: Content[] = [
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_1',
-                name: 'shell',
-                args: {},
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call_1',
-                name: 'shell',
-                response,
-              },
-            },
-          ],
-        },
-      ];
-      return {
-        model: 'models/test',
-        contents,
-      };
+    /** Converts one `call_1` exchange and checks the tool message leads with the output text. */
+    const expectToolMessageParts = (
+      name: string,
+      output: string,
+      media: Part,
+    ) => {
+      const messages = toMessages(
+        ...exchange('call_1', name, { output }, [media]),
+      );
+      const contentArray = toolPartsOf(messages);
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe(output);
+      return { messages, media: contentArray[1] };
     };
 
     it('normalizes legacy dotted MCP names before sending history', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_legacy_mcp',
-                  name: 'mcp__zybio__literature.search_pubmed',
-                  args: { query: 'IVD' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_legacy_mcp',
-                  name: 'mcp__zybio__literature.search_pubmed',
-                  response: { output: 'ok' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        ...exchange(
+          'call_legacy_mcp',
+          'mcp__zybio__literature.search_pubmed',
+          { output: 'ok' },
+          undefined,
+          { query: 'IVD' },
+        ),
       );
-      const assistant = messages.find(hasOpenAIToolCalls);
-      const name = assistant?.tool_calls[0]?.function.name;
+      const name =
+        messages.find(hasOpenAIToolCalls)?.tool_calls[0]?.function.name;
 
       expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
       expect(name).not.toContain('.');
@@ -1401,31 +1017,25 @@ describe('OpenAIContentConverter', () => {
     // the reattach region, labels included, must stay exactly one block.
     it('emits one wire block per reattach region part', () => {
       const store = new InMemoryImagePayloadStore();
-      const history: Content[] = ['a', 'b'].map((data) => ({
-        role: 'user',
-        parts: [{ inlineData: { mimeType: 'image/png', data } }],
-      }));
+      const history: Content[] = ['a', 'b'].map((data) =>
+        content('user', inline('image/png', data)),
+      );
       const replaced = replaceImagePayloadsInPlace(history, store);
       const contents: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            { text: 'what changed?' },
-            { inlineData: { mimeType: 'image/png', data: 'new-shot' } },
-            ...buildReattachParts(replaced, 2),
-          ],
-        },
+        content(
+          'user',
+          { text: 'what changed?' },
+          inline('image/png', 'new-shot'),
+          ...buildReattachParts(replaced, 2),
+        ),
       ];
 
-      const messages = converter.convertLlmRequestToOpenAI(
-        { model: 'models/test', contents },
-        requestContext,
-      );
-      const content = messages.at(-1)?.content as Array<{ type: string }>;
+      const messages = toMessages(...contents);
+      const blocks = messages.at(-1)?.content as Array<{ type: string }>;
       const regionCount = trailingReattachPartCount(contents);
 
       expect(regionCount).toBe(5);
-      expect(content.map((block) => block.type)).toEqual([
+      expect(blocks.map((block) => block.type)).toEqual([
         'text',
         'image_url',
         'text',
@@ -1434,27 +1044,17 @@ describe('OpenAIContentConverter', () => {
         'text',
         'image_url',
       ]);
-      expect(content.length - regionCount).toBe(2);
+      expect(blocks.length - regionCount).toBe(2);
     });
 
     it('preserves ordered multi-part startup reminder user content', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: '<system-reminder>\ndeferred tools' },
-              { text: '<system-reminder>\nstartup context' },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
+      const messages = toSplitMessages(
+        content(
+          'user',
+          { text: '<system-reminder>\ndeferred tools' },
+          { text: '<system-reminder>\nstartup context' },
+        ),
+      );
 
       expect(messages).toEqual([
         {
@@ -1467,272 +1067,217 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
-    it('should extract raw output from function response objects', () => {
-      const request = createRequestWithFunctionResponse({
-        output: 'Raw output text',
-      });
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
-      const toolMessage = messages.find((message) => message.role === 'tool');
-
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Raw output text');
-    });
-
-    it('should prioritize error field when present', () => {
-      const request = createRequestWithFunctionResponse({
-        error: 'Command failed',
-      });
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-      const toolMessage = messages.find((message) => message.role === 'tool');
-
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Command failed');
-    });
-
-    it('should stringify non-string responses', () => {
-      const request = createRequestWithFunctionResponse({
-        data: { value: 42 },
-      });
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-      const toolMessage = messages.find((message) => message.role === 'tool');
-
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('{"data":{"value":42}}');
-    });
-
-    it('should convert function responses with inlineData to tool message with embedded image_url', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Image content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'image/png',
-                        data: 'base64encodedimagedata',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
+    it.each<[string, Record<string, unknown>, string, Partial<RequestContext>]>(
+      [
+        [
+          'should extract raw output from function response objects',
+          { output: 'Raw output text' },
+          'Raw output text',
+          { splitToolMedia: true },
         ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+        [
+          'should prioritize error field when present',
+          { error: 'Command failed' },
+          'Command failed',
+          {},
+        ],
+        [
+          'should stringify non-string responses',
+          { data: { value: 42 } },
+          '{"data":{"value":42}}',
+          {},
+        ],
+      ],
+    )('%s', (_title, response, text, overrides) => {
+      const parts = toolPartsOf(
+        toMessagesWith(overrides, ...exchange('call_1', 'shell', response)),
       );
 
-      // Should have tool message with both text and image content
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect((toolMessage as { tool_call_id?: string }).tool_call_id).toBe(
-        'call_1',
-      );
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Image content');
-      expect(contentArray[1].type).toBe('image_url');
-      expect(contentArray[1].image_url?.url).toBe(
-        'data:image/png;base64,base64encodedimagedata',
-      );
-
-      // No separate user message should be created
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
+      expect(parts[0].type).toBe('text');
+      expect(parts[0].text).toBe(text);
     });
+
+    /** Media stays embedded next to the output text when splitToolMedia is off. */
+    const expectEmbeddedMedia = (
+      name: string,
+      output: string,
+      media: Part,
+      expected: Record<string, string>,
+    ) => {
+      const result = expectToolMessageParts(name, output, media);
+      for (const [path, value] of Object.entries(expected)) {
+        expect(result.media).toHaveProperty(path, value);
+      }
+      return result;
+    };
+
+    // These also check the tool call id and that no separate user message is
+    // created.
+    it.each<[string, string, string, Part, Record<string, string>]>([
+      [
+        'should convert function responses with inlineData to tool message with embedded image_url',
+        'Read',
+        'Image content',
+        inline('image/png', 'base64encodedimagedata'),
+        {
+          type: 'image_url',
+          'image_url.url': 'data:image/png;base64,base64encodedimagedata',
+        },
+      ],
+      [
+        'should convert function responses with fileData to tool message with embedded image_url',
+        'Read',
+        'File content',
+        fileRef('image/jpeg', 'base64imagedata'),
+        { type: 'image_url', 'image_url.url': 'base64imagedata' },
+      ],
+      [
+        'should convert PDF inlineData to tool message with embedded input_file',
+        'Read',
+        'PDF content',
+        inline('application/pdf', 'base64pdfdata', 'document.pdf'),
+        {
+          type: 'file',
+          'file.filename': 'document.pdf',
+          'file.file_data': 'data:application/pdf;base64,base64pdfdata',
+        },
+      ],
+      [
+        'should convert audio parts to tool message with embedded input_audio',
+        'Record',
+        'Audio recorded',
+        inline('audio/wav', 'audiobase64data'),
+        {
+          type: 'input_audio',
+          'input_audio.data': 'data:audio/wav;base64,audiobase64data',
+          'input_audio.format': 'wav',
+        },
+      ],
+      [
+        'should convert video inlineData to tool message with embedded video_url',
+        'Read',
+        'Video content',
+        inline('video/mp4', 'videobase64data', 'recording.mp4'),
+        {
+          type: 'video_url',
+          'video_url.url': 'data:video/mp4;base64,videobase64data',
+        },
+      ],
+      [
+        'should convert image fileData URL to tool message with embedded image_url',
+        'Read',
+        'Image content',
+        fileRef(
+          'image/jpeg',
+          'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
+          'ant.jpg',
+        ),
+        {
+          type: 'image_url',
+          'image_url.url':
+            'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
+        },
+      ],
+      [
+        'should convert PDF fileData URL to tool message with embedded file',
+        'Read',
+        'PDF content',
+        fileRef(
+          'application/pdf',
+          'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
+          'document.pdf',
+        ),
+        {
+          type: 'file',
+          'file.filename': 'document.pdf',
+          'file.file_data':
+            'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
+        },
+      ],
+      [
+        'should convert video fileData URL to tool message with embedded video_url',
+        'Read',
+        'Video content',
+        fileRef(
+          'video/mp4',
+          'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          'recording.mp4',
+        ),
+        {
+          type: 'video_url',
+          'video_url.url': 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        },
+      ],
+    ])('%s', (_title, name, output, media, expected) => {
+      const { messages } = expectEmbeddedMedia(name, output, media, expected);
+
+      expect(findRole(messages, 'tool')).toMatchObject(toolReply('call_1'));
+      expect(findRole(messages, 'user')).toBeUndefined();
+    });
+
+    /** Parallel `shot_a` / `shot_b` calls, and each one's result with a PNG. */
+    const shotCalls = () =>
+      content(
+        'model',
+        fnCall('shot_a', {}, 'call_a'),
+        fnCall('shot_b', {}, 'call_b'),
+      );
+    const shotA = () =>
+      fnResult('shot_a', { output: 'A' }, 'call_a', [
+        inline('image/png', 'aaa'),
+      ]);
+    const shotB = () =>
+      fnResult('shot_b', { output: 'B' }, 'call_b', [
+        inline('image/png', 'bbb'),
+      ]);
+
+    /** Converts one split `call_1` Read result; returns the tool and user messages. */
+    const splitRead = (output: string, parts: Part[]) => {
+      const messages = toSplitMessages(
+        ...exchange('call_1', 'Read', { output }, parts),
+      );
+      return {
+        toolMessage: findRole(messages, 'tool'),
+        userMessage: findRole(messages, 'user'),
+      };
+    };
 
     it('should split tool-result media into a follow-up user message when splitToolMedia is enabled (issue #3616)', () => {
-      // Same shape as the embedded-image test above, but with the strict
-      // OpenAI-compat opt-in flag set. The tool message must stay
-      // spec-compliant (string / text-part content only) and the image must
-      // arrive in a follow-up user message.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Image content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'image/png',
-                        data: 'base64encodedimagedata',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
+      // Same shape as the embedded-image case but with the strict
+      // OpenAI-compat opt-in: the tool message stays spec-compliant (string /
+      // text-part content only) and the image moves to a follow-up user message.
+      const { toolMessage, userMessage } = splitRead('Image content', [
+        inline('image/png', 'base64encodedimagedata'),
+      ]);
 
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
-      );
-
-      const toolMessage = messages.find((m) => m.role === 'tool');
       expect(toolMessage).toBeDefined();
-      // Tool message content is a plain string (or text-part array) — no media
       expect(typeof toolMessage?.content === 'string').toBe(true);
       expect(toolMessage?.content).toContain('Image content');
-
-      // The image lives in a follow-up user message
-      const userMessage = messages.find((m) => m.role === 'user');
       expect(userMessage).toBeDefined();
-      const userContent = userMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
+      const userContent = wireParts(userMessage);
       expect(Array.isArray(userContent)).toBe(true);
-      const imagePart = userContent.find((p) => p.type === 'image_url');
-      expect(imagePart?.image_url?.url).toBe(
+      expect(imageUrlOf(userContent)).toBe(
         'data:image/png;base64,base64encodedimagedata',
       );
     });
 
     it('moves an omni degradation disclosure together with its media part when splitting tool media', () => {
-      // The omni pipeline emits a disclosure text Part IMMEDIATELY before
-      // each lossy derivative's media Part. When splitToolMedia relocates
-      // the media into the follow-up user message, the disclosure must move
-      // WITH it — stranded in the text-only tool message, the model could
-      // not attribute it to the media. Ordinary text parts stay behind.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Image content' },
-                  parts: [
-                    { text: 'ordinary tool text' },
-                    { text: '【媒体降质】photo.png：downsampled to 1568px' },
-                    {
-                      inlineData: {
-                        mimeType: 'image/png',
-                        data: 'base64encodedimagedata',
-                      },
-                    },
-                  ] as unknown as Part[],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
-
-      const toolMessage = messages.find((m) => m.role === 'tool');
-      expect(toolMessage?.content).toBe('Image content\nordinary tool text');
-
-      const userMessage = messages.find((m) => m.role === 'user');
-      const userContent = userMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(userContent.map((p) => p.type)).toEqual([
-        'text',
-        'text',
-        'image_url',
+      // The omni pipeline emits a disclosure text Part IMMEDIATELY before each
+      // lossy derivative's media Part. When splitToolMedia relocates the media,
+      // the disclosure must move WITH it: stranded in the text-only tool
+      // message, the model could not attribute it. Ordinary text stays behind.
+      const { toolMessage, userMessage } = splitRead('Image content', [
+        { text: 'ordinary tool text' },
+        { text: '【媒体降质】photo.png：downsampled to 1568px' },
+        inline('image/png', 'base64encodedimagedata'),
       ]);
+
+      expect(toolMessage?.content).toBe('Image content\nordinary tool text');
+      const userContent = wireParts(userMessage);
+      expect(typesOf(userContent)).toEqual(['text', 'text', 'image_url']);
       expect(userContent[0].text).toBe(
         '(attached media from previous tool call)',
       );
-      // Disclosure sits immediately before its media part.
       expect(userContent[1].text).toBe(
         '【媒体降质】photo.png：downsampled to 1568px',
       );
@@ -1742,101 +1287,33 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('moves a bare keyframe timestamp marker together with its frame', () => {
-      // Per-frame markers (`<MM:SS>`) carry no 【媒体降质】 prefix — the
-      // degradation notice rode once on the first frame's header — but they
-      // must still migrate WITH their image so each frame keeps its label.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'frames' },
-                  parts: [
-                    { text: '<00:34>' },
-                    {
-                      inlineData: {
-                        mimeType: 'image/jpeg',
-                        data: 'framebytes',
-                      },
-                    },
-                  ] as unknown as Part[],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
-
-      // The marker did NOT stay stranded in the tool message text.
-      const toolMessage = messages.find((m) => m.role === 'tool');
-      expect(toolMessage?.content).toBe('frames');
-
-      const userContent = messages.find((m) => m.role === 'user')
-        ?.content as Array<{ type: string; text?: string }>;
-      expect(userContent.map((p) => p.type)).toEqual([
-        'text',
-        'text',
-        'image_url',
+      // Per-frame markers (`<MM:SS>`) carry no 【媒体降质】 prefix (the notice
+      // rode once on the first frame's header) but must still migrate WITH
+      // their image so each frame keeps its label.
+      const { toolMessage, userMessage } = splitRead('frames', [
+        { text: '<00:34>' },
+        inline('image/jpeg', 'framebytes'),
       ]);
+
+      expect(toolMessage?.content).toBe('frames');
+      const userContent = wireParts(userMessage);
+      expect(typesOf(userContent)).toEqual(['text', 'text', 'image_url']);
       expect(userContent[1].text).toBe('<00:34>');
     });
 
     it('gives a disclosure only to the media part directly following it', () => {
-      // Two media parts after one disclosure: only the adjacent one owns
-      // it — the second media part must not pull the disclosure past the
-      // first (prev-tracking, not "last disclosure seen").
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'two images' },
-                  parts: [
-                    { text: '【媒体降质】a.png：lossy' },
-                    { inlineData: { mimeType: 'image/png', data: 'first' } },
-                    { inlineData: { mimeType: 'image/png', data: 'second' } },
-                  ] as unknown as Part[],
-                },
-              },
-            ],
-          },
-        ],
-      };
+      // Two media parts after one disclosure: only the adjacent one owns it;
+      // the second must not pull the disclosure past the first
+      // (prev-tracking, not "last disclosure seen").
+      const userContent = wireParts(
+        splitRead('two images', [
+          { text: '【媒体降质】a.png：lossy' },
+          inline('image/png', 'first'),
+          inline('image/png', 'second'),
+        ]).userMessage,
+      );
 
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
-      const userMessage = messages.find((m) => m.role === 'user');
-      const userContent = userMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(userContent.map((p) => p.type)).toEqual([
+      expect(typesOf(userContent)).toEqual([
         'text',
         'text',
         'image_url',
@@ -1847,114 +1324,54 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
-      // Two assistant tool calls in parallel. Both responses come back in the
-      // same `user` content as separate functionResponse parts. The first
-      // returns an image; the second returns text only. OpenAI Chat
-      // Completions requires every `role: "tool"` response to appear
-      // contiguously before any non-tool message, so the synthesised user
-      // message carrying split media MUST come after BOTH tool messages,
-      // not interleaved between them.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_screenshot',
-                  name: 'browser_take_screenshot',
-                  args: {},
-                },
-              },
-              {
-                functionCall: {
-                  id: 'call_console',
-                  name: 'browser_console_messages',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_screenshot',
-                  name: 'browser_take_screenshot',
-                  response: { output: 'Captured screenshot' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'image/png',
-                        data: 'shotbase64',
-                      },
-                    },
-                  ],
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'call_console',
-                  name: 'browser_console_messages',
-                  response: { output: 'no console messages' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      // Two parallel tool calls answered in one user content: the first returns
+      // an image, the second text only. Chat Completions requires every `tool`
+      // message to be contiguous before any non-tool message, so the
+      // synthesised media user message MUST follow BOTH tool messages.
+      const messages = toSplitMessages(
+        content(
+          'model',
+          fnCall('browser_take_screenshot', {}, 'call_screenshot'),
+          fnCall('browser_console_messages', {}, 'call_console'),
+        ),
+        content(
+          'user',
+          fnResult(
+            'browser_take_screenshot',
+            { output: 'Captured screenshot' },
+            'call_screenshot',
+            [inline('image/png', 'shotbase64')],
+          ),
+          fnResponse(
+            'browser_console_messages',
+            { output: 'no console messages' },
+            'call_console',
+          ),
+        ),
       );
 
-      // Locate the assistant turn (with the two tool calls) and assert that
-      // the next two messages are both `tool`, contiguously, before any
-      // user message.
       const assistantIdx = messages.findIndex((m) => m.role === 'assistant');
       expect(assistantIdx).toBeGreaterThanOrEqual(0);
       expect(messages[assistantIdx + 1]?.role).toBe('tool');
       expect(messages[assistantIdx + 2]?.role).toBe('tool');
       expect(messages[assistantIdx + 3]?.role).toBe('user');
 
-      // Both tool messages have spec-compliant content (string OR array of
-      // text-typed parts only — no image_url / input_audio / video_url /
-      // file parts allowed by OpenAI on tool messages).
-      const isSpecCompliantToolContent = (content: unknown): boolean => {
-        if (typeof content === 'string') return true;
-        if (!Array.isArray(content)) return false;
-        return (content as Array<{ type: string }>).every(
-          (p) => p.type === 'text',
-        );
-      };
-      expect(
-        isSpecCompliantToolContent(
-          (messages[assistantIdx + 1] as { content: unknown }).content,
-        ),
-      ).toBe(true);
-      expect(
-        isSpecCompliantToolContent(
-          (messages[assistantIdx + 2] as { content: unknown }).content,
-        ),
-      ).toBe(true);
+      // Tool content must be a string or text-typed parts only: OpenAI allows
+      // no image_url / input_audio / video_url / file parts on tool messages.
+      for (const offset of [1, 2]) {
+        const toolContent = messages[assistantIdx + offset].content;
+        expect(
+          typeof toolContent === 'string' ||
+            (Array.isArray(toolContent) &&
+              toolContent.every((p) => p.type === 'text')),
+        ).toBe(true);
+      }
 
-      // Exactly one synthesised user message exists, and it carries the
-      // single image from the first tool response.
-      const userMessages = messages.filter((m) => m.role === 'user');
+      const userMessages = byRole(messages, 'user');
       expect(userMessages).toHaveLength(1);
-      const userContent = userMessages[0].content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      const imageParts = userContent.filter((p) => p.type === 'image_url');
+      const imageParts = wireParts(userMessages[0]).filter(
+        (p) => p.type === 'image_url',
+      );
       expect(imageParts).toHaveLength(1);
       expect(imageParts[0].image_url?.url).toBe(
         'data:image/png;base64,shotbase64',
@@ -1962,847 +1379,141 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should merge media from multiple media-bearing parallel tool responses into one follow-up user message (issue #3616)', () => {
-      // Both tool responses return images. The accumulator must combine them
-      // into a single user message — we should NOT see two separate user
-      // messages (which would still violate the contiguity rule because the
-      // first user message would split the tool messages apart).
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
-              },
-              {
-                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'shot_a',
-                  response: { output: 'A' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
-                  ],
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'call_b',
-                  name: 'shot_b',
-                  response: { output: 'B' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      // Two separate user messages would still break the contiguity rule:
+      // the first would split the tool messages apart.
+      const messages = toSplitMessages(
+        shotCalls(),
+        content('user', shotA(), shotB()),
       );
 
-      const toolMessages = messages.filter((m) => m.role === 'tool');
-      const userMessages = messages.filter((m) => m.role === 'user');
-      expect(toolMessages).toHaveLength(2);
+      const userMessages = byRole(messages, 'user');
+      expect(byRole(messages, 'tool')).toHaveLength(2);
       expect(userMessages).toHaveLength(1);
-
-      const userContent = userMessages[0].content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      const imageUrls = userContent
-        .filter((p) => p.type === 'image_url')
-        .map((p) => p.image_url?.url);
-      expect(imageUrls).toEqual([
-        'data:image/png;base64,aaa',
-        'data:image/png;base64,bbb',
-      ]);
+      expect(
+        wireParts(userMessages[0])
+          .filter((p) => p.type === 'image_url')
+          .map((p) => p.image_url?.url),
+      ).toEqual(['data:image/png;base64,aaa', 'data:image/png;base64,bbb']);
     });
 
     it('should not synthesise a follow-up user message when splitToolMedia is enabled but the response has no media (issue #3616)', () => {
-      // Regression guard: when the flag is on but a tool response is text-only,
-      // the synthesis path must not emit any user message. Without this guard,
-      // a future refactor that always emits the follow-up could regress silently.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'c', name: 'echo', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'c',
-                  name: 'echo',
-                  response: { output: 'plain text result' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      // Regression guard: a future refactor that always emits the follow-up
+      // user message would otherwise regress silently.
+      const messages = toSplitMessages(
+        ...exchange('c', 'echo', { output: 'plain text result' }),
       );
 
-      const toolMessages = messages.filter((m) => m.role === 'tool');
-      const userMessages = messages.filter((m) => m.role === 'user');
-      expect(toolMessages).toHaveLength(1);
-      expect(userMessages).toHaveLength(0);
+      expect(byRole(messages, 'tool')).toHaveLength(1);
+      expect(byRole(messages, 'user')).toHaveLength(0);
     });
 
     it('should fall back to a placeholder string when the tool response is media-only (issue #3616)', () => {
-      // When extractFunctionResponseContent returns empty AND parts contain
-      // only media, the tool message must end up with the placeholder string
-      // rather than an empty array (which would be invalid spec).
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'c', name: 'shot', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'c',
-                  name: 'shot',
-                  // null response triggers extractFunctionResponseContent
-                  // to return "" — the empty-text branch we want to cover.
-                  response: null as unknown as Record<string, unknown>,
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      // A null response makes extractFunctionResponseContent return "" (the
+      // empty-text branch); with media-only parts the tool message must get the
+      // placeholder string rather than an invalid empty array.
+      const messages = toSplitMessages(
+        ...exchange('c', 'shot', null as unknown as Record<string, unknown>, [
+          inline('image/png', 'xxx'),
+        ]),
       );
 
-      const toolMessage = messages.find((m) => m.role === 'tool');
+      const toolMessage = findRole(messages, 'tool');
       expect(toolMessage).toBeDefined();
       expect(toolMessage?.content).toBe(
         '[media attached in following user message]',
       );
-      const userMessage = messages.find((m) => m.role === 'user');
-      const userContent = userMessage?.content as Array<{
-        type: string;
-        image_url?: { url: string };
-      }>;
-      const img = userContent.find((p) => p.type === 'image_url');
-      expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
+      expect(imageUrlOf(wireParts(findRole(messages, 'user')))).toBe(
+        'data:image/png;base64,xxx',
+      );
     });
 
     it('should preserve embedded-media behavior when splitToolMedia is explicitly false (opt-out) on parallel tool calls (issue #3616, #4876)', () => {
-      // Same input as the parallel-tool-calls split test, but with the flag
-      // explicitly off. Since #4876 the default is true (spec-compliant), so
-      // this asserts the opt-out path: media stays embedded in the tool
-      // message and no follow-up user message is synthesised.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              { functionCall: { id: 'c1', name: 's1', args: {} } },
-              { functionCall: { id: 'c2', name: 's2', args: {} } },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 's1',
-                  response: { output: 'r1' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
-                  ],
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'c2',
-                  name: 's2',
-                  response: { output: 'r2' },
-                },
-              },
-            ],
-          },
-        ],
-      };
+      // Since #4876 the default is true (spec-compliant); this covers the
+      // opt-out: media stays embedded and no follow-up user message appears.
+      const messages = toMessagesWith(
+        { splitToolMedia: false },
+        content('model', fnCall('s1', {}, 'c1'), fnCall('s2', {}, 'c2')),
+        content(
+          'user',
+          fnResult('s1', { output: 'r1' }, 'c1', [inline('image/png', 'aaa')]),
+          fnResponse('s2', { output: 'r2' }, 'c2'),
+        ),
+      );
 
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: false,
-      });
-
-      const toolMessages = messages.filter((m) => m.role === 'tool');
-      const userMessages = messages.filter((m) => m.role === 'user');
+      const toolMessages = byRole(messages, 'tool');
       expect(toolMessages).toHaveLength(2);
-      expect(userMessages).toHaveLength(0);
-      // First tool message should still carry the embedded image
-      const firstToolContent = toolMessages[0].content as Array<{
-        type: string;
-        image_url?: { url: string };
-      }>;
-      const img = firstToolContent.find((p) => p.type === 'image_url');
-      expect(img?.image_url?.url).toBe('data:image/png;base64,aaa');
+      expect(byRole(messages, 'user')).toHaveLength(0);
+      expect(imageUrlOf(wireParts(toolMessages[0]))).toBe(
+        'data:image/png;base64,aaa',
+      );
     });
 
     it('should keep embedded media as content parts when string tool content is requested but splitToolMedia is false', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'c1', name: 'shot', args: {} } }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'shot',
-                  response: { output: 'screenshot' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
+      const messages = toMessagesWith(
+        { splitToolMedia: false, toolResultContentFormat: 'string' },
+        ...exchange('c1', 'shot', { output: 'screenshot' }, [
+          inline('image/png', 'aaa'),
+        ]),
+      );
 
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: false,
-        toolResultContentFormat: 'string',
-      });
-
-      const toolMessage = messages.find((m) => m.role === 'tool');
+      const toolMessage = findRole(messages, 'tool');
       expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const toolContent = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(toolContent.find((p) => p.type === 'text')?.text).toBe(
-        'screenshot',
-      );
-      expect(
-        toolContent.find((p) => p.type === 'image_url')?.image_url?.url,
-      ).toBe('data:image/png;base64,aaa');
-    });
-
-    it('should convert function responses with fileData to tool message with embedded image_url', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'File content' },
-                  parts: [
-                    {
-                      fileData: {
-                        mimeType: 'image/jpeg',
-                        fileUri: 'base64imagedata',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      // Should have tool message with both text and image content
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('File content');
-      expect(contentArray[1].type).toBe('image_url');
-      expect(contentArray[1].image_url?.url).toBe('base64imagedata');
-
-      // No separate user message should be created
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
-    });
-
-    it('should convert PDF inlineData to tool message with embedded input_file', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'PDF content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'application/pdf',
-                        data: 'base64pdfdata',
-                        displayName: 'document.pdf',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      // Should have tool message with both text and file content
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        file?: { filename: string; file_data: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'data:application/pdf;base64,base64pdfdata',
-      );
-
-      // No separate user message should be created
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
-    });
-
-    it('should convert audio parts to tool message with embedded input_audio', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Record',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Record',
-                  response: { output: 'Audio recorded' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'audio/wav',
-                        data: 'audiobase64data',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      // Should have tool message with both text and audio content
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        input_audio?: { data: string; format: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Audio recorded');
-      expect(contentArray[1].type).toBe('input_audio');
-      expect(contentArray[1].input_audio?.data).toBe(
-        'data:audio/wav;base64,audiobase64data',
-      );
-      expect(contentArray[1].input_audio?.format).toBe('wav');
-
-      // No separate user message should be created
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
-    });
-
-    it('should convert image fileData URL to tool message with embedded image_url', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Image content' },
-                  parts: [
-                    {
-                      fileData: {
-                        mimeType: 'image/jpeg',
-                        fileUri:
-                          'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
-                        displayName: 'ant.jpg',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Image content');
-      expect(contentArray[1].type).toBe('image_url');
-      expect(contentArray[1].image_url?.url).toBe(
-        'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
-      );
-    });
-
-    it('should convert PDF fileData URL to tool message with embedded file', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'PDF content' },
-                  parts: [
-                    {
-                      fileData: {
-                        mimeType: 'application/pdf',
-                        fileUri:
-                          'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
-                        displayName: 'document.pdf',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        file?: { filename: string; file_data: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
-      );
-    });
-
-    it('should convert video inlineData to tool message with embedded video_url', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Video content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'video/mp4',
-                        data: 'videobase64data',
-                        displayName: 'recording.mp4',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      // Should have tool message with both text and video content
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        video_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Video content');
-      expect(contentArray[1].type).toBe('video_url');
-      expect(contentArray[1].video_url?.url).toBe(
-        'data:video/mp4;base64,videobase64data',
-      );
-
-      // No separate user message should be created
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
-    });
-
-    it('should convert video fileData URL to tool message with embedded video_url', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'Video content' },
-                  parts: [
-                    {
-                      fileData: {
-                        mimeType: 'video/mp4',
-                        fileUri: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-                        displayName: 'recording.mp4',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-        video_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('Video content');
-      expect(contentArray[1].type).toBe('video_url');
-      expect(contentArray[1].video_url?.url).toBe(
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      );
+      const toolContent = wireParts(toolMessage);
+      expect(partOf(toolContent, 'text')?.text).toBe('screenshot');
+      expect(imageUrlOf(toolContent)).toBe('data:image/png;base64,aaa');
     });
 
     it('should pass oss:// video fileData in a user message through to video_url unchanged (omni upload delivery)', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: 'Describe this video' },
-              {
-                fileData: {
-                  mimeType: 'video/mp4',
-                  fileUri:
-                    'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
-                  displayName: 'video.mp4',
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const url =
+        'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4';
+      const messages = toMessages(
+        content(
+          'user',
+          { text: 'Describe this video' },
+          fileRef('video/mp4', url, 'video.mp4'),
+        ),
       );
 
-      const userMessage = messages.find((message) => message.role === 'user');
+      const userMessage = findRole(messages, 'user');
       expect(userMessage).toBeDefined();
-      const contentArray = userMessage?.content as Array<{
-        type: string;
-        text?: string;
-        video_url?: { url: string };
-      }>;
-      const videoPart = contentArray.find((p) => p.type === 'video_url');
-      expect(videoPart?.video_url?.url).toBe(
-        'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+      expect(partOf(wireParts(userMessage), 'video_url')?.video_url?.url).toBe(
+        url,
       );
     });
 
     it('should convert oss:// audio fileData to input_audio with the bare URL (omni upload delivery)', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: 'What is this sound?' },
-              {
-                fileData: {
-                  mimeType: 'audio/mpeg',
-                  fileUri:
-                    'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
-                  displayName: 'tone.mp3',
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const url = 'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3';
+      const messages = toMessages(
+        content(
+          'user',
+          { text: 'What is this sound?' },
+          fileRef('audio/mpeg', url, 'tone.mp3'),
+        ),
       );
 
-      const userMessage = messages.find((message) => message.role === 'user');
-      const contentArray = userMessage?.content as Array<{
-        type: string;
-        input_audio?: { data: string; format: string };
-      }>;
-      const audioPart = contentArray.find((p) => p.type === 'input_audio');
+      const audioPart = partOf(
+        wireParts(findRole(messages, 'user')),
+        'input_audio',
+      );
       // Bare oss URL — no data: prefix (unlike the inline branch).
-      expect(audioPart?.input_audio?.data).toBe(
-        'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
-      );
+      expect(audioPart?.input_audio?.data).toBe(url);
       expect(audioPart?.input_audio?.format).toBe('mp3');
     });
 
+    const audioFormats = [
+      ['audio/flac', 'flac'],
+      ['audio/ogg', 'ogg'],
+      ['audio/mp4', 'm4a'],
+    ] as const;
+    const userParts = (part: Part) =>
+      wireParts(findRole(toMessages(content('user', part)), 'user'));
+
     it('should convert flac/ogg/m4a audio fileData instead of textifying', () => {
-      for (const [mime, format] of [
-        ['audio/flac', 'flac'],
-        ['audio/ogg', 'ogg'],
-        ['audio/mp4', 'm4a'],
-      ] as const) {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  fileData: {
-                    mimeType: mime,
-                    fileUri: 'oss://bucket/key',
-                    displayName: 'clip',
-                  },
-                },
-              ],
-            },
-          ],
-        };
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
+      for (const [mime, format] of audioFormats) {
+        const contentArray = userParts(
+          fileRef(mime, 'oss://bucket/key', 'clip'),
         );
-        const userMessage = messages.find((m) => m.role === 'user');
-        const contentArray = userMessage?.content as Array<{
-          type: string;
-          input_audio?: { data: string; format: string };
-          text?: string;
-        }>;
-        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        const audioPart = partOf(contentArray, 'input_audio');
         expect(audioPart?.input_audio?.format).toBe(format);
         expect(
           contentArray.some((p) =>
@@ -2813,42 +1524,12 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should convert inline flac/ogg/m4a audio instead of textifying', () => {
-      // Mirrors the fileData case above: the inline branch shares
-      // getAudioFormat, and a regression that re-textifies inline
-      // flac/ogg/m4a must not ship green.
-      for (const [mime, format] of [
-        ['audio/flac', 'flac'],
-        ['audio/ogg', 'ogg'],
-        ['audio/mp4', 'm4a'],
-      ] as const) {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mime,
-                    data: 'YXVkaW8=',
-                    displayName: 'clip',
-                  },
-                },
-              ],
-            },
-          ],
-        };
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
-        );
-        const userMessage = messages.find((m) => m.role === 'user');
-        const contentArray = userMessage?.content as Array<{
-          type: string;
-          input_audio?: { data: string; format: string };
-          text?: string;
-        }>;
-        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+      // Mirrors the fileData case: the inline branch shares getAudioFormat,
+      // and a regression that re-textifies inline flac/ogg/m4a must not ship
+      // green.
+      for (const [mime, format] of audioFormats) {
+        const contentArray = userParts(inline(mime, 'YXVkaW8=', 'clip'));
+        const audioPart = partOf(contentArray, 'input_audio');
         expect(audioPart?.input_audio?.format).toBe(format);
         expect(audioPart?.input_audio?.data).toBe(
           `data:${mime};base64,YXVkaW8=`,
@@ -2861,359 +1542,115 @@ describe('OpenAIContentConverter', () => {
       }
     });
 
-    it('should render unsupported inlineData file types as a text block', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'File content' },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'application/zip',
-                        data: 'base64zipdata',
-                        displayName: 'archive.zip',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+    it.each([
+      [
+        'should render unsupported inlineData file types as a text block',
+        inline('application/zip', 'base64zipdata', 'archive.zip'),
+        'Unsupported inline media type',
+      ],
+      [
+        'should render unsupported fileData types as a text block',
+        fileRef(
+          'application/zip',
+          'https://example.com/archive.zip',
+          'archive.zip',
+        ),
+        'Unsupported file media type',
+      ],
+    ])('%s', (_title, media, notice) => {
+      const { media: wire } = expectToolMessageParts(
+        'Read',
+        'File content',
+        media,
       );
 
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('File content');
-      expect(contentArray[1].type).toBe('text');
-      expect(contentArray[1].text).toContain('Unsupported inline media type');
-      expect(contentArray[1].text).toContain('application/zip');
-      expect(contentArray[1].text).toContain('archive.zip');
-    });
-
-    it('should render unsupported fileData types as a text block', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'Read',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'Read',
-                  response: { output: 'File content' },
-                  parts: [
-                    {
-                      fileData: {
-                        mimeType: 'application/zip',
-                        fileUri: 'https://example.com/archive.zip',
-                        displayName: 'archive.zip',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      const toolMessage = messages.find((message) => message.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toBe('File content');
-      expect(contentArray[1].type).toBe('text');
-      expect(contentArray[1].text).toContain('Unsupported file media type');
-      expect(contentArray[1].text).toContain('application/zip');
-      expect(contentArray[1].text).toContain('archive.zip');
+      expect(wire.type).toBe('text');
+      expect(wire.text).toContain(notice);
+      expect(wire.text).toContain('application/zip');
+      expect(wire.text).toContain('archive.zip');
     });
 
     it('should create tool message with text-only content when no media parts', () => {
-      const request = createRequestWithFunctionResponse({
-        output: 'Plain text output',
-      });
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        ...exchange('call_1', 'shell', { output: 'Plain text output' }),
       );
-      const toolMessage = messages.find((message) => message.role === 'tool');
+      const contentArray = toolPartsOf(messages);
 
-      expect(toolMessage).toBeDefined();
-      expect(Array.isArray(toolMessage?.content)).toBe(true);
-      const contentArray = toolMessage?.content as Array<{
-        type: string;
-        text?: string;
-      }>;
       expect(contentArray).toHaveLength(1);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('Plain text output');
-
-      // No user message should be created when there's no media
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
+      expect(findRole(messages, 'user')).toBeUndefined();
     });
 
     it('should serialize text-only tool content as a string when requested', () => {
-      const request = createRequestWithFunctionResponse({
-        output: 'Plain text output',
-      });
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        toolResultContentFormat: 'string',
-      });
-      const toolMessage = messages.find((message) => message.role === 'tool');
+      const messages = toMessagesWith(
+        { toolResultContentFormat: 'string' },
+        ...exchange('call_1', 'shell', { output: 'Plain text output' }),
+      );
+      const toolMessage = findRole(messages, 'tool');
 
       expect(toolMessage).toBeDefined();
       expect(toolMessage?.content).toBe('Plain text output');
-      const userMessage = messages.find((message) => message.role === 'user');
-      expect(userMessage).toBeUndefined();
+      expect(findRole(messages, 'user')).toBeUndefined();
     });
 
     it('should create tool message with empty content for empty function responses', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                text: 'Let me read that file.',
-              },
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'read_file',
-                  args: { path: 'test.txt' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'read_file',
-                  response: { output: '' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content(
+          'model',
+          { text: 'Let me read that file.' },
+          fnCall('read_file', { path: 'test.txt' }, 'call_1'),
+        ),
+        content('user', fnResponse('read_file', { output: '' }, 'call_1')),
       );
 
-      // Should create an assistant message with tool call and a tool message with empty content
-      // This is required because OpenAI API expects every tool call to have a corresponding response
+      // OpenAI expects every tool call to have a matching response, so an
+      // empty result still yields a tool message (after the assistant one).
       expect(messages.length).toBeGreaterThanOrEqual(2);
-
-      const toolMessage = messages.find(
-        (m) =>
-          m.role === 'tool' &&
-          'tool_call_id' in m &&
-          m.tool_call_id === 'call_1',
-      );
+      const toolMessage = findRole(messages, 'tool');
       expect(toolMessage).toBeDefined();
       expect(toolMessage).toMatchObject({
-        role: 'tool',
-        tool_call_id: 'call_1',
+        ...toolReply('call_1'),
         content: '',
       });
     });
 
     it('should drop tool responses that are not adjacent to their assistant tool call', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  args: { path: 'a.txt' },
-                },
-              },
-              {
-                functionCall: {
-                  id: 'call_b',
-                  name: 'grep',
-                  args: { pattern: 'needle' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [{ text: 'history text inserted between tool results' }],
-          },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_c',
-                  name: 'list_files',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_c',
-                  name: 'list_files',
-                  response: { output: 'C' },
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'call_b',
-                  name: 'grep',
-                  response: { output: 'B' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content(
+          'model',
+          fnCall('read_file', { path: 'a.txt' }, 'call_a'),
+          fnCall('grep', { pattern: 'needle' }, 'call_b'),
+        ),
+        content('user', fnResponse('read_file', { output: 'A' }, 'call_a')),
+        userText('history text inserted between tool results'),
+        content('model', fnCall('list_files', {}, 'call_c')),
+        content(
+          'user',
+          fnResponse('list_files', { output: 'C' }, 'call_c'),
+          fnResponse('grep', { output: 'B' }, 'call_b'),
+        ),
       );
-      const assistantWithCallA = messages.find(
-        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
-          message.role === 'assistant' &&
-          'tool_calls' in message &&
-          Array.isArray(message.tool_calls) &&
-          message.tool_calls.some((toolCall) => toolCall.id === 'call_a'),
+      const assistantWithCallA = messages.find((message) =>
+        callIdsOf(message)?.includes('call_a'),
       );
 
-      expect(
-        assistantWithCallA?.tool_calls?.map((toolCall) => toolCall.id),
-      ).toEqual(['call_a']);
-
-      const toolCallIds = messages
-        .filter(
-          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
-            message.role === 'tool' && 'tool_call_id' in message,
-        )
-        .map((message) => message.tool_call_id);
-
-      expect(toolCallIds).toEqual(['call_a', 'call_c']);
+      expect(callIdsOf(assistantWithCallA)).toEqual(['call_a']);
+      expect(toolCallIdsOf(messages)).toEqual(['call_a', 'call_c']);
     });
 
     it('should keep assistant text when all tool calls are orphaned', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              { text: 'I can answer without the tool.' },
-              {
-                functionCall: {
-                  id: 'call_missing',
-                  name: 'read_file',
-                  args: { path: 'missing.txt' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [{ text: 'continue' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content(
+          'model',
+          { text: 'I can answer without the tool.' },
+          fnCall('read_file', { path: 'missing.txt' }, 'call_missing'),
+        ),
+        userText('continue'),
       );
-      const assistant = messages.find(
-        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
-          message.role === 'assistant',
-      );
+      const assistant = findRole(messages, 'assistant') as
+        | OpenAI.Chat.ChatCompletionAssistantMessageParam
+        | undefined;
 
       expect(assistant?.content).toBe('I can answer without the tool.');
       expect('tool_calls' in (assistant ?? {})).toBe(false);
@@ -3221,160 +1658,46 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should drop assistant-only tool calls when all responses are orphaned', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_missing',
-                  name: 'read_file',
-                  args: { path: 'missing.txt' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [{ text: 'break adjacency' }],
-          },
-          {
-            role: 'user',
-            parts: [{ text: 'continue' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content(
+          'model',
+          fnCall('read_file', { path: 'missing.txt' }, 'call_missing'),
+        ),
+        userText('break adjacency'),
+        userText('continue'),
       );
 
-      expect(messages.some((message) => message.role === 'assistant')).toBe(
-        false,
-      );
+      expect(findRole(messages, 'assistant')).toBeUndefined();
       expect(messages.some((message) => message.role === 'tool')).toBe(false);
     });
 
     it('should drop later assistant tool calls that reuse a previous surviving id', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  args: { file_path: 'a.ts' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  args: { file_path: 'b.ts' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  response: { output: 'B' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        ...exchange('dup_id_0001', 'read_file', { output: 'A' }, undefined, {
+          file_path: 'a.ts',
+        }),
+        ...exchange('dup_id_0001', 'read_file', { output: 'B' }, undefined, {
+          file_path: 'b.ts',
+        }),
       );
 
-      const assistantToolCallIds = messages.flatMap((message) =>
-        hasOpenAIToolCalls(message)
-          ? message.tool_calls.map((toolCall) => toolCall.id)
-          : [],
-      );
-      const toolResultIds = messages
-        .filter(
-          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
-            message.role === 'tool' && 'tool_call_id' in message,
-        )
-        .map((message) => message.tool_call_id);
-
-      expect(assistantToolCallIds).toEqual(['dup_id_0001']);
-      expect(toolResultIds).toEqual(['dup_id_0001']);
+      expect(messages.flatMap((message) => callIdsOf(message) ?? [])).toEqual([
+        'dup_id_0001',
+      ]);
+      expect(toolCallIdsOf(messages)).toEqual(['dup_id_0001']);
     });
 
     it('should drop duplicate tool call IDs within a single assistant message', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  args: { file_path: 'a.ts' },
-                },
-              },
-              {
-                functionCall: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  args: { file_path: 'b.ts' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'dup_id_0001',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content(
+          'model',
+          fnCall('read_file', { file_path: 'a.ts' }, 'dup_id_0001'),
+          fnCall('read_file', { file_path: 'b.ts' }, 'dup_id_0001'),
+        ),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'A' }, 'dup_id_0001'),
+        ),
       );
       const assistant = messages.find(hasOpenAIToolCalls);
 
@@ -3386,57 +1709,18 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should keep only the first adjacent tool response and its split media for a surviving id', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_image',
-                  name: 'screenshot',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_image',
-                  name: 'screenshot',
-                  response: { output: 'first' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'first' } },
-                  ],
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'call_image',
-                  name: 'screenshot',
-                  response: { output: 'second' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'second' } },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(request, {
-        ...requestContext,
-        splitToolMedia: true,
-      });
-      const toolMessages = messages.filter(
-        (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
-          message.role === 'tool' && 'tool_call_id' in message,
+      const messages = toSplitMessages(
+        content('model', fnCall('screenshot', {}, 'call_image')),
+        content(
+          'user',
+          ...['first', 'second'].map((data) =>
+            fnResult('screenshot', { output: data }, 'call_image', [
+              inline('image/png', data),
+            ]),
+          ),
+        ),
       );
+      const toolMessages = byRole(messages, 'tool');
       const splitMediaMessages = messages.filter(isOpenAISplitMediaMessage);
 
       expect(toolMessages).toHaveLength(1);
@@ -3447,310 +1731,77 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should keep a tool response after an empty-id tool message', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  args: { path: 'a.txt' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: 'empty_id',
-                  response: { output: 'no id' },
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content('model', fnCall('read_file', { path: 'a.txt' }, 'call_a')),
+        content(
+          'user',
+          fnResponse('empty_id', { output: 'no id' }),
+          fnResponse('read_file', { output: 'A' }, 'call_a'),
+        ),
       );
-      const toolCallIds = messages
-        .filter(
-          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
-            message.role === 'tool' && 'tool_call_id' in message,
-        )
-        .map((message) => message.tool_call_id);
 
-      expect(toolCallIds).toEqual(['call_a']);
+      expect(toolCallIdsOf(messages)).toEqual(['call_a']);
     });
 
     it('should clean after merging consecutive assistant turns', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  args: { path: 'a.txt' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'A short follow-up.' }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        content('model', fnCall('read_file', { path: 'a.txt' }, 'call_a')),
+        modelText('A short follow-up.'),
+        content('user', fnResponse('read_file', { output: 'A' }, 'call_a')),
       );
 
       expect(messages[0]).toMatchObject({
         role: 'assistant',
         content: 'A short follow-up.',
       });
-      expect(
-        (
-          messages[0] as OpenAI.Chat.ChatCompletionAssistantMessageParam
-        ).tool_calls?.map((toolCall) => toolCall.id),
-      ).toEqual(['call_a']);
-      expect(messages[1]).toMatchObject({
-        role: 'tool',
-        tool_call_id: 'call_a',
-      });
+      expect(callIdsOf(messages[0])).toEqual(['call_a']);
+      expect(messages[1]).toMatchObject(toolReply('call_a'));
     });
 
     it('should keep split media after all adjacent tool responses across content items', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
-              },
-              {
-                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'shot_a',
-                  response: { output: 'A' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
-                  ],
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_b',
-                  name: 'shot_b',
-                  response: { output: 'B' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      const messages = toSplitMessages(
+        shotCalls(),
+        content('user', shotA()),
+        content('user', shotB()),
       );
       const assistantIndex = messages.findIndex(
         (message) => message.role === 'assistant',
       );
 
-      expect(messages[assistantIndex + 1]).toMatchObject({
-        role: 'tool',
-        tool_call_id: 'call_a',
-      });
-      expect(messages[assistantIndex + 2]).toMatchObject({
-        role: 'tool',
-        tool_call_id: 'call_b',
-      });
+      expect(messages[assistantIndex + 1]).toMatchObject(toolReply('call_a'));
+      expect(messages[assistantIndex + 2]).toMatchObject(toolReply('call_b'));
       expect(messages[assistantIndex + 3]?.role).toBe('user');
       expect(messages[assistantIndex + 4]?.role).toBe('user');
     });
 
     it('should not keep split media from orphaned tool responses', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_x',
-                  name: 'shot_x',
-                  response: { output: 'X' },
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
-                  ],
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'shot_a',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-      const strictContext: RequestContext = {
-        ...requestContext,
-        splitToolMedia: true,
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        strictContext,
+      const messages = toSplitMessages(
+        content('model', fnCall('shot_a', {}, 'call_a')),
+        content(
+          'user',
+          fnResult('shot_x', { output: 'X' }, 'call_x', [
+            inline('image/png', 'xxx'),
+          ]),
+        ),
+        content('user', fnResponse('shot_a', { output: 'A' }, 'call_a')),
       );
 
       expect(messages.map((message) => message.role)).toEqual([
         'assistant',
         'tool',
       ]);
-      expect(messages[1]).toMatchObject({
-        role: 'tool',
-        tool_call_id: 'call_a',
-      });
+      expect(messages[1]).toMatchObject(toolReply('call_a'));
     });
 
     it('should merge assistant turns created by orphan cleanup', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: { id: 'call_a', name: 'read_file', args: {} },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_a',
-                  name: 'read_file',
-                  response: { output: 'A' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Next I will call another tool.' }],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_orphan',
-                  name: 'stale_tool',
-                  response: { output: 'stale' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: { id: 'call_b', name: 'grep', args: {} },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_b',
-                  name: 'grep',
-                  response: { output: 'B' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        ...exchange('call_a', 'read_file', { output: 'A' }),
+        modelText('Next I will call another tool.'),
+        content(
+          'user',
+          fnResponse('stale_tool', { output: 'stale' }, 'call_orphan'),
+        ),
+        ...exchange('call_b', 'grep', { output: 'B' }),
       );
 
       for (let index = 1; index < messages.length; index += 1) {
@@ -3759,364 +1810,153 @@ describe('OpenAIContentConverter', () => {
           'assistant',
         ]);
       }
-      expect(
-        messages
-          .filter(
-            (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
-              message.role === 'tool' && 'tool_call_id' in message,
-          )
-          .map((message) => message.tool_call_id),
-      ).toEqual(['call_a', 'call_b']);
+      expect(toolCallIdsOf(messages)).toEqual(['call_a', 'call_b']);
     });
 
     describe('assistant message with reasoning-only content (issue #3421)', () => {
-      /**
-       * Regression tests for https://github.com/QwenLM/qwen-code/issues/3421
-       *
-       * When a model (e.g. Ollama qwen3.5:9b) returns a response that contains
-       * reasoning content but an empty text body, the converted assistant message
-       * must use content: "" instead of content: null.
-       * Some OpenAI-compatible providers reject content: null with HTTP 400 when
-       * reasoning_content is also present.
-       */
-      it('should use empty string instead of null for content when assistant has only reasoning parts', () => {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            { role: 'user', parts: [{ text: 'Think about this.' }] },
-            {
-              // Assistant turn that only produced a thought, no visible text
-              role: 'model',
-              parts: [{ text: 'I reasoned about it.', thought: true }],
-            },
-            { role: 'user', parts: [{ text: 'What did you conclude?' }] },
-          ],
+      // Regression for #3421: when a model (e.g. Ollama qwen3.5:9b) returns
+      // reasoning but an empty text body, the assistant message must use
+      // content: "" instead of null; some OpenAI-compatible providers reject
+      // content: null with HTTP 400 when reasoning_content is also present.
+      const assistantOf = (...contents: Content[]) => {
+        const assistantMsg = findRole(toMessages(...contents), 'assistant');
+        expect(assistantMsg).toBeDefined();
+        return assistantMsg as {
+          content: unknown;
+          reasoning_content?: string;
         };
+      };
 
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
+      it('should use empty string instead of null for content when assistant has only reasoning parts', () => {
+        const assistantMsg = assistantOf(
+          userText('Think about this.'),
+          // Assistant turn that only produced a thought, no visible text
+          content('model', thoughtPart('I reasoned about it.')),
+          userText('What did you conclude?'),
         );
 
-        const assistantMsg = messages.find((m) => m.role === 'assistant');
-        expect(assistantMsg).toBeDefined();
-        // Must NOT be null – Ollama and other providers reject null content
-        // when reasoning_content is present (HTTP 400).
-        expect((assistantMsg as { content: unknown }).content).toBe('');
-        // reasoning_content should still be preserved
-        expect(
-          (assistantMsg as { reasoning_content?: string }).reasoning_content,
-        ).toBe('I reasoned about it.');
+        // Must NOT be null (see the describe comment); reasoning is preserved.
+        expect(assistantMsg.content).toBe('');
+        expect(assistantMsg.reasoning_content).toBe('I reasoned about it.');
       });
 
       it('should keep reasoning content when orphaned tool calls are removed', () => {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            {
-              role: 'model',
-              parts: [
-                { text: 'I need to inspect this.', thought: true },
-                {
-                  functionCall: {
-                    id: 'call_missing',
-                    name: 'read_file',
-                    args: {},
-                  },
-                },
-              ],
-            },
-            { role: 'user', parts: [{ text: 'break adjacency' }] },
-          ],
-        };
-
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
+        const assistantMsg = assistantOf(
+          content(
+            'model',
+            thoughtPart('I need to inspect this.'),
+            fnCall('read_file', {}, 'call_missing'),
+          ),
+          userText('break adjacency'),
         );
 
-        const assistantMsg = messages.find((m) => m.role === 'assistant');
-        expect(assistantMsg).toBeDefined();
-        expect((assistantMsg as { content: unknown }).content).toBe('');
-        expect(
-          (assistantMsg as { reasoning_content?: string }).reasoning_content,
-        ).toBe('I need to inspect this.');
-        expect('tool_calls' in (assistantMsg ?? {})).toBe(false);
+        expect(assistantMsg.content).toBe('');
+        expect(assistantMsg.reasoning_content).toBe('I need to inspect this.');
+        expect('tool_calls' in assistantMsg).toBe(false);
       });
 
       it('should keep content null when assistant has only tool_calls and no reasoning', () => {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            { role: 'user', parts: [{ text: 'Call the tool.' }] },
-            {
-              role: 'model',
-              parts: [
-                {
-                  functionCall: {
-                    id: 'call_1',
-                    name: 'some_tool',
-                    args: {},
-                  },
-                },
-              ],
-            },
-            {
-              role: 'user',
-              parts: [
-                {
-                  functionResponse: {
-                    id: 'call_1',
-                    name: 'some_tool',
-                    response: { output: 'done' },
-                  },
-                },
-              ],
-            },
-          ],
-        };
-
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
+        const assistantMsg = assistantOf(
+          userText('Call the tool.'),
+          ...exchange('call_1', 'some_tool', { output: 'done' }),
         );
 
-        const assistantMsg = messages.find((m) => m.role === 'assistant');
-        expect(assistantMsg).toBeDefined();
         // Tool-call-only messages follow the OpenAI spec: content should be null
-        expect((assistantMsg as { content: unknown }).content).toBeNull();
+        expect(assistantMsg.content).toBeNull();
       });
 
       it('should use actual text content when assistant has both reasoning and text', () => {
-        const request: GenerateContentParameters = {
-          model: 'models/test',
-          contents: [
-            { role: 'user', parts: [{ text: 'Explain.' }] },
-            {
-              role: 'model',
-              parts: [
-                { text: 'My hidden reasoning.', thought: true },
-                { text: 'Here is my answer.' },
-              ],
-            },
-          ],
-        };
-
-        const messages = converter.convertLlmRequestToOpenAI(
-          request,
-          requestContext,
+        const assistantMsg = assistantOf(
+          userText('Explain.'),
+          content('model', thoughtPart('My hidden reasoning.'), {
+            text: 'Here is my answer.',
+          }),
         );
 
-        const assistantMsg = messages.find((m) => m.role === 'assistant');
-        expect(assistantMsg).toBeDefined();
-        expect((assistantMsg as { content: unknown }).content).toBe(
-          'Here is my answer.',
-        );
-        expect(
-          (assistantMsg as { reasoning_content?: string }).reasoning_content,
-        ).toBe('My hidden reasoning.');
+        expect(assistantMsg.content).toBe('Here is my answer.');
+        expect(assistantMsg.reasoning_content).toBe('My hidden reasoning.');
       });
     });
   });
 
   describe('MCP multi-part tool results (issue #1520)', () => {
-    /**
-     * Regression tests for https://github.com/QwenLM/qwen-code/issues/1520
-     *
-     * Ensures that when an MCP tool returns multiple content blocks
-     * (e.g., text + image, or multiple text sections), all content
-     * ends up inside the tool message – NOT in a separate user message.
-     *
-     * These tests simulate the data shape produced by the *fixed*
-     * convertToFunctionResponse(), where all text is joined into
-     * `response.output` and media is placed in `response.parts`.
-     */
+    // Regression tests for https://github.com/QwenLM/qwen-code/issues/1520:
+    // when an MCP tool returns several content blocks (text + image, or
+    // multiple text sections), all content must end up in the tool message,
+    // NOT in a separate user message. Inputs mimic the fixed
+    // convertToFunctionResponse(): text joined into `response.output`,
+    // media placed in `response.parts`.
+    const toolMessageOf = (messages: Message[], id: string) => {
+      expect(findRole(messages, 'tool')).toMatchObject(toolReply(id));
+      return toolPartsOf(messages);
+    };
 
     it('should include all text content in tool message when function response has joined text', () => {
-      // After the fix, convertToFunctionResponse joins multiple text parts
-      // into the FunctionResponse.response.output.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
+      const messages = toMessages(
+        ...exchange(
+          'call_mcp_1',
+          'figma_get_code',
           {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_mcp_1',
-                  name: 'figma_get_code',
-                  args: { nodeId: '38:521' },
-                },
-              },
-            ],
+            output:
+              '<div data-node-id="38:521">...</div>\nSUPER CRITICAL: The generated React+Tailwind code MUST be converted...',
           },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_mcp_1',
-                  name: 'figma_get_code',
-                  response: {
-                    output:
-                      '<div data-node-id="38:521">...</div>\nSUPER CRITICAL: The generated React+Tailwind code MUST be converted...',
-                  },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+          undefined,
+          { nodeId: '38:521' },
+        ),
       );
 
-      const toolMessage = messages.find((m) => m.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect((toolMessage as { tool_call_id?: string }).tool_call_id).toBe(
-        'call_mcp_1',
-      );
-
-      // All content is in the tool message
-      const toolContent = toolMessage?.content;
-      expect(Array.isArray(toolContent)).toBe(true);
-      const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
-        .filter((p) => p.type === 'text')
-        .map((p) => p.text);
+      const toolTexts = textsOf(toolMessageOf(messages, 'call_mcp_1'));
       expect(toolTexts).toHaveLength(1);
       expect(toolTexts[0]).toContain('data-node-id');
       expect(toolTexts[0]).toContain('SUPER CRITICAL');
-
-      // No user message should be created
-      const userMessages = messages.filter((m) => m.role === 'user');
-      expect(userMessages).toHaveLength(0);
+      expect(byRole(messages, 'user')).toHaveLength(0);
     });
 
     it('should include text and image in tool message when function response has media parts', () => {
-      // After the fix, convertToFunctionResponse puts media into
-      // FunctionResponse.parts, which the OpenAI converter picks up
-      // in createToolMessage().
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
+      // convertToFunctionResponse puts media into FunctionResponse.parts,
+      // which createToolMessage() picks up.
+      const messages = toMessages(
+        ...exchange(
+          'call_mcp_2',
+          'figma_get_screenshot',
           {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_mcp_2',
-                  name: 'figma_get_screenshot',
-                  args: { nodeId: '38:521' },
-                },
-              },
-            ],
+            output:
+              "[Tool 'figma' provided the following image data with mime-type: image/png]",
           },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_mcp_2',
-                  name: 'figma_get_screenshot',
-                  response: {
-                    output:
-                      "[Tool 'figma' provided the following image data with mime-type: image/png]",
-                  },
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'image/png',
-                        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+          [
+            inline(
+              'image/png',
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
+            ),
+          ],
+          { nodeId: '38:521' },
+        ),
       );
 
-      const toolMessage = messages.find((m) => m.role === 'tool');
-      expect(toolMessage).toBeDefined();
-      expect((toolMessage as { tool_call_id?: string }).tool_call_id).toBe(
-        'call_mcp_2',
-      );
-
-      // Tool message should contain both text and image
-      const toolContent = toolMessage?.content;
-      expect(Array.isArray(toolContent)).toBe(true);
-      const contentArray = toolContent as Array<{
-        type: string;
-        text?: string;
-        image_url?: { url: string };
-      }>;
-      expect(contentArray).toHaveLength(2);
-      expect(contentArray[0].type).toBe('text');
-      expect(contentArray[0].text).toContain('image data');
-      expect(contentArray[1].type).toBe('image_url');
-      expect(contentArray[1].image_url?.url).toContain('data:image/png');
-
-      // No user message should be created
-      const userMessages = messages.filter((m) => m.role === 'user');
-      expect(userMessages).toHaveLength(0);
+      expectTextThenPng(toolMessageOf(messages, 'call_mcp_2'), 'image data');
+      expect(byRole(messages, 'user')).toHaveLength(0);
     });
 
     it('passes text-only nested parts (e.g. compaction slimmer placeholders) through to the tool message', () => {
-      // The compaction slimming module replaces inlineData inside
-      // functionResponse.parts with `{ text: '[image: image/png]' }`
-      // before the side-query. createToolMessage must surface those
-      // text placeholders, otherwise the summary model receives an
-      // empty tool response with no signal that an image existed.
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_strip',
-                  name: 'read_file',
-                  args: { path: '/x.png' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_strip',
-                  name: 'read_file',
-                  response: { output: '' },
-                  // After slimming: nested part is a text placeholder.
-                  parts: [{ text: '[image: image/png]' }] as unknown as Part[],
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      // Compaction slimming replaces inlineData inside functionResponse.parts
+      // with `{ text: '[image: image/png]' }` before the side-query.
+      // createToolMessage must surface the placeholder, otherwise the summary
+      // model gets an empty tool response with no sign an image existed.
+      const messages = toMessages(
+        ...exchange(
+          'call_strip',
+          'read_file',
+          { output: '' },
+          [{ text: '[image: image/png]' }],
+          { path: '/x.png' },
+        ),
       );
 
-      const toolMessage = messages.find((m) => m.role === 'tool');
+      const toolMessage = findRole(messages, 'tool');
       expect(toolMessage).toBeDefined();
       const toolContent = toolMessage?.content;
-      // Either string or array, depending on how OpenAI shapes single-part
-      // content. Either way the placeholder must be visible verbatim.
+      // String or array depending on single-part shaping; either way the
+      // placeholder must be visible verbatim.
       const flattened =
         typeof toolContent === 'string'
           ? toolContent
@@ -4128,57 +1968,49 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertOpenAIResponseToLlm', () => {
-    it('should handle empty choices array without crashing', () => {
-      const response = converter.convertOpenAIResponseToLlm(
+    const usage = (
+      prompt_tokens: number,
+      completion_tokens: number,
+      total_tokens: number,
+      extra: Record<string, unknown> = {},
+    ) => ({ prompt_tokens, completion_tokens, total_tokens, ...extra });
+    const usageChunk = (
+      context: RequestContext,
+      chunkUsage: Record<string, unknown>,
+    ) =>
+      converter.convertOpenAIChunkToLlm(
         {
-          object: 'chat.completion',
-          id: 'chatcmpl-empty',
+          object: 'chat.completion.chunk',
+          id: 'chunk-usage',
           created: 123,
           model: 'test-model',
           choices: [],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
+          usage: chunkUsage,
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
       );
+    /** Streams each reasoning_content delta, then a usage-only chunk. */
+    const streamReasoningUsage = (
+      deltas: string[],
+      chunkUsage: Record<string, unknown>,
+    ) => {
+      const context = withStreamParser();
+      for (const reasoning_content of deltas) {
+        streamParts(context, { reasoning_content });
+      }
+      return usageChunk(context, chunkUsage);
+    };
+
+    it('should handle empty choices array without crashing', () => {
+      const response = toLlm([]);
 
       expect(response.candidates).toEqual([]);
       expect(response.modelVersion).toBe('test-model');
     });
 
     it('maps uppercase finish_reason values case-insensitively', () => {
-      const stop = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-stop',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'done' },
-              finish_reason: 'STOP',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
-      const truncated = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-max-tokens',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'cut off' },
-              finish_reason: 'MAX_TOKENS',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
+      const stop = toLlm([choice({ content: 'done' }, 'STOP')]);
+      const truncated = toLlm([choice({ content: 'cut off' }, 'MAX_TOKENS')]);
 
       expect(stop.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(truncated.candidates?.[0]?.finishReason).toBe(
@@ -4187,107 +2019,42 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('does not throw on a non-string finish_reason from a malformed gateway', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-malformed',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'done' },
-              finish_reason: 42,
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
+      const response = toLlm([choice({ content: 'done' }, 42)]);
 
       expect(response.candidates?.[0]?.finishReason).toBe(
         FinishReason.FINISH_REASON_UNSPECIFIED,
       );
     });
 
-    it('omits the input/output breakdown when only total tokens are reported', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'hi' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
+    it.each([
+      [
+        'omits the input/output breakdown when only total tokens are reported',
+        () => toLlm([choice({ content: 'hi' })], { usage: usage(0, 0, 5) }),
+      ],
+      [
+        'omits the streaming input/output breakdown when only total tokens are reported',
+        () => usageChunk(withStreamParser(), usage(0, 0, 5)),
+      ],
+    ])('%s', (_title, convert) => {
+      const usageMetadata = convert().usageMetadata;
 
-      const usage = response.usageMetadata;
-      expect(usage?.totalTokenCount).toBe(5);
-      expect(usage?.promptTokenCount).toBeUndefined();
-      expect(usage?.candidatesTokenCount).toBeUndefined();
-      expect(getGenAiUsageProvenance(usage)).toMatchObject({
-        cachedInputTokensReported: false,
-      });
-    });
-
-    it('omits the streaming input/output breakdown when only total tokens are reported', () => {
-      const response = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        withStreamParser(),
-      );
-
-      const usage = response.usageMetadata;
-      expect(usage?.totalTokenCount).toBe(5);
-      expect(usage?.promptTokenCount).toBeUndefined();
-      expect(usage?.candidatesTokenCount).toBeUndefined();
-      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+      expect(usageMetadata?.totalTokenCount).toBe(5);
+      expect(usageMetadata?.promptTokenCount).toBeUndefined();
+      expect(usageMetadata?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usageMetadata)).toMatchObject({
         cachedInputTokensReported: false,
       });
     });
 
     it('distinguishes an absent cache field from an explicitly reported zero', () => {
-      const base = {
-        object: 'chat.completion',
-        id: 'chatcmpl-cache',
-        created: 123,
-        model: 'provider-model',
-        choices: [],
-      } as const;
-      const absent = converter.convertOpenAIResponseToLlm(
-        {
-          ...base,
-          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
-      const zero = converter.convertOpenAIResponseToLlm(
-        {
-          ...base,
-          usage: {
-            prompt_tokens: 3,
-            completion_tokens: 1,
-            total_tokens: 4,
-            prompt_tokens_details: { cached_tokens: 0 },
-          },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
+      const convert = (extra: Record<string, unknown> = {}) =>
+        toLlm([], {
+          id: 'chatcmpl-cache',
+          model: 'provider-model',
+          usage: usage(3, 1, 4, extra),
+        });
+      const absent = convert();
+      const zero = convert({ prompt_tokens_details: { cached_tokens: 0 } });
 
       expect(absent.modelVersion).toBe('provider-model');
       expect(
@@ -4299,118 +2066,43 @@ describe('OpenAIContentConverter', () => {
       ).toBe(true);
     });
 
-    it('estimates missing reasoning tokens from non-streaming content', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-reasoning-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'answer',
-                reasoning_content: '先仔细想',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
+    it.each([
+      [
+        'estimates missing reasoning tokens from non-streaming content',
+        { reasoning_content: '先仔细想' },
+        usage(1, 10, 11),
+        5,
+      ],
+      [
+        'estimates missing reasoning tokens from non-streaming reasoning field',
+        { reasoning: '先仔细想' },
+        usage(1, 10, 11),
+        5,
+      ],
+      [
+        'clamps estimated non-streaming reasoning tokens to completion tokens',
+        { reasoning_content: '想'.repeat(10) },
+        usage(1, 3, 4),
+        3,
+      ],
+    ])('%s', (_title, reasoning, responseUsage, expected) => {
+      const response = toLlm([choice({ content: 'answer', ...reasoning })], {
+        usage: responseUsage,
+      });
 
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
-    });
-
-    it('estimates missing reasoning tokens from non-streaming reasoning field', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-reasoning-field-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'answer',
-                reasoning: '先仔细想',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
-    });
-
-    it('clamps estimated non-streaming reasoning tokens to completion tokens', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-reasoning-clamped-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'answer',
-                reasoning_content: '想'.repeat(10),
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(expected);
     });
 
     it.each([0, 42])(
       'preserves provider reasoning tokens for non-streaming content: %s',
       (reasoningTokens) => {
-        const response = converter.convertOpenAIResponseToLlm(
+        const response = toLlm(
+          [choice({ content: 'answer', reasoning_content: '先仔细想' })],
           {
-            object: 'chat.completion',
-            id: 'chatcmpl-provider-reasoning-usage',
-            created: 123,
-            model: 'test-model',
-            choices: [
-              {
-                index: 0,
-                message: {
-                  role: 'assistant',
-                  content: 'answer',
-                  reasoning_content: '先仔细想',
-                },
-                finish_reason: 'stop',
-                logprobs: null,
-              },
-            ],
-            usage: {
-              prompt_tokens: 1,
-              completion_tokens: 10,
-              total_tokens: 11,
-              completion_tokens_details: {
-                reasoning_tokens: reasoningTokens,
-              },
-            },
-          } as unknown as OpenAI.Chat.ChatCompletion,
-          requestContext,
+            usage: usage(1, 10, 11, {
+              completion_tokens_details: { reasoning_tokens: reasoningTokens },
+            }),
+          },
         );
 
         expect(response.usageMetadata?.thoughtsTokenCount).toBe(
@@ -4419,200 +2111,45 @@ describe('OpenAIContentConverter', () => {
       },
     );
 
-    it('estimates reasoning tokens past the streaming detection window', () => {
-      const context = withStreamParser();
-      const reasoningChunk = (id: string, reasoning_content: string) =>
-        ({
-          object: 'chat.completion.chunk',
-          id,
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+    it.each([
+      [
+        'estimates reasoning tokens past the streaming detection window',
+        ['想'.repeat(1024), '想'],
+        usage(1, 1200, 1201),
+        1128,
+      ],
+      [
+        'estimates reasoning tokens for short streaming content',
+        ['先', '仔细想'],
+        usage(1, 10, 11),
+        5,
+      ],
+      [
+        'estimates normalized cumulative reasoning without a completion count',
+        ['先仔细想', '先仔细想再检查'],
+        usage(1, 0, 1),
+        8,
+      ],
+      [
+        'clamps estimated streaming reasoning tokens to completion tokens',
+        ['想'.repeat(10)],
+        usage(1, 3, 4),
+        3,
+      ],
+    ])('%s', (_title, deltas, chunkUsage, expected) => {
+      const response = streamReasoningUsage(deltas, chunkUsage);
 
-      converter.convertOpenAIChunkToLlm(
-        reasoningChunk('chunk-reasoning-1', '想'.repeat(1024)),
-        context,
-      );
-      converter.convertOpenAIChunkToLlm(
-        reasoningChunk('chunk-reasoning-2', '想'),
-        context,
-      );
-      const response = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-reasoning-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [],
-          usage: {
-            prompt_tokens: 1,
-            completion_tokens: 1200,
-            total_tokens: 1201,
-          },
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(1128);
-    });
-
-    it('estimates reasoning tokens for short streaming content', () => {
-      const context = withStreamParser();
-      const reasoningChunk = (id: string, reasoning_content: string) =>
-        ({
-          object: 'chat.completion.chunk',
-          id,
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
-
-      converter.convertOpenAIChunkToLlm(
-        reasoningChunk('chunk-short-reasoning-1', '先'),
-        context,
-      );
-      converter.convertOpenAIChunkToLlm(
-        reasoningChunk('chunk-short-reasoning-2', '仔细想'),
-        context,
-      );
-      const response = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-short-reasoning-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [],
-          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
-    });
-
-    it('estimates normalized cumulative reasoning without a completion count', () => {
-      const context = withStreamParser();
-      for (const reasoning_content of ['先仔细想', '先仔细想再检查']) {
-        converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: 'chunk-cumulative-reasoning',
-            created: 123,
-            model: 'test-model',
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          context,
-        );
-      }
-      const response = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-cumulative-reasoning-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [],
-          usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(8);
-    });
-
-    it('clamps estimated streaming reasoning tokens to completion tokens', () => {
-      const context = withStreamParser();
-      converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-clamped-reasoning',
-          created: 123,
-          model: 'test-model',
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content: '想'.repeat(10) },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const response = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-clamped-reasoning-usage',
-          created: 123,
-          model: 'test-model',
-          choices: [],
-          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(expected);
     });
 
     it.each([0, 42])(
       'preserves provider reasoning tokens for streaming content: %s',
       (reasoningTokens) => {
-        const context = withStreamParser();
-        converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: 'chunk-provider-reasoning',
-            created: 123,
-            model: 'test-model',
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content: '先仔细想' },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          context,
-        );
-        const response = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: 'chunk-provider-reasoning-usage',
-            created: 123,
-            model: 'test-model',
-            choices: [],
-            usage: {
-              prompt_tokens: 1,
-              completion_tokens: 10,
-              total_tokens: 11,
-              completion_tokens_details: {
-                reasoning_tokens: reasoningTokens,
-              },
-            },
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          context,
+        const response = streamReasoningUsage(
+          ['先仔细想'],
+          usage(1, 10, 11, {
+            completion_tokens_details: { reasoning_tokens: reasoningTokens },
+          }),
         );
 
         expect(response.usageMetadata?.thoughtsTokenCount).toBe(
@@ -4623,189 +2160,98 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {
-    it('should convert reasoning_content to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-1',
-          created: 123,
-          model: 'gpt-test',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'final answer',
-                reasoning_content: 'chain-of-thought',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
+    /** Streams content deltas through one context; returns each chunk's first-part text ('' when none). */
+    const streamContent = (chunks: string[]) => {
+      const ctx = withStreamParser();
+      return chunks.map(
+        (content) => streamParts(ctx, { content })?.[0]?.text ?? '',
       );
+    };
+    /** Same for reasoning_content, returning `{ text, thought }` of each chunk's first part. */
+    const streamReasoning = (chunks: string[]) => {
+      const ctx = withStreamParser();
+      return chunks.map((reasoning_content) => {
+        const part = streamParts(ctx, { reasoning_content })?.[0];
+        return { text: part?.text ?? '', thought: part?.thought ?? false };
+      });
+    };
 
-      const parts = response.candidates?.[0]?.content?.parts;
+    it.each([
+      [
+        'should convert reasoning_content to a thought part for non-streaming responses',
+        () =>
+          toLlm([
+            choice({
+              content: 'final answer',
+              reasoning_content: 'chain-of-thought',
+            }),
+          ]),
+        'chain-of-thought',
+        'final answer',
+      ],
+      [
+        'should convert reasoning to a thought part for non-streaming responses',
+        () =>
+          toLlm([
+            choice({ content: 'final answer', reasoning: 'chain-of-thought' }),
+          ]),
+        'chain-of-thought',
+        'final answer',
+      ],
+      [
+        'should convert streaming reasoning_content delta to a thought part',
+        () =>
+          converter.convertOpenAIChunkToLlm(
+            openAIStreamChunk(
+              { content: 'visible text', reasoning_content: 'thinking...' },
+              'stop',
+            ),
+            withStreamParser(),
+          ),
+        'thinking...',
+        'visible text',
+      ],
+      [
+        'should convert streaming reasoning delta to a thought part',
+        () =>
+          converter.convertOpenAIChunkToLlm(
+            openAIStreamChunk(
+              { content: 'visible text', reasoning: 'thinking...' },
+              'stop',
+            ),
+            withStreamParser(),
+          ),
+        'thinking...',
+        'visible text',
+      ],
+    ])('%s', (_title, convert, thought, text) => {
+      const parts = partsOf(convert());
+
       expect(parts?.[0]).toEqual(
-        expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
+        expect.objectContaining({ thought: true, text: thought }),
       );
       expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
-      expect(parts?.[1]).toEqual(
-        expect.objectContaining({ text: 'final answer' }),
-      );
-    });
-
-    it('should convert reasoning to a thought part for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-2',
-          created: 123,
-          model: 'gpt-test',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'final answer',
-                reasoning: 'chain-of-thought',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
-      );
-
-      const parts = response.candidates?.[0]?.content?.parts;
-      expect(parts?.[0]).toEqual(
-        expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
-      );
-      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
-      expect(parts?.[1]).toEqual(
-        expect.objectContaining({ text: 'final answer' }),
-      );
-    });
-
-    it('should convert streaming reasoning_content delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                content: 'visible text',
-                reasoning_content: 'thinking...',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        withStreamParser(new StreamingToolCallParser()),
-      );
-
-      const parts = chunk.candidates?.[0]?.content?.parts;
-      expect(parts?.[0]).toEqual(
-        expect.objectContaining({ thought: true, text: 'thinking...' }),
-      );
-      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
-      expect(parts?.[1]).toEqual(
-        expect.objectContaining({ text: 'visible text' }),
-      );
-    });
-
-    it('should convert streaming reasoning delta to a thought part', () => {
-      const chunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-1b',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                content: 'visible text',
-                reasoning: 'thinking...',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        withStreamParser(new StreamingToolCallParser()),
-      );
-
-      const parts = chunk.candidates?.[0]?.content?.parts;
-      expect(parts?.[0]).toEqual(
-        expect.objectContaining({ thought: true, text: 'thinking...' }),
-      );
-      expect(parts?.[1]).toEqual(
-        expect.objectContaining({ text: 'visible text' }),
-      );
+      expect(parts?.[1]).toEqual(expect.objectContaining({ text }));
     });
 
     it('should not throw when streaming chunk has no delta', () => {
-      const chunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-2',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              // Some OpenAI-compatible providers may omit delta entirely.
-              delta: undefined,
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        withStreamParser(new StreamingToolCallParser()),
+      // Some OpenAI-compatible providers may omit delta entirely.
+      const parts = streamParts(
+        withStreamParser(),
+        undefined as unknown as Record<string, unknown>,
       );
 
-      const parts = chunk.candidates?.[0]?.content?.parts;
       expect(parts).toEqual([]);
     });
 
     it('should normalize cumulative streaming content deltas to suffixes', () => {
-      const ctx = withStreamParser();
       const chunks = [
         'Here',
         'Here is a Flowchart Syntax Reference:',
         'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |',
         'Here is a Flowchart Syntax Reference:\n| `flowchart TD` | Direction |\n| `A[Text]` | Node |',
       ];
-
-      const emitted = chunks.map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-cumulative-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        );
-
-        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      });
+      const emitted = streamContent(chunks);
 
       expect(emitted).toEqual([
         'Here',
@@ -4817,100 +2263,30 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should ignore repeated cumulative chunks with no new suffix', () => {
-      const ctx = withStreamParser();
-      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars) so the
-      // exact-repeat branch enters cumulative mode rather than treating this
-      // as a short legitimate repeat. Realistic cumulative providers replay
-      // buffers of hundreds of bytes, so this length is representative.
+      // ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64) so the exact repeat
+      // enters cumulative mode instead of passing as a short legit repeat.
       const content =
         'The following section starts with more than enough text for cumulative-mode detection.';
-      const emitted = [content, content].map((chunkContent, index) => {
-        const chunk = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-cumulative-repeat-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { content: chunkContent },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        );
 
-        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      });
-
-      expect(emitted).toEqual([content, '']);
+      expect(streamContent([content, content])).toEqual([content, '']);
     });
 
     it('should preserve repeated short incremental content chunks', () => {
-      const ctx = withStreamParser();
-      const emitted = ['ha', 'ha'].map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-repeat-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        );
-
-        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      });
-
-      expect(emitted).toEqual(['ha', 'ha']);
+      expect(streamContent(['ha', 'ha'])).toEqual(['ha', 'ha']);
     });
 
     it('should normalize cumulative streaming reasoning_content deltas to suffixes', () => {
-      const ctx = withStreamParser();
       const chunks = [
         'Let me think',
         'Let me think about the request carefully.',
         'Let me think about the request carefully.\nFirst, identify the table format.',
       ];
-
-      const emitted = chunks.map((reasoning_content, index) => {
-        const chunk = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-reasoning-cumulative-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        );
-
-        const part = chunk.candidates?.[0]?.content?.parts?.[0];
-        return { text: part?.text ?? '', thought: part?.thought ?? false };
-      });
+      const emitted = streamReasoning(chunks);
 
       expect(emitted).toEqual([
-        { text: 'Let me think', thought: true },
-        { text: ' about the request carefully.', thought: true },
-        { text: '\nFirst, identify the table format.', thought: true },
+        thoughtPart('Let me think'),
+        thoughtPart(' about the request carefully.'),
+        thoughtPart('\nFirst, identify the table format.'),
       ]);
       expect(emitted.map((e) => e.text).join('')).toBe(
         chunks[chunks.length - 1],
@@ -4918,1527 +2294,547 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should exit cumulative mode when a chunk does not match prior accumulated text', () => {
-      const ctx = withStreamParser();
-      // Three chunks that establish cumulative mode, then one that breaks it.
-      const chunks = [
-        'Step one is to gather inputs.',
-        'Step one is to gather inputs.\nStep two is to validate them.',
-        'Brand new unrelated message.',
-      ];
-
-      const emitted = chunks.map((content, index) => {
-        const chunk = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-cumulative-exit-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        );
-
-        return chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      });
-
-      // Chunk 1: emits as-is (initial)
-      // Chunk 2: cumulative mode entered, emits suffix only
-      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
-      //          new chunk must be appended verbatim (no silent loss)
-      expect(emitted[0]).toBe('Step one is to gather inputs.');
-      expect(emitted[1]).toBe('\nStep two is to validate them.');
-      expect(emitted[2]).toBe('Brand new unrelated message.');
+      // Chunk 2 enters cumulative mode; chunk 3 is not a prefix extension, so
+      // the mode exits and it is appended verbatim (no silent loss).
+      expectEach(
+        streamContent([
+          'Step one is to gather inputs.',
+          'Step one is to gather inputs.\nStep two is to validate them.',
+          'Brand new unrelated message.',
+        ]),
+        [
+          'Step one is to gather inputs.',
+          '\nStep two is to validate them.',
+          'Brand new unrelated message.',
+        ],
+      );
     });
 
     it('should resume prefix detection cleanly after exiting cumulative mode', () => {
-      const ctx = withStreamParser();
-      // Establish cumulative mode, then break it, then send another cumulative
-      // stream — the fresh baseline should allow re-entry into cumulative mode.
-      const chunks = [
-        'Step one is to gather inputs.',
-        'Step one is to gather inputs.\nStep two is to validate them.',
-        'Brand new unrelated message.',
-        'Brand new unrelated message. And more.',
-      ];
-
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-reentry-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      // After the exit (chunk 3 becomes the fresh baseline), chunk 4
+      // prefix-extends it and re-enters cumulative mode: suffix only.
+      expectEach(
+        streamContent([
+          'Step one is to gather inputs.',
+          'Step one is to gather inputs.\nStep two is to validate them.',
+          'Brand new unrelated message.',
+          'Brand new unrelated message. And more.',
+        ]),
+        [
+          'Step one is to gather inputs.',
+          '\nStep two is to validate them.',
+          'Brand new unrelated message.',
+          ' And more.',
+        ],
       );
-
-      expect(emitted[0]).toBe('Step one is to gather inputs.');
-      expect(emitted[1]).toBe('\nStep two is to validate them.');
-      // Cumulative mode exits; fresh baseline = chunk 3
-      expect(emitted[2]).toBe('Brand new unrelated message.');
-      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only
-      expect(emitted[3]).toBe(' And more.');
     });
 
     it('should not poison the baseline when short chunks repeat before threshold', () => {
-      const ctx = withStreamParser();
-      // Short exact-repeat followed by a prefix-extending chunk.
-      // The repeat must NOT corrupt emittedText so the extension is detected.
-      const chunks = ['Hi', 'Hi', 'Hi there, how are you today?'];
-
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-short-repeat-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
-      );
-
-      // Chunk 1: initial
-      expect(emitted[0]).toBe('Hi');
-      // Chunk 2: short exact repeat — passthrough, baseline stays 'Hi'
-      expect(emitted[1]).toBe('Hi');
-      // Chunk 3: prefix-extends 'Hi' — enters cumulative, emits suffix
-      expect(emitted[2]).toBe(' there, how are you today?');
+      // The short repeat must not corrupt emittedText (baseline stays 'Hi').
+      expectEach(streamContent(['Hi', 'Hi', 'Hi there, how are you today?']), [
+        'Hi',
+        'Hi',
+        ' there, how are you today?',
+      ]);
     });
 
     it('should normalize cumulative reasoning_content deltas across multi-line growth (newline-prefixed suffixes)', () => {
-      // Distinct from the single-line cumulative reasoning test above:
-      // this case grows the accumulated text across newline boundaries so the
-      // emitted suffixes themselves begin with '\n', exercising the slice
-      // arithmetic at the newline.
-      const ctx = withStreamParser();
-      const chunks = [
-        'Let me reason step by step.',
-        'Let me reason step by step.\nFirst: check the inputs.',
-        'Let me reason step by step.\nFirst: check the inputs.\nSecond: validate.',
-      ];
-
-      const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-reasoning-cumulative2-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts?.[0];
-        return { text: part?.text ?? '', thought: part?.thought ?? false };
-      });
-
-      expect(emitted[0]).toEqual({
-        text: 'Let me reason step by step.',
-        thought: true,
-      });
-      expect(emitted[1]).toEqual({
-        text: '\nFirst: check the inputs.',
-        thought: true,
-      });
-      expect(emitted[2]).toEqual({
-        text: '\nSecond: validate.',
-        thought: true,
-      });
+      // Suffixes start with '\n', exercising the slice arithmetic there.
+      expectEach(
+        streamReasoning([
+          'Let me reason step by step.',
+          'Let me reason step by step.\nFirst: check the inputs.',
+          'Let me reason step by step.\nFirst: check the inputs.\nSecond: validate.',
+        ]),
+        [
+          thoughtPart('Let me reason step by step.'),
+          thoughtPart('\nFirst: check the inputs.'),
+          thoughtPart('\nSecond: validate.'),
+        ],
+      );
     });
 
     it('should ignore repeated cumulative reasoning_content chunks with no new suffix', () => {
-      // Mirrors the content-channel `should ignore repeated cumulative chunks
-      // with no new suffix` test: the reasoning channel uses a separate state
-      // object, so the exact-repeat entry path is exercised independently.
-      const ctx = withStreamParser();
-      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars).
+      // The reasoning channel has its own state, so its exact-repeat entry
+      // (≥ 64 chars) is exercised separately; the repeat yields no part.
       const reasoning =
         'The reasoning section also starts with more than enough text to pass detection.';
-      const emitted = [reasoning, reasoning].map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-reasoning-repeat-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts?.[0];
-        return { text: part?.text ?? '', thought: part?.thought ?? false };
-      });
 
-      // Chunk 1: emits as a thought part.
-      expect(emitted[0]).toEqual({ text: reasoning, thought: true });
-      // Chunk 2: exact repeat — enters cumulative mode, suppressed (no part).
-      expect(emitted[1]).toEqual({ text: '', thought: false });
+      expectEach(streamReasoning([reasoning, reasoning]), [
+        thoughtPart(reasoning),
+        { text: '', thought: false },
+      ]);
     });
 
     it('should exit cumulative mode on reasoning_content channel when chunk does not match prior accumulated text', () => {
-      // Mirrors the content-channel `should exit cumulative mode` test against
-      // the reasoning channel's independent state.
-      const ctx = withStreamParser();
-      const chunks = [
-        'Step one of my reasoning is to gather inputs.',
-        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
-        'Brand new unrelated reasoning.',
-      ];
-
-      const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-reasoning-exit-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts?.[0];
-        return { text: part?.text ?? '', thought: part?.thought ?? false };
-      });
-
-      // Chunk 1: initial passthrough.
-      expect(emitted[0]).toEqual({
-        text: 'Step one of my reasoning is to gather inputs.',
-        thought: true,
-      });
-      // Chunk 2: cumulative mode entered, emits suffix only.
-      expect(emitted[1]).toEqual({
-        text: '\nStep two: validate.',
-        thought: true,
-      });
-      // Chunk 3: NOT a prefix-extension — cumulative mode must exit and the
-      //          new chunk must be appended verbatim (no silent loss).
-      expect(emitted[2]).toEqual({
-        text: 'Brand new unrelated reasoning.',
-        thought: true,
-      });
+      // Content-channel exit case, against the reasoning channel's own state.
+      expectEach(
+        streamReasoning([
+          'Step one of my reasoning is to gather inputs.',
+          'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+          'Brand new unrelated reasoning.',
+        ]),
+        [
+          thoughtPart('Step one of my reasoning is to gather inputs.'),
+          thoughtPart('\nStep two: validate.'),
+          thoughtPart('Brand new unrelated reasoning.'),
+        ],
+      );
     });
 
     it('should resume prefix detection on reasoning_content channel after exiting cumulative mode', () => {
-      // Mirrors the content-channel `should resume prefix detection cleanly
-      // after exiting cumulative mode` test. After the exit path resets the
-      // baseline to the new chunk, the reasoning channel must be able to
-      // re-enter cumulative mode on the next prefix-extending chunk.
-      const ctx = withStreamParser();
-      const chunks = [
-        'Step one of my reasoning is to gather inputs.',
-        'Step one of my reasoning is to gather inputs.\nStep two: validate.',
-        'Brand new unrelated reasoning.',
-        'Brand new unrelated reasoning. And further reflection.',
-      ];
-
-      const emitted = chunks.map((reasoning_content, index) => {
-        const part = converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: `chunk-reasoning-reentry-${index}`,
-            created: 456 + index,
-            choices: [
-              {
-                index: 0,
-                delta: { reasoning_content },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts?.[0];
-        return { text: part?.text ?? '', thought: part?.thought ?? false };
-      });
-
-      expect(emitted[0]).toEqual({
-        text: 'Step one of my reasoning is to gather inputs.',
-        thought: true,
-      });
-      expect(emitted[1]).toEqual({
-        text: '\nStep two: validate.',
-        thought: true,
-      });
-      // Cumulative mode exits; fresh baseline = chunk 3.
-      expect(emitted[2]).toEqual({
-        text: 'Brand new unrelated reasoning.',
-        thought: true,
-      });
-      // Chunk 4 prefix-extends chunk 3 — re-enters cumulative, emits suffix only.
-      expect(emitted[3]).toEqual({
-        text: ' And further reflection.',
-        thought: true,
-      });
+      // Content-channel re-entry case, against the reasoning channel's state.
+      expectEach(
+        streamReasoning([
+          'Step one of my reasoning is to gather inputs.',
+          'Step one of my reasoning is to gather inputs.\nStep two: validate.',
+          'Brand new unrelated reasoning.',
+          'Brand new unrelated reasoning. And further reflection.',
+        ]),
+        [
+          thoughtPart('Step one of my reasoning is to gather inputs.'),
+          thoughtPart('\nStep two: validate.'),
+          thoughtPart('Brand new unrelated reasoning.'),
+          thoughtPart(' And further reflection.'),
+        ],
+      );
     });
 
     it('should deduplicate interleaved reasoning_content and content channels independently', () => {
-      const ctx = withStreamParser();
-      // reasoning_content and content each use a separate state object;
-      // cumulative detection in one channel must not bleed into the other.
-      const chunks: Array<{ reasoning_content?: string; content?: string }> = [
-        { reasoning_content: 'Let me think about this carefully.' },
-        { content: 'Here' },
-        { reasoning_content: 'Let me think about this carefully.\nStep two.' },
-        { content: 'Here is the answer.' },
-      ];
-
-      const emitted = chunks.map(
-        (delta, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-interleaved-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta,
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts ?? [],
-      );
-
-      // Reasoning chunk 1: emits as thought
-      expect(emitted[0]).toEqual([
-        { text: 'Let me think about this carefully.', thought: true },
+      // Cumulative detection in one channel must not bleed into the other.
+      expectSteps(withStreamParser(), [
+        [
+          { reasoning_content: 'Let me think about this carefully.' },
+          [thoughtPart('Let me think about this carefully.')],
+        ],
+        [{ content: 'Here' }, [{ text: 'Here' }]],
+        [
+          {
+            reasoning_content: 'Let me think about this carefully.\nStep two.',
+          },
+          [thoughtPart('\nStep two.')],
+        ],
+        [{ content: 'Here is the answer.' }, [{ text: ' is the answer.' }]],
       ]);
-      // Content chunk 1: emits as text (independent state)
-      expect(emitted[1]).toEqual([{ text: 'Here' }]);
-      // Reasoning chunk 2: cumulative extension — emits suffix only
-      expect(emitted[2]).toEqual([{ text: '\nStep two.', thought: true }]);
-      // Content chunk 2: cumulative extension of content channel
-      expect(emitted[3]).toEqual([{ text: ' is the answer.' }]);
     });
 
     it('should enter cumulative mode on exact 64-char repeat (at threshold)', () => {
-      const ctx = withStreamParser();
-      // Exactly 64 chars — meets CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH.
-      // The threshold sits well above realistic legit-repeat lengths (e.g. a
-      // duplicate `import { foo } from './module';` is ~31 chars) so that
-      // legitimate repeats are never silently suppressed.
+      // Exactly the 64-char threshold: the repeat is suppressed and chunk 3
+      // emits its suffix. The threshold sits well above realistic legit
+      // repeats (a duplicate import line is ~31 chars).
       const atThreshold = 'A'.repeat(64);
-      const chunks = [atThreshold, atThreshold, atThreshold + ' and more'];
 
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-threshold64-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      expectEach(
+        streamContent([atThreshold, atThreshold, atThreshold + ' and more']),
+        [atThreshold, '', ' and more'],
       );
-
-      // Chunk 1: initial passthrough
-      expect(emitted[0]).toBe(atThreshold);
-      // Chunk 2: exact 64-char repeat — enters cumulative mode, suppressed
-      expect(emitted[1]).toBe('');
-      // Chunk 3: cumulative extension — emits suffix only
-      expect(emitted[2]).toBe(' and more');
     });
 
     it('should pass through 63-char exact repeat without entering cumulative mode (below threshold)', () => {
-      const ctx = withStreamParser();
-      // 63 chars — one short of CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+      // One short: the repeat passes through; chunk 3 enters cumulative mode.
       const belowThreshold = 'A'.repeat(63);
-      const chunks = [
-        belowThreshold,
-        belowThreshold,
-        belowThreshold + ' extra',
-      ];
 
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-threshold63-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      expectEach(
+        streamContent([
+          belowThreshold,
+          belowThreshold,
+          belowThreshold + ' extra',
+        ]),
+        [belowThreshold, belowThreshold, ' extra'],
       );
-
-      // Chunk 1: initial passthrough
-      expect(emitted[0]).toBe(belowThreshold);
-      // Chunk 2: 63-char repeat — below threshold, passes through unchanged
-      expect(emitted[1]).toBe(belowThreshold);
-      // Chunk 3: prefix-extends prior — enters cumulative, emits suffix only
-      expect(emitted[2]).toBe(' extra');
     });
 
     it('should preserve legitimate duplicate import-line chunks (regression: silent data loss)', () => {
-      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
-      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #1). Realistic
-      // incremental streams emit duplicate import/boilerplate lines and the
-      // exact-repeat threshold must be high enough that those legitimate
-      // repeats are NOT silently suppressed. A duplicate ~31-char import is
-      // the canonical motivating case.
-      const ctx = withStreamParser();
+      // Regression for PR #3896 review (wenshao, 2026-05-13, finding #1):
+      // incremental streams emit duplicate import/boilerplate lines, which the
+      // exact-repeat threshold must not silently suppress.
       const importLine = "import { foo } from './module';"; // 31 chars
-      const chunks = [importLine, importLine, '\nconst x = 1;'];
+      const emitted = streamContent([importLine, importLine, '\nconst x = 1;']);
 
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-import-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
-      );
-
-      // All three chunks must reach the user — no suppression.
-      expect(emitted[0]).toBe(importLine);
-      expect(emitted[1]).toBe(importLine);
-      expect(emitted[2]).toBe('\nconst x = 1;');
-      // Sanity: the reassembled stream equals the user-visible total.
+      expectEach(emitted, [importLine, importLine, '\nconst x = 1;']);
       expect(emitted.join('')).toBe(importLine + importLine + '\nconst x = 1;');
     });
 
     it('should pass incremental chunks through verbatim past the detection window cap (none of them overlap)', () => {
-      // Incremental providers send fresh, non-overlapping chunks. Even after
-      // emittedText growth exceeds CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
-      // and the baseline stops growing, every subsequent chunk that lacks
-      // prefix overlap with the frozen baseline must still be emitted
-      // verbatim (i.e., it must fall through to the final passthrough
-      // branch). This guards against any future regression that would, e.g.,
-      // wrongly short-circuit the passthrough path once the cap is reached.
-      //
-      // Note: this test does NOT cover the (currently unhandled) case where a
-      // later chunk happens to start with the frozen baseline — that chunk
-      // would still trigger prefix-overlap detection against a stale
-      // baseline. Such a chunk is vanishingly unlikely on a true incremental
-      // stream (≥1024 bytes of exact-prefix coincidence) but is not
-      // explicitly defended against here.
-      const ctx = withStreamParser();
-      // 100 distinct incremental chunks of 20 chars = 2000 chars, well past the cap.
+      // Past CUMULATIVE_DETECTION_WINDOW_BYTES (1024) the baseline stops
+      // growing; non-overlapping chunks must still pass through verbatim
+      // rather than short-circuiting once the cap is reached. Unhandled: a
+      // later chunk starting with the frozen baseline would still match it,
+      // but that needs ≥1024 bytes of exact-prefix coincidence.
+      // 100 distinct 20-char chunks = 2000 chars, well past the cap.
       const incrementalChunks = Array.from(
         { length: 100 },
         (_, i) => `chunk${String(i).padStart(3, '0')}-payload__`,
       );
-      const allEmitted = incrementalChunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-cap-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
-      );
 
-      // Every chunk should pass through verbatim — none of them overlap
-      // with prior emittedText, so prefix/exact-repeat detection never fires.
-      expect(allEmitted).toEqual(incrementalChunks);
+      expect(streamContent(incrementalChunks)).toEqual(incrementalChunks);
     });
 
     it('should detect cumulative mode even when the first chunk exceeds the detection window cap', () => {
-      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review:
-      // Some cumulative providers ship a large initial chunk (>1024 chars)
-      // and then accumulate more text on subsequent chunks. The detection
-      // window cap must not short-circuit prefix-overlap detection before the
-      // second chunk gets a chance to be classified, otherwise the entire
-      // first chunk gets duplicated.
-      const ctx = withStreamParser();
-      const firstChunk = 'A'.repeat(1500); // well past CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
-      const secondChunk = firstChunk + 'B'.repeat(200); // cumulative extension
-      const thirdChunk = secondChunk + 'C'.repeat(50); // further cumulative extension
+      // Regression for PR #3896 review: a large (>1024 char) first chunk must
+      // not short-circuit prefix detection, or the whole chunk is duplicated.
+      const firstChunk = 'A'.repeat(1500); // past CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
+      const secondChunk = firstChunk + 'B'.repeat(200);
+      const thirdChunk = secondChunk + 'C'.repeat(50);
 
-      const emitted = [firstChunk, secondChunk, thirdChunk].map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-large-first-${index}`,
-              created: 789 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
-      );
-
-      // Chunk 1: initial passthrough.
-      expect(emitted[0]).toBe(firstChunk);
-      // Chunk 2: prefix-extends → cumulative mode, emits the 200-char suffix only.
-      expect(emitted[1]).toBe('B'.repeat(200));
-      // Chunk 3: continues in cumulative mode, emits only the new 50-char suffix.
-      expect(emitted[2]).toBe('C'.repeat(50));
+      expectEach(streamContent([firstChunk, secondChunk, thirdChunk]), [
+        firstChunk,
+        'B'.repeat(200),
+        'C'.repeat(50),
+      ]);
     });
 
     it('should not duplicate emitted bytes when an incremental stream transitions into cumulative mode past the window cap', () => {
-      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
-      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #2). Hybrid scenario:
-      // upstream emits 200 distinct incremental chunks of 8 bytes each (1600
-      // bytes of user-visible content, well past the 1024-byte detection-
-      // window cap), then sends a single cumulative chunk that replays the
-      // full 1600 bytes and appends new content. The internal baseline froze
-      // at 1024 bytes; without tracking the true emitted length, the suffix
-      // would be sliced from byte 1024 of the cumulative chunk and the user
-      // would see bytes 1024..1600 a second time. The fix tracks emittedLength
-      // separately so the slice starts from the real user-visible boundary
-      // (1600). The chunks must be DISTINCT (otherwise the short-exact-repeat
-      // branch keeps emittedText pinned and the cap is never reached).
-      const ctx = withStreamParser();
+      // Regression for PR #3896 review (wenshao, 2026-05-13, finding #2):
+      // 200 distinct 8-byte chunks (past the 1024-byte cap), then one
+      // cumulative replay plus new content. The baseline froze at 1024, so
+      // without the separately tracked emittedLength bytes 1024..1600 would be
+      // shown twice. Chunks must be distinct, or the short-repeat branch pins
+      // emittedText and the cap is never reached.
       const incremental = Array.from(
         { length: 200 },
         (_, i) => `c${String(i).padStart(3, '0')}=AB_`, // 8 bytes, distinct per chunk
       );
-      const accumulated = incremental.join(''); // 1600 bytes
       const tail = '|CONTINUATION|'; // 14 bytes
-      const cumulativeChunk = accumulated + tail; // 1614 bytes
+      const cumulativeChunk = incremental.join('') + tail; // 1614 bytes
 
-      const incrementalEmitted = incremental.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-hybrid-incr-${index}`,
-              created: 1000 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
-      );
+      const emitted = streamContent([...incremental, cumulativeChunk]);
+      const incrementalEmitted = emitted.slice(0, -1);
+      const cumulativeEmitted = emitted.at(-1);
 
-      const cumulativeEmitted =
-        converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: 'chunk-hybrid-cum',
-            created: 2000,
-            choices: [
-              {
-                index: 0,
-                delta: { content: cumulativeChunk },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-
-      // Incremental phase: every chunk passes through verbatim.
       expect(incrementalEmitted).toEqual(incremental);
-      // Cumulative chunk: only the new 14-byte tail must be emitted — not the
-      // ~576 bytes between the cap (1024) and the true emitted total (1600).
+      // Only the new 14-byte tail, not the ~576 bytes between cap and total.
       expect(cumulativeEmitted).toBe(tail);
-      // Sanity: reassembled stream equals the original accumulated text.
       const userVisible = incrementalEmitted.join('') + cumulativeEmitted;
       expect(userVisible).toBe(cumulativeChunk);
       expect(userVisible.length).toBe(1614);
     });
 
     it('should suppress cumulative rewind (provider re-sends shorter accumulated string)', () => {
-      const ctx = withStreamParser();
-      // Scenario: provider sends Hello → Hello World (extension) → Hello (rewind) → Hello World! (extension again)
-      const chunks = ['Hello', 'Hello World', 'Hello', 'Hello World!'];
-
-      const emitted = chunks.map(
-        (content, index) =>
-          converter.convertOpenAIChunkToLlm(
-            {
-              object: 'chat.completion.chunk',
-              id: `chunk-rewind-${index}`,
-              created: 456 + index,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content },
-                  finish_reason: null,
-                  logprobs: null,
-                },
-              ],
-              model: 'gpt-test',
-            } as unknown as OpenAI.Chat.ChatCompletionChunk,
-            ctx,
-          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      // 'Hello' after 'Hello World' is a rewind (strict prefix): suppressed.
+      expectEach(
+        streamContent(['Hello', 'Hello World', 'Hello', 'Hello World!']),
+        ['Hello', ' World', '', '!'],
       );
-
-      // Chunk 1: initial passthrough
-      expect(emitted[0]).toBe('Hello');
-      // Chunk 2: prefix-extends 'Hello' → enters cumulative, emits suffix
-      expect(emitted[1]).toBe(' World');
-      // Chunk 3: rewind — 'Hello' is a strict prefix of emitted 'Hello World' → suppressed
-      expect(emitted[2]).toBe('');
-      // Chunk 4: extension resumes from 'Hello World' → emits '!'
-      expect(emitted[3]).toBe('!');
     });
 
     it('should still call into convertOpenAITextToParts on finish_reason when the cumulative-mode normalized delta is empty', () => {
-      // Targets the `normalizedContent || choice.finish_reason` guard on the
-      // content path: in cumulative mode an exact-repeat final chunk yields a
-      // normalized delta of '' but must still flush buffered tagged-thinking
-      // content (and any other finish-time side effects) via
-      // convertOpenAITextToParts. The earlier cumulative tests all use
-      // `finish_reason: null`, so this exercises the empty-normalized +
-      // non-null finish_reason path in a cumulative context.
+      // Targets the `normalizedContent || choice.finish_reason` guard: an
+      // exact-repeat final chunk normalizes to '' in cumulative mode (set up by
+      // the prefix-extension pair) but must still reach the text conversion
+      // for finish-time effects such as flushing buffered tagged thinking. The
+      // other cumulative cases all use `finish_reason: null`.
       const ctx = withStreamParser();
-      // 1) Prefix-extension chunk pair establishes cumulative mode and primes
-      //    `emittedText` so the next exact-repeat is the cumulative branch.
-      converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-cum-empty-finish-0',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'Answer: forty-two' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        ctx,
-      );
-      converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-cum-empty-finish-1',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'Answer: forty-two and more.' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        ctx,
-      );
-
-      // 2) Final chunk: re-sends the accumulated string verbatim along with
-      //    `finish_reason: 'stop'`. The normalized delta is '' (cumulative
-      //    suffix-of-self), but the finish_reason must still drive
-      //    convertOpenAITextToParts.
+      streamParts(ctx, { content: 'Answer: forty-two' });
+      streamParts(ctx, { content: 'Answer: forty-two and more.' });
       const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-cum-empty-finish-2',
-          created: 458,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'Answer: forty-two and more.' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'gpt-test',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        openAIStreamChunk({ content: 'Answer: forty-two and more.' }, 'stop'),
         ctx,
       );
 
-      // The cumulative-suppressed empty delta produces no text part, but
-      // because finish_reason is set, the converter still reaches the parts
-      // pipeline; on a clean (no buffered tag) state this yields parts: [].
-      // The crucial invariant: no exception thrown, finishReason propagates,
-      // and no spurious duplicate text emerges.
+      // Clean state (no buffered tag): no exception, finishReason propagates,
+      // no duplicate text.
       expect(finalChunk.candidates?.[0]?.finishReason).toBe('STOP');
-      const finalText =
-        finalChunk.candidates?.[0]?.content?.parts
-          ?.filter((p) => 'text' in p)
-          ?.map((p) => (p as { text: string }).text)
-          ?.join('') ?? '';
-      expect(finalText).toBe('');
+      expect(
+        partsOf(finalChunk)
+          ?.map((p) => p.text ?? '')
+          .join(''),
+      ).toBe('');
     });
 
     it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
       const ctx = withStreamParser();
       ctx.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const part =
-        converter.convertOpenAIChunkToLlm(
-          {
-            object: 'chat.completion.chunk',
-            id: 'chunk-dual-1',
-            created: 456,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  reasoning_content: 'I need to think.',
-                  content: 'Here is my answer.',
-                },
-                finish_reason: null,
-                logprobs: null,
-              },
-            ],
-            model: 'gpt-test',
-          } as unknown as OpenAI.Chat.ChatCompletionChunk,
-          ctx,
-        ).candidates?.[0]?.content?.parts ?? [];
+      const parts =
+        streamParts(ctx, {
+          reasoning_content: 'I need to think.',
+          content: 'Here is my answer.',
+        }) ?? [];
 
-      // Both channels should emit independently in the same response
-      const thoughtPart = part.find((p) => p.thought === true);
-      const textPart = part.find((p) => !p.thought);
-      expect(thoughtPart?.text).toBe('I need to think.');
-      expect(textPart?.text).toBe('Here is my answer.');
+      expect(parts.find((p) => p.thought === true)?.text).toBe(
+        'I need to think.',
+      );
+      expect(parts.find((p) => !p.thought)?.text).toBe('Here is my answer.');
     });
   });
 
   describe('OpenAI -> Gemini tagged thinking content', () => {
-    it('should convert MiniMax <think> content to thought parts for non-streaming responses', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-minimax-1',
-          created: 123,
-          model: 'MiniMax-M2.7',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: '<think>internal reasoning</think>final answer',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
+    const responseParts = (
+      content: string,
+      ctx: RequestContext = withTaggedThinkingOptions(),
+    ) => partsOf(toLlm([choice({ content })], {}, ctx));
 
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'internal reasoning', thought: true },
-        { text: 'final answer' },
-      ]);
-    });
-
-    it('should preserve ordering around <thinking> blocks', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-minimax-2',
-          created: 123,
-          model: 'MiniMax-M2.7',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'before<thinking>hidden</thinking>after',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'before' },
-        { text: 'hidden', thought: true },
-        { text: 'after' },
-      ]);
-    });
-
-    it('should parse multiple tagged thinking blocks case-insensitively', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-minimax-3',
-          created: 123,
-          model: 'MiniMax-M2.7',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: '<THINK>a</THINK>visible<Thinking>b</Thinking>',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'a', thought: true },
-        { text: 'visible' },
-        { text: 'b', thought: true },
-      ]);
+    it.each<[string, string, Part[]]>([
+      [
+        'should convert MiniMax <think> content to thought parts for non-streaming responses',
+        '<think>internal reasoning</think>final answer',
+        [thoughtPart('internal reasoning'), { text: 'final answer' }],
+      ],
+      [
+        'should preserve ordering around <thinking> blocks',
+        'before<thinking>hidden</thinking>after',
+        [{ text: 'before' }, thoughtPart('hidden'), { text: 'after' }],
+      ],
+      [
+        'should parse multiple tagged thinking blocks case-insensitively',
+        '<THINK>a</THINK>visible<Thinking>b</Thinking>',
+        [thoughtPart('a'), { text: 'visible' }, thoughtPart('b')],
+      ],
+      [
+        'should preserve incomplete tags as visible text on final non-streaming parse',
+        'final answer <thi',
+        [{ text: 'final answer <thi' }],
+      ],
+    ])('%s', (_title, content, expected) => {
+      expect(responseParts(content)).toEqual(expected);
     });
 
     it('should leave tags visible when tagged thinking parsing is disabled', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-openai-1',
-          created: 123,
-          model: 'gpt-test',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: '<think>visible xml example</think>',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        {
-          ...requestContext,
-          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
-        },
-      );
+      const parts = responseParts('<think>visible xml example</think>', {
+        ...requestContext,
+        responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+      });
 
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: '<think>visible xml example</think>' },
-      ]);
-    });
-
-    it('should preserve incomplete tags as visible text on final non-streaming parse', () => {
-      const response = converter.convertOpenAIResponseToLlm(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-minimax-4',
-          created: 123,
-          model: 'MiniMax-M2.7',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'final answer <thi',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'final answer <thi' },
-      ]);
+      expect(parts).toEqual([{ text: '<think>visible xml example</think>' }]);
     });
 
     it('should parse streaming tags split across chunks', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-minimax-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'pre <thi' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'MiniMax-M2.7',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const secondChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-minimax-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'nk>hidden</thi' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'MiniMax-M2.7',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-minimax-3',
-          created: 458,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'nk> visible' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'MiniMax-M2.7',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'pre ' },
-      ]);
-      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'hidden', thought: true },
-      ]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: ' visible' },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [{ content: 'pre <thi' }, [{ text: 'pre ' }]],
+        [{ content: 'nk>hidden</thi' }, [thoughtPart('hidden')]],
+        [{ content: 'nk> visible' }, [{ text: ' visible' }], 'stop'],
       ]);
     });
 
     it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const chunk = converter.convertOpenAIChunkToLlm(
+      const parts = streamParts(
+        withTaggedThinkingStreamParser(),
         {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-dual-tagged',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                reasoning_content: 'duplicate reasoning channel',
-                content: '<think>tagged reasoning</think>final answer',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
+          reasoning_content: 'duplicate reasoning channel',
+          content: '<think>tagged reasoning</think>final answer',
+        },
+        'stop',
       );
 
-      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'tagged reasoning', thought: true },
+      expect(parts).toEqual([
+        thoughtPart('tagged reasoning'),
         { text: 'final answer' },
       ]);
     });
 
     it('should suppress late reasoning_content after streaming tagged thinking content', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-late-reasoning-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { content: '<think>tagged reasoning</think>' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const secondChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-late-reasoning-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content: 'late reasoning' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'tagged reasoning', thought: true },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [
+          { content: '<think>tagged reasoning</think>' },
+          [thoughtPart('tagged reasoning')],
+        ],
+        [{ reasoning_content: 'late reasoning' }, []],
       ]);
-      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([]);
     });
 
     it('should suppress buffered reasoning_content when later streaming content has tagged thinking', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-reasoning-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content: 'duplicate reasoning channel' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const secondChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-reasoning-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: '<think>tagged reasoning</think>' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-reasoning-3',
-          created: 458,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'final answer' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'tagged reasoning', thought: true },
-      ]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'final answer' },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [{ reasoning_content: 'duplicate reasoning channel' }, []],
+        [
+          { content: '<think>tagged reasoning</think>' },
+          [thoughtPart('tagged reasoning')],
+        ],
+        [{ content: 'final answer' }, [{ text: 'final answer' }], 'stop'],
       ]);
     });
 
     it('should flush buffered content before later tagged thinking content', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-content-before-tag-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                reasoning_content: 'duplicate reasoning channel',
-                content: 'early visible ',
-              },
-              finish_reason: null,
-              logprobs: null,
-            },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [
+          {
+            reasoning_content: 'duplicate reasoning channel',
+            content: 'early visible ',
+          },
+          [],
+        ],
+        [
+          { content: '<think>tagged reasoning</think>final answer' },
+          [
+            { text: 'early visible ' },
+            thoughtPart('tagged reasoning'),
+            { text: 'final answer' },
           ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const secondChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-content-before-tag-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: '<think>tagged reasoning</think>final answer' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(secondChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'early visible ' },
-        { text: 'tagged reasoning', thought: true },
-        { text: 'final answer' },
+        ],
       ]);
     });
 
     it('should flush buffered content before current content when reasoning flushes on finish', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-content-order-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                reasoning_content: 'step 1',
-                content: 'hello ',
-              },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-buffered-content-order-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'world' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'step 1', thought: true },
-        { text: 'hello ' },
-        { text: 'world' },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [{ reasoning_content: 'step 1', content: 'hello ' }, []],
+        [
+          { content: 'world' },
+          [thoughtPart('step 1'), { text: 'hello ' }, { text: 'world' }],
+          'stop',
+        ],
       ]);
     });
 
     it('should flush buffered reasoning_content when tagged streaming content has no thinking tags', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-reasoning-only-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                reasoning_content: 'separate reasoning channel',
-                content: 'final ',
-              },
-              finish_reason: null,
-              logprobs: null,
-            },
+      const [, finalParts] = expectSteps(withTaggedThinkingStreamParser(), [
+        [
+          {
+            reasoning_content: 'separate reasoning channel',
+            content: 'final ',
+          },
+          [],
+        ],
+        [
+          { content: 'answer' },
+          [
+            thoughtPart('separate reasoning channel'),
+            { text: 'final ' },
+            { text: 'answer' },
           ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-reasoning-only-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'answer' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      const finalParts = finalChunk.candidates?.[0]?.content?.parts;
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalParts).toEqual([
-        { text: 'separate reasoning channel', thought: true },
-        { text: 'final ' },
-        { text: 'answer' },
+          'stop',
+        ],
       ]);
+
       expect(isOpenAIReasoningThoughtPart(finalParts?.[0] as Part)).toBe(true);
     });
 
     it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const firstChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-reasoning-only-no-content-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { reasoning_content: 'step 1' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-glm-reasoning-only-no-content-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'glm-5.2',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
-      );
-
-      expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'step 1', thought: true },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [{ reasoning_content: 'step 1' }, []],
+        [{}, [thoughtPart('step 1')], 'stop'],
       ]);
     });
 
     it('should flush unclosed streaming thinking content on finish', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const chunk = converter.convertOpenAIChunkToLlm(
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-minimax-unclosed',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'answer <think>still thinking' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'MiniMax-M2.7',
-        } as unknown as OpenAI.Chat.ChatCompletionChunk,
-        context,
+      const parts = streamParts(
+        withTaggedThinkingStreamParser(),
+        { content: 'answer <think>still thinking' },
+        'stop',
       );
 
-      expect(chunk.candidates?.[0]?.content?.parts).toEqual([
+      expect(parts).toEqual([
         { text: 'answer ' },
-        { text: 'still thinking', thought: true },
+        thoughtPart('still thinking'),
       ]);
     });
 
-    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+    /** A Qwen3 tagged-thinking stream that has already emitted reasoning 'step 1'. */
+    const qwen3AfterReasoning = () => {
       const context = withQwen3TaggedThinkingStreamParser();
+      streamParts(context, { reasoning_content: 'step 1' });
+      return context;
+    };
 
-      const reasoningChunk = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
-      );
-      const contentChunk = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: 'answer' }),
-        context,
-      );
-
-      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'step 1', thought: true },
-      ]);
-      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'answer' },
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      expectSteps(withQwen3TaggedThinkingStreamParser(), [
+        [{ reasoning_content: 'step 1' }, [thoughtPart('step 1')]],
+        [{ content: 'answer' }, [{ text: 'answer' }]],
       ]);
     });
 
     it('should parse a balanced Qwen3 thinking block after reasoning', () => {
-      const context = withQwen3TaggedThinkingStreamParser();
-
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
-      );
-      const openingChunk = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: '<thi' }),
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: 'nking>step 2</thinking>answer' }, 'stop'),
-        context,
-      );
-
-      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'step 2', thought: true },
-        { text: 'answer' },
+      expectSteps(qwen3AfterReasoning(), [
+        [{ content: '<thi' }, []],
+        [
+          { content: 'nking>step 2</thinking>answer' },
+          [thoughtPart('step 2'), { text: 'answer' }],
+          'stop',
+        ],
       ]);
     });
 
     it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
-      const context = withQwen3TaggedThinkingStreamParser();
+      const context = qwen3AfterReasoning();
 
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
+      expectThrowType(
+        () => streamParts(context, { content: '<thinking>step 2' }, 'stop'),
+        'PROTOCOL_TAG_LEAK',
       );
-
-      expect(() =>
-        converter.convertOpenAIChunkToLlm(
-          openAIStreamChunk({ content: '<thinking>step 2' }, 'stop'),
-          context,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
     it('should suppress a replayed short Qwen3 thinking block', () => {
-      const context = withQwen3TaggedThinkingStreamParser();
-      const block = '<think>x</think>';
-
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
-      );
-      const firstBlock = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block }),
-        context,
-      );
-      const replayedBlock = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block }),
-        context,
-      );
-
-      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'x', thought: true },
+      expectSteps(qwen3AfterReasoning(), [
+        [{ content: '<think>x</think>' }, [thoughtPart('x')]],
+        [{ content: '<think>x</think>' }, []],
       ]);
-      expect(replayedBlock.candidates?.[0]?.content?.parts).toEqual([]);
     });
 
     it('should suppress a replayed short Qwen3 thinking opener', () => {
-      const context = withQwen3TaggedThinkingStreamParser();
-      const opener = '<think>';
+      const context = qwen3AfterReasoning();
+      streamParts(context, { content: '<think>' });
 
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
-      );
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: opener }),
-        context,
-      );
-      const replayedOpener = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: opener }),
-        context,
-      );
-      const finalChunk = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: 'x</think>answer' }, 'stop'),
-        context,
-      );
-
-      expect(replayedOpener.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'x', thought: true },
-        { text: 'answer' },
+      expectSteps(context, [
+        [{ content: '<think>' }, []],
+        [
+          { content: 'x</think>answer' },
+          [thoughtPart('x'), { text: 'answer' }],
+          'stop',
+        ],
       ]);
     });
 
     it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
-      const context = withQwen3TaggedThinkingStreamParser();
+      const context = qwen3AfterReasoning();
       const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
-
-      converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ reasoning_content: 'step 1' }),
-        context,
-      );
       for (let offset = 0; offset < block.length; offset += 100) {
-        converter.convertOpenAIChunkToLlm(
-          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
-          context,
-        );
+        streamParts(context, { content: block.slice(offset, offset + 100) });
       }
 
-      const replay = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block }),
-        context,
-      );
-      const rewind = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block.slice(0, -1) }),
-        context,
-      );
-      const extension = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: `${block}!` }),
-        context,
-      );
-
-      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(extension.candidates?.[0]?.content?.parts).toEqual([
-        { text: '!' },
+      expectSteps(context, [
+        [{ content: block }, []],
+        [{ content: block.slice(0, -1) }, []],
+        [{ content: `${block}!` }, [{ text: '!' }]],
       ]);
     });
 
     it('should preserve repeated short blocks for eager tagged parsing', () => {
-      const context = withTaggedThinkingStreamParser();
-      const block = '<think>x</think>';
-
-      const firstBlock = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block }),
-        context,
-      );
-      const secondBlock = converter.convertOpenAIChunkToLlm(
-        openAIStreamChunk({ content: block }),
-        context,
-      );
-
-      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'x', thought: true },
-      ]);
-      expect(secondBlock.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'x', thought: true },
+      expectSteps(withTaggedThinkingStreamParser(), [
+        [{ content: '<think>x</think>' }, [thoughtPart('x')]],
+        [{ content: '<think>x</think>' }, [thoughtPart('x')]],
       ]);
     });
   });
 
   describe('convertLlmToolsToOpenAI', () => {
+    const toolsOf = (...functionDeclarations: unknown[]) =>
+      [{ functionDeclarations }] as Tool[];
+    const convertDeclarations = (
+      declarations: unknown[],
+      schemaFormat?: Parameters<typeof converter.convertLlmToolsToOpenAI>[1],
+    ) =>
+      converter.convertLlmToolsToOpenAI(toolsOf(...declarations), schemaFormat);
+    const declarationsOf = async (
+      declarations: unknown[],
+      schemaFormat?: Parameters<typeof converter.convertLlmToolsToOpenAI>[1],
+    ) =>
+      (await convertDeclarations(declarations, schemaFormat)).map(
+        ({ function: declaration }) => declaration,
+      );
+    const paramsOf = async (declaration: unknown) =>
+      (await convertDeclarations([declaration]))[0]!.function
+        .parameters as Record<string, unknown>;
+    const schemaTool = (name: string, parametersJsonSchema: unknown) => ({
+      name,
+      parametersJsonSchema,
+    });
+    const closedEmpty = () => ({
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    });
+    /** An expected wire declaration: empty description, `parameters` only when given. */
+    const decl = (name: string, parameters?: unknown) => ({
+      name,
+      description: '',
+      ...(parameters === undefined ? {} : { parameters }),
+    });
+
     it('compiles a stable tool schema only once', async () => {
-      const parametersJsonSchema = {
-        type: 'object',
-        properties: {
-          value: { type: 'string', maxLength: 1999 },
-        },
-      };
-      const tools = [
-        {
-          functionDeclarations: [{ name: 'stable', parametersJsonSchema }],
-        },
-      ] as Tool[];
+      const tools = toolsOf(
+        schemaTool('stable', {
+          type: 'object',
+          properties: { value: { type: 'string', maxLength: 1999 } },
+        }),
+      );
       const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');
 
       try {
@@ -6461,19 +2857,14 @@ describe('OpenAIContentConverter', () => {
           },
         },
       };
-      const tools = [
-        {
-          functionDeclarations: [
-            {
-              name: 'todo_write',
-              description: 'Update the todo list',
-              parametersJsonSchema,
-            },
-          ],
-        },
-      ] as Tool[];
 
-      const result = await converter.convertLlmToolsToOpenAI(tools);
+      const result = await convertDeclarations([
+        {
+          name: 'todo_write',
+          description: 'Update the todo list',
+          parametersJsonSchema,
+        },
+      ]);
 
       expect(result).toEqual([
         {
@@ -6484,10 +2875,7 @@ describe('OpenAIContentConverter', () => {
             parameters: {
               type: 'object',
               properties: {
-                blockedBy: {
-                  type: 'array',
-                  items: { type: 'string' },
-                },
+                blockedBy: { type: 'array', items: { type: 'string' } },
               },
             },
           },
@@ -6497,166 +2885,70 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('only relaxes grammar constraints backed by local validation', async () => {
-      const supportedSchema = {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      };
-      const openSchema = {
-        type: 'object',
-        properties: {},
-      };
-      const draft2020Schema = {
-        $schema: 'https://json-schema.org/draft/2020-12/schema',
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      };
-      // Says nothing about its arguments -- not the same claim as an empty
-      // argument list, so it keeps `parameters`.
-      const unspecifiedSchema = {
-        type: 'object',
-      };
-      // Explicitly accepts arguments it does not name; also keeps them.
-      const permissiveSchema = {
-        type: 'object',
-        properties: {},
-        additionalProperties: true,
-      };
+      const supportedSchema = closedEmpty();
       const unsupportedSchema = {
         $schema: 'https://json-schema.org/draft/2019-09/schema',
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
+        ...closedEmpty(),
       };
       const unsupportedVocabularySchema = {
         type: 'object',
-        properties: {
-          tuple: {
-            type: 'array',
-            prefixItems: [
-              {
-                type: 'object',
-                properties: {},
-                additionalProperties: false,
-              },
-            ],
-          },
-        },
+        properties: { tuple: { type: 'array', prefixItems: [closedEmpty()] } },
       };
-      const tools = [
-        {
-          functionDeclarations: [
-            { name: 'supported', parametersJsonSchema: supportedSchema },
-            { name: 'open', parametersJsonSchema: openSchema },
-            { name: 'draft_2020', parametersJsonSchema: draft2020Schema },
-            {
-              name: 'annotated',
-              parametersJsonSchema: {
-                type: 'object',
-                properties: {},
-                title: 'NoArgs',
-              },
-            },
-            {
-              name: 'closed',
-              parametersJsonSchema: {
-                type: 'object',
-                additionalProperties: false,
-              },
-            },
-            {
-              name: 'constrained',
-              parametersJsonSchema: {
-                type: 'object',
-                properties: {},
-                minProperties: 1,
-              },
-            },
-            {
-              name: 'nullable',
-              parametersJsonSchema: {
-                type: ['object', 'null'],
-                properties: {},
-              },
-            },
-            { name: 'unspecified', parametersJsonSchema: unspecifiedSchema },
-            { name: 'permissive', parametersJsonSchema: permissiveSchema },
-            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
-            {
-              name: 'unsupported_vocabulary',
-              parametersJsonSchema: unsupportedVocabularySchema,
-            },
-            {
-              name: 'without_local_schema',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {},
-                additionalProperties: false,
-              },
-            },
-          ],
-        },
-      ] as Tool[];
 
-      const result = await converter.convertLlmToolsToOpenAI(tools);
-
-      expect(result.map(({ function: declaration }) => declaration)).toEqual([
-        { name: 'supported', description: '' },
-        { name: 'open', description: '' },
-        { name: 'draft_2020', description: '' },
-        { name: 'annotated', description: '' },
-        { name: 'closed', description: '' },
-        {
-          name: 'constrained',
-          description: '',
-          parameters: { type: 'object', minProperties: 1 },
-        },
-        {
-          name: 'nullable',
-          description: '',
-          parameters: { type: ['object', 'null'] },
-        },
-        {
-          name: 'unspecified',
-          description: '',
-          parameters: { type: 'object' },
-        },
-        {
-          name: 'permissive',
-          description: '',
-          parameters: { type: 'object', additionalProperties: true },
-        },
-        {
-          name: 'unsupported',
-          description: '',
-          parameters: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'unsupported_vocabulary',
-          description: '',
-          parameters: unsupportedVocabularySchema,
-        },
+      const declarations = await declarationsOf([
+        schemaTool('supported', supportedSchema),
+        schemaTool('open', { type: 'object', properties: {} }),
+        schemaTool('draft_2020', {
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          ...closedEmpty(),
+        }),
+        schemaTool('annotated', {
+          type: 'object',
+          properties: {},
+          title: 'NoArgs',
+        }),
+        schemaTool('closed', { type: 'object', additionalProperties: false }),
+        schemaTool('constrained', {
+          type: 'object',
+          properties: {},
+          minProperties: 1,
+        }),
+        schemaTool('nullable', { type: ['object', 'null'], properties: {} }),
+        // Says nothing about its arguments -- not the same claim as an empty
+        // argument list, so it keeps `parameters`.
+        schemaTool('unspecified', { type: 'object' }),
+        // Explicitly accepts arguments it does not name; also keeps them.
+        schemaTool('permissive', {
+          type: 'object',
+          properties: {},
+          additionalProperties: true,
+        }),
+        schemaTool('unsupported', unsupportedSchema),
+        schemaTool('unsupported_vocabulary', unsupportedVocabularySchema),
         {
           name: 'without_local_schema',
-          description: '',
-          parameters: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
+          parameters: { ...closedEmpty(), type: Type.OBJECT },
         },
       ]);
-      expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters');
-      expect(supportedSchema).toEqual({
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      });
+
+      expect(declarations).toEqual([
+        decl('supported'),
+        decl('open'),
+        decl('draft_2020'),
+        decl('annotated'),
+        decl('closed'),
+        decl('constrained', { type: 'object', minProperties: 1 }),
+        decl('nullable', { type: ['object', 'null'] }),
+        decl('unspecified', { type: 'object' }),
+        decl('permissive', { type: 'object', additionalProperties: true }),
+        decl('unsupported', closedEmpty()),
+        decl('unsupported_vocabulary', unsupportedVocabularySchema),
+        decl('without_local_schema', closedEmpty()),
+      ]);
+      expect(JSON.stringify(declarations.slice(0, 5))).not.toContain(
+        'parameters',
+      );
+      expect(supportedSchema).toEqual(closedEmpty());
       expect(unsupportedSchema.$schema).toBe(
         'https://json-schema.org/draft/2019-09/schema',
       );
@@ -6667,172 +2959,125 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('does not omit constraints lost during OpenAPI 3.0 conversion', async () => {
-      const parametersJsonSchema = {
-        type: 'object',
-        properties: {},
-        patternProperties: { '^x': { type: 'string' } },
-        additionalProperties: false,
-      };
-      const tools = [
-        {
-          functionDeclarations: [
-            { name: 'patterned', parametersJsonSchema },
-            {
-              name: 'dependent',
-              parametersJsonSchema: {
-                type: 'object',
-                properties: {},
-                dependencies: { a: ['b'] },
-              },
-            },
-            {
-              name: 'nullable',
-              parametersJsonSchema: {
-                type: ['object', 'null'],
-                properties: {},
-              },
-            },
-          ],
-        },
-      ] as Tool[];
-
-      const result = await converter.convertLlmToolsToOpenAI(
-        tools,
+      const declarations = await declarationsOf(
+        [
+          schemaTool('patterned', {
+            type: 'object',
+            properties: {},
+            patternProperties: { '^x': { type: 'string' } },
+            additionalProperties: false,
+          }),
+          schemaTool('dependent', {
+            type: 'object',
+            properties: {},
+            dependencies: { a: ['b'] },
+          }),
+          schemaTool('nullable', { type: ['object', 'null'], properties: {} }),
+        ],
         'openapi_30',
       );
 
-      expect(result.map(({ function: declaration }) => declaration)).toEqual([
-        {
-          name: 'patterned',
-          description: '',
-          parameters: { type: 'object' },
-        },
-        {
-          name: 'dependent',
-          description: '',
-          parameters: { type: 'object' },
-        },
-        {
-          name: 'nullable',
-          description: '',
-          parameters: { type: 'object', nullable: true },
-        },
+      expect(declarations).toEqual([
+        decl('patterned', { type: 'object' }),
+        decl('dependent', { type: 'object' }),
+        decl('nullable', { type: 'object', nullable: true }),
       ]);
     });
 
     it('keeps grammar constraints for schemas with a top-level $id', async () => {
-      const sharedId = 'https://qwen-code.test/shared-tool-schema';
+      const properties = () => ({ value: { type: 'string', maxLength: 1999 } });
       const makeSchema = () => ({
-        $id: sharedId,
+        $id: 'https://qwen-code.test/shared-tool-schema',
         type: 'object',
-        properties: {
-          value: { type: 'string', maxLength: 1999 },
-        },
+        properties: properties(),
       });
-      const tools = [
-        {
-          functionDeclarations: [
-            { name: 'first', parametersJsonSchema: makeSchema() },
-            { name: 'second', parametersJsonSchema: makeSchema() },
-          ],
-        },
-      ] as Tool[];
 
-      const result = await converter.convertLlmToolsToOpenAI(tools);
-
-      expect(result.map(({ function: declaration }) => declaration)).toEqual([
-        {
-          name: 'first',
-          description: '',
-          parameters: {
-            type: 'object',
-            properties: {
-              value: { type: 'string', maxLength: 1999 },
-            },
-          },
-        },
-        {
-          name: 'second',
-          description: '',
-          parameters: {
-            type: 'object',
-            properties: {
-              value: { type: 'string', maxLength: 1999 },
-            },
-          },
-        },
+      const declarations = await declarationsOf([
+        schemaTool('first', makeSchema()),
+        schemaTool('second', makeSchema()),
       ]);
+
+      expect(declarations).toEqual(
+        ['first', 'second'].map((name) =>
+          decl(name, { type: 'object', properties: properties() }),
+        ),
+      );
     });
 
-    it('should convert Gemini tools with parameters field', async () => {
-      const llmTools = [
+    it.each([
+      [
+        'should convert Gemini tools with parameters field',
         {
-          functionDeclarations: [
-            {
-              name: 'get_weather',
-              description: 'Get weather for a location',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  location: { type: Type.STRING },
-                },
-                required: ['location'],
-              },
-            },
-          ],
+          name: 'get_weather',
+          description: 'Get weather for a location',
+          parameters: {
+            type: Type.OBJECT,
+            properties: { location: { type: Type.STRING } },
+            required: ['location'],
+          },
         },
-      ] as Tool[];
-
-      const result = await converter.convertLlmToolsToOpenAI(llmTools);
-
-      expect(result).toHaveLength(1);
-      expect(result[0]).toEqual({
-        type: 'function',
-        function: {
+        {
           name: 'get_weather',
           description: 'Get weather for a location',
           parameters: {
             type: 'object',
-            properties: {
-              location: { type: 'string' },
-            },
+            properties: { location: { type: 'string' } },
             required: ['location'],
           },
         },
-      });
+      ],
+      [
+        // MCP tools carry plain JSON schema (not Gemini types).
+        'should convert MCP tools with parametersJsonSchema field',
+        {
+          name: 'read_file',
+          description: 'Read a file from disk',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        },
+        {
+          name: 'read_file',
+          description: 'Read a file from disk',
+          parameters: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        },
+      ],
+    ])('%s', async (_title, declaration, expected) => {
+      const result = await convertDeclarations([declaration]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({ type: 'function', function: expected });
     });
 
     // Regression for #7315: the wire schema must not carry
-    // additionalProperties:false on levels with optional properties —
-    // OpenAI-compatible gateways promote every property to required,
-    // forcing mutually exclusive optional fields (Agent working_dir vs
-    // isolation) into every call.
+    // additionalProperties:false on levels with optional properties.
+    // OpenAI-compatible gateways promote every property to required, forcing
+    // mutually exclusive optional fields (Agent working_dir vs isolation)
+    // into every call.
     it('relaxes additionalProperties:false for schemas with optional fields', async () => {
-      const agentLikeTools = [
-        {
-          functionDeclarations: [
-            {
-              name: 'agent',
-              description: 'Launch a new agent',
-              parametersJsonSchema: {
-                $schema: 'http://json-schema.org/draft-07/schema#',
-                type: 'object',
-                properties: {
-                  description: { type: 'string' },
-                  prompt: { type: 'string' },
-                  working_dir: { type: 'string' },
-                  isolation: { type: 'string', enum: ['worktree'] },
-                },
-                required: ['description', 'prompt'],
-                additionalProperties: false,
-              },
-            },
-          ],
+      const params = await paramsOf({
+        name: 'agent',
+        description: 'Launch a new agent',
+        parametersJsonSchema: {
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            description: { type: 'string' },
+            prompt: { type: 'string' },
+            working_dir: { type: 'string' },
+            isolation: { type: 'string', enum: ['worktree'] },
+          },
+          required: ['description', 'prompt'],
+          additionalProperties: false,
         },
-      ] as Tool[];
+      });
 
-      const result = await converter.convertLlmToolsToOpenAI(agentLikeTools);
-      const params = result[0]!.function.parameters as Record<string, unknown>;
       expect(params['additionalProperties']).toBeUndefined();
       expect(params['$schema']).toBeUndefined();
       // Required stays exactly as authored — optional fields remain optional.
@@ -6840,82 +3085,29 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('keeps additionalProperties:false when every property is required', async () => {
-      const strictTools = [
-        {
-          functionDeclarations: [
-            {
-              name: 'strict_tool',
-              description: 'All fields required',
-              parametersJsonSchema: {
-                type: 'object',
-                properties: { path: { type: 'string' } },
-                required: ['path'],
-                additionalProperties: false,
-              },
-            },
-          ],
-        },
-      ] as Tool[];
-
-      const result = await converter.convertLlmToolsToOpenAI(strictTools);
-      const params = result[0]!.function.parameters as Record<string, unknown>;
-      expect(params['additionalProperties']).toBe(false);
-    });
-
-    it('should convert MCP tools with parametersJsonSchema field', async () => {
-      // MCP tools use parametersJsonSchema which contains plain JSON schema (not Gemini types)
-      const mcpTools = [
-        {
-          functionDeclarations: [
-            {
-              name: 'read_file',
-              description: 'Read a file from disk',
-              parametersJsonSchema: {
-                type: 'object',
-                properties: {
-                  path: { type: 'string' },
-                },
-                required: ['path'],
-              },
-            },
-          ],
-        },
-      ] as Tool[];
-
-      const result = await converter.convertLlmToolsToOpenAI(mcpTools);
-
-      expect(result).toHaveLength(1);
-      expect(result[0]).toEqual({
-        type: 'function',
-        function: {
-          name: 'read_file',
-          description: 'Read a file from disk',
-          parameters: {
-            type: 'object',
-            properties: {
-              path: { type: 'string' },
-            },
-            required: ['path'],
-          },
+      const params = await paramsOf({
+        name: 'strict_tool',
+        description: 'All fields required',
+        parametersJsonSchema: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+          additionalProperties: false,
         },
       });
+
+      expect(params['additionalProperties']).toBe(false);
     });
 
     it('should handle CallableTool by resolving tool function', async () => {
       const callableTools = [
         {
-          tool: async () => ({
-            functionDeclarations: [
-              {
-                name: 'dynamic_tool',
-                description: 'A dynamically resolved tool',
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {},
-                },
-              },
-            ],
-          }),
+          tool: async () =>
+            toolsOf({
+              name: 'dynamic_tool',
+              description: 'A dynamically resolved tool',
+              parameters: { type: Type.OBJECT, properties: {} },
+            })[0],
         },
       ] as CallableTool[];
 
@@ -6926,26 +3118,11 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should preserve functions without description and skip functions without name', async () => {
-      const llmTools = [
-        {
-          functionDeclarations: [
-            {
-              name: 'valid_tool',
-              description: 'A valid tool',
-            },
-            {
-              name: 'missing_description',
-              // no description
-            },
-            {
-              // no name
-              description: 'Missing name',
-            },
-          ],
-        },
-      ] as Tool[];
-
-      const result = await converter.convertLlmToolsToOpenAI(llmTools);
+      const result = await convertDeclarations([
+        { name: 'valid_tool', description: 'A valid tool' },
+        { name: 'missing_description' },
+        { description: 'Missing name' },
+      ]);
 
       expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
@@ -6963,18 +3140,9 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should handle functions without parameters', async () => {
-      const llmTools: Tool[] = [
-        {
-          functionDeclarations: [
-            {
-              name: 'no_params_tool',
-              description: 'A tool without parameters',
-            },
-          ],
-        },
-      ];
-
-      const result = await converter.convertLlmToolsToOpenAI(llmTools);
+      const result = await convertDeclarations([
+        { name: 'no_params_tool', description: 'A tool without parameters' },
+      ]);
 
       expect(result).toHaveLength(1);
       expect(result[0].function.parameters).toBeUndefined();
@@ -6985,38 +3153,38 @@ describe('OpenAIContentConverter', () => {
         type: 'object',
         properties: { foo: { type: 'string' } },
       };
-      const mcpTools: Tool[] = [
+
+      const result = await convertDeclarations([
         {
-          functionDeclarations: [
-            {
-              name: 'test_tool',
-              description: 'Test tool',
-              parametersJsonSchema: originalSchema,
-            },
-          ],
-        } as Tool,
-      ];
+          name: 'test_tool',
+          description: 'Test tool',
+          parametersJsonSchema: originalSchema,
+        },
+      ]);
 
-      const result = await converter.convertLlmToolsToOpenAI(mcpTools);
-
-      // Verify the result is a copy, not the same reference
       expect(result[0].function.parameters).not.toBe(originalSchema);
       expect(result[0].function.parameters).toEqual(originalSchema);
     });
   });
 
   describe('convertLlmToolParametersToOpenAI', () => {
+    const convertedProperties = (
+      properties: Record<string, unknown>,
+      type = 'object',
+    ) =>
+      converter.convertLlmToolParametersToOpenAI({ type, properties })?.[
+        'properties'
+      ] as Record<string, unknown> | undefined;
+
     it('should convert type names to lowercase', () => {
-      const params = {
+      const result = converter.convertLlmToolParametersToOpenAI({
         type: 'OBJECT',
         properties: {
           count: { type: 'INTEGER' },
           amount: { type: 'NUMBER' },
           name: { type: 'STRING' },
         },
-      };
-
-      const result = converter.convertLlmToolParametersToOpenAI(params);
+      });
 
       expect(result).toEqual({
         type: 'object',
@@ -7032,9 +3200,8 @@ describe('OpenAIContentConverter', () => {
       // A tool can declare a parameter literally called `maximum` or
       // `minItems`. Those are property NAMES, not constraints, so their
       // subschemas must still be converted like any other property.
-      const params = {
-        type: 'OBJECT',
-        properties: {
+      const properties = convertedProperties(
+        {
           maximum: {
             type: 'INTEGER',
             description: 'upper bound',
@@ -7043,10 +3210,8 @@ describe('OpenAIContentConverter', () => {
           minItems: { type: 'STRING' },
           normalProp: { type: 'STRING' },
         },
-      };
-
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-      const properties = result?.['properties'] as Record<string, unknown>;
+        'OBJECT',
+      );
 
       expect(properties?.['maximum']).toEqual({
         type: 'integer',
@@ -7057,10 +3222,10 @@ describe('OpenAIContentConverter', () => {
       expect(properties?.['normalProp']).toEqual({ type: 'string' });
     });
 
-    it('should convert string numeric constraints to numbers', () => {
-      const params = {
-        type: 'object',
-        properties: {
+    it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+      [
+        'should convert string numeric constraints to numbers',
+        {
           value: {
             type: 'number',
             minimum: '0',
@@ -7068,129 +3233,61 @@ describe('OpenAIContentConverter', () => {
             multipleOf: '0.5',
           },
         },
-      };
-
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-      const properties = result?.['properties'] as Record<string, unknown>;
-
-      expect(properties?.['value']).toEqual({
-        type: 'number',
-        minimum: 0,
-        maximum: 100,
-        multipleOf: 0.5,
-      });
-    });
-
-    it('should convert string length constraints to integers', () => {
-      const params = {
-        type: 'object',
-        properties: {
-          text: {
-            type: 'string',
-            minLength: '1',
-            maxLength: '100',
-          },
-          items: {
-            type: 'array',
-            minItems: '0',
-            maxItems: '10',
-          },
+        {
+          value: { type: 'number', minimum: 0, maximum: 100, multipleOf: 0.5 },
         },
-      };
-
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-      const properties = result?.['properties'] as Record<string, unknown>;
-
-      expect(properties?.['text']).toEqual({
-        type: 'string',
-        minLength: 1,
-        maxLength: 100,
-      });
-      expect(properties?.['items']).toEqual({
-        type: 'array',
-        minItems: 0,
-        maxItems: 10,
-      });
-    });
-
-    it('should not truncate non-integer length constraints', () => {
-      const params = {
-        type: 'object',
-        properties: {
-          text: {
-            type: 'string',
-            minLength: '1.5',
-            maxLength: '   ',
-          },
-          items: {
-            type: 'array',
-            minItems: '10px',
-            maxItems: '1.5',
-          },
+      ],
+      [
+        'should convert string length constraints to integers',
+        {
+          text: { type: 'string', minLength: '1', maxLength: '100' },
+          items: { type: 'array', minItems: '0', maxItems: '10' },
         },
-      };
+        {
+          text: { type: 'string', minLength: 1, maxLength: 100 },
+          items: { type: 'array', minItems: 0, maxItems: 10 },
+        },
+      ],
+      [
+        'should not truncate non-integer length constraints',
+        {
+          text: { type: 'string', minLength: '1.5', maxLength: '   ' },
+          items: { type: 'array', minItems: '10px', maxItems: '1.5' },
+        },
+        {
+          text: { type: 'string', minLength: '1.5', maxLength: '   ' },
+          items: { type: 'array', minItems: '10px', maxItems: '1.5' },
+        },
+      ],
+    ])('%s', (_title, input, expected) => {
+      const properties = convertedProperties(input);
 
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-      const properties = result?.['properties'] as Record<string, unknown>;
-
-      expect(properties?.['text']).toEqual({
-        type: 'string',
-        minLength: '1.5',
-        maxLength: '   ',
-      });
-      expect(properties?.['items']).toEqual({
-        type: 'array',
-        minItems: '10px',
-        maxItems: '1.5',
-      });
+      for (const [name, schema] of Object.entries(expected)) {
+        expect(properties?.[name]).toEqual(schema);
+      }
     });
 
     it('should handle nested objects', () => {
-      const params = {
-        type: 'object',
-        properties: {
-          nested: {
-            type: 'object',
-            properties: {
-              deep: {
-                type: 'INTEGER',
-                minimum: '0',
-              },
-            },
-          },
+      const nested = convertedProperties({
+        nested: {
+          type: 'object',
+          properties: { deep: { type: 'INTEGER', minimum: '0' } },
         },
-      };
+      })?.['nested'] as { properties?: Record<string, unknown> } | undefined;
 
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-      const properties = result?.['properties'] as Record<string, unknown>;
-      const nested = properties?.['nested'] as Record<string, unknown>;
-      const nestedProperties = nested?.['properties'] as Record<
-        string,
-        unknown
-      >;
-
-      expect(nestedProperties?.['deep']).toEqual({
+      expect(nested?.properties?.['deep']).toEqual({
         type: 'integer',
         minimum: 0,
       });
     });
 
     it('should handle arrays', () => {
-      const params = {
+      const result = converter.convertLlmToolParametersToOpenAI({
         type: 'array',
-        items: {
-          type: 'INTEGER',
-        },
-      };
-
-      const result = converter.convertLlmToolParametersToOpenAI(params);
-
-      expect(result).toEqual({
-        type: 'array',
-        items: {
-          type: 'integer',
-        },
+        items: { type: 'INTEGER' },
       });
+
+      expect(result).toEqual({ type: 'array', items: { type: 'integer' } });
     });
 
     it('should return undefined for null or non-object input', () => {
@@ -7209,9 +3306,7 @@ describe('OpenAIContentConverter', () => {
     it('should not mutate the original parameters', () => {
       const original = {
         type: 'OBJECT',
-        properties: {
-          count: { type: 'INTEGER' },
-        },
+        properties: { count: { type: 'INTEGER' } },
       };
       const originalCopy = JSON.parse(JSON.stringify(original));
 
@@ -7222,159 +3317,70 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('mergeConsecutiveAssistantMessages', () => {
+    /** Converts `contents` and expects them merged into a single message. */
+    const mergeAll = (...contents: Content[]) => {
+      const messages = toMessages(...contents);
+      expect(messages).toHaveLength(1);
+      return messages[0];
+    };
+
     it('should preserve reasoning_content from every merged assistant turn', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              { text: 'First reasoning.', thought: true },
-              { text: 'First answer.' },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [
-              { text: 'Second reasoning.', thought: true },
-              { text: 'Second answer.' },
-            ],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const merged = mergeAll(
+        content('model', thoughtPart('First reasoning.'), {
+          text: 'First answer.',
+        }),
+        content('model', thoughtPart('Second reasoning.'), {
+          text: 'Second answer.',
+        }),
       );
 
-      expect(messages).toHaveLength(1);
-      expect(messages[0].role).toBe('assistant');
-      expect(messages[0].content).toBe('First answer.Second answer.');
+      expect(merged.role).toBe('assistant');
+      expect(merged.content).toBe('First answer.Second answer.');
       // The reasoning of the merged-away turn must not be silently dropped.
-      expect(
-        (messages[0] as { reasoning_content?: string }).reasoning_content,
-      ).toBe('First reasoning.Second reasoning.');
+      expect((merged as { reasoning_content?: string }).reasoning_content).toBe(
+        'First reasoning.Second reasoning.',
+      );
     });
 
-    it('should merge two consecutive assistant messages with string content', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ text: 'First part' }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Second part' }],
-          },
-        ],
-      };
+    it.each<[string, Content[], string]>([
+      [
+        'should merge two consecutive assistant messages with string content',
+        [modelText('First part'), modelText('Second part')],
+        'First partSecond part',
+      ],
+      [
+        'should merge multiple consecutive assistant messages',
+        [modelText('Part 1'), modelText('Part 2'), modelText('Part 3')],
+        'Part 1Part 2Part 3',
+      ],
+      [
+        'should handle merging when one message has array content and another has string',
+        [modelText('Text part'), modelText('Another text')],
+        'Text partAnother text',
+      ],
+      [
+        // Empty messages should be filtered out
+        'should merge empty content correctly',
+        [modelText('First'), content('model'), modelText('Second')],
+        'FirstSecond',
+      ],
+    ])('%s', (_title, contents, text) => {
+      const merged = mergeAll(...contents);
 
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      expect(messages).toHaveLength(1);
-      expect(messages[0].role).toBe('assistant');
-      expect(messages[0].content).toBe('First partSecond part');
-    });
-
-    it('should merge multiple consecutive assistant messages', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ text: 'Part 1' }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Part 2' }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Part 3' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      expect(messages).toHaveLength(1);
-      expect(messages[0].role).toBe('assistant');
-      expect(messages[0].content).toBe('Part 1Part 2Part 3');
+      expect(merged.role).toBe('assistant');
+      expect(merged.content).toBe(text);
     });
 
     it('should merge tool_calls from consecutive assistant messages', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_1',
-                  name: 'tool_1',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_1',
-                  name: 'tool_1',
-                  response: { output: 'result_1' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_2',
-                  name: 'tool_2',
-                  args: {},
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_2',
-                  name: 'tool_2',
-                  response: { output: 'result_2' },
-                },
-              },
-            ],
-          },
-        ],
-      };
-
       const messages = converter.convertLlmRequestToOpenAI(
-        request,
+        req(
+          ...exchange('call_1', 'tool_1', { output: 'result_1' }),
+          ...exchange('call_2', 'tool_2', { output: 'result_2' }),
+        ),
         requestContext,
-        {
-          cleanOrphanToolCalls: false,
-        },
+        { cleanOrphanToolCalls: false },
       );
 
-      // Should have: assistant (tool_call_1), tool (result_1), assistant (tool_call_2), tool (result_2)
       expect(messages).toHaveLength(4);
       expect(messages[0].role).toBe('assistant');
       expect(messages[1].role).toBe('tool');
@@ -7383,27 +3389,10 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('should not merge assistant messages separated by user messages', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ text: 'First assistant' }],
-          },
-          {
-            role: 'user',
-            parts: [{ text: 'User message' }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Second assistant' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
+      const messages = toMessages(
+        modelText('First assistant'),
+        userText('User message'),
+        modelText('Second assistant'),
       );
 
       expect(messages).toHaveLength(3);
@@ -7411,378 +3400,128 @@ describe('OpenAIContentConverter', () => {
       expect(messages[1].role).toBe('user');
       expect(messages[2].role).toBe('assistant');
     });
-
-    it('should handle merging when one message has array content and another has string', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ text: 'Text part' }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Another text' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe('Text partAnother text');
-    });
-
-    it('should merge empty content correctly', () => {
-      const request: GenerateContentParameters = {
-        model: 'models/test',
-        contents: [
-          {
-            role: 'model',
-            parts: [{ text: 'First' }],
-          },
-          {
-            role: 'model',
-            parts: [],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Second' }],
-          },
-        ],
-      };
-
-      const messages = converter.convertLlmRequestToOpenAI(
-        request,
-        requestContext,
-      );
-
-      // Empty messages should be filtered out
-      expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe('FirstSecond');
-    });
   });
 });
 
 describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', () => {
+  // End-to-end regression tests for https://github.com/QwenLM/qwen-code/issues/1520.
+  // Simulates transformMcpContentToParts → convertToFunctionResponse → OpenAI
+  // converter and verifies multi-part MCP results land in the OpenAI tool
+  // message, with no content leaking into user messages.
   /**
-   * End-to-end regression tests for https://github.com/QwenLM/qwen-code/issues/1520
-   *
-   * Simulates the full pipeline:
-   *   transformMcpContentToParts → convertToFunctionResponse → OpenAI converter
-   *
-   * Verifies that multi-part MCP tool results are properly carried through
-   * into the OpenAI tool message, with no content leaking into user messages.
+   * Wraps what transformMcpContentToParts returned via convertToFunctionResponse,
+   * converts the call + result history, and checks there is exactly one tool
+   * message (array content) and no user message.
    */
-  let converter: typeof OpenAIContentConverter;
-  let requestContext: RequestContext;
-
-  beforeEach(() => {
-    converter = OpenAIContentConverter;
-    requestContext = {
-      model: 'test-model',
-      modalities: {
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      },
-      startTime: 0,
-    };
-  });
-
-  it('should preserve MCP multi-text content in tool message (not leak to user message)', () => {
-    // Step 1: Simulate what transformMcpContentToParts returns for a Figma
-    // tool that returns code + instructions as two text blocks
-    const mcpTransformedParts: Part[] = [
-      { text: '<div data-node-id="38:521"><h1>Welcome</h1></div>' },
-      {
-        text: 'SUPER CRITICAL: Convert the React+Tailwind code to match the target stack.',
-      },
-    ];
-
-    // Step 2: convertToFunctionResponse wraps the MCP result
-    const callId = 'call_figma_1';
-    const toolName = 'figma_get_code';
-    const responseParts = convertToFunctionResponse(
-      toolName,
-      callId,
-      mcpTransformedParts,
+  const convertMcpResult = (
+    toolName: string,
+    callId: string,
+    args: Record<string, unknown>,
+    mcpTransformedParts: Part[],
+  ) => {
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
+      req(
+        content('model', fnCall(toolName, args, callId)),
+        content(
+          'user',
+          ...convertToFunctionResponse(toolName, callId, mcpTransformedParts),
+        ),
+      ),
+      baseRequestContext(),
     );
-
-    // Step 3: Build the conversation history (model tool call + tool result)
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: callId,
-              name: toolName,
-              args: { nodeId: '38:521' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: responseParts,
-      },
-    ];
-
-    // Step 4: Convert to OpenAI format
-    const request: GenerateContentParameters = {
-      model: 'models/test',
-      contents,
-    };
-    const messages = converter.convertLlmRequestToOpenAI(
-      request,
-      requestContext,
-    );
-
-    const toolMessages = messages.filter((m) => m.role === 'tool');
-    const userMessages = messages.filter((m) => m.role === 'user');
-    const assistantMessages = messages.filter((m) => m.role === 'assistant');
+    const toolMessages = byRole(messages, 'tool');
 
     expect(toolMessages).toHaveLength(1);
-    expect(assistantMessages).toHaveLength(1);
-    // No content should leak into a user message
-    expect(userMessages).toHaveLength(0);
+    expect(byRole(messages, 'user')).toHaveLength(0);
+    expect(Array.isArray(toolMessages[0].content)).toBe(true);
+    return {
+      messages,
+      toolMsg: toolMessages[0],
+      contentArray: wireParts(toolMessages[0]),
+    };
+  };
 
-    // Tool message should contain the actual MCP content
-    const toolMsg = toolMessages[0];
-    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe(callId);
+  it('should preserve MCP multi-text content in tool message (not leak to user message)', () => {
+    // A Figma tool returning code + instructions as two text blocks.
+    const { messages, toolMsg, contentArray } = convertMcpResult(
+      'figma_get_code',
+      'call_figma_1',
+      { nodeId: '38:521' },
+      [
+        { text: '<div data-node-id="38:521"><h1>Welcome</h1></div>' },
+        {
+          text: 'SUPER CRITICAL: Convert the React+Tailwind code to match the target stack.',
+        },
+      ],
+    );
 
-    const toolContent = toolMsg.content;
-    expect(Array.isArray(toolContent)).toBe(true);
-    const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
-      .filter((p) => p.type === 'text')
-      .map((p) => p.text);
+    expect(byRole(messages, 'assistant')).toHaveLength(1);
+    expect(toolMsg).toMatchObject(toolReply('call_figma_1'));
+    const toolTexts = textsOf(contentArray);
     expect(toolTexts).toHaveLength(1);
     expect(toolTexts[0]).toContain('data-node-id');
     expect(toolTexts[0]).toContain('SUPER CRITICAL');
   });
 
   it('should preserve MCP text+image content in tool message', () => {
-    // Simulates MCP tool returning text description + image (e.g., get_screenshot)
-    const mcpTransformedParts: Part[] = [
-      {
-        text: "[Tool 'figma' provided the following image data with mime-type: image/png]",
-      },
-      {
-        inlineData: {
-          mimeType: 'image/png',
-          data: 'iVBORw0KGgo=',
+    // MCP tool returning a text description + image (e.g. get_screenshot).
+    const { contentArray } = convertMcpResult(
+      'figma_get_screenshot',
+      'call_figma_2',
+      { nodeId: '38:521' },
+      [
+        {
+          text: "[Tool 'figma' provided the following image data with mime-type: image/png]",
         },
-      },
-    ];
-
-    const callId = 'call_figma_2';
-    const toolName = 'figma_get_screenshot';
-    const responseParts = convertToFunctionResponse(
-      toolName,
-      callId,
-      mcpTransformedParts,
+        inline('image/png', 'iVBORw0KGgo='),
+      ],
     );
 
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: callId,
-              name: toolName,
-              args: { nodeId: '38:521' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: responseParts,
-      },
-    ];
-
-    const request: GenerateContentParameters = {
-      model: 'models/test',
-      contents,
-    };
-    const messages = converter.convertLlmRequestToOpenAI(
-      request,
-      requestContext,
-    );
-
-    const toolMessages = messages.filter((m) => m.role === 'tool');
-    const userMessages = messages.filter((m) => m.role === 'user');
-
-    expect(toolMessages).toHaveLength(1);
-    // No content should leak into a user message
-    expect(userMessages).toHaveLength(0);
-
-    // Tool message should contain both text description and image
-    const toolMsg = toolMessages[0];
-    const toolContent = toolMsg.content;
-    expect(Array.isArray(toolContent)).toBe(true);
-    const contentArray = toolContent as Array<{
-      type: string;
-      text?: string;
-      image_url?: { url: string };
-    }>;
-    expect(contentArray).toHaveLength(2);
-    expect(contentArray[0].type).toBe('text');
-    expect(contentArray[0].text).toContain('image data');
-    expect(contentArray[1].type).toBe('image_url');
-    expect(contentArray[1].image_url?.url).toContain('data:image/png');
+    expectTextThenPng(contentArray, 'image data');
   });
 
   it('should work correctly when MCP tool returns a single text part', () => {
     // Single text part — the control case that has always worked
-    const mcpTransformedParts: Part[] = [
-      { text: 'Single text response from MCP tool' },
-    ];
-
-    const callId = 'call_mcp_single';
-    const toolName = 'mcp_tool';
-    const responseParts = convertToFunctionResponse(
-      toolName,
-      callId,
-      mcpTransformedParts,
+    const { contentArray } = convertMcpResult(
+      'mcp_tool',
+      'call_mcp_single',
+      {},
+      [{ text: 'Single text response from MCP tool' }],
     );
 
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: callId,
-              name: toolName,
-              args: {},
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: responseParts,
-      },
-    ];
-
-    const request: GenerateContentParameters = {
-      model: 'models/test',
-      contents,
-    };
-    const messages = converter.convertLlmRequestToOpenAI(
-      request,
-      requestContext,
-    );
-
-    const toolMessages = messages.filter((m) => m.role === 'tool');
-    const userMessages = messages.filter((m) => m.role === 'user');
-
-    expect(toolMessages).toHaveLength(1);
-    expect(userMessages).toHaveLength(0);
-
-    const toolMsg = toolMessages[0];
-    const toolContent = toolMsg.content;
-    expect(Array.isArray(toolContent)).toBe(true);
-    const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
-      .filter((p) => p.type === 'text')
-      .map((p) => p.text);
+    const toolTexts = textsOf(contentArray);
     expect(toolTexts).toHaveLength(1);
     expect(toolTexts[0]).toBe('Single text response from MCP tool');
   });
 
   it('should preserve MCP multi-text + multi-image content in tool message', () => {
-    // Simulates a complex MCP response with multiple text blocks and images
-    const mcpTransformedParts: Part[] = [
-      { text: 'Here is the design mockup:' },
-      {
-        text: "[Tool 'pencil' provided the following image data with mime-type: image/png]",
-      },
-      {
-        inlineData: {
-          mimeType: 'image/png',
-          data: 'screenshotBase64Data',
+    const { toolMsg, contentArray } = convertMcpResult(
+      'mcp__pencil__get_screenshot',
+      'call_pencil_1',
+      { nodeId: 'vHOGa' },
+      [
+        { text: 'Here is the design mockup:' },
+        {
+          text: "[Tool 'pencil' provided the following image data with mime-type: image/png]",
         },
-      },
-      { text: 'And here are the node details...' },
-    ];
-
-    const callId = 'call_pencil_1';
-    const toolName = 'mcp__pencil__get_screenshot';
-    const responseParts = convertToFunctionResponse(
-      toolName,
-      callId,
-      mcpTransformedParts,
+        inline('image/png', 'screenshotBase64Data'),
+        { text: 'And here are the node details...' },
+      ],
     );
 
-    const contents: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: callId,
-              name: toolName,
-              args: { nodeId: 'vHOGa' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: responseParts,
-      },
-    ];
-
-    const request: GenerateContentParameters = {
-      model: 'models/test',
-      contents,
-    };
-    const messages = converter.convertLlmRequestToOpenAI(
-      request,
-      requestContext,
+    expect(toolMsg).toMatchObject(toolReply('call_pencil_1'));
+    // All text joined into one part, then the image.
+    expectTextThenPng(
+      contentArray,
+      'design mockup',
+      'image data',
+      'node details',
     );
-
-    const toolMessages = messages.filter((m) => m.role === 'tool');
-    const userMessages = messages.filter((m) => m.role === 'user');
-
-    expect(toolMessages).toHaveLength(1);
-    expect(userMessages).toHaveLength(0);
-
-    const toolMsg = toolMessages[0];
-    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe(callId);
-
-    const toolContent = toolMsg.content;
-    expect(Array.isArray(toolContent)).toBe(true);
-    const contentArray = toolContent as Array<{
-      type: string;
-      text?: string;
-      image_url?: { url: string };
-    }>;
-
-    // Should have text (all joined) + image
-    expect(contentArray).toHaveLength(2);
-    expect(contentArray[0].type).toBe('text');
-    expect(contentArray[0].text).toContain('design mockup');
-    expect(contentArray[0].text).toContain('image data');
-    expect(contentArray[0].text).toContain('node details');
-    expect(contentArray[1].type).toBe('image_url');
-    expect(contentArray[1].image_url?.url).toContain('data:image/png');
   });
 });
 
 describe('Truncated tool call detection in streaming', () => {
-  let converter: typeof OpenAIContentConverter;
-
-  beforeEach(() => {
-    converter = OpenAIContentConverter;
-  });
+  const converter = OpenAIContentConverter;
 
   function createStreamingRequestContext(model = 'test-model'): RequestContext {
     return {
@@ -7792,6 +3531,16 @@ describe('Truncated tool call detection in streaming', () => {
       toolCallParser: new StreamingToolCallParser(),
     };
   }
+
+  /** Sends one chunk carrying a single index-0 tool-call delta. */
+  const sendToolDelta = (
+    ctx: RequestContext,
+    toolCall: Record<string, unknown>,
+  ) =>
+    converter.convertOpenAIChunkToLlm(
+      openAIStreamChunk({ tool_calls: [{ index: 0, ...toolCall }] }),
+      ctx,
+    );
 
   /**
    * Helper: feed streaming chunks then a final chunk with finish_reason,
@@ -7806,9 +3555,22 @@ describe('Truncated tool call detection in streaming', () => {
       arguments: string;
     }>,
     finishReason: string,
+    options?: {
+      usage?: OpenAI.Chat.ChatCompletionChunk['usage'];
+      maxOutputTokens?: number;
+      /**
+       * Receives the live stream context so a test can inspect state the
+       * converter parks on it for the pipeline to settle later.
+       */
+      captureContext?: (ctx: RequestContext) => void;
+    },
   ) {
     // One stream-local context covers every chunk of this simulated stream.
     const ctx = createStreamingRequestContext();
+    if (options?.maxOutputTokens !== undefined) {
+      ctx.maxOutputTokens = options.maxOutputTokens;
+    }
+    options?.captureContext?.(ctx);
 
     // Feed argument chunks (no finish_reason yet)
     for (const tc of toolCallChunks) {
@@ -7858,89 +3620,46 @@ describe('Truncated tool call detection in streaming', () => {
             logprobs: null,
           },
         ],
+        usage: options?.usage,
       } as unknown as OpenAI.Chat.ChatCompletionChunk,
       ctx,
     );
   }
 
+  const finish = (ctx: RequestContext, finishReason = 'tool_calls') =>
+    converter.convertOpenAIChunkToLlm(openAIStreamChunk({}, finishReason), ctx);
+
+  /**
+   * Streams one write_file call (call_1) with `args`, then a final chunk with
+   * `finishReason`; returns the Gemini response for the final chunk.
+   */
+  function feedWriteFileCall(args: string, finishReason: string) {
+    const ctx = createStreamingRequestContext();
+    sendToolDelta(ctx, {
+      id: 'call_1',
+      function: { name: 'write_file', arguments: args },
+    });
+    return finish(ctx, finishReason);
+  }
+
   it('emits tool preparation metadata before the complete function call', () => {
     const context = createStreamingRequestContext();
-    const opener = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-open',
-        created: 100,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call-1',
-                  type: 'function',
-                  function: { name: 'read_file', arguments: '' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const args = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-args',
-        created: 101,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  type: 'function',
-                  function: { arguments: '{"file_path":"a.sql"}' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const finish = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-finish',
-        created: 102,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: 'tool_calls',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
+    const opener = sendToolDelta(context, {
+      id: 'call-1',
+      function: { name: 'read_file', arguments: '' },
+    });
+    const args = sendToolDelta(context, {
+      function: { arguments: '{"file_path":"a.sql"}' },
+    });
+    const finishResponse = finish(context);
 
     expect(getToolCallPreparations(opener)).toEqual([
       { callId: 'call-1', toolName: 'read_file' },
     ]);
     expect(getToolCallPreparations(args)).toEqual([]);
-    expect(getToolCallPreparations(finish)).toEqual([]);
+    expect(getToolCallPreparations(finishResponse)).toEqual([]);
     expect(opener.functionCalls).toBeUndefined();
-    expect(finish.functionCalls).toEqual([
+    expect(finishResponse.functionCalls).toEqual([
       { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
     ]);
   });
@@ -7948,31 +3667,12 @@ describe('Truncated tool call detection in streaming', () => {
   it('does not duplicate tool preparation metadata for a replayed opener', () => {
     const context = createStreamingRequestContext();
     const opener = {
-      object: 'chat.completion.chunk',
-      id: 'chunk-open',
-      created: 100,
-      model: 'test-model',
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call-1',
-                type: 'function',
-                function: { name: 'read_file', arguments: '' },
-              },
-            ],
-          },
-          finish_reason: null,
-          logprobs: null,
-        },
-      ],
-    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      id: 'call-1',
+      function: { name: 'read_file', arguments: '' },
+    };
 
-    const first = converter.convertOpenAIChunkToLlm(opener, context);
-    const replay = converter.convertOpenAIChunkToLlm(opener, context);
+    const first = sendToolDelta(context, opener);
+    const replay = sendToolDelta(context, opener);
 
     expect(getToolCallPreparations(first)).toEqual([
       { callId: 'call-1', toolName: 'read_file' },
@@ -7982,192 +3682,33 @@ describe('Truncated tool call detection in streaming', () => {
 
   it('emits preparation after split identity deltas using the remapped parser index', () => {
     const context = createStreamingRequestContext();
+    const responses = [
+      {
+        id: 'call-1',
+        function: { name: 'read_file', arguments: '{"file_path":"a.sql"}' },
+      },
+      { id: 'call-2' },
+      { function: { name: 'write_file', arguments: '{"file_path":"b.sql"}' } },
+      { function: { name: 'delete_file', arguments: '' } },
+      { function: { arguments: '{"file_path":"c.sql"}' } },
+      { id: 'call-3' },
+    ].map((toolCall) => sendToolDelta(context, toolCall));
+    const finishResponse = finish(context);
 
-    const firstCall = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-first-call',
-        created: 100,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call-1',
-                  type: 'function',
-                  function: {
-                    name: 'read_file',
-                    arguments: '{"file_path":"a.sql"}',
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const secondCallId = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-second-id',
-        created: 101,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [{ index: 0, id: 'call-2', type: 'function' }],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const secondCallName = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-second-name',
-        created: 102,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  type: 'function',
-                  function: {
-                    name: 'write_file',
-                    arguments: '{"file_path":"b.sql"}',
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const thirdCallName = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-third-name',
-        created: 103,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  type: 'function',
-                  function: {
-                    name: 'delete_file',
-                    arguments: '',
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const thirdCallArguments = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-third-arguments',
-        created: 104,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  type: 'function',
-                  function: { arguments: '{"file_path":"c.sql"}' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const thirdCallId = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-third-id',
-        created: 105,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [{ index: 0, id: 'call-3', type: 'function' }],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-    const finish = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-finish',
-        created: 106,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: 'tool_calls',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      context,
-    );
-
-    expect(getToolCallPreparations(firstCall)).toEqual([
-      { callId: 'call-1', toolName: 'read_file' },
+    // [firstCall, secondCallId, secondCallName, thirdCallName,
+    //  thirdCallArguments, thirdCallId]
+    expectEach(responses.map(getToolCallPreparations), [
+      [{ callId: 'call-1', toolName: 'read_file' }],
+      [],
+      [{ callId: 'call-2', toolName: 'write_file' }],
+      [],
+      [],
+      [{ callId: 'call-3', toolName: 'delete_file' }],
     ]);
-    expect(getToolCallPreparations(secondCallId)).toEqual([]);
-    expect(getToolCallPreparations(secondCallName)).toEqual([
-      { callId: 'call-2', toolName: 'write_file' },
-    ]);
-    expect(getToolCallPreparations(thirdCallName)).toEqual([]);
-    expect(getToolCallPreparations(thirdCallArguments)).toEqual([]);
-    expect(getToolCallPreparations(thirdCallId)).toEqual([
-      { callId: 'call-3', toolName: 'delete_file' },
-    ]);
-    expect(firstCall.functionCalls).toBeUndefined();
-    expect(secondCallId.functionCalls).toBeUndefined();
-    expect(secondCallName.functionCalls).toBeUndefined();
-    expect(thirdCallName.functionCalls).toBeUndefined();
-    expect(thirdCallArguments.functionCalls).toBeUndefined();
-    expect(thirdCallId.functionCalls).toBeUndefined();
-    expect(finish.functionCalls).toEqual([
+    for (const response of responses) {
+      expect(response.functionCalls).toBeUndefined();
+    }
+    expect(finishResponse.functionCalls).toEqual([
       { id: 'call-1', name: 'read_file', args: { file_path: 'a.sql' } },
       { id: 'call-2', name: 'write_file', args: { file_path: 'b.sql' } },
       { id: 'call-3', name: 'delete_file', args: { file_path: 'c.sql' } },
@@ -8193,29 +3734,126 @@ describe('Truncated tool call detection in streaming', () => {
       },
     },
   ])('does not emit tool preparation metadata when $label', ({ toolCall }) => {
-    const response = converter.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'chunk-open',
-        created: 100,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: { tool_calls: [toolCall] },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      createStreamingRequestContext(),
-    );
+    const response = sendToolDelta(createStreamingRequestContext(), toolCall);
 
     expect(getToolCallPreparations(response)).toEqual([]);
   });
 
-  it('should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"', () => {
-    // Simulate: write_file call truncated mid-JSON, provider says "stop"
+  it.each([
+    [
+      // write_file truncated mid-JSON (no closing brace or content field).
+      'should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"',
+      '{"file_path": "/tmp/test.cpp"',
+      'stop',
+      FinishReason.MAX_TOKENS,
+    ],
+    [
+      // Truncated mid-string.
+      'should override finishReason to MAX_TOKENS when provider reports "tool_calls" but JSON is truncated',
+      '{"file_path": "/tmp/test.cpp", "content": "partial content',
+      'tool_calls',
+      FinishReason.MAX_TOKENS,
+    ],
+    [
+      'should preserve finishReason STOP when tool call JSON is complete',
+      '{"file_path": "/tmp/test.cpp", "content": "hello"}',
+      'stop',
+      FinishReason.STOP,
+    ],
+    [
+      'should preserve finishReason MAX_TOKENS when provider already reports "length"',
+      '{"file_path": "/tmp/test.cpp"',
+      'length',
+      FinishReason.MAX_TOKENS,
+    ],
+  ])('%s', (_title, args, finishReason, expected) => {
+    const result = feedWriteFileCall(args, finishReason);
+
+    expect(result.candidates?.[0]?.finishReason).toBe(expected);
+  });
+
+  it('should still emit the (repaired) function call even when truncated', () => {
+    const result = feedWriteFileCall('{"file_path": "/tmp/test.cpp"', 'stop');
+
+    const call = (partsOf(result) ?? []).find((p: Part) => p.functionCall);
+    expect(call).toBeDefined();
+    expect(call?.functionCall?.name).toBe('write_file');
+    expect(call?.functionCall?.args).toEqual({ file_path: '/tmp/test.cpp' });
+  });
+
+  it('should detect truncation with multi-chunk streaming arguments', () => {
+    // Arguments arrive in several small chunks like real streaming; the final
+    // chunk says "stop" while the JSON is still incomplete.
+    const ctx = createStreamingRequestContext();
+    sendToolDelta(ctx, {
+      id: 'call_1',
+      type: 'function' as const,
+      function: { name: 'write_file', arguments: '{"file_' },
+    });
+    sendToolDelta(ctx, {
+      function: { arguments: 'path": "/tmp/f.txt", "conten' },
+    });
+    const result = finish(ctx, 'stop');
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should not override finishReason when usage disproves truncation (fused tool-call arguments)', () => {
+    // Issue #12970: the provider fused two intended read_file calls into one
+    // argument bag and the streamed JSON is missing the final closing brace,
+    // so the parser flags the call incomplete. Usage (185 completion tokens
+    // against an 8192 output budget) proves the response was NOT cut by
+    // max_tokens, so the brace-depth heuristic must not rewrite the
+    // provider's finish_reason to "length" — downstream that misdiagnosis
+    // appends the truncation guidance to the schema-validation error and
+    // sends the model into futile identical retries.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+          // Fused second call's argument bag; missing the final closing brace.
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 252811,
+          completion_tokens: 185,
+          total_tokens: 252996,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    // The repaired call is still emitted so downstream schema validation can
+    // report the real parameter error...
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p: Part) => p.functionCall);
+    expect(fnCall?.functionCall?.name).toBe('read_file');
+    expect(fnCall?.functionCall?.args).toEqual({
+      file_path: '/tmp/ad01.yml',
+      limit: { file_path: '/tmp/node01.yml', limit: null },
+    });
+    // ...but without the truncation misdiagnosis: turn.ts only flags
+    // wasOutputTruncated on MAX_TOKENS, so STOP here is what keeps the
+    // scheduler from appending the max_tokens note to the validation error.
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    // Withdrawing the diagnosis must not withdraw the data-loss guard: the
+    // arguments really did arrive unterminated, so the call is still marked
+    // and the scheduler still refuses to let a repaired partial file write
+    // through (it just words the refusal by the real cause).
+    expect(toolCallArgumentsWereIncomplete(fnCall!.functionCall!)).toBe(true);
+  });
+
+  it('should still override finishReason to MAX_TOKENS when usage corroborates truncation', () => {
+    // Genuine truncation (#4964 must not regress): completion_tokens reached
+    // the output budget, so the incomplete JSON really was cut by the limit
+    // even though the provider reported "stop".
     const result = feedToolCallChunks(
       converter,
       [
@@ -8224,16 +3862,25 @@ describe('Truncated tool call detection in streaming', () => {
           id: 'call_1',
           name: 'write_file',
           arguments: '{"file_path": "/tmp/test.cpp"',
-          // Missing closing brace and content field — truncated
         },
       ],
       'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 8192,
+          total_tokens: 8292,
+        },
+        maxOutputTokens: 8192,
+      },
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
 
-  it('should override finishReason to MAX_TOKENS when provider reports "tool_calls" but JSON is truncated', () => {
+  it('should keep the legacy override when the output ceiling is unknown', () => {
+    // Without a known output budget the usage check is inconclusive; keep
+    // inferring truncation from brace depth as before.
     const result = feedToolCallChunks(
       converter,
       [
@@ -8241,35 +3888,25 @@ describe('Truncated tool call detection in streaming', () => {
           index: 0,
           id: 'call_1',
           name: 'write_file',
-          arguments:
-            '{"file_path": "/tmp/test.cpp", "content": "partial content',
-          // Truncated mid-string
+          arguments: '{"file_path": "/tmp/test.cpp"',
         },
       ],
-      'tool_calls',
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+      },
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
 
-  it('should preserve finishReason STOP when tool call JSON is complete', () => {
-    const result = feedToolCallChunks(
-      converter,
-      [
-        {
-          index: 0,
-          id: 'call_1',
-          name: 'write_file',
-          arguments: '{"file_path": "/tmp/test.cpp", "content": "hello"}',
-        },
-      ],
-      'stop',
-    );
-
-    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
-  });
-
-  it('should preserve finishReason MAX_TOKENS when provider already reports "length"', () => {
+  it('should trust a provider-reported "length" even when usage is below the ceiling', () => {
+    // The usage guard only restrains the client-side inference; an explicit
+    // finish_reason from the provider is taken at face value.
     const result = feedToolCallChunks(
       converter,
       [
@@ -8281,12 +3918,28 @@ describe('Truncated tool call detection in streaming', () => {
         },
       ],
       'length',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+        maxOutputTokens: 8192,
+      },
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
 
-  it('should still emit the (repaired) function call even when truncated', () => {
+  it('should treat zero-filled usage on the finish chunk as inconclusive, not as a disproof', () => {
+    // ModelScope zero-fills usage on the finish chunk and sends the real
+    // totals on a trailing `choices: []` chunk (see pipeline.test.ts "should
+    // handle providers that send zero usage in finish chunk (like
+    // modelscope)"). Reading completion_tokens: 0 as proof against truncation
+    // would suppress the #4964 override and, with it, the scheduler's
+    // reject-file-writes-while-truncated guard — on a response whose tool-call
+    // JSON really was cut. Zero means "not counted", not "nothing generated":
+    // this branch is only reached when the parser found incomplete JSON.
     const result = feedToolCallChunks(
       converter,
       [
@@ -8298,96 +3951,186 @@ describe('Truncated tool call detection in streaming', () => {
         },
       ],
       'stop',
-    );
-
-    const parts = result.candidates?.[0]?.content?.parts ?? [];
-    const fnCall = parts.find((p: Part) => p.functionCall);
-    expect(fnCall).toBeDefined();
-    expect(fnCall?.functionCall?.name).toBe('write_file');
-    expect(fnCall?.functionCall?.args).toEqual({
-      file_path: '/tmp/test.cpp',
-    });
-  });
-
-  it('should detect truncation with multi-chunk streaming arguments', () => {
-    // Feed arguments in multiple small chunks like real streaming
-    const conv = OpenAIContentConverter;
-    const ctx = createStreamingRequestContext();
-
-    // Chunk 1: start of JSON with tool metadata
-    conv.convertOpenAIChunkToLlm(
       {
-        object: 'chat.completion.chunk',
-        id: 'c1',
-        created: 100,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'call_1',
-                  type: 'function' as const,
-                  function: { name: 'write_file', arguments: '{"file_' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      ctx,
-    );
-
-    // Chunk 2: more arguments
-    conv.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'c2',
-        created: 100,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  function: { arguments: 'path": "/tmp/f.txt", "conten' },
-                },
-              ],
-            },
-            finish_reason: null,
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      ctx,
-    );
-
-    // Final chunk: finish_reason "stop" but JSON is still incomplete
-    const result = conv.convertOpenAIChunkToLlm(
-      {
-        object: 'chat.completion.chunk',
-        id: 'c3',
-        created: 101,
-        model: 'test-model',
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: 'stop',
-            logprobs: null,
-          },
-        ],
-      } as unknown as OpenAI.Chat.ChatCompletionChunk,
-      ctx,
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        maxOutputTokens: 8192,
+      },
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should treat an explicit null completion_tokens as inconclusive, not as a disproof', () => {
+    // `null >= 8192 * 0.5` coerces null to 0 and reads as a disproof, which is
+    // the same failure mode as the zero-filled case above. Some OpenAI-compatible
+    // gateways type this field as `number | null` (see omni usage-log.ts).
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: null,
+          total_tokens: 0,
+        } as unknown as OpenAI.Chat.ChatCompletionChunk['usage'],
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should attribute consumption exactly at the 50% threshold to truncation', () => {
+    // Boundary pin for TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD: the
+    // comparison is `>=`, so exactly half the budget is still consistent with
+    // a real cut. Goes red if the ratio is raised (0.95) or `>=` becomes `>`.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 4096,
+          total_tokens: 4196,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should clear truncation for consumption just under the 50% threshold', () => {
+    // Other side of the same boundary: one token below half the budget is
+    // decisively not a token-limit cut. Goes red if the ratio is lowered
+    // (0.25), which would silently re-admit the #12970 misdiagnosis for
+    // responses that ended well below the ceiling.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 4095,
+          total_tokens: 4195,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+  });
+
+  it('should park the override for the pipeline to settle when the finish chunk carries no usage', () => {
+    // The shape the pipeline actually produces: it requests
+    // stream_options.include_usage, under which the finish_reason chunk
+    // reports no usage and the totals arrive on a later `choices: []` chunk
+    // that handleChunkMerging folds into the parked finish response. The
+    // converter must keep the conservative override *and* hand over the
+    // provider's own reason, or the delayed evidence has nothing to undo.
+    let ctx: RequestContext | undefined;
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        maxOutputTokens: 8192,
+        captureContext: (c) => {
+          ctx = c;
+        },
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+    expect(ctx?.pendingTruncationOverride).toEqual({
+      finishReason: FinishReason.STOP,
+    });
+  });
+
+  it('should not park an override that this chunk already decided', () => {
+    // Conclusive evidence — in either direction — settles the rewrite here, so
+    // nothing may be left for the pipeline to second-guess on a later chunk.
+    const corroborating: RequestContext[] = [];
+    feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 8192,
+          total_tokens: 8292,
+        },
+        maxOutputTokens: 8192,
+        captureContext: (c) => corroborating.push(c),
+      },
+    );
+    expect(corroborating[0]?.pendingTruncationOverride).toBeUndefined();
+
+    const disproving: RequestContext[] = [];
+    feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 252811,
+          completion_tokens: 185,
+          total_tokens: 252996,
+        },
+        maxOutputTokens: 8192,
+        captureContext: (c) => disproving.push(c),
+      },
+    );
+    expect(disproving[0]?.pendingTruncationOverride).toBeUndefined();
   });
 });
 
@@ -8411,207 +4154,115 @@ describe('mapLlmFinishReasonToOpenAI', () => {
       {
         candidates: [{ finishReason: llmReason, content: { parts: [] } }],
       } as unknown as GenerateContentResponse,
-      {
-        model: 'test-model',
-        modalities: {
-          image: true,
-          pdf: true,
-          audio: true,
-          video: true,
-        },
-        startTime: 0,
-      },
+      baseRequestContext(),
     );
     expect(response.choices[0].finish_reason).toBe(expected);
   });
 });
 
 describe('modality filtering', () => {
-  function makeRequest(parts: Part[]): GenerateContentParameters {
-    return {
-      model: 'test-model',
-      contents: [{ role: 'user', parts }],
-    };
-  }
-
-  function makeRequestContext(
+  /** Converts one user turn holding `parts` and returns its content parts. */
+  function userContentParts(
     model: string,
     modalities: RequestContext['modalities'],
-  ): RequestContext {
-    return {
-      model,
-      modalities,
-      startTime: 0,
-    };
+    ...parts: Part[]
+  ): WirePart[] {
+    const userMsg = findRole(
+      OpenAIContentConverter.convertLlmRequestToOpenAI(
+        { model: 'test-model', contents: [content('user', ...parts)] },
+        { model, modalities, startTime: 0 },
+      ),
+      'user',
+    );
+    return Array.isArray(userMsg?.content) ? wireParts(userMsg) : [];
   }
 
-  function getUserContentParts(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  ): Array<{ type: string; text?: string }> {
-    const userMsg = messages.find((m) => m.role === 'user');
-    if (
-      !userMsg ||
-      !('content' in userMsg) ||
-      !Array.isArray(userMsg.content)
-    ) {
-      return [];
-    }
-    return userMsg.content as Array<{ type: string; text?: string }>;
-  }
-
-  it('replaces image with placeholder when image modality is disabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
+  it.each<[string, string, RequestContext['modalities'], Part, string[]]>([
+    [
+      'replaces image with placeholder when image modality is disabled',
+      'deepseek-chat',
+      {},
       {
         inlineData: { mimeType: 'image/png', data: 'abc123' },
         displayName: 'screenshot.png',
       } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('deepseek-chat', {}),
-    );
-    const parts = getUserContentParts(messages);
+      ['image file', 'does not support image input'],
+    ],
+    [
+      'replaces PDF with placeholder when pdf modality is disabled',
+      'test-model',
+      { image: true },
+      inline('application/pdf', 'pdf-data', 'doc.pdf'),
+      ['pdf file', 'does not support PDF input'],
+    ],
+    [
+      'replaces video with placeholder when video modality is disabled',
+      'test-model',
+      {},
+      inline('video/mp4', 'vid-data'),
+      ['video file'],
+    ],
+    [
+      'replaces audio with placeholder when audio modality is disabled',
+      'test-model',
+      {},
+      inline('audio/wav', 'audio-data'),
+      ['audio file'],
+    ],
+    [
+      'defaults to text-only when no modalities are specified',
+      'unknown-model',
+      {},
+      inline('image/png', 'img-data'),
+      ['image file'],
+    ],
+  ])('%s', (_title, model, modalities, part, fragments) => {
+    const parts = userContentParts(model, modalities, part);
+
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
-    expect(parts[0].text).toContain('image file');
-    expect(parts[0].text).toContain('does not support image input');
+    for (const fragment of fragments) {
+      expect(parts[0].text).toContain(fragment);
+    }
   });
 
   it('keeps BMP image data when image modality is enabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: { mimeType: 'image/bmp', data: 'abc123' },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('gpt-4o', { image: true }),
+    const parts = userContentParts(
+      'gpt-4o',
+      { image: true },
+      inline('image/bmp', 'abc123'),
     );
-    const parts = getUserContentParts(messages) as Array<{
-      type: string;
-      image_url?: { url: string };
-    }>;
+
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('image_url');
     expect(parts[0].image_url?.url).toBe('data:image/bmp;base64,abc123');
   });
 
-  it('replaces PDF with placeholder when pdf modality is disabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: {
-          mimeType: 'application/pdf',
-          data: 'pdf-data',
-          displayName: 'doc.pdf',
-        },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('test-model', { image: true }),
-    );
-    const parts = getUserContentParts(messages);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].type).toBe('text');
-    expect(parts[0].text).toContain('pdf file');
-    expect(parts[0].text).toContain('does not support PDF input');
-  });
-
   it('keeps PDF when pdf modality is enabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: {
-          mimeType: 'application/pdf',
-          data: 'pdf-data',
-          displayName: 'doc.pdf',
-        },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('claude-sonnet', { image: true, pdf: true }),
+    const parts = userContentParts(
+      'claude-sonnet',
+      { image: true, pdf: true },
+      inline('application/pdf', 'pdf-data', 'doc.pdf'),
     );
-    const parts = getUserContentParts(messages);
+
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('file');
   });
 
-  it('replaces video with placeholder when video modality is disabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('test-model', {}),
-    );
-    const parts = getUserContentParts(messages);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].type).toBe('text');
-    expect(parts[0].text).toContain('video file');
-  });
-
-  it('replaces audio with placeholder when audio modality is disabled', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: { mimeType: 'audio/wav', data: 'audio-data' },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('test-model', {}),
-    );
-    const parts = getUserContentParts(messages);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].type).toBe('text');
-    expect(parts[0].text).toContain('audio file');
-  });
-
   it('handles mixed content: keeps text + supported media, replaces unsupported', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
+    const parts = userContentParts(
+      'gpt-4o',
+      { image: true },
       { text: 'Analyze these files' },
-      {
-        inlineData: { mimeType: 'image/png', data: 'img-data' },
-      } as unknown as Part,
-      {
-        inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('gpt-4o', { image: true }),
+      inline('image/png', 'img-data'),
+      inline('video/mp4', 'vid-data'),
     );
-    const parts = getUserContentParts(messages);
+
     expect(parts).toHaveLength(3);
     expect(parts[0].type).toBe('text');
     expect(parts[0].text).toBe('Analyze these files');
     expect(parts[1].type).toBe('image_url');
     expect(parts[2].type).toBe('text');
     expect(parts[2].text).toContain('video file');
-  });
-
-  it('defaults to text-only when no modalities are specified', () => {
-    const conv = OpenAIContentConverter;
-    const request = makeRequest([
-      {
-        inlineData: { mimeType: 'image/png', data: 'img-data' },
-      } as unknown as Part,
-    ]);
-    const messages = conv.convertLlmRequestToOpenAI(
-      request,
-      makeRequestContext('unknown-model', {}),
-    );
-    const parts = getUserContentParts(messages);
-    expect(parts).toHaveLength(1);
-    expect(parts[0].type).toBe('text');
-    expect(parts[0].text).toContain('image file');
   });
 });
