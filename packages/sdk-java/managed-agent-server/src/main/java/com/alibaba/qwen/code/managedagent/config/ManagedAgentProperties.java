@@ -239,7 +239,13 @@ public class ManagedAgentProperties {
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
         private Duration deletionGrace = Duration.ofHours(24);
+        // Off by default: the head's activation columns are only trustworthy
+        // once no pre-V35 binary can still commit. Enable after the fleet
+        // fully runs the schema's version.
+        private boolean journalHeadAuthorization;
 
+        public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
         public Duration getDeletionGrace() { return deletionGrace; }
@@ -281,6 +287,7 @@ public class ManagedAgentProperties {
         private boolean publishPreview;
         private int maxConcurrentReads = 4;
         private Duration readTimeout = Duration.ofMinutes(2);
+        private Duration readRevalidationInterval = Duration.ofSeconds(5);
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean value) { enabled = value; }
@@ -292,6 +299,9 @@ public class ManagedAgentProperties {
         public void setMaxConcurrentReads(int value) { maxConcurrentReads = value; }
         public Duration getReadTimeout() { return readTimeout; }
         public void setReadTimeout(Duration value) { readTimeout = value; }
+        /** How often a download re-verifies content access; PT0S checks on every chunk. */
+        public Duration getReadRevalidationInterval() { return readRevalidationInterval; }
+        public void setReadRevalidationInterval(Duration value) { readRevalidationInterval = value; }
     }
 
     public static class Dispatch {
@@ -355,6 +365,7 @@ public class ManagedAgentProperties {
         private Duration pollInterval = Duration.ofSeconds(5);
         private Duration heartbeatInterval = Duration.ofSeconds(15);
         private Duration streamTimeout = Duration.ofMinutes(30);
+        private Duration readGrantRecheckInterval = Duration.ofSeconds(5);
         private Duration batchInterval = Duration.ofMillis(75);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
@@ -365,6 +376,19 @@ public class ManagedAgentProperties {
 
         public void setPollInterval(Duration pollInterval) {
             this.pollInterval = pollInterval;
+        }
+
+        /**
+         * How often a stream re-verifies the subscriber's read grant; PT0S
+         * checks before every event.
+         */
+        public Duration getReadGrantRecheckInterval() {
+            return readGrantRecheckInterval;
+        }
+
+        public void setReadGrantRecheckInterval(
+                Duration readGrantRecheckInterval) {
+            this.readGrantRecheckInterval = readGrantRecheckInterval;
         }
 
         public Duration getHeartbeatInterval() {

@@ -53,6 +53,36 @@ public class ManagedWorkspaceRegistry {
         return createdSession(tenantId, actorId, sessionId);
     }
 
+    /** The batch twin of createdSession for a page of Session ids. */
+    public java.util.Set<String> createdSessions(String tenantId,
+            String actorId, List<String> sessionIds) {
+        if (actorId == null || actorId.isEmpty() || sessionIds.isEmpty()) {
+            return java.util.Set.of();
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return java.util.Set.of();
+        }
+        String marks = String.join(", ",
+                java.util.Collections.nCopies(sessionIds.size(), "?"));
+        List<Object> arguments = new java.util.ArrayList<>(
+                sessionIds.size() + 3);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        arguments.add(tenantId);
+        arguments.add(key);
+        return new java.util.HashSet<>(jdbc.queryForList(
+                "SELECT session_id FROM managed_workspace_create_command"
+                        + " WHERE tenant_id = ? AND session_id IN (" + marks
+                        + ")"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND actor_id = ?",
+                String.class, arguments.toArray()));
+    }
+
     public boolean canRead(String tenantId, String actorId,
             String workspaceId) {
         if (actorId == null || actorId.isEmpty()) {
@@ -122,6 +152,51 @@ public class ManagedWorkspaceRegistry {
                 (result, row) -> summary(result), tenantId, workspaceId,
                 tenantId, workspaceId, key);
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** The batch twin of findReadable for a page of Workspace ids. */
+    public java.util.Map<String, WorkspaceSummary> findReadable(
+            String tenantId, String actorId,
+            java.util.Collection<String> workspaceIds) {
+        if (workspaceIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        byte[] key = actorKey(tenantId, actorId);
+        String plain = String.join(", ", java.util.Collections.nCopies(
+                workspaceIds.size(), "?"));
+        String binary = String.join(", ", java.util.Collections.nCopies(
+                workspaceIds.size(), "CAST(CONCAT(?, '!') AS BINARY(513))"));
+        List<Object> arguments = new java.util.ArrayList<>(
+                workspaceIds.size() * 2 + 3);
+        arguments.add(tenantId);
+        arguments.addAll(workspaceIds);
+        arguments.addAll(workspaceIds);
+        arguments.add(tenantId);
+        arguments.add(key);
+        List<WorkspaceSummary> rows = jdbc.query(
+                "SELECT r.workspace_id, r.display_name, r.state,"
+                        + " a.can_create FROM managed_workspace_registry r"
+                        + " JOIN managed_workspace_access a ON"
+                        + " a.tenant_id = r.tenant_id"
+                        + " AND a.workspace_id = r.workspace_id"
+                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
+                        + " WHERE r.tenant_id = ? AND r.workspace_id IN ("
+                        + plain + ")"
+                        + " AND CAST(CONCAT(r.workspace_id, '!') AS"
+                        + " BINARY(513)) IN (" + binary + ")"
+                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND a.actor_id = ? AND a.can_read = TRUE",
+                (result, row) -> summary(result), arguments.toArray());
+        java.util.Map<String, WorkspaceSummary> result =
+                new java.util.HashMap<>(rows.size() * 2);
+        for (WorkspaceSummary row : rows) {
+            result.put(row.workspaceId(), row);
+        }
+        return result;
     }
 
     public WorkspaceSummary readableDefault(String tenantId,

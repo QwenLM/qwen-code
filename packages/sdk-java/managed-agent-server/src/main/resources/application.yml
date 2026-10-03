@@ -40,6 +40,7 @@ qwen:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
       deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
+      journal-head-authorization: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_JOURNAL_HEAD_AUTHORIZATION:false}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
@@ -51,6 +52,8 @@ qwen:
       connect-timeout: '5s'
       request-timeout: '30s'
       heartbeat-interval: '30s'
+    artifacts:
+      read-revalidation-interval: '5s'
     dispatch:
       scan-delay: '1s'
       lease-duration: '60s'
@@ -62,6 +65,7 @@ qwen:
       poll-interval: '5s'
       heartbeat-interval: '15s'
       stream-timeout: '30m'
+      read-grant-recheck-interval: '5s'
       batch-interval: '75ms'
       materialize-interval: '100ms'
       batch-max-events: 64
