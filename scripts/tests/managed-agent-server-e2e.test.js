@@ -163,6 +163,29 @@ describe('managed-agent-server e2e runner', () => {
     ).toHaveLength(2);
   });
 
+  // Every mode now runs through the G0 public Workspace admission, and the
+  // failover modes hand the same Session to a replacement owner: both Spring
+  // launch sites and both Harness launch sites must carry the admission
+  // wiring, or a mode turns red only after the failover kill with an error
+  // that reads like a takeover defect instead of a config asymmetry.
+  it('pins the G0 workspace admission at both launch sites', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(
+      source.match(
+        /QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader/g,
+      ),
+      'both Spring launch sites must configure the trusted actor header',
+    ).toHaveLength(2);
+    expect(
+      source.match(/QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true'/g),
+      'both Spring launch sites must enable Hosted Workspace files',
+    ).toHaveLength(2);
+    expect(
+      source.match(/'--managed-runtime-broker-url'/g),
+      'both Harness launch sites must pass the Runtime Broker flags',
+    ).toHaveLength(2);
+  });
+
   // The README currently names no script, so only a fixture can pin the
   // extractor itself: an extractor that stops matching must fail, not pass.
   it('extracts the script spellings the README could use', () => {

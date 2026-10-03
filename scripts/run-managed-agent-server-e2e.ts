@@ -965,8 +965,7 @@ try {
       headers: {
         'content-type': 'application/json',
         'idempotency-key': `failover-create-${Date.now()}`,
-        'x-qwen-tenant-id': tenant,
-        ...(workspaceTurns ? { [trustedActorHeader]: trustedActor } : {}),
+        ...tenantHeaders(tenant),
       },
       body: JSON.stringify({
         agent_id: 'qwen-code',
@@ -1198,10 +1197,10 @@ try {
           QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
           QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
           QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
+          QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
+          QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
           ...(workspaceTurns
             ? {
-                QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
-                QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
                 QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
               }
             : {
@@ -1260,14 +1259,10 @@ try {
         '--no-web',
         '--workspace',
         workspace,
-        ...(workspaceTurns
-          ? [
-              '--managed-runtime-broker-url',
-              replacementBrokerProxy?.baseUrl ??
-                `http://127.0.0.1:${replacementBrokerPort}`,
-              `--managed-runtime-broker-token=${brokerToken}`,
-            ]
-          : []),
+        '--managed-runtime-broker-url',
+        replacementBrokerProxy?.baseUrl ??
+          `http://127.0.0.1:${replacementBrokerPort}`,
+        `--managed-runtime-broker-token=${brokerToken}`,
       ],
       {
         env: {
@@ -1500,7 +1495,7 @@ try {
           headers: {
             'content-type': 'application/json',
             'idempotency-key': `failover-second-${Date.now()}`,
-            'x-qwen-tenant-id': tenant,
+            ...tenantHeaders(tenant),
           },
           body: JSON.stringify({
             type: 'agent.session.input.message',
@@ -1700,13 +1695,18 @@ try {
       mysqlPort,
       `SELECT COUNT(*), GROUP_CONCAT(DISTINCT execution_state) FROM qwen_managed_agent.qwen_tool_execution`,
     ).split('\t');
-    const executionStates = (executions[1] ?? '').split(',');
-    if (
-      executions[0] !== '1' ||
-      executionStates.length !== 1 ||
-      executionStates[0] !== 'SETTLED'
-    ) {
-      throw new Error(`Tool execution audit failed: ${executions.join(',')}`);
+    if (executions[0] !== '1' || executions[1] !== 'SETTLED') {
+      // The temporary MySQL data dir is deleted on exit, so the failure
+      // message is the only place the offending executions can still be
+      // identified: two tool_call_ids mean the model called another tool,
+      // one tool_call_id across two rows means a duplicate dispatch.
+      const rows = runMysql(
+        mysqlPort,
+        'SELECT execution_call_id, tool_call_id, execution_state FROM qwen_managed_agent.qwen_tool_execution',
+      );
+      throw new Error(
+        `Tool execution audit failed: ${executions.join(',')}\n${rows}`,
+      );
     }
 
     const replay = await fetch(`${springUrl}/v1/agents/sessions`, {
@@ -1726,9 +1726,13 @@ try {
     ) {
       throw new Error('Idempotent create replay did not return the Session');
     }
+    // The probe carries an actor holding a read grant on the Session's
+    // Workspace, so its 404 can only come from the tenant scope: without the
+    // actor, a bound Session 404s through the grant check and would mask a
+    // tenant-scoping leak.
     const crossTenant = await fetch(
       `${springUrl}/v1/agents/sessions/${session.id}`,
-      { headers: { 'x-qwen-tenant-id': 'other-tenant' } },
+      { headers: tenantHeaders('other-tenant') },
     );
     if (crossTenant.status !== 404) {
       throw new Error(`Cross-tenant lookup returned ${crossTenant.status}`);
@@ -1769,7 +1773,7 @@ try {
 } catch (error) {
   failure = error;
   console.error(error);
-  if (durableFailover && dumpPort !== undefined) {
+  if (dumpPort !== undefined) {
     try {
       console.error(
         `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.managed_agent_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.managed_agent_event ORDER BY sequence_id')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head')}`,
