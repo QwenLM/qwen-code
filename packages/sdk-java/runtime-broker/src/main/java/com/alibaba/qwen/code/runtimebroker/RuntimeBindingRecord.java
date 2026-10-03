@@ -390,7 +390,8 @@ public final class RuntimeBindingRecord {
                         && stopEvidence != null) {
             throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
         }
-        if ((state == State.LOST && replacement.state != State.LOST)
+        if ((state == State.LOST && replacement.state != State.LOST
+                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null))
                 || state == State.OPERATOR_RECOVERY
                         && replacement.state != State.OPERATOR_RECOVERY
                         && replacement.state != State.LOST) {

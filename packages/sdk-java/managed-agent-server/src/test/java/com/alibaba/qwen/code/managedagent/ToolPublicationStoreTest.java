@@ -293,8 +293,8 @@ class ToolPublicationStoreTest {
                     : first.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null));
             try {
                 assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ? WHERE operation_id = 'original'",
-                        java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+                jdbc.update("UPDATE qwen_tool_publication_operation SET deadline ="
+                        + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = 'original'");
                 var originalDeadline = jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation"
                         + " WHERE operation_id = 'original'", java.sql.Timestamp.class);
                 var before = jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256, operation_id"
@@ -423,7 +423,7 @@ class ToolPublicationStoreTest {
                 assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 String column = expired ? "deadline" : "claim_until";
                 jdbc.update("UPDATE qwen_tool_publication_operation SET " + column
-                        + " = ? WHERE operation_id = 'held'", java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+                        + " = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = 'held'");
                 assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "held").path("state").asText())
                         .isEqualTo(expired ? "EXPIRED" : "RETRYABLE");
                 var candidate = jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256"
@@ -476,8 +476,8 @@ class ToolPublicationStoreTest {
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "candidate", "stdout", 0, new byte[] {1}, null)).hasMessageContaining("lost PUT reply");
         data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stderr");
-        jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?, state = 'PENDING'",
-                java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+        jdbc.update("UPDATE qwen_tool_publication_operation SET deadline ="
+                + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)), state = 'PENDING'");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "prefix"))
                 .hasMessageContaining("prefix cannot be recovered");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", "wrong-token", "candidate"))
@@ -1656,12 +1656,20 @@ class ToolPublicationStoreTest {
     }
 
     static ApiFixture largeApiFixture(int total, javax.sql.DataSource source) throws Exception {
+        return largeApiFixture(total, source, Integer.MAX_VALUE);
+    }
+
+    static ApiFixture largeApiFixture(int total, javax.sql.DataSource source, int maxRead) throws Exception {
         var fixture = new ToolPublicationStoreTest();
         fixture.initialize(source);
-        return largeApiFixture(total, fixture);
+        return largeApiFixture(total, fixture, maxRead);
     }
 
     private static ApiFixture largeApiFixture(int total, ToolPublicationStoreTest fixture) throws Exception {
+        return largeApiFixture(total, fixture, Integer.MAX_VALUE);
+    }
+
+    private static ApiFixture largeApiFixture(int total, ToolPublicationStoreTest fixture, int maxRead) throws Exception {
         var jdbc = fixture.jdbc;
         var manager = fixture.manager;
         var sessions = fixture.sessions;
@@ -1697,7 +1705,12 @@ class ToolPublicationStoreTest {
 
                     @Override
                     public InputStream open(String key) {
-                        return new ByteArrayInputStream(objects.get(key));
+                        return new java.io.FilterInputStream(new ByteArrayInputStream(objects.get(key))) {
+                            @Override
+                            public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
+                                return in.read(bytes, offset, Math.min(length, maxRead));
+                            }
+                        };
                     }
 
                     @Override
