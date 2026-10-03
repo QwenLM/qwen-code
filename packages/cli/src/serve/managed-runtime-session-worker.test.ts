@@ -676,6 +676,8 @@ describe.skipIf(process.platform === 'win32')(
     /** Gates the fake recorder's commit awaits, per test. */
     const outcomeWaiters: { admit?: Promise<void>; settle?: Promise<void> } =
       {};
+    /** Fires as the fake recorder enters a commit, per test. */
+    const outcomeSignals: { admit?: () => void; settle?: () => void } = {};
     /** Makes the fake recorder's commits fail, per test. */
     const outcomeFailures: { admit?: Error; settle?: Error } = {};
     const signal = new AbortController().signal;
@@ -684,6 +686,7 @@ describe.skipIf(process.platform === 'win32')(
       const recorder = {
         admit: async (input: Record<string, unknown>) => {
           if (outcomeFailures.admit) throw outcomeFailures.admit;
+          outcomeSignals.admit?.();
           if (outcomeWaiters.admit) await outcomeWaiters.admit;
           admissions.push(input);
         },
@@ -709,6 +712,8 @@ describe.skipIf(process.platform === 'win32')(
       settlements = [];
       outcomeWaiters.admit = undefined;
       outcomeWaiters.settle = undefined;
+      outcomeSignals.admit = undefined;
+      outcomeSignals.settle = undefined;
       outcomeFailures.admit = undefined;
       outcomeFailures.settle = undefined;
       config = new Config({
@@ -829,10 +834,16 @@ describe.skipIf(process.platform === 'win32')(
         signal,
       );
       const result = env.execute('write', signal);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      // The admission has not landed: the worker saw nothing, and the model
-      // loop has no result yet.
-      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+      // The admission holds while the worker stands ready: dispatch is
+      // blocked, not merely slow.
+      for (;;) {
+        const log = await readFile(logFile, 'utf8');
+        if (log.includes('"boot"')) {
+          expect(log).not.toContain('"execute"');
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       release();
       await result;
       expect(admissions).toHaveLength(1);
@@ -877,10 +888,12 @@ describe.skipIf(process.platform === 'win32')(
         resolved = true;
         return value;
       });
-      await new Promise((resolve) => setTimeout(resolve, 100));
       // The worker settled; the commit has not landed, so the model loop
       // waits.
-      expect(await readFile(logFile, 'utf8')).toContain('"execute"');
+      await vi.waitFor(async () => {
+        expect(await readFile(logFile, 'utf8')).toContain('"execute"');
+      });
+      await new Promise((resolve) => setImmediate(resolve));
       expect(resolved).toBe(false);
       release();
       await result;
@@ -940,8 +953,13 @@ describe.skipIf(process.platform === 'win32')(
         },
         controller.signal,
       );
+      let entered!: () => void;
+      const admitStarted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      outcomeSignals.admit = entered;
       const result = env.execute('write', controller.signal);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await admitStarted;
       controller.abort();
       release();
       const settled = await result;

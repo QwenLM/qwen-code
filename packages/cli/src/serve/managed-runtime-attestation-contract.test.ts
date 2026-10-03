@@ -535,6 +535,12 @@ describe('Managed Runtime tool contract', () => {
         clone.suites[2].cases[0].expected.body!['lastSequence'] = 1;
       },
     ],
+    [
+      'acknowledge responses forbid lastSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].cases[0].expected.body!['lastSequence'] = 1;
+      },
+    ],
   ])('rejects fixtures when %s', (_label, mutate) => {
     const validate = new Ajv2020({ strict: true }).compile(toolSchema);
     const invalidFixtures = structuredClone(

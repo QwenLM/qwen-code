@@ -3233,8 +3233,11 @@ describe('Session', () => {
     });
 
     it('runs neither for a Legacy session', async () => {
+      const order: string[] = [];
+      mockChatRecordingService.flush.mockImplementation(async () => {
+        order.push('flush');
+      });
       mockConfig.getManagedRuntimeOutcomes = vi.fn().mockReturnValue(undefined);
-      const finalizeBatch = vi.fn();
       const execute = driveToolTurn();
 
       await session.prompt({
@@ -3243,7 +3246,7 @@ describe('Session', () => {
       });
 
       expect(execute).toHaveBeenCalled();
-      expect(finalizeBatch).not.toHaveBeenCalled();
+      expect(order).toEqual([]);
     });
   });
 

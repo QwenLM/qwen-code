@@ -94,11 +94,11 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 - `execute` 按 `reference.callId` 幂等：同一身份会并入在途调用或返回其已结算结果；同一 `callId` 携带不同摘要或负载则是 409 身份冲突。未准入的工具名同样是 409——它对本代数永远不合法。`run_shell_command` 的有效输入归一化为 `is_background: true` 时，在创建日志条目或启动进程之前被拒绝，包括不区分大小写的字符串 `"true"`；省略、布尔 false 或字符串 `"false"` 则仍以前台运行。通过协议准入后的参数校验或复制失败结算为错误，不执行命令。工具接收输入副本，参数归一化不会改变用于识别重试的原始负载。
 - `status` 只读，对 Runtime 没有记录的 reference 以 200 回答 `unknown`；已知调用按其状态与日志的单调 `lastSequence` 应答。
 - `cancel` 把 `prepared` 调用直接结算为 cancelled（不触碰工具），中止 `executing` 调用并回答 `cancel_requested`，此后幂等。Runtime 兑现的取消会把该调用结算为 `cancelled`——无论工具把中止表现为错误还是提前返回的结果。
-- `acknowledge` 只作用于已结算的调用：丢弃日志条目的输入、编码输入与结果负载，保留 reference 与摘要，并把条目移入终态 `acknowledged`；此后同一 `callId` 的 `execute` 是 409 身份冲突，`status` 以保留的摘要回答 `acknowledged`，重复 `acknowledge` 照答不误。未知的 reference 得到 200 的 `unknown` 应答。
+- `acknowledge` 只作用于已结算的调用：丢弃日志条目的输入、编码输入与结果负载，保留 reference 与摘要，并把条目移入终态 `acknowledged`；此后同一 `callId` 的 `execute` 是 409 身份冲突，`status` 以保留的摘要回答 `acknowledged`，重复 `acknowledge` 照答不误。尚未结算的既有条目（`prepared`、`executing`、`cancel_requested`）是 409 身份冲突，调用方只能在调用结算之后重试。未知的 reference 得到 200 的 `unknown` 应答。
 - worker 保留 5 秒的 HTTP `requestTimeout`，它限制接收请求体的时间，不限制完整请求的执行时间。执行由工具自身的超时约束；headers 与 keep-alive 上限维持不变。
 - 发布已结算结果之前，worker 按序列化后的 status 信封检查 1 MiB 响应上限。超大输出被替换为小型终态错误（保留 cancelled 状态），并供 execute 重试、status 与 cancel 共用。这表示调用已执行但输出不可用，绝不是 `not_started`，也不是允许再次执行。
 - `prepared` 是内部日志状态：执行会同步进入 `executing`，因此 HTTP 调用方无法观察或取消 prepared 条目。
 
 验证新增 `managed-runtime-tool-worker.test.ts`：在真实挂载的路由上用原始 HTTP 回放全部负面共享 fixture；行为用例覆盖在临时工作区真实执行 `read_file`、对未见过的 reference 回答 `unknown`、并入并发的重复 execute、以 409 拒绝同 callId 不同摘要的重试、拒绝未准入工具，以及取消一个在途的前台 shell 命令。额外回归用例验证后台 shell 被拒绝且不留日志条目（包含归一化后的字符串布尔值），验证省略 `is_background`、布尔或字符串 false 均可准入，并验证无效值不会启动命令。
 
-仍为后续工作：Harness 侧 `RuntimeBackedTool` 接线、文件历史结算、对已准入工具集合的 capability digest 校验、合成模型 `managed-runtime-worker` 的图片输入支持，以及大输出的产物交付通道。日志保留由调用方的确认设界；从未被确认的条目在 Runtime 的生命周期内保留。
+仍为后续工作：Harness 侧 `RuntimeBackedTool` 接线、文件历史结算、对已准入工具集合的 capability digest 校验、合成模型 `managed-runtime-worker` 的图片输入支持，以及大输出的产物交付通道。普通 Managed 宿主的 worker 日志由调用方的确认设界（§4.1）；Broker 路径目前无任何调用方确认，Broker 驱动的一代 runtime 的日志设界仍是后续工作。

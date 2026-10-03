@@ -259,8 +259,10 @@ Semantics mounted on the contract:
   the digests, and moves the entry to the terminal `acknowledged` state. A
   later `execute` with the same `callId` is a 409 identity conflict,
   `status` answers `acknowledged` with the retained digests, and a repeated
-  `acknowledge` answers it again. An unknown reference gets the 200
-  `unknown` answer.
+  `acknowledge` answers it again. A known entry that has not settled —
+  `prepared`, `executing`, or `cancel_requested` — is a 409 identity
+  conflict; the caller retries only after the call settles. An unknown
+  reference gets the 200 `unknown` answer.
 - The worker keeps its 5-second HTTP `requestTimeout`, which bounds receipt
   of the request body, not the duration of a complete request's execution.
   Per-tool timeouts govern execution; headers and keep-alive bounds stay as
@@ -287,5 +289,6 @@ Still follow-up: harness-side `RuntimeBackedTool` wiring, file-history
 settlement, capability-digest verification against the admitted tool set,
 image input support for the synthetic
 `managed-runtime-worker` model, and the artifact delivery track for large
-outputs. Journal retention is bounded by the caller's acknowledgement; an
-entry that is never acknowledged is kept for the Runtime's lifetime.
+outputs. For the ordinary Managed host the journal is bounded by the
+caller's acknowledgement (§4.1); the Broker path acknowledges nothing today,
+so bounding a Broker-driven generation's journal remains follow-up.
