@@ -677,6 +677,36 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations).toHaveLength(1025);
   });
 
+  it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    expect(() => runtime.beginTurn({ ...identity, promptId: 'prompt-2' })).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('prepared');
+    expect(runtime.hasActiveWork()).toBe(true);
+  });
+
+  it('refuses a new turn while an invocation is still executing and preserves access to it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    const next = { ...identity, promptId: 'prompt-2' };
+    try {
+      expect(() => runtime.beginTurn(next)).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve(rawResult);
+      await executing;
+    }
+    expect((await executing).executionStatus).toBe('success');
+    expect(runtime.status(ref).state).toBe('settled');
+    await runtime.beginTurn(next);
+    expect(() => runtime.status(ref)).toThrow('identity does not match');
+  });
+
   it('runs the preflight hook once across the second confirmation bounce', async () => {
     hooks.pre.mockResolvedValue({ shouldProceed: false, blockType: 'ask' });
     const ref = await prepare();
