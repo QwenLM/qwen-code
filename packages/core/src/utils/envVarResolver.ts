@@ -8,8 +8,10 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
 export interface ResolveEnvVarsOptions {
   /**
-   * Whether a variable that `customEnv` does not define is taken from
-   * `process.env`. Defaults to true.
+   * Fall back to `process.env` for a name `customEnv` lacks. Default true.
+   * `false` confines resolution to `customEnv` — for a repository-supplied
+   * file resolved against one workspace's environment, where `process.env`
+   * may carry another workspace's `.env` values.
    */
   readonly processEnvFallback?: boolean;
 }
@@ -28,9 +30,14 @@ export interface ResolveEnvVarsOptions {
  * Session-ID placeholders are also reserved for per-request custom header
  * expansion, including bare, braced, and case-insensitive spellings.
  *
+ * Substituted values are inserted VERBATIM — never quoted or escaped. A
+ * placeholder inside a shell string (e.g. `bash -c "srv --f \"$F\""`) hands the
+ * shell the raw value, so `"`, backticks or `$(` change the command that runs.
+ * Callers splicing into a shell string own their quoting.
+ *
  * @param value - The string that may contain environment variable placeholders
- * @param customEnv - Variables consulted before `process.env`
- * @param options - Whether `process.env` is consulted at all
+ * @param customEnv - Looked up before `process.env`
+ * @param options - See {@link ResolveEnvVarsOptions}
  * @returns The string with environment variables resolved
  *
  * @example
@@ -40,7 +47,7 @@ export interface ResolveEnvVarsOptions {
  */
 export function resolveEnvVarsInString(
   value: string,
-  customEnv?: Record<string, string>,
+  customEnv?: Readonly<Record<string, string | undefined>>,
   options: ResolveEnvVarsOptions = {},
 ): string {
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
@@ -56,6 +63,22 @@ export function resolveEnvVarsInString(
     }
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
+    }
+    // win32: process.env is case-insensitive; with the fallback off, the snapshot must be too.
+    if (
+      customEnv &&
+      options.processEnvFallback === false &&
+      process.platform === 'win32'
+    ) {
+      const upperVarName = varName.toUpperCase();
+      for (const key of Object.keys(customEnv)) {
+        if (
+          key.toUpperCase() === upperVarName &&
+          typeof customEnv[key] === 'string'
+        ) {
+          return customEnv[key]!;
+        }
+      }
     }
     if (
       options.processEnvFallback !== false &&
@@ -75,6 +98,8 @@ export function resolveEnvVarsInString(
  * Protected against circular references using a WeakSet to track visited objects.
  *
  * @param obj - The object to process for environment variable resolution
+ * @param customEnv - Looked up before `process.env`
+ * @param options - See {@link ResolveEnvVarsOptions}
  * @returns A new object with environment variables resolved
  *
  * @example
@@ -90,7 +115,7 @@ export function resolveEnvVarsInString(
  */
 export function resolveEnvVarsInObject<T>(
   obj: T,
-  customEnv?: Record<string, string>,
+  customEnv?: Readonly<Record<string, string | undefined>>,
   options: ResolveEnvVarsOptions = {},
 ): T {
   return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv, options);
@@ -106,7 +131,7 @@ export function resolveEnvVarsInObject<T>(
 function resolveEnvVarsInObjectInternal<T>(
   obj: T,
   visited: WeakSet<object>,
-  customEnv: Record<string, string> | undefined,
+  customEnv: Readonly<Record<string, string | undefined>> | undefined,
   options: ResolveEnvVarsOptions,
 ): T {
   if (

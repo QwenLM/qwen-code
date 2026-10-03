@@ -10,7 +10,10 @@ import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { isGatedMcpScope } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { loadSettings } from '../../config/settings.js';
-import { assembleMcpServers } from '../../config/mcpServers.js';
+import {
+  assembleMcpServers,
+  mcpExpansionOptions,
+} from '../../config/mcpServers.js';
 import {
   loadMcpApprovals,
   type McpApprovalStatus,
@@ -23,7 +26,12 @@ import {
  */
 function loadGatedServers(cwd: string): Record<string, MCPServerConfig> {
   const settings = loadSettings(cwd);
-  const all = assembleMcpServers(settings.merged.mcpServers, cwd);
+  const all = assembleMcpServers(
+    settings.merged.mcpServers,
+    cwd,
+    undefined,
+    mcpExpansionOptions(settings.merged, cwd),
+  );
   const gated: Record<string, MCPServerConfig> = {};
   for (const [serverName, config] of Object.entries(all)) {
     if (isGatedMcpScope(config.scope)) {

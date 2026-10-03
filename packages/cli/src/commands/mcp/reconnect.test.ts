@@ -29,6 +29,7 @@ vi.mock('../../config/settings.js', () => ({
 
 vi.mock('../../config/mcpServers.js', () => ({
   assembleMcpServers: mockAssembleMcpServers,
+  mcpExpansionOptions: vi.fn(() => ({ expandEnv: true, env: {} })),
 }));
 
 vi.mock('../../config/trustedFolders.js', () => ({
@@ -233,6 +234,8 @@ describe('mcp reconnect command', () => {
       expect(mockedAssembleMcpServers).toHaveBeenCalledWith(
         settingsServers,
         process.cwd(),
+        undefined,
+        expect.objectContaining({ expandEnv: true }),
       );
       expect(mockToolRegistry.discoverToolsForServer).toHaveBeenCalledWith(
         'project',
