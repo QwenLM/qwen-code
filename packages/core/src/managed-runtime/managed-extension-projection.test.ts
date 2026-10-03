@@ -37,7 +37,7 @@ interface Revision {
 
 interface FixtureSuite {
   readonly contractVersion: 1;
-  readonly recordBodies: Record<string, string>;
+  readonly recordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
   readonly taskIdCases: ReadonlyArray<{

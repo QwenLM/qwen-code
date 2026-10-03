@@ -201,6 +201,7 @@ export interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
@@ -3060,6 +3061,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onToolResultOpen,
       onError,
       generateContent,
     },
@@ -5914,6 +5916,7 @@ export const MessageList = memo(
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
+              onToolResultOpen={onToolResultOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget
@@ -6041,6 +6044,7 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onToolResultOpen,
         sourcesByTurn,
         onSourceOpen,
         onError,

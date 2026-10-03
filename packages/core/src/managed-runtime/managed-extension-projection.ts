@@ -15,6 +15,22 @@ import {
   type ExtensionRunState,
 } from './managed-extension-record.js';
 import type { ManagedSessionDomain } from './managed-session-records.js';
+import {
+  isMcpConfigurationStart,
+  isMcpConfigurationSuccessor,
+  isMcpOperationStart,
+  isMcpOperationSuccessor,
+  parseMcpConfiguration,
+  parseMcpOperation,
+} from './managed-mcp-record.js';
+import {
+  isHookRegistrationStart,
+  isHookRegistrationSuccessor,
+  isHookExecutionStart,
+  isHookExecutionSuccessor,
+  parseHookRegistration,
+  parseHookExecution,
+} from './managed-hook-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -57,7 +73,7 @@ export type ManagedTaskRuntimeState =
  * identity that keys the record's revision chain and the run it embeds.
  */
 export interface ManagedExtensionRecordBody {
-  readonly taskKind: ManagedTaskKind;
+  readonly taskKind: ManagedTaskKind | null;
   /** The parsed body is closed and frozen; the authority stores exactly it. */
   parse(value: unknown): {
     readonly record: unknown;
@@ -75,6 +91,42 @@ export interface ManagedExtensionRecordBody {
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
+  mcp_configuration: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseMcpConfiguration(value);
+      return { record, recordId: record.configurationId, run: record.run };
+    },
+    isStart: isMcpConfigurationStart,
+    isSuccessor: isMcpConfigurationSuccessor,
+  }),
+  mcp_operation: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseMcpOperation(value);
+      return { record, recordId: record.operationId, run: record.run };
+    },
+    isStart: isMcpOperationStart,
+    isSuccessor: isMcpOperationSuccessor,
+  }),
+  hook_registration: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookRegistration(value);
+      return { record, recordId: record.registrationId, run: record.run };
+    },
+    isStart: isHookRegistrationStart,
+    isSuccessor: isHookRegistrationSuccessor,
+  }),
+  hook_execution: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookExecution(value);
+      return { record, recordId: record.hookExecutionId, run: record.run };
+    },
+    isStart: isHookExecutionStart,
+    isSuccessor: isHookExecutionSuccessor,
+  }),
   monitor_run: Object.freeze({
     taskKind: 'monitor',
     parse: (value: unknown) => {
