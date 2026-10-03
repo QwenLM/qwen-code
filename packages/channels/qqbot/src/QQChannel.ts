@@ -1662,21 +1662,22 @@ export class QQChannel extends ChannelBase {
     const sourceLabel = this.getResponseSourceLabel(sessionId);
     const replyContext =
       anchor === null ? undefined : this.resolveResponseReplyContext(sessionId);
-    for (let attempt = 1; ; attempt++) {
-      // Why the send did not reach the wire, if it did not. Read from the send
-      // itself rather than probed beforehand: a probe's route can go stale
-      // before the send resolves its own, which would drop the text silently,
-      // and the probe would run outside the in-flight msg_seq guard below.
-      let blocked: SendBlock | undefined = undefined;
-      try {
-        if (captured) {
-          // Mark the send in flight for the release guard: this session owns no
-          // streamState entry for the cancelled turn, so a successor's
-          // onPromptStart release (or the 60s sweep) would otherwise drop the
-          // msg_seq counter while the send is suspended in resolveRoute and it
-          // would resolve msg_seq 1 again.
-          this.beginMsgSeqSend(captured);
-          try {
+    // Hold the msg_seq counter for the whole delivery, backoff sleeps included:
+    // between attempts this session owns no streamState entry and no flush
+    // marker, so a TTL sweep would otherwise reclaim the counter and the next
+    // attempt would restart at msg_seq 1 — a pair QQ dedupes on (msg_id,
+    // msg_seq) and drops silently.
+    if (captured) this.beginMsgSeqSend(captured);
+    let delivered = false;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        // Why the send did not reach the wire, if it did not. Read from the send
+        // itself rather than probed beforehand: a probe's route can go stale
+        // before the send resolves its own, which would drop the text silently,
+        // and the probe would run outside the in-flight msg_seq guard below.
+        let blocked: SendBlock | undefined = undefined;
+        try {
+          if (captured) {
             blocked = await this.sendMessageWithReplyContext(
               chatId,
               text,
@@ -1684,74 +1685,79 @@ export class QQChannel extends ChannelBase {
               sourceLabel,
               captured,
             );
-          } finally {
-            this.endMsgSeqSend(captured);
+          } else {
+            // Same entry point sendResponseMessage uses, with the reply context
+            // already captured: its own lookup would run against a successor's
+            // activePrompts entry on a re-attempt.
+            blocked = await this.sendMessageWithReplyContext(
+              chatId,
+              text,
+              replyContext,
+              sourceLabel,
+            );
           }
-        } else {
-          // Same entry point sendResponseMessage uses, with the reply context
-          // already captured: its own lookup would run against a successor's
-          // activePrompts entry on a re-attempt.
-          blocked = await this.sendMessageWithReplyContext(
-            chatId,
-            text,
-            replyContext,
-            sourceLabel,
-          );
-        }
-        if (blocked === 'transient') {
-          // A route that may resolve on a later attempt: feed the loop's
-          // transient arm, which applies the same retry bound as a thrown
-          // failure.
-          throw new Error('outgoing route unresolved');
-        }
-      } catch (e: unknown) {
-        // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED are permanent
-        // (see flushAndTrack); everything else — RATE_LIMITED and a plain
-        // network error — is transient and re-attempted under the bound.
-        if (
-          e instanceof DeliveryError &&
-          (e.code === 'RETRY_EXHAUSTED' ||
-            e.code === 'ACTIVE_MSG_DISABLED' ||
-            e.code === 'FALLBACK_FAILED')
-        ) {
+          if (blocked === 'transient') {
+            // A route that may resolve on a later attempt: feed the loop's
+            // transient arm, which applies the same retry bound as a thrown
+            // failure.
+            throw new Error('outgoing route unresolved');
+          }
+        } catch (e: unknown) {
+          // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED are permanent
+          // (see flushAndTrack); everything else — RATE_LIMITED and a plain
+          // network error — is transient and re-attempted under the bound.
+          if (
+            e instanceof DeliveryError &&
+            (e.code === 'RETRY_EXHAUSTED' ||
+              e.code === 'ACTIVE_MSG_DISABLED' ||
+              e.code === 'FALLBACK_FAILED')
+          ) {
+            process.stderr.write(
+              `[QQ:${this.name}] cancelled-stash delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${text.length} chars\n`,
+            );
+            return;
+          }
+          if (this.maxFlushRetries <= 0 || attempt < this.maxFlushRetries) {
+            const delay =
+              attempt > 1
+                ? QQChannel.IDLE_FLUSH_BACKOFF_MS
+                : QQChannel.IDLE_FLUSH_MS;
+            process.stderr.write(
+              `[QQ:${this.name}] cancelled-stash delivery failed (attempt ${attempt}): ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in ${delay}ms\n`,
+            );
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, delay);
+              timer.unref?.();
+            });
+            continue;
+          }
           process.stderr.write(
-            `[QQ:${this.name}] cancelled-stash delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${text.length} chars\n`,
+            `[QQ:${this.name}] cancelled-stash delivery failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retries exhausted, dropping ${text.length} chars\n`,
           );
           return;
         }
-        if (this.maxFlushRetries <= 0 || attempt < this.maxFlushRetries) {
-          const delay =
-            attempt > 1
-              ? QQChannel.IDLE_FLUSH_BACKOFF_MS
-              : QQChannel.IDLE_FLUSH_MS;
+        if (blocked === 'permanent') {
+          // The route can never resolve (channel disposed, unusable chatId, no
+          // chat type), so a retry cannot help even under `unlimited` retries:
+          // drop it with a log rather than spinning the backoff forever.
           process.stderr.write(
-            `[QQ:${this.name}] cancelled-stash delivery failed (attempt ${attempt}): ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in ${delay}ms\n`,
+            `[QQ:${this.name}] cancelled-stash delivery blocked (no usable route): dropping ${text.length} chars\n`,
           );
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, delay);
-            timer.unref?.();
-          });
-          continue;
+          return;
         }
-        process.stderr.write(
-          `[QQ:${this.name}] cancelled-stash delivery failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retries exhausted, dropping ${text.length} chars\n`,
-        );
-        return;
+        delivered = true;
+        break;
       }
-      if (blocked === 'permanent') {
-        // The route can never resolve (channel disposed, unusable chatId, no
-        // chat type), so a retry cannot help even under `unlimited` retries:
-        // drop it with a log rather than spinning the backoff forever.
-        process.stderr.write(
-          `[QQ:${this.name}] cancelled-stash delivery blocked (no usable route): dropping ${text.length} chars\n`,
-        );
-        return;
-      }
-      // Delivered. The release is synchronous and cannot throw (saveQQState
-      // swallows write errors), and it sits outside the retry try/catch so a
-      // throw here can never be mistaken for a failed send and re-send text.
-      if (captured) this.releaseSessionReplyAnchor(sessionId, captured);
-      return;
+    } finally {
+      if (captured) this.endMsgSeqSend(captured);
+    }
+    // Delivered. The release is synchronous and cannot throw (saveQQState
+    // swallows write errors), it sits outside the retry try/catch so a throw
+    // here can never be mistaken for a failed send and re-send text, and it
+    // runs after the in-flight registration is gone so it can reclaim the
+    // counter it owns.
+    if (delivered && captured) {
+      this.releaseSessionReplyAnchor(sessionId, captured);
     }
   }
 
@@ -2049,11 +2055,21 @@ export class QQChannel extends ChannelBase {
         // into this buffer), so it must not be re-stashed by a later permanent
         // failure — onResponseComplete would prepend it and deliver a second
         // standalone copy. Clear it on both success paths (state current and
-        // session died) because the head is out either way. Guarded on identity:
-        // a seal a boundary wrote after this send started was never in this
-        // payload and is the residual's only copy, so clearing it here would
-        // drop that text when the residual's own flush fails permanently.
-        if (state.sealedPre === carriedSeal) state.sealedPre = undefined;
+        // session died) because the head is out either way. Guarded on identity
+        // and on the per-flight marker: a boundary that re-sealed the live
+        // turn's residual during the flight wrote a seal that was never in this
+        // payload and is that residual's only copy, so clearing it here would
+        // drop the text when the residual's own flush fails permanently. The
+        // seal text alone cannot tell the two apart — the residual may repeat
+        // the carried seal byte for byte. 'payload' is not a re-seal: the
+        // boundary stripped the delivery from fullText without rewriting
+        // sealedPre, so this send still carried that seal.
+        if (
+          state.sealedPre === carriedSeal &&
+          state.boundaryClearedInFlight !== 'residual'
+        ) {
+          state.sealedPre = undefined;
+        }
         // #3: Guard — if session died during in-flight send, touch nothing
         // of the entry's, but do release the anchor: no later settle can run
         // for this state, so otherwise its msg_seq counter is stranded.
@@ -2906,8 +2922,15 @@ export class QQChannel extends ChannelBase {
     const existing = this.streamOrphanBuffer.get(sessionId);
     const taggedTurn =
       existing?.turn ?? this.turnCounter.get(sessionId) ?? state.turn;
+    // A successor that ended by cancel can never read a re-stash either:
+    // onPromptStart marks the session active and onPromptEnd clears it, while
+    // completedTurns is only written by onResponseComplete, so the cancel path
+    // is invisible to the record. With no prompt active there is no completion
+    // left that could consume the stash, and the next onPromptStart would drop
+    // it as dead text — deliver on this turn's own anchor instead.
     const noSuccessorCanConsume =
-      turnIsOver && (this.turnCounter.get(sessionId) ?? 0) === state.turn;
+      (turnIsOver && (this.turnCounter.get(sessionId) ?? 0) === state.turn) ||
+      !this.activePromptSessions.has(sessionId);
     // That turn has already run its own onResponseComplete, so a re-stash is a
     // write with no guaranteed consumer: the next onPromptStart drops it as
     // superseded and the sealed opening is lost. Deliver it on this turn's
