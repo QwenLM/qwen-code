@@ -34,6 +34,7 @@ import {
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
 import { SessionService } from '../services/sessionService.js';
+import { SessionTranscriptReader } from '../services/session-transcript-reader.js';
 import {
   getSessionWriterLockPath,
   SessionWriterLease,
@@ -46,7 +47,10 @@ import {
 } from '../managed-runtime/managed-session-records.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
-import { ManagedSessionConflictError } from '../managed-runtime/managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+} from '../managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import { ManagedSessionRecordSink } from '../managed-runtime/managed-session-record-sink.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
@@ -954,6 +958,121 @@ describe('Managed Session log recording', () => {
     const restored = await start(restoringConfig());
     expect(await activeChatTexts(restored)).toEqual(['first prompt']);
     await restored.closeSessionWriter();
+  });
+
+  it('derives navigation turns from the Managed log with the physical builder semantics', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    recorder.recordUserMessage(
+      [{ text: 'first prompt' }],
+      undefined,
+      undefined,
+      undefined,
+      'daemon-prompt-1',
+    );
+    recorder.recordTurnResult({
+      promptId: 'turn-result-prompt-1',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    recordUser(config, 'second prompt');
+    recorder.recordTurnResult({
+      promptId: 'prompt-2',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    await recorder.flush();
+    await config.closeSessionWriter();
+
+    // Same rules as the physical index builder: a daemon prompt id is
+    // filled at the turn record, and a later turn result is first-wins.
+    const page = await new SessionTranscriptReader(
+      projectDir,
+    ).readTurnIndexPage(SESSION_ID);
+    expect(page.turns).toEqual([
+      expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
+      expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
+    ]);
+  });
+
+  it('skips a malformed file-history record instead of failing the managed restore', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    const sessionKey = localManagedSessionKey(projectDir, SESSION_ID);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId: SESSION_ID,
+      transcriptPath,
+    });
+    try {
+      const authority = await LocalManagedSessionAuthority.open({
+        lease,
+        sessionKey,
+        cwd: projectDir,
+        version: 'test',
+        resources: store,
+        create: {
+          definitionRef: await store.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await store.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      await authority.installActivation({
+        activationId: 'act-1',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      const sink = new ManagedSessionRecordSink(authority, store, () => ({
+        class: 'harness',
+        activation: { activationId: 'act-1', epoch: 1 },
+      }));
+      await sink.write({
+        uuid: 'rec-user-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'before the damage' }] },
+      } as ChatRecord);
+      await sink.write({
+        uuid: 'rec-history-1',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        systemPayload: { snapshots: [null] },
+      } as unknown as ChatRecord);
+
+      const projection = await sessionService().readRestoreProjection(
+        SESSION_ID,
+        { replay: { kind: 'none' } },
+      );
+      expect(projection?.runtime.fileHistorySnapshots).toBeUndefined();
+      const page = await new SessionTranscriptReader(
+        projectDir,
+      ).readTurnIndexPage(SESSION_ID);
+      expect(page.turns).toEqual([
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-1' }),
+      ]);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
   });
 
   it.each<[string, () => Config]>([

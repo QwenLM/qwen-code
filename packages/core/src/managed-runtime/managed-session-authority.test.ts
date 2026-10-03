@@ -12,6 +12,7 @@ import { assertSessionExecutionEngine } from '../services/session-execution-engi
 import { readSessionTranscriptSnapshot } from '../services/session-transcript-reader.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { Storage } from '../config/storage.js';
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   assertManagedSessionRestoreBundle,
@@ -749,6 +750,82 @@ describe('managed session authority activation fences', () => {
         renewalSeq: 2,
       });
       await opened.release();
+    });
+
+    it('does not revive a released activation when a renewal commits after the release', async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const journal = LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKeyFor(fixture),
+        );
+        const authority = await LocalManagedSessionAuthority.open({
+          journal,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now: () => 1_000_000,
+          resources: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: fixture.runtimeBaseDir,
+            sessionKey: sessionKeyFor(fixture),
+          }),
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        await authority.installActivation({
+          activationId: 'act-release-race',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+        // Hold the release commit inside the serial queue, so the renewal
+        // below reads the still-'active' pre-commit state and queues behind
+        // the release it must not outlive.
+        let releaseCommitStarted!: () => void;
+        const releaseCommitting = new Promise<void>((resolve) => {
+          releaseCommitStarted = resolve;
+        });
+        let releaseCommitMayFinish!: () => void;
+        const releaseCommitGate = new Promise<void>((resolve) => {
+          releaseCommitMayFinish = resolve;
+        });
+        const appendTransaction = journal.appendTransaction.bind(journal);
+        vi.spyOn(journal, 'appendTransaction').mockImplementation(
+          async (records) => {
+            if (
+              JSON.stringify(records).includes(
+                '"operation":"releaseActivation"',
+              )
+            ) {
+              releaseCommitStarted();
+              await releaseCommitGate;
+            }
+            return appendTransaction(records);
+          },
+        );
+
+        const release = authority.releaseActivation();
+        await releaseCommitting;
+        const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
+        releaseCommitMayFinish();
+        await release;
+        await expect(renewed).resolves.toBeUndefined();
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-release-race',
+          phase: 'released',
+          renewalSeq: 0,
+        });
+      } finally {
+        await lease.release();
+      }
     });
 
     it('recovers the renewed horizon from a cold reopen', async () => {
@@ -2316,7 +2393,24 @@ describe('managed session checkpoints', () => {
     );
     const resultRef = await harness.store.publish(
       'managed-turn-result',
-      Buffer.from('{"state":"completed"}', 'utf8'),
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'rec-turn-1',
+          parentUuid: null,
+          sessionId: harness.fixture.sessionId,
+          timestamp: new Date(1).toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'turn-1',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+        'utf8',
+      ),
     );
     const committed = await harness.authority.commitTurnComplete(
       inputCommand(harness.fixture, {
@@ -2373,6 +2467,72 @@ describe('managed session checkpoints', () => {
     await expect(
       harness.authority.harnessRunAuthorization(),
     ).resolves.toMatchObject({ status: 'runnable' });
+    await harness.close();
+  });
+
+  it('rejects a turn-complete whose result body is not a reader-facing record', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    const first = createInitialHarnessCheckpoint({
+      sessionKey: sessionKeyFor(harness.fixture),
+      checkpointId: 'ckpt-4',
+      coveredSequence: 3,
+      activationId: 'act-1',
+      turnId: null,
+      promptId: null,
+      definitionRevision: 'def-1',
+      configRevision: 'cfg-1',
+      inputDigest: DIGEST,
+      previousCheckpointId: null,
+    });
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-v1',
+      }),
+      { state: encodeHarnessCheckpointV1(first), boundary: null },
+      HOLDS,
+    );
+    const resultRef = await harness.store.publish(
+      'managed-turn-result',
+      Buffer.from('{"state":"completed"}', 'utf8'),
+    );
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-invalid-body',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: 'end_turn',
+            resultRef,
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: (identity, previous) =>
+            encodeHarnessCheckpointV1(
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: HOLDS.activation.activationId,
+                turnId: 'turn-1',
+                promptId: 'turn-1',
+              }),
+            ),
+        },
+        HOLDS,
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
     await harness.close();
   });
 

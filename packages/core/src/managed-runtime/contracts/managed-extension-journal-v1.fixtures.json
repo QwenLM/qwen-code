@@ -29,16 +29,16 @@
       "recordDigest": "182b7ff101a7903808ff62a58af6f5490892bf75c6966f356eb134aab9d5c732",
       "resources": [
         {
-          "resourceId": "00000000-0000-4000-8000-000000000001",
-          "kind": "managed-session-definition",
+          "resourceId": "00000000-0000-4000-8000-000000000002",
+          "kind": "managed-session-root-snapshot",
           "schemaVersion": 1,
           "byteLength": 2,
           "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
           "bytesBase64": "e30="
         },
         {
-          "resourceId": "00000000-0000-4000-8000-000000000002",
-          "kind": "managed-session-root-snapshot",
+          "resourceId": "00000000-0000-4000-8000-000000000001",
+          "kind": "managed-session-definition",
           "schemaVersion": 1,
           "byteLength": 2,
           "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -141,6 +141,22 @@
       "recordDigest": "fb70888345c7c7bb30dd9b800fae75a2c1042ee4a1d86b8a486d46e8c259c165",
       "resources": [
         {
+          "resourceId": "00000000-0000-4000-8000-000000000016",
+          "kind": "managed-admission",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytesBase64": "e30="
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000015",
+          "kind": "managed-input",
+          "schemaVersion": 1,
+          "byteLength": 28,
+          "digest": "3849ec9000e64785751953ade370c47d5960b3d7783cc80601a09eb4cbbe77fb",
+          "bytesBase64": "eyJ0ZXh0IjoiYnVpbGQubG9nIGNoYW5nZWQifQ=="
+        },
+        {
           "resourceId": "00000000-0000-4000-8000-000000000017",
           "kind": "managed-monitor_run",
           "schemaVersion": 1,
@@ -154,22 +170,6 @@
           "schemaVersion": 1,
           "byteLength": 31,
           "digest": "b880aed6021b6bfce49c1cb899d109a49db988999a5db905a4fa2db89083833f"
-        },
-        {
-          "resourceId": "00000000-0000-4000-8000-000000000015",
-          "kind": "managed-input",
-          "schemaVersion": 1,
-          "byteLength": 28,
-          "digest": "3849ec9000e64785751953ade370c47d5960b3d7783cc80601a09eb4cbbe77fb",
-          "bytesBase64": "eyJ0ZXh0IjoiYnVpbGQubG9nIGNoYW5nZWQifQ=="
-        },
-        {
-          "resourceId": "00000000-0000-4000-8000-000000000016",
-          "kind": "managed-admission",
-          "schemaVersion": 1,
-          "byteLength": 2,
-          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-          "bytesBase64": "e30="
         }
       ]
     },

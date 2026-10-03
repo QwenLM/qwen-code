@@ -2363,6 +2363,53 @@ describe('SessionWriterLease', () => {
       await replacement.release();
     });
 
+    it('refuses an unsupported managed lock format version at acquire', async () => {
+      const fixture = await createFixture('managed-format-guard-session');
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: { schemaVersion: 3, formatVersion: 0 },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      // No wedging: nothing was installed, so a baseline acquire resolves.
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.release();
+    });
+
+    it('blocks a certified takeover that would downgrade the sealed format', async () => {
+      const fixture = await createFixture('managed-format-takeover-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          takeoverPolicy: 'certified',
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        state: 'sealed',
+        format_version: 2,
+      });
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      await replacement.release();
+    });
+
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
       const fixture = await createFixture('managed-truncate-session');
       const lease = await SessionWriterLease.acquire({

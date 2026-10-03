@@ -1094,6 +1094,36 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
 }
 
 /**
+ * The refs an event carries at its schema-declared positions. Anything that
+ * merely has the ref field names without being a declared ref position — a
+ * free-form `json` payload field, for example — is not a dependency.
+ */
+export function managedSessionEventRefs(
+  event: ManagedSessionEvent,
+): ManagedSessionDurableRef[] {
+  const schema = EVENT_SCHEMAS[event.kind];
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const [name, kind] of Object.entries(schema.fields)) {
+    if (kind !== 'ref' && kind !== 'refOrNull' && kind !== 'refs') continue;
+    const value = event.payload[name];
+    if (value === null || value === undefined) continue;
+    if (kind === 'refs') {
+      (value as ManagedSessionJsonValue[]).forEach((item, index) =>
+        refs.push(
+          assertManagedSessionDurableRef(
+            item,
+            `${event.kind}.${name}[${index}]`,
+          ),
+        ),
+      );
+    } else {
+      refs.push(assertManagedSessionDurableRef(value, `${event.kind}.${name}`));
+    }
+  }
+  return refs;
+}
+
+/**
  * Rejects an actor class that may not request the kind. `action.changed` is
  * split by source and state because only the current Harness may raise a
  * tool_call request, while every final decision goes through the arbiter.

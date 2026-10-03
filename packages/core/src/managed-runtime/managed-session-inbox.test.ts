@@ -310,6 +310,33 @@ describe('FileManagedSessionInbox', () => {
     });
   });
 
+  it('latches a persist failure and halts every later operation until reopen', async () => {
+    const inbox = await openInbox();
+    await inbox.admit(userMessage('m1'), limits);
+
+    const contents = await readFile(filePath, 'utf8');
+    await rm(filePath);
+    await mkdir(filePath);
+
+    const m2 = userMessage('m2');
+    await expect(inbox.admit(m2, limits)).rejects.toBeInstanceOf(Error);
+    expect(inbox.haltedError).toBeInstanceOf(Error);
+    // The latch, not the original errno, is what later operations see.
+    await expect(inbox.admit(m2, limits)).rejects.toBe(inbox.haltedError);
+    // A failed persist must not have applied the event to memory either.
+    expect(inbox.get(m2)).toBeUndefined();
+    expect(inbox.listPending()).toHaveLength(1);
+
+    await rm(filePath, { recursive: true, force: true });
+    await writeFile(filePath, contents);
+    const reopened = await openInbox();
+    expect(reopened.get(userMessage('m1'))?.state).toBe('admitted');
+    expect(reopened.get(m2)).toBeUndefined();
+    await expect(
+      reopened.admit(userMessage('m3'), limits),
+    ).resolves.toMatchObject({ created: true });
+  });
+
   it('requires the deterministic payload reference and matching fence identity', async () => {
     const inbox = await openInbox();
     const input = userMessage('m1');
