@@ -4,7 +4,7 @@
 
 ## 部署决策
 
-物理回收保持关闭。O2/O3、O4-1 已合并；本门禁分片已对齐 main 9478f2873 上恢复后的 O4-2。退役与回收使用 V30/V33，中间为 recovery V31 与 close V32；落地前联合 SQL、Java 两个迁移目录再次核对 main 最新编号。临时 close 或 collection 数据库历史需要显式核对或重建，不自动执行 Flyway repair。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
+物理回收保持关闭。O2/O3、O4-1 与恢复后的 O4-2 均已合入 main。retention 使用 V30，依次为 recovery V31、close V32、AgentDefinition V33、collection V34；落地前联合 SQL、Java 两个迁移目录再次核对 main 最新编号。临时 close 或 collection 数据库历史需要显式核对或重建，不自动执行 Flyway repair。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
 
 默认 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED=false`，删除宽限期为 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE=24h`。物理回收关闭时仍执行观察。close、archive、ACK、事件过期及 Runtime 回收不会退役 Session 保留根。Session 成功删除建立不可逆的退役时间；修改宽限期不会重置时间。部署保持 24 小时策略，零宽限期仅用于全新隔离测试。
 
@@ -14,7 +14,7 @@
 
 ## 可复现门禁入口
 
-SDK Java workflow 也对本堆叠 PR 的 O4-2 base 执行，并提供按分支手动触发入口。Linux MySQL 8.4 job 先保留完整 Hosted 报告，再单独运行 clean O4 文件系统 profile 与源码导出的完整性检查。O4 fixture 不能替代失败或跳过的 Hosted 家族、真实 OSS 或下面的完整前台 Shell 验收。测试 workflow 不开启部署 GC。
+SDK Java workflow 对以 main 为目标的 PR 执行，并提供按分支手动触发入口。Linux MySQL 8.4 job 先保留完整 Hosted 报告，再单独运行 clean O4 文件系统 profile 与源码导出的完整性检查。O4 fixture 不能替代失败或跳过的 Hosted 家族、真实 OSS 或下面的完整前台 Shell 验收。测试 workflow 不开启部署 GC。
 
 使用 Java 21，先按 Java SDK 和 Runtime Broker 的 README 构建并安装本 checkout 的依赖。O4 profile 要求启用 `performance_schema` 的真实 MySQL 8.4，不会静默替换为 H2。提供已有专用数据库 URL，库名以 `qwen_o4_` 开头，例如 `jdbc:mysql://127.0.0.1:3306/qwen_o4_gate`。测试身份需要隔离测试服务器上的 CREATE/DROP DATABASE 权限，以及对 `performance_schema.data_lock_waits`、`performance_schema.data_locks`、`performance_schema.threads` 的 SELECT 权限。这些元数据仅用于按 writer 连接 ID、随机库名和 tenant 表观察真实 InnoDB 锁等待。每个用例创建全新随机 `qwen_o4_` 数据库、迁移并只删除该生成库；不会清理传入的数据库。主测试数据源使用最多四个连接的池，删库前先关闭池。runner 中断后，清理前核对生成库名、用例目录及自己创建的子进程 PID；不得删除传入库。
 
