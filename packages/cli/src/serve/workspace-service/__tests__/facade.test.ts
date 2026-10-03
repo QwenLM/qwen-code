@@ -5,7 +5,9 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { promises as fs, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { atomicWriteFileSync as realAtomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
@@ -119,6 +121,7 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../../../config/settings.js';
 import {
+  onTrustedFoldersChanged,
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
   TrustLevel,
@@ -239,8 +242,10 @@ async function withIsolatedWorkspace<T>(
   resetHomeEnvBootstrapForTesting();
   resetTrustedFoldersForTesting();
   try {
+    vi.mocked(atomicWriteFileSync).mockImplementation(realAtomicWriteFileSync);
     return await fn({ home, workspace });
   } finally {
+    vi.mocked(atomicWriteFileSync).mockReset();
     await fs.rm(scratch, { recursive: true, force: true });
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -622,33 +627,74 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('grantWorkspaceTrust overrides an existing untrusted rule', async () => {
-      await withIsolatedWorkspace(async ({ home, workspace }) => {
-        await writeJson(path.join(home, 'settings.json'), {
-          security: { folderTrust: { enabled: true } },
-        });
-        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
-          [workspace]: TrustLevel.DO_NOT_TRUST,
-        });
-        const svc = createDaemonWorkspaceService(
-          makeDeps({ boundWorkspace: workspace }),
-        );
+    it.each([false, true])(
+      'grantWorkspaceTrust persists trust (existing rule: %s)',
+      async (hasRule) => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await writeJson(path.join(home, 'settings.json'), {
+            security: { folderTrust: { enabled: true } },
+          });
+          if (hasRule) {
+            await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+              [workspace]: TrustLevel.DO_NOT_TRUST,
+            });
+          }
+          const svc = createDaemonWorkspaceService(
+            makeDeps({ boundWorkspace: workspace }),
+          );
 
-        await expect(
-          svc.getWorkspaceTrustStatus(makeCtx()),
-        ).resolves.toMatchObject({
-          effective: { state: 'untrusted', source: 'file' },
-        });
+          await expect(
+            svc.getWorkspaceTrustStatus(makeCtx()),
+          ).resolves.toMatchObject({
+            effective: { state: hasRule ? 'untrusted' : 'unknown' },
+          });
 
-        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
-          {
+          await expect(
+            svc.grantWorkspaceTrust(makeCtx()),
+          ).resolves.toMatchObject({
             v: 1,
             workspaceCwd: workspace,
             folderTrustEnabled: true,
             effective: { state: 'trusted', source: 'file' },
             explicitTrustLevel: TrustLevel.TRUST_FOLDER,
-          },
+          });
+          expect(
+            JSON.parse(
+              await fs.readFile(
+                path.join(home, TRUSTED_FOLDERS_FILENAME),
+                'utf8',
+              ),
+            ),
+          ).toEqual({ [workspace]: TrustLevel.TRUST_FOLDER });
+        });
+      },
+    );
+
+    it('grantWorkspaceTrust refuses when the written rule changes on disk', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
         );
+        const unsubscribe = onTrustedFoldersChanged(() => {
+          writeFileSync(
+            trustFile,
+            JSON.stringify({ [workspace]: TrustLevel.DO_NOT_TRUST }),
+          );
+        });
+        try {
+          await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+            WorkspaceTrustGrantIneffectiveError,
+          );
+          expect(JSON.parse(await fs.readFile(trustFile, 'utf8'))).toEqual({
+            [workspace]: TrustLevel.DO_NOT_TRUST,
+          });
+        } finally {
+          unsubscribe();
+        }
       });
     });
 

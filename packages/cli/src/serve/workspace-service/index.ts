@@ -715,17 +715,7 @@ export function createDaemonWorkspaceService(
       // the caller would report success for a workspace that stays
       // untrusted and the panel spins to its deadline and reverts.
       const snapshot = await readDaemonTrustPolicySnapshot();
-      const decision = evaluateDaemonWorkspaceTrust(
-        {
-          ...snapshot,
-          // The post-write rule set: setValue already committed it to the
-          // loaded config (and to disk with the real atomic writer), so the
-          // evaluation reads what the reconciler will read, without a disk
-          // round-trip.
-          trustedFolders: { ...loadTrustedFolders().user.config },
-        },
-        boundWorkspace,
-      );
+      const decision = evaluateDaemonWorkspaceTrust(snapshot, boundWorkspace);
       if (!decision.targetTrusted) {
         throw new WorkspaceTrustGrantIneffectiveError(
           decision.state,
