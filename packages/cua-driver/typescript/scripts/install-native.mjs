@@ -156,24 +156,61 @@ async function requireValidAuthenticodeSignature(source) {
     `$signature = Get-AuthenticodeSignature -LiteralPath ${quotePowerShell(source)}; ` +
     `if ($signature.Status -ne 'Valid') { ` +
     `throw \"UIAccess worker Authenticode status is $($signature.Status)\" }`
-  await run(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", command],
-    {
-      timeout: 30_000,
-    },
-  )
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  try {
+    await run("powershell", args, { timeout: 30_000 })
+  } catch (error) {
+    // Windows PowerShell 5.1 can fail to autoload the Security module, which
+    // reports the error id below instead of running Get-AuthenticodeSignature.
+    // Observed on the windows-2025 runner during a CUA release dry run. The id
+    // is not localized, unlike the message text, and ordinary failures of the
+    // signature check do not carry it, so the retry cannot mask a real result.
+    if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {
+      throw error
+    }
+    try {
+      await run("pwsh", args, { timeout: 30_000 })
+    } catch (retryError) {
+      // The population that hits the 5.1 autoload failure is largely the
+      // population without pwsh — chain the original diagnostic or the user
+      // is sent chasing a missing pwsh instead of the autoload failure. The
+      // entry renderer prints only error.message, so interpolate it.
+      throw new Error(
+        `Get-AuthenticodeSignature failed under Windows PowerShell (${error.message}) and the pwsh retry failed: ${retryError.message}`,
+        { cause: error },
+      )
+    }
+  }
 }
 
-async function installUiAccessWorker(source, version, env) {
-  await requireValidAuthenticodeSignature(source)
+// `verifySignature`/`mkdirImpl` are injectable (same pattern as
+// ensureNativePayload's fetchImpl) so the deploy path is testable off
+// Windows.
+export async function installUiAccessWorker(
+  source,
+  version,
+  env,
+  verifySignature = requireValidAuthenticodeSignature,
+  mkdirImpl = mkdir,
+) {
+  await verifySignature(source)
   const destination = uiAccessWorkerPath(version, env)
   const installed = await stat(destination).catch(() => undefined)
   if (installed?.isFile()) {
-    await requireValidAuthenticodeSignature(destination)
+    await verifySignature(destination)
     return destination
   }
-  await mkdir(dirname(destination), { recursive: true })
+  try {
+    await mkdirImpl(dirname(destination), { recursive: true })
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      throw new Error(
+        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed under Program Files (${error.message}). Run packages/cua-driver/scripts/install.ps1 once from an elevated terminal — it deploys the byte-identical path, and this installer then short-circuits on the already-installed worker.`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
   const temporary = `${destination}.${process.pid}.tmp`
   await copyFile(source, temporary)
   await rename(temporary, destination)

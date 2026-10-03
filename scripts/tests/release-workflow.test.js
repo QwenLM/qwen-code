@@ -59,6 +59,10 @@ const nodeReplPackage = JSON.parse(
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
+const cuaSdkInstallScript = readFileSync(
+  'packages/cua-driver/typescript/scripts/install-native.mjs',
+  'utf8',
+);
 const cuaSdkPackageLock = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package-lock.json', 'utf8'),
 );
@@ -132,17 +136,106 @@ describe('CUA release workflow', () => {
     );
   });
 
-  it('ships the Windows UIAccess worker for target-machine signing', () => {
-    expect(cuaReleaseWorkflow).toMatch(
-      /Build \(release\)[\s\S]*?Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build[\s\S]*?Verify unsigned UIAccess worker/,
+  it('signs the Windows worker and exercises packaged postinstall before upload', () => {
+    const steps = parse(cuaReleaseWorkflow).jobs['build-windows'].steps;
+    const testSignIndex = steps.findIndex(
+      (step) => step.name === 'Sign UIAccess worker with test certificate',
     );
-    expect(cuaReleaseWorkflow).toMatch(
-      /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
+    const signIndex = steps.findIndex(
+      (step) => step.name === 'Sign UIAccess worker',
     );
-    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
-    expect(cuaReleaseWorkflow).toContain(
-      '- **Windows**: unsigned UIAccess worker + native SDK payload',
+    const packageIndex = steps.findIndex((step) => step.name === 'Package');
+    const installIndex = steps.findIndex(
+      (step) => step.name === 'Clean-install Windows SDK from packaged payload',
     );
+    const uploadIndex = steps.findIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4',
+    );
+    expect(testSignIndex).toBeGreaterThan(-1);
+    expect(signIndex).toBeGreaterThan(-1);
+    expect(packageIndex).toBeGreaterThan(signIndex);
+    expect(installIndex).toBeGreaterThan(packageIndex);
+    expect(uploadIndex).toBeGreaterThan(installIndex);
+    expect(steps[testSignIndex].if).toBe(
+      "github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/')",
+    );
+    expect(steps[testSignIndex].env).toEqual({ SIGNING_TEST_ONLY: 'true' });
+    expect(steps[signIndex].if).toBe(
+      "github.event_name != 'workflow_dispatch' || inputs.dry_run != true || startsWith(github.ref, 'refs/tags/')",
+    );
+    expect(steps[signIndex].env).not.toHaveProperty('SIGNING_TEST_ONLY');
+    const signingScriptPath = '.github/scripts/sign-cua-windows-worker.ps1';
+    expect(steps[signIndex].run).toContain(signingScriptPath);
+    expect(steps[signIndex].run).toContain(
+      '-Worker "packages/cua-driver/rust/target/${{ matrix.target }}/release/cua-driver-uia.exe"',
+    );
+    const signingScript = readFileSync(signingScriptPath, 'utf8');
+    expect(signingScript).toContain(
+      "throw 'A trusted Windows code-signing certificate is required",
+    );
+    // Fail closed on a half-configured pair instead of silently falling
+    // through to the other identity (desktop-release.yml has the same guard).
+    expect(signingScript).toContain(
+      '([bool]$env:WINDOWS_CERTIFICATE) -ne ([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)',
+    );
+    expect(signingScript).toContain(
+      '([bool]$env:LEGACY_WIN_CSC_LINK) -ne ([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)',
+    );
+    // The imported leaf must not stay in Cert:\CurrentUser\My past the
+    // sign + verify lines: the clean-install step later in the job runs
+    // registry-fetched scripts under the same user.
+    expect(signingScript).toMatch(/Remove-Item[^\n]*Cert:\\CurrentUser\\My/);
+    expect(signingScript).toContain("$signature.Status -ne 'Valid'");
+    // `EnhancedKeyUsageList` holds provider display strings and `Oid` exposes
+    // only FriendlyName/Value, so filtering on `.ObjectId` selects nothing and
+    // fails closed even on a correctly configured PFX. Pin the EKU-extension
+    // route instead of the dead member access.
+    expect(signingScript).not.toContain('EnhancedKeyUsageList.ObjectId');
+    expect(signingScript).toContain("$_.Oid.Value -eq '2.5.29.37'");
+    expect(signingScript).toContain(
+      'X509EnhancedKeyUsageExtension]::new($_, $false).EnhancedKeyUsages',
+    );
+    expect(signingScript).toContain("$_.Value -eq '1.3.6.1.5.5.7.3.3'");
+    expect(signingScript).toContain('$_.HasPrivateKey');
+    expect(steps[installIndex].run).toContain('npm install');
+    expect(steps[installIndex].run).toContain('--ignore-scripts=false');
+    expect(steps[installIndex].run).toContain(
+      "throw 'Windows SDK postinstall failed'",
+    );
+    // Pin the whole signature guard, not a token inside it: the cmdlet name
+    // alone matches an inverted `-eq 'Valid'` verdict too.
+    expect(steps[installIndex].run).toContain(
+      "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",
+    );
+    expect(steps[installIndex].run).toContain(
+      "throw 'Installed UIAccess worker must have a valid signature'",
+    );
+    // With the gate now requiring `Valid`, a stale signed PE restored from
+    // the cargo cache would pass it — the Remove-Item before `cargo build`
+    // is the only thing forcing a relink, so pin the ordering.
+    const buildIndex = steps.findIndex(
+      (step) => step.name === 'Build (release)',
+    );
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(steps[buildIndex].run).toMatch(
+      /Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build/,
+    );
+    expect(cuaSdkInstallScript).toContain('await run("powershell", args');
+    // Retry only on the non-localized 5.1 module-autoload failure: the
+    // `pwsh` retry is reachable solely through the CouldNotAutoloadMatchingModule
+    // branch, never on an ordinary Get-AuthenticodeSignature error. (The
+    // module name itself stays legal in this file — a deeper fix that
+    // force-loads Microsoft.PowerShell.Security inside 5.1 needs it.)
+    expect(cuaSdkInstallScript).toMatch(
+      /CouldNotAutoloadMatchingModule[\s\S]*?run\("pwsh"/,
+    );
+    // Pin the guard's polarity, not just the ordering: dropping the `!`
+    // would send ordinary signature failures into the retry and rethrow the
+    // autoload case — exactly inverted.
+    expect(cuaSdkInstallScript).toContain(
+      'if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {',
+    );
+    expect(cuaSdkInstallScript).toContain('await run("pwsh", args');
   });
 
   it('pins exact Computer Use package versions across the skill and user guide', () => {
