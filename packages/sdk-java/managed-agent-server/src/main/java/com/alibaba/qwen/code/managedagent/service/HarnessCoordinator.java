@@ -155,6 +155,9 @@ public class HarnessCoordinator {
                         if (!store.renewTurn(tenantId, sessionId, turnId,
                                 owner, leaseDuration)) {
                             leaseLost.set(true);
+                        } else if (!leaseLost.get()) {
+                            executor.execute(() -> cancelAdmittedTurn(
+                                    tenantId, sessionId, turnId));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -547,18 +550,22 @@ public class HarnessCoordinator {
             }
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
-            if (session.workspace() != null) {
+            // A bound Session's Turn is cancelled like any other once
+            // Workspace files are enabled: the Hosted Harness aborts the
+            // Turn and settles its Runtime calls through their original
+            // identities. Without the opt-in nothing may reach it.
+            if (session.workspace() != null
+                    && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            Attachment attachment = harness.createOrLoad(
-                    session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null);
-            if (store.bindHarness(tenantId, sessionId,
-                    turnId, owner, attachment.bootId())) {
+            // Reuse the admitted attachment: attaching would recheck grants
+            // needed for new work and could replace the running attachment.
+            if (session.harnessBootId() != null && store.bindHarness(tenantId,
+                    sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
-            LOG.warn("Managed Turn cancellation will recover tenant={}"
+            LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"
                             + " session={} turn={} failure={}",
                     tenantId, sessionId, turnId,
                     error.getClass().getSimpleName());

@@ -187,6 +187,34 @@ describe('ToolRegistry', () => {
   let toolRegistry: ToolRegistry;
   let mockConfigGetToolDiscoveryCommand: ReturnType<typeof vi.spyOn>;
 
+  it('registers only runnable read tools for agent-host sessions through every registration path', async () => {
+    const config = new Config({
+      ...baseConfigParams,
+      safeMode: true,
+      coreTools: ['read_file', 'grep_search', 'list_directory'],
+    });
+    config.setSessionSource('agent-host', 'host_1');
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    for (const name of [
+      'agent',
+      'tool_call',
+      'mcp__ambient__read',
+      'unknown',
+    ]) {
+      const tool = new MockTool({ name });
+      registry.registerTool(tool);
+      registry.registerFactory(name, async () => tool);
+      registry.registerPermissionDeferredFactory(name, async () => tool);
+    }
+    expect(registry.getAllToolNames().sort()).toEqual([
+      'grep_search',
+      'list_directory',
+      'read_file',
+    ]);
+  });
+
   beforeEach(() => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.statSync).mockReturnValue({
