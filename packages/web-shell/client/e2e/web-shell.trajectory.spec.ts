@@ -1530,3 +1530,125 @@ test.describe('collapsible waterfall', () => {
     ).toBeInViewport();
   });
 });
+
+test.describe('trajectory search and filters', () => {
+  test('temporarily expands matches, navigates with input focus and restores folding @smoke', async ({
+    page,
+  }, testInfo) => {
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const request = page.getByTestId('trajectory-row-request').last();
+    await request.getByRole('button', { name: /^Collapse/ }).click();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.fill('note-2.txt');
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(1);
+    await expect(page.getByTestId('trajectory-row-request')).toHaveAttribute(
+      'data-context',
+      'true',
+    );
+    await page
+      .getByTestId('trajectory-row-request')
+      .getByRole('button', { name: /^Collapse/ })
+      .click();
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(0);
+    await search.press('Enter');
+    await expect(search).toBeFocused();
+    await expect(
+      page.locator('[data-testid="trajectory-row-tool"][data-selected="true"]'),
+    ).toBeInViewport();
+    await expect(page.getByTestId('trajectory-inspector')).toHaveCount(0);
+    await page
+      .getByRole('button', { name: 'Clear filters', exact: true })
+      .click();
+    await expect(
+      page
+        .getByTestId('trajectory-row-request')
+        .last()
+        .getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await search.fill('impossible phrase');
+    await expect(page.getByTestId('trajectory-filter-empty')).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Next', exact: true }),
+    ).toBeDisabled();
+  });
+
+  test('preserves hidden detail and clipboard, then overview clears only necessary filters @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page
+      .context()
+      .grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const tool = page.getByTestId('trajectory-row-tool').last();
+    const key = await tool.getAttribute('data-row-key');
+    await tool.click();
+    await page.getByRole('button', { name: 'View details' }).click();
+    const inspector = page.getByTestId('trajectory-inspector');
+    await inspector.getByRole('button', { name: 'Input', exact: true }).click();
+    const content = await inspector.locator('pre').textContent();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.fill('qwen3.8-max');
+    await expect(inspector).toContainText(
+      'This record does not match the current filters.',
+    );
+    await expect(inspector.locator('pre')).toHaveText(content!);
+    await inspector
+      .getByRole('button', { name: 'Copy displayed content' })
+      .click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      content,
+    );
+    await page
+      .locator(`[data-testid="trajectory-span"][data-row-key="${key}"]`)
+      .click({ force: true });
+    await expect(search).toHaveValue('');
+    await expect(
+      page.locator(
+        `[data-testid="trajectory-row-tool"][data-row-key="${key}"][data-selected="true"]`,
+      ),
+    ).toBeInViewport();
+    await expect(inspector).not.toContainText('does not match');
+  });
+});
+
+test('intersects type and recorded status without treating context as a hit @smoke', async ({
+  page,
+}, testInfo) => {
+  await openTrajectory(page, String(testInfo.project.use.baseURL), {
+    transcriptPage: { events: transcriptEvents(2) },
+  });
+  await page.getByRole('combobox', { name: 'Record type' }).click();
+  await page.getByRole('option', { name: 'Tools', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Execution status' }).click();
+  await page.getByRole('option', { name: 'Success', exact: true }).click();
+  await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
+  await expect(page.getByTestId('trajectory-row-request')).toHaveCount(2);
+  await expect(
+    page.getByTestId('trajectory-row-request').first(),
+  ).toHaveAttribute('data-context', 'true');
+  await expect(page.locator('[data-trajectory-filters]')).toContainText(
+    '2 matching records',
+  );
+  await page.getByRole('combobox', { name: 'Execution status' }).click();
+  await page.getByRole('option', { name: 'Failed', exact: true }).click();
+  await expect(page.getByTestId('trajectory-filter-empty')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Next', exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByTestId('trajectory-filter-empty')
+    .getByRole('button', { name: 'Clear filters', exact: true })
+    .click();
+  await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
+  await expect(
+    page.getByRole('combobox', { name: 'Record type' }),
+  ).toContainText('All types');
+});

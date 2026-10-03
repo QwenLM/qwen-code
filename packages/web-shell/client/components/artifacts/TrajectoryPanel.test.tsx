@@ -1589,3 +1589,325 @@ describe('collapsible trajectory', () => {
     expect(fold(container).getAttribute('aria-expanded')).toBe('true');
   });
 });
+
+describe('trajectory diagnostic filters', () => {
+  const events = () => [
+    userText('Check configuration', 'search-user'),
+    timingFrame(
+      {
+        kind: 'request',
+        durationMs: 1000,
+        startedAt: 1760000000000,
+        model: 'qwen-search',
+        status: 'ok',
+      },
+      'search-request',
+    ),
+    toolCall('search-call', 'read_file', 'Unique needle', 'search-tool'),
+    toolCall('other-call', 'run_shell', 'Another operation', 'other-tool'),
+  ];
+  const inputOf = (container: HTMLElement) =>
+    container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  const typeQuery = async (container: HTMLElement, value: string) => {
+    const input = inputOf(container);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const button = (container: HTMLElement, name: string) =>
+    Array.from(container.querySelectorAll('button')).find(
+      (element) => element.textContent === name,
+    )!;
+  const fold = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-row-request"] button',
+    )!;
+
+  it('keeps request context, restores base folding and does not resurrect temporary overrides', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    await typeQuery(container, 'needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-context'),
+    ).toBe('true');
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps hidden inspector identity and copy content, then reveals from overview', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    const inspector = () =>
+      container.querySelector('[data-testid="trajectory-inspector"]')!;
+    await typeQuery(container, 'qwen-search');
+    expect(inspector().textContent).toContain('Unique needle');
+    expect(inspector().textContent).toContain(
+      'This record does not match the current filters.',
+    );
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    const span = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-span"][data-row-key="req:search-request"]',
+    )!;
+    expect(span).not.toBeNull();
+    // The request is itself a match, so selecting it preserves the query.
+    await act(async () => {
+      span.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+      );
+      span.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+      );
+    });
+    expect(inputOf(container).value).toBe('qwen-search');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+
+  it('navigates only direct matches, retains input focus and expands temporarily folded hits', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    const input = inputOf(container);
+    input.focus();
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(input);
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-selected'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('Result 1 / 1');
+    await typeQuery(container, 'no such text');
+    expect(
+      container.querySelector('[data-testid="trajectory-filter-empty"]'),
+    ).not.toBeNull();
+    expect(button(container, 'Next').disabled).toBe(true);
+  });
+
+  it('preserves filters across refresh and clears them immediately on loader change', async () => {
+    let fail = false;
+    const container = await render(async () =>
+      fail ? page([], { replayError: 'offline' }) : page(events()),
+    );
+    await typeQuery(container, 'needle');
+    fail = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    fail = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryPanel loadPage={async () => page(events())} />
+        </I18nProvider>,
+      ),
+    );
+    expect(inputOf(container).value).toBe('');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+});
+
+it('reveals a request when its independent filter and time contexts have an empty intersection', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'intersection-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'intersection-model',
+          status: 'ok',
+        },
+        'intersection-request',
+      ),
+      toolCall(
+        'intersection-call',
+        'read_file',
+        'intersection-needle',
+        'intersection-tool',
+      ),
+      timingFrame(
+        {
+          kind: 'tool',
+          durationMs: 1000,
+          startedAt: 1760000002000,
+          callId: 'intersection-call',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'intersection-timing',
+      ),
+    ]),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const plot = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-plot"]',
+  )!;
+  const rect = vi
+    .spyOn(plot, 'getBoundingClientRect')
+    .mockReturnValue({ left: 0, right: 1000, width: 1000 } as DOMRect);
+  await act(async () => {
+    plot.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, clientX: 400 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 400 }),
+    );
+  });
+  expect(
+    container.querySelector('[data-testid="trajectory-filter-empty"]'),
+  ).not.toBeNull();
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:intersection-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 100 }),
+    );
+  });
+  expect(input.value).toBe('');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-testid="trajectory-range-status"]'),
+  ).not.toBeNull();
+  rect.mockRestore();
+});
+
+it('retains filters when overview reveals a context request hidden only by a collapsed turn', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'context-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'context-model',
+          status: 'ok',
+        },
+        'context-request',
+      ),
+      toolCall(
+        'context-call',
+        'Only child matches',
+        'Only child matches',
+        'context-tool',
+      ),
+    ]),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'Only child matches');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-turn"] button',
+      )!
+      .click(),
+  );
+  expect(
+    container.querySelector('[data-testid="trajectory-row-request"]'),
+  ).toBeNull();
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:context-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+    );
+  });
+  expect(input.value).toBe('Only child matches');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+});
