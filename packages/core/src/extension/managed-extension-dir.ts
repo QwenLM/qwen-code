@@ -180,11 +180,9 @@ function canonicalDirectory(directory: string): string {
   }
 }
 
-// Win32 and darwin default volumes equate names differing only in case, and
-// realpath preserves the spelling it was given — so one physical directory
-// can reach the comparison under two spellings. Fold case there, or a
-// case-variant spelling slips past the containment guard (the same failure
-// config/storage.ts folds for).
+// Apply a conservative case-insensitive boundary policy on win32/darwin,
+// including components that do not exist yet. Existing components are
+// canonicalized with realpathSync.native before these comparisons.
 function platformFoldsCase(): boolean {
   return process.platform === 'win32' || process.platform === 'darwin';
 }
