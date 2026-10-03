@@ -51,7 +51,7 @@ interface SuggestionsDisplayProps {
   onSelectCategory?: (category: SuggestionCategory | 'all') => void;
 }
 
-function categoryLabel(cat: SuggestionCategory | 'all'): string {
+export function categoryLabel(cat: SuggestionCategory | 'all'): string {
   switch (cat) {
     case 'all':
       return t('All');

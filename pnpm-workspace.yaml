@@ -6,6 +6,7 @@ packages:
   - 'packages/channels/base'
   - 'packages/channels/dingtalk'
   - 'packages/channels/dws'
+  - 'packages/channels/email'
   - 'packages/channels/feishu'
   - 'packages/channels/github'
   - 'packages/channels/gitlab'
@@ -16,7 +17,7 @@ packages:
   - 'packages/channels/weixin'
   - 'integrations/external-context'
   - 'integrations/external-context-mem0'
-  - '!packages/desktop-shell'
+  - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
 
@@ -78,6 +79,15 @@ overrides:
   # stops matching and a malformed request answers -32602 instead of -32603.
   # Pin it so every ACP consumer keeps the behaviour the tests verify.
   '@agentclientprotocol/sdk>zod': '3.25.76'
+  # web-shell generates its Managed Agent API types with openapi-typescript,
+  # which asks for supports-color 10. A second, higher supports-color in the
+  # graph makes pnpm resolve every `debug` instance's optional supports-color
+  # peer to it, rewriting hundreds of lockfile entries that the hoisted tree
+  # never uses. openapi-typescript only reads `stdout` and `stdout.hasBasic`
+  # to decide whether to colour its logs, and 7.2.0, the version the
+  # repository already installs, exports the same `stdout` (false without a
+  # TTY, which turns colours off).
+  'openapi-typescript>supports-color': '7.2.0'
 
 allowBuilds:
   '@google/genai': true

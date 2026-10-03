@@ -394,7 +394,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     } else if (name === 'escape') {
       onClose();
     } else if (activeTab === EXTENSIONS_TABS.INSTALLED && !busy) {
-      const row = listItems[listSelect.activeIndex]?.row;
+      const row = listItems[listSelect.activeIndexRef.current]?.row;
       if (!row) return;
       if (name === 'space' || original.sequence === ' ') {
         onRowAction?.(row, 'toggle');
@@ -490,7 +490,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
                     0,
                     Math.min(
                       detailActions.length - 1,
-                      detailSelect.activeIndex +
+                      detailSelect.activeIndexRef.current +
                         (direction === 'down' ? 1 : -1),
                     ),
                   ),
@@ -525,7 +525,8 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
                   0,
                   Math.min(
                     scopeItems.length - 1,
-                    scopeSelect.activeIndex + (direction === 'down' ? 1 : -1),
+                    scopeSelect.activeIndexRef.current +
+                      (direction === 'down' ? 1 : -1),
                   ),
                 ),
               )
@@ -574,7 +575,8 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
               0,
               Math.min(
                 listItems.length - 1,
-                listSelect.activeIndex + (direction === 'down' ? 1 : -1),
+                listSelect.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               ),
             ),
           )

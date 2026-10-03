@@ -10,3 +10,4 @@ fi
 bun packages/cli/scripts/opentui-component-parity.tsx
 bun packages/cli/scripts/opentui-stats-parity.tsx
 bun packages/cli/scripts/opentui-command-parity.ts
+bun packages/cli/scripts/opentui-wrap-parity.ts

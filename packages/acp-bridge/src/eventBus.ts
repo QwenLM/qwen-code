@@ -261,6 +261,53 @@ export function serializedBridgeEventByteLength(
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The over-budget degrade for an MCP App frame: blank the optional HTML,
+ * keep the text result. `html: ''` is the renderer's degrade sentinel
+ * (the App iframe mounts only when `html` is non-empty), so a frame whose
+ * `fallbackText` is empty would degrade to zero renderable content —
+ * those are left to the byte cap's eviction, which keeps the original
+ * resumable from the replay ring. Matches both `tool_call_update` (live
+ * delivery) and `tool_call` (the compacted replay window normalizes to
+ * it) so the replay window can apply the same degrade.
+ */
+export function mcpAppTextFallback(
+  event: BridgeEvent,
+): BridgeEvent | undefined {
+  if (event.type !== 'session_update' || !isRecord(event.data))
+    return undefined;
+  const update = event.data['update'];
+  if (
+    !isRecord(update) ||
+    (update['sessionUpdate'] !== 'tool_call_update' &&
+      update['sessionUpdate'] !== 'tool_call')
+  ) {
+    return undefined;
+  }
+  const output = update['rawOutput'];
+  if (
+    !isRecord(output) ||
+    output['type'] !== 'mcp_app' ||
+    typeof output['html'] !== 'string' ||
+    !output['html'] ||
+    typeof output['fallbackText'] !== 'string' ||
+    !output['fallbackText']
+  ) {
+    return undefined;
+  }
+  return {
+    ...event,
+    data: {
+      ...event.data,
+      update: { ...update, rawOutput: { ...output, html: '' } },
+    },
+  };
+}
+
 export function logEventSizingFailed(type: string): void {
   try {
     process.stderr.write(
@@ -586,7 +633,15 @@ export class EventBus {
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      const pushResult = sub.queue.push(event, getEventBytes);
+      const pushResult = sub.queue.push(event, getEventBytes, () => {
+        // Only queued subscribers lose optional HTML; direct delivery and
+        // the replay ring retain the original App. Keep both queue caps.
+        const fallback = mcpAppTextFallback(event);
+        const bytes = fallback && serializedBridgeEventByteLength(fallback);
+        return fallback && bytes !== undefined
+          ? { value: fallback, bytes }
+          : undefined;
+      });
       if (!pushResult.ok) {
         sub.evicted = true;
         // Synthetic terminal frame: NO `id` field. Otherwise it would
@@ -1134,7 +1189,11 @@ class BoundedAsyncQueue<T> {
     return this.liveBytes;
   }
 
-  push(value: T, getBytes: () => number): PushResult {
+  push(
+    value: T,
+    getBytes: () => number,
+    fallback?: () => { value: T; bytes: number } | undefined,
+  ): PushResult {
     if (this.closed) {
       return {
         ok: false,
@@ -1161,7 +1220,20 @@ class BoundedAsyncQueue<T> {
         liveBytes: this.liveBytes,
       };
     }
-    const bytes = getBytes();
+    let bytes = getBytes();
+    const reduced =
+      this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes
+        ? fallback?.()
+        : undefined;
+    if (reduced) {
+      value = reduced.value;
+      bytes = reduced.bytes;
+    }
+    // First-item rule: an empty queue admits one over-budget frame
+    // without degrading it (parity with the replay path's `replayedCount > 0`
+    // guarantee). A subscriber with an empty backlog is keeping up;
+    // evicting it buys nothing — the ring keeps the original frame and a
+    // resume would replay the identical bytes.
     if (this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes) {
       return {
         ok: false,

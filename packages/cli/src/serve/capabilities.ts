@@ -32,8 +32,11 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1' },
+  session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
@@ -57,6 +60,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_chunk_upload: { since: 'v1' },
   session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
@@ -120,6 +124,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents collaborating on shared task threads
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
+  // is settled at daemon startup, but the tag is recomputed per response, so a
+  // workspace opting in or out afterwards is seen on the next request. A client
+  // that sees it absent must not render the collaboration surface rather than
+  // render it and let the calls 404. Distinct from `workspace_agents` above,
+  // which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -255,6 +268,39 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // and its auth is reported per-request through the
   // `github_cli_unavailable` / `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
+  // workspace's repository, `GET .../git/worktrees/status?path=` reads one
+  // listed worktree's working-tree counters, and
+  // `POST .../git/worktrees/remove` removes one linked worktree by path,
+  // leaving the repository's other registrations alone except where git
+  // refuses per-path removal of a registration it has marked stale — usually
+  // a directory that outlived its gitfile — which falls back to
+  // `git worktree prune`. Removal refuses the main
+  // worktree and any registered workspace outright, and a dirty or
+  // session-hosting worktree unless the body carries `force: true` (409
+  // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
+  // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
+  // `worktree_status_unknown` / `worktree_nested_repository`, the last for a
+  // submodule whose own repository the removal would delete — which git
+  // itself only refuses while the checkout is still there, and which carries
+  // `submodulesUnknown` instead when whether there is one could not be
+  // checked). The
+  // `worktree_is_workspace` refusal names the blocking workspace in
+  // `workspaceCwd`, since it may be rooted below the worktree. Any
+  // other refusal git makes on a non-forced removal that changed nothing,
+  // for a checkout git can still reach, comes back as 409
+  // `worktree_remove_refused` with git's own sentence in `detail`, so a
+  // refusal `--force --force` would clear is not a dead end. A forced
+  // removal's failure, and one git cannot validate, surface as git's error. Whichever
+  // refusal answers, it carries everything else the same `force` would take. The session count spans every
+  // registered workspace's current runtime, draining ones included, so a
+  // worktree holding another workspace's session is refused too. A success
+  // carries `directoryRemains` when the registration went and the directory
+  // did not — an unfinished deletion, or the prune fallback, which deletes
+  // no file in the working tree, though it does delete the registration's
+  // admin directory and with it that worktree's HEAD, reflog and any
+  // submodule repository.
+  workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -357,6 +403,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
@@ -526,7 +573,18 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * advertised.
  */
 export interface AdvertiseFeatureToggles {
+  hostedHarness?: boolean;
   requireAuth?: boolean;
+  /**
+   * Whether the daemon is serving the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`) for this response. Resolved from
+   * `experimental.agentCollaboration` at call time rather than snapshotted at
+   * boot: which routes exist at all is settled at startup, but a workspace
+   * opting in or out afterwards is seen on the next request. Left unset by the
+   * pre-runtime bootstrap envelope, which reads no workspace settings and so
+   * omits the tag even when the runtime envelope will advertise it.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -621,7 +679,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,

@@ -96,6 +96,9 @@ function Harness({
           data-expanded
         />
       )}
+      {composer.searchState.searchMode && (
+        <input ref={composer.searchState.searchInputRef} data-history-search />
+      )}
     </div>
   );
 }
@@ -333,6 +336,24 @@ describe('useComposerCore mobile textarea backend', () => {
     act(() => latest!.searchState.openHistorySearch());
     expect(latest!.searchState.searchMode).toBe(true);
     expect(latest!.searchState.searchMatches).toContain('first message');
+  });
+
+  it('focuses history search when timers run before the input mounts', async () => {
+    mockTouchDevice();
+    await mount();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        latest!.searchState.openHistorySearch();
+        vi.runOnlyPendingTimers();
+        expect(container!.querySelector('[data-history-search]')).toBeNull();
+      });
+      const search = container!.querySelector('[data-history-search]');
+      expect(search).not.toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('submits a selected history-search match through the pipeline', async () => {

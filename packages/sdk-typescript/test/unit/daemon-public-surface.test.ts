@@ -239,6 +239,7 @@ describe('continuation compatibility', () => {
 });
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
+    expect(typeof Public.DaemonAttachmentUploadError).toBe('function');
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
     expect(typeof Public.isKnownDaemonEvent).toBe('function');
     expect(typeof Public.isDaemonEventType).toBe('function');
@@ -805,7 +806,13 @@ describe('runtime MCP add/remove SDK types', () => {
   it('request type compiles', () => {
     const req: DaemonRuntimeMcpAddRequest = {
       name: 'echo',
-      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      config: {
+        command: 'node',
+        args: ['echo.js'],
+        type: 'stdio',
+        appResourceMaxBytes: 4_194_304,
+        appResourceTimeoutMs: 30_000,
+      },
       displayName: 'Echo Server',
     };
     expect(req.name).toBe('echo');
