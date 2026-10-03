@@ -1571,7 +1571,21 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
           recovery = recovered.report;
-          session.recoveredTurn = recovered.promptId;
+          // Arm the undriven marker only for a recovery the coordinator can
+          // actually drive: every outcome reported as known, and phase
+          // results_ready unless the load only reports passively (a passive
+          // report with all-known outcomes is cancellation-ready). An
+          // undrivable report is answered without the marker — the
+          // coordinator fails the Turn without ever driving, and the
+          // Session must not refuse every later route forever.
+          const passiveTakeover =
+            body?.['passiveManagedRuntimeRecovery'] === true;
+          const drivable =
+            recovery.executions.every(
+              (execution) => execution.outcome === 'known',
+            ) &&
+            (passiveTakeover || recovery.phase === 'results_ready');
+          if (drivable) session.recoveredTurn = recovered.promptId;
           if (recovered.acquiredRuntime)
             session.runtimeLeaseHeld =
               recovered.report.executions[0]?.runtimeSessionId ??
@@ -2022,6 +2036,10 @@ export function registerHostedHarnessSessionRoutes(
       } finally {
         if (timer) clearTimeout(timer);
         session.active = undefined;
+        // A settled prompt Turn is a natural retry pacing for any lease a
+        // terminal route owed the Broker — read the owed identity from the
+        // flag only, never from this Turn's own broker.
+        releaseRecoveredRuntime(session);
       }
     })();
   });
@@ -2635,7 +2653,9 @@ export function registerHostedHarnessSessionRoutes(
           // blocked-on-recovery re-drive exists on this route, because the
           // Session stays registered and the coordinator drops its recovery
           // tracking on this admission. Only an already-wrapped recovery
-          // error keeps its outer recovery-blocked handling.
+          // error keeps its outer recovery-blocked handling, and a Turn
+          // settling here also drops its pending file-history marker, since
+          // it never resumes to reconcile it.
           await toolTurn.resumeCommittedResults();
           const result = await runHostedHarnessTextTurn({
             sessionId,
@@ -2660,6 +2680,20 @@ export function registerHostedHarnessSessionRoutes(
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
             );
+          }
+        }
+        // A Turn settling here never resumes, so its pending file-history
+        // obligation dies with it — same invariant as the cancel route —
+        // or one transient failure wedges every later cold load.
+        {
+          const savedHistory = await readHostedFileHistory(session.managed);
+          if (savedHistory?.pendingTurn === promptId) {
+            await commitHostedFileHistory(session.managed, {
+              schemaVersion: 1,
+              state: savedHistory.state,
+              pendingTurn: null,
+              pendingUndo: null,
+            });
           }
         }
         await toolTurn.finish();
@@ -2791,8 +2825,9 @@ export function registerHostedHarnessSessionRoutes(
         // here once the executions are confirmed stopped — including the
         // abandoned kind, whose binding is fenced too. A refused or lost
         // release must not redo a cancellation that is already settled:
-        // record the lease as owed so the next terminal route retries the
-        // handback, and answer the Turn's outcome rather than the lease's.
+        // record the lease as owed under the identity whose release just
+        // failed, so the later retry sites (the next settled /prompt, a
+        // cancel replay, or close) hand it back on the same key.
         const released = await broker.release().then(
           () => true,
           (cause: unknown) => {
@@ -2802,12 +2837,12 @@ export function registerHostedHarnessSessionRoutes(
             )
               return true;
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed after the cancellation settled: ${String(cause)}`,
+              `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
             );
             return false;
           },
         );
-        if (!released) session.runtimeLeaseHeld = promptId;
+        if (!released) session.runtimeLeaseHeld = broker.runtimeSessionId;
         await session.managed.sink.write(
           record(session, sessionId, 'system', null, {
             subtype: 'turn_result',
