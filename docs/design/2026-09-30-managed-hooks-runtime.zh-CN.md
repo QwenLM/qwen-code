@@ -79,6 +79,18 @@ Hook owner ID 在构造时根据已经持久化的 activation ID 与 epoch 固�
 安装新的 activation，因此不会复用已释放的 Runtime Session ID。即使 acquire 仅用于
 目录请求、尚无首条 Hook execution 记录，恢复也能找到 owner。旧随机 owner ID
 继续从 execution 记录恢复；旧版本若没有留下任何 execution 记录，则需要运维恢复。
+只有 load 的 activation 对应 owner。每次生命周期 Hook 操作会安装一个
+`hook_operation` activation，结束时再安装一个恢复 activation，其 ID 由该操作所
+替换的 activation 的 ID 派生。日志中总有那个 activation，因此即使
+`hook_operation` activation 安装失败，也能识别出恢复。恢复 activation 沿用默认
+subject，因此记录格式不变；日志拒绝安装已存在的 activation ID，因此派生 ID 不会
+重放之前的安装。两者都不会构造 Hook session，因此释放时跳过两者，其开销不随 Hook
+操作次数增长。load 总是安装随机的 activation ID，因此即使它位于失败或未恢复的
+Hook 操作之后，也仍视为 owner。同一 Hook session 中并行的 Hook 执行共享同一次
+acquire，因此它们只执行一遍释放流程。之后的 load 会再次释放更早的 load owner；
+释放是幂等的，重复释放只多一次 Broker 往返。在恢复 ID 改为派生之前记录的恢复
+activation 会像 load 一样被释放，Broker 对这次释放返回 404。因此对本次改动之前
+写入的日志，之后每次 load 仍要为每次更早的 Hook 操作发送一次 release。
 替换后的 Hook owner acquire Workspace 前，会释放所有 Hook 记录已终态的旧 owner，
 包括经 status 完成对账的 owner。工具结果 continuation 复用同一 acquire 入口。
 共享的物理工作仍在运行时，Broker 继续拒绝释放。仅明确的
