@@ -635,6 +635,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public OperationAdmission beginOperation(String tenantId,
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
             throw workspaceExecutionUnavailable();
         }
