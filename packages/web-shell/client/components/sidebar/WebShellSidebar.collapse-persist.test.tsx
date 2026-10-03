@@ -2179,6 +2179,67 @@ describe('WebShellSidebar rail navigation', () => {
     );
   });
 
+  it('maps a capped leftward jitter onto the stored width', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 298, pointerId: 1 }),
+      );
+    });
+
+    // The cap binds at drag start, so the rendered edge cannot follow the
+    // pointer and a rect-based delta is container-scoped: a 2px leftward
+    // jitter must store 420 - 2, not the capped 298.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('418');
+  });
+
+  it('drops the rail tooltip when the rail unmounts under it', async () => {
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    const home = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    // The nav's hover handler ignores synthetic mouse events, so this must
+    // carry pointerType 'mouse' or the hint is never set — and the harness
+    // aliases PointerEvent to MouseEvent, which drops that property.
+    const hover = new PointerEvent('pointerover', { bubbles: true });
+    Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+    act(() => {
+      home.dispatchEvent(hover);
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="tooltip"]')).not.toBeNull();
+
+    renderSidebar(false, { layout: 'single' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-navigation-rail]'),
+    ).toBeNull();
+
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    // A removed element fires neither pointerout nor blur, so without an
+    // explicit clear the Popover remounts already-open against the detached
+    // button and paints the previous icon's label at the viewport origin.
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
   it('restores the state width when a drag returns to its start', async () => {
     window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
     renderSidebar(false, { layout: 'rail', containerWidth: 600 });

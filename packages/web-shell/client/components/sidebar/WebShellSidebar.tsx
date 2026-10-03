@@ -1069,6 +1069,18 @@ export function WebShellSidebar({
   const railLayout = layout === 'rail';
   const [navigationHint, setNavigationHint] =
     useState<HTMLButtonElement | null>(null);
+  // Every other clear site is a DOM handler on the rail `<nav>`, and removed
+  // elements fire neither pointerout nor blur — so an unmounted rail (or just
+  // an unmounted hinted button, when its feature gate flips) would leave the
+  // tooltip Popover open against a detached node, painting a stale label at
+  // the viewport origin when the rail returns. No dependency array: a dep
+  // list cannot observe a child's unmount, and the early return keeps this
+  // free on every render that has no hint to drop.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- must re-check every render: the hinted button can unmount while both deps stay unchanged
+  useEffect(() => {
+    if (navigationHint === null) return;
+    if (!railLayout || !navigationHint.isConnected) setNavigationHint(null);
+  });
   // Column-restoring entries (Home, Channels, Live) must leave the collapsed
   // state behind or a collapsed user's click appears to do nothing; full-page
   // entries keep the column hidden regardless, so they leave the persisted
@@ -4413,9 +4425,21 @@ export function WebShellSidebar({
         const cappedByContainer =
           rawWidth >= getSidebarDragMaxWidth(containerWidth) &&
           startStateWidth > nextWidth;
+        // While the cap binds, the rendered edge cannot follow the pointer,
+        // so the rect-based delta is container-scoped in *both* directions:
+        // persisting it would overwrite the window-scoped preference with a
+        // narrow value on an ordinary leftward jitter. Map the pointer delta
+        // onto the state width instead; the visible width still renders under
+        // the cap, the same snap the past-cap branch already accepts.
+        const capBoundAtStart = startStateWidth > startWidth;
         const finalWidth = cappedByContainer
           ? clampSidebarWidth(startStateWidth, sidebarMinWidth)
-          : nextWidth;
+          : capBoundAtStart
+            ? clampSidebarWidth(
+                startStateWidth + (rawWidth - startWidth),
+                sidebarMinWidth,
+              )
+            : nextWidth;
         setSidebarWidth(finalWidth);
         writeSidebarWidth(finalWidth);
         teardown(true);
