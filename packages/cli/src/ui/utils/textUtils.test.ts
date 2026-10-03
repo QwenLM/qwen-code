@@ -13,6 +13,7 @@ import {
   TEXT_CACHE_MAX_ENTRIES,
   __getTextUtilsCacheSizes,
   clearStringWidthCache,
+  clipToWidth,
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
   sanitizeFilenameForDisplay,
@@ -410,6 +411,29 @@ describe('textUtils', () => {
     it('bounds CJK text by display width, not character count', () => {
       // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
       expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
+    });
+  });
+
+  describe('clipToWidth', () => {
+    it('returns the full text when it fits the budget', () => {
+      expect(clipToWidth('Color', 12)).toBe('Color');
+      expect(clipToWidth('Color', 5)).toBe('Color');
+    });
+
+    it('clips to plain columns with no ellipsis when over budget', () => {
+      expect(clipToWidth('Target config', 6)).toBe('Target');
+    });
+
+    it('returns empty at a zero or negative budget', () => {
+      expect(clipToWidth('Target config', 0)).toBe('');
+      expect(clipToWidth('Target config', -3)).toBe('');
+    });
+
+    it('bounds CJK text by display width, not character count', () => {
+      expect(clipToWidth('目标配置参数设置', 10)).toBe('目标配置参');
+      // A double-width cell that would straddle the budget is dropped whole.
+      expect(clipToWidth('目标配置参数设置', 9)).toBe('目标配置');
+      expect(clipToWidth('ab目', 3)).toBe('ab');
     });
   });
 

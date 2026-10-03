@@ -100,6 +100,27 @@ describe('scroll window rules (BaseSelectionList parity)', () => {
   it('selectionWindow never slices past the item count', () => {
     expect(selectionWindow(0, 3, 10).end).toBe(3);
   });
+
+  it('selectionWindow clamps an offset the window outgrew', () => {
+    // The follow rule leaves the offset alone while the highlight stays
+    // inside, so a region grow can hand in an offset past the last full
+    // window. Painting from it would show fewer rows than the budget allows
+    // — and no arrows, since the budget just decided the whole list fits.
+    expect(selectionWindow(3, 5, 5)).toEqual({
+      start: 0,
+      end: 5,
+      showUp: false,
+      showDown: false,
+    });
+    expect(selectionWindow(18, 20, 5)).toEqual({
+      start: 15,
+      end: 20,
+      showUp: true,
+      showDown: false,
+    });
+    // A mid-list offset inside the bound passes through unchanged.
+    expect(selectionWindow(12, 20, 3).start).toBe(12);
+  });
 });
 
 describe('computeInitialActiveIndex', () => {

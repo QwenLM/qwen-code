@@ -82,6 +82,13 @@ export function dialogContentWidth(terminalWidth: number): number {
 export function DialogFrame(props: {
   children?: ReactNode;
   borderColor?: string;
+  /**
+   * Stretch to the whole popup region, as the ink dialogs that take an
+   * explicit `clampDialogHeight(availableTerminalHeight)` do. Only those may
+   * set it: ink leaves every other dialog content-height at the top of the
+   * region, with the unused rows blank below it.
+   */
+  fill?: boolean;
 }) {
   return (
     <box
@@ -89,6 +96,7 @@ export function DialogFrame(props: {
       borderStyle="rounded"
       borderColor={props.borderColor ?? C.borderDefault}
       padding={1}
+      flexGrow={props.fill ? 1 : 0}
     >
       {props.children}
     </box>
@@ -277,8 +285,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   );
 
   // BaseSelectionList scroll-follow: the window only moves when the
-  // highlight would leave it.
+  // highlight would leave it. A zero-row window has no anchor to follow to —
+  // the rule would ping-pong between the highlight and the list end — so the
+  // offset is left alone until the budget paints rows again.
   useEffect(() => {
+    if (maxItemsToShow < 1) return;
     const next = followScrollOffset(
       activeIndex,
       scrollOffset,
@@ -355,6 +366,37 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
+        // A completed number may only address a row the painted window shows:
+        // on a short terminal the window is narrower than the list, and
+        // moving to (or committing) an unpainted row would persist a choice
+        // the user never saw — on a highlight-driven step like the scope one,
+        // the highlight move alone already retargets what the next Enter
+        // writes. A prefix that could still extend into a painted row keeps
+        // its buffer and waits for the completing digit instead: it never
+        // moves the highlight and never arms the committing flush, because
+        // both commit the highlight.
+        const painted = selectionWindow(
+          scrollOffset,
+          items.length,
+          maxItemsToShow,
+        );
+        if (
+          result.activeIndex < painted.start ||
+          result.activeIndex >= painted.end
+        ) {
+          if (result.selectNow) {
+            numberBuffer.current = '';
+          } else {
+            // The kept prefix still expires on the same clock a live entry
+            // flushes on, except this timer only clears: a prefix refused a
+            // minute ago must not complete against the next digit.
+            numberTimer.current = setTimeout(
+              clearNumberBuffer,
+              NUMBER_SELECT_TIMEOUT_MS,
+            );
+          }
+          return;
+        }
         moveCursor(result.activeIndex);
         const item = items[result.activeIndex];
         if (item) onHighlight?.(item.value, result.activeIndex);
@@ -380,6 +422,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // original hook clears its buffer on a non-numeric key.
     clearNumberBuffer();
 
+    // The zero-row budget that refuses Enter has no painted row for the
+    // arrows to reach either: a highlight move fires onHighlight, and on a
+    // highlight-driven step like the scope one that alone retargets what the
+    // next Enter writes.
+    if (maxItemsToShow < 1) return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
       highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'up'));
       return;
@@ -389,6 +436,9 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       return;
     }
     if (original.name === 'return') {
+      // A zero-row budget (a region too short for even one list row) leaves
+      // the highlight on a row nothing paints; Enter must not commit it.
+      if (maxItemsToShow < 1) return;
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }

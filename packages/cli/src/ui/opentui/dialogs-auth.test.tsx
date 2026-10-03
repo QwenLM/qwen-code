@@ -1266,3 +1266,43 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
   });
 });
+
+describe('wire-API step cursor out of one read (#207)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.logAuth.mockReset();
+  });
+
+  it('saves the wire API the arrow of the same read moved to', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    // ↓ and Enter out of one stdin read. Read from the render that armed the
+    // handler, the Enter still saw Chat Completions and saved the wrong wire.
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    await typeText('responses-model');
+    await press('return'); // models → advancedConfig
+    await press('return'); // advancedConfig → review
+    await press('return'); // save
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+      expect.anything(),
+    );
+  });
+});

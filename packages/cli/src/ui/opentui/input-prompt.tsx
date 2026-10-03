@@ -62,7 +62,14 @@ import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
-import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  cpLen,
+  getCachedStringWidth,
+  stripUnsafeCharacters,
+  toCodePoints,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
@@ -1302,6 +1309,60 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const color = isActive ? C.accent : C.dim;
             const label = suggestion.label ?? suggestion.value;
             const sharedColumn = slashColumn || !!suggestion.description;
+            // ink truncates the hint and the badge (`wrap="truncate-end"`) in
+            // the columns the label column leaves after the label. @opentui has
+            // no truncate wrap mode, so an over-long hint wrapped onto a second
+            // row and doubled the row height instead.
+            // ink measures these with `string-width`, which reads an ANSI
+            // sequence as zero-width in a whole string, and its terminal then
+            // paints the colour. This renderer has no content-level ANSI
+            // handling, so the same bytes would be charged against the budget
+            // as five columns and cut mid-sequence; strip them instead.
+            const hintText = suggestion.argumentHint
+              ? ` ${stripUnsafeCharacters(suggestion.argumentHint)}`
+              : '';
+            const badgeText = suggestion.sourceBadge
+              ? ` ${stripUnsafeCharacters(suggestion.sourceBadge)}`
+              : '';
+            // A row with no shared column has no description gutter to pay, so
+            // its budget drops only the dropdown margins and the active marker:
+            // columns - 6.
+            const columnWidth = Math.max(
+              0,
+              sharedColumn ? labelColumnWidth : columns - 6,
+            );
+            // Yoga measures each tail item against the column, so an item
+            // shrinks from a basis already capped at the column width rather
+            // than from its full text width, and the overflow splits between
+            // the two in proportion to those bases. Fitted against ink across 23
+            // hint/badge/column combinations; shrinking from the uncapped width
+            // hands the hint a larger share and eats the badge.
+            const hintBasis = Math.min(
+              getCachedStringWidth(hintText),
+              columnWidth,
+            );
+            const badgeBasis = Math.min(
+              getCachedStringWidth(badgeText),
+              columnWidth,
+            );
+            const shrinkTotal = hintBasis + badgeBasis;
+            const overflow =
+              getCachedStringWidth(label) + shrinkTotal - columnWidth;
+            const share = (basis: number) =>
+              basis - (overflow * basis) / shrinkTotal;
+            let hint = truncateToWidth(hintText, hintBasis);
+            let badge = badgeText;
+            if (overflow > 0 && shrinkTotal > 0) {
+              // Yoga leaves both widths fractional and ink's renderer floors the
+              // badge's start column, so the hint's own ellipsis is drawn one
+              // column past the text it kept and the badge paints over it: what
+              // survives is ceil(width - 1) plain columns. With no badge there
+              // is nothing to paint over it and the ellipsis is its last column.
+              hint = badgeText
+                ? clipToWidth(hintText, Math.ceil(share(hintBasis) - 1))
+                : truncateToWidth(hintText, Math.floor(share(hintBasis)));
+              badge = truncateToWidth(badgeText, Math.ceil(share(badgeBasis)));
+            }
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
@@ -1318,9 +1379,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                   // every `@` row after one slash completion.
                   width={sharedColumn ? labelColumnWidth : 'auto'}
                 >
-                  {/* Separate flex children, not one text: an over-long hint then
-                      wraps in the width left after the label. Char wrap matches
-                      ink's hard wrap-ansi; word wrap strands `[` on its own row. */}
+                  {/* Separate flex children, not one text: the label keeps its
+                      own char wrap, matching ink's hard wrap-ansi. Word wrap
+                      strands `[` on its own row. */}
                   <box flexDirection="row">
                     <box flexShrink={0}>
                       <text
@@ -1331,27 +1392,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                         {label}
                       </text>
                     </box>
-                    {suggestion.argumentHint && (
-                      <text fg={C.dim} wrapMode="char">
-                        {` ${suggestion.argumentHint}`}
+                    {hint ? <text fg={C.dim}>{hint}</text> : null}
+                    {badge ? (
+                      <text fg={color} attributes={isActive ? 1 : 0}>
+                        {badge}
                       </text>
-                    )}
-                    {suggestion.sourceBadge && (
-                      <text
-                        fg={color}
-                        attributes={isActive ? 1 : 0}
-                        wrapMode="char"
-                      >
-                        {` ${suggestion.sourceBadge}`}
-                      </text>
-                    )}
+                    ) : null}
                   </box>
                 </box>
                 {suggestion.description && (
                   <box paddingLeft={2} flexGrow={1}>
                     <text fg={color}>
                       {truncateToWidth(
-                        normalizeDescription(suggestion.description),
+                        normalizeDescription(
+                          stripUnsafeCharacters(suggestion.description),
+                        ),
                         descriptionWidth,
                       )}
                     </text>

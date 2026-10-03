@@ -132,8 +132,12 @@ export interface OpenTuiDialogMountProps {
   onSelectSetting?: (name: string, scope: SettingScope) => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
-  /** Row budget for the model/settings/theme dialog bodies. */
-  availableTerminalHeight?: number;
+  /** Row budget for the dialog bodies that window themselves (model, theme,
+   * approval mode, settings, the permission rule and directory lists, and
+   * the session picker's) and for the help overlay's body rows. Required
+   * so a caller cannot budget the overlay from the raw terminal height —
+   * five rows more than the region holds — by forgetting it. */
+  availableTerminalHeight: number;
 }
 
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
@@ -296,7 +300,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   };
   const [helpScroll, setHelpScroll] = useState(0);
   const dialogWidth = dialogAreaWidth(dimensions.width);
-  const helpBodyRows = computeHelpBodyRows(dimensions.height);
+  const helpBodyRows = computeHelpBodyRows(props.availableTerminalHeight);
   const helpWindowRows = helpCommandWindowRows(helpBodyRows);
   // Only the two command tabs have a scrollable window, and its bound is that
   // tab's line count. Clamping here rather than leaving it to the render keeps
@@ -444,6 +448,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           rules={data.rules}
           directories={data.directories}
           initialDirectories={data.initialDirectories}
+          availableTerminalHeight={props.availableTerminalHeight}
           onAddRule={(ruleText, type, scope) => {
             addPermissionRule(config, settings, ruleText, type, scope);
             reloadPermissions();
@@ -475,6 +480,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
             props.onApprovalModeChanged?.(mode);
             onClose();
           }}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -505,6 +511,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           onClose={onClose}
           notify={(text, level) => reportResult(null, text, level)}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -514,6 +521,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
           matchedSessions={
             request.matchedSessions as SessionListItem[] | undefined
           }
@@ -600,6 +608,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -642,6 +651,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 

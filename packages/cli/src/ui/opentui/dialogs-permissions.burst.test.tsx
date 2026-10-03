@@ -163,6 +163,48 @@ beforeEach(() => {
   document.body.innerHTML = '';
 });
 
+describe('OpenTuiPermissionsDialog region budget', () => {
+  it('windows the rule list to the region, so Enter only commits a painted row', () => {
+    // Region nineteen pays the rule view's chrome — tab bar 1, description
+    // and margin 2, search box and margin 4, spacer 1, footer hint 2 — and
+    // leaves the list nine rows, not the constant fifteen whose tail the
+    // region's clip took while the keys kept committing the clipped rows.
+    const rules = Array.from({ length: 20 }, (_, i) => ({
+      raw: `WebFetch(domain-${i}.example.com)`,
+      toolName: 'WebFetch',
+      type: 'allow' as const,
+      scope: 'user',
+    }));
+    render(
+      <OpenTuiPermissionsDialog
+        rules={rules}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    // The window is the nine rows the region pays for: 'Add a new rule…'
+    // plus the first eight rules; the ninth rule does not paint.
+    expect(screen.getByText('WebFetch(domain-7.example.com)')).toBeTruthy();
+    expect(screen.queryByText('WebFetch(domain-8.example.com)')).toBeNull();
+
+    // Eight downs land on the window's last painted row, and Enter commits
+    // exactly that rule's confirmation.
+    for (let i = 0; i < 8; i++) press({ name: 'down' });
+    press(ENTER);
+    expect(screen.getByText('Delete allow rule?')).toBeTruthy();
+    expect(
+      screen.getAllByText('WebFetch(domain-7.example.com)').length,
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe('OpenTuiPermissionsDialog text-field bursts', () => {
   it('submits the rule a burst typed in, not the empty buffer it started from', () => {
     const { onAddRule } = renderDialog();
