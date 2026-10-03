@@ -20,8 +20,10 @@
 //     them when the lane showed no sign of life in over a day (a workflow
 //     file that fails to parse produces exactly that).
 // One open issue at a time, found by an exact body marker matched client-side
-// (GitHub search tokenizes the marker away). Its body is written once; every
-// later change is a comment; recovery comments and closes it.
+// (GitHub search tokenizes the marker away), with a title-prefix fallback for
+// the tracker whose label a maintainer removed by hand (see
+// findOpenIssueByTitle). Its body is written once; every later change is a
+// comment; recovery comments and closes it.
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
@@ -638,12 +640,6 @@ export function assess(prs, options = {}) {
       // requests go unanswered, the PRs carrying them are closed or merged,
       // and the lane later demonstrably works. The one place a closed PR
       // still has to count is the evidence's OWN PR, folded in after the loop.
-      // Only an OPEN PR feeds the global signal. A request on a closed one
-      // can never be served now, and holding every recovery for the rest of
-      // the window over it would refuse the ordinary end of an incident:
-      // requests go unanswered, the PRs carrying them are closed or merged,
-      // and the lane later demonstrably works. The one place a closed PR
-      // still has to count is the evidence's OWN PR, folded in after the loop.
       if (pr.state === 'open' && (!unserved || prUnserved > unserved)) {
         unserved = prUnserved;
       }
@@ -1215,7 +1211,7 @@ export function decide(assessment, existing, options = {}, borrowed = null) {
     if (!existing) {
       actions.push({
         type: 'create',
-        title: `/resolve is failing: ${assessment.streak} consecutive failures, ${assessment.unanswered.length} unanswered requests`,
+        title: `${ISSUE_TITLE_PREFIX} ${assessment.streak} consecutive failures, ${assessment.unanswered.length} unanswered requests`,
         body: renderIssueBody(assessment, options, borrowed),
         // apply() posts this with the create: the filing tick's record, in
         // a comment the watch trusts. The body's own marker is never read
@@ -1465,6 +1461,30 @@ export function fetchPrs(gh, repo, since) {
 // A marker anyone else comments must not override the watch's state.
 const STATE_AUTHORS = new Set(['github-actions[bot]', DEFAULTS.bot]);
 
+// The watch's state feed on a found issue: its own unedited comments and
+// only those. An edit is a forgery whoever posted it: the watch writes a
+// fresh comment per tick and never edits one.
+function trustedCommentTexts(gh, repo, number) {
+  return tsvLines(
+    gh([
+      'api',
+      '-X',
+      'GET',
+      `repos/${repo}/issues/${number}/comments`,
+      '-f',
+      'per_page=100',
+      '--paginate',
+      '--jq',
+      '.[] | [.user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
+    ]),
+  )
+    .filter(
+      ([user, created, updated]) =>
+        STATE_AUTHORS.has(user) && updated === created,
+    )
+    .map(([, , , b]) => b64(b));
+}
+
 // The newest marker-carrying tracking issue in the given state, authored
 // by the watch itself. `open` is decide()'s write target; `closed` is
 // only a record source — the recovery comment carries the final record, so
@@ -1499,26 +1519,7 @@ function findMarkerIssue(gh, repo, label, state) {
     // dropped. Gating discovery too would let a triage user delete the marker
     // by editing, and every later tick would file a duplicate.
     if (text.includes(HEALTH_MARKER)) {
-      const comments = tsvLines(
-        gh([
-          'api',
-          '-X',
-          'GET',
-          `repos/${repo}/issues/${number}/comments`,
-          '-f',
-          'per_page=100',
-          '--paginate',
-          '--jq',
-          '.[] | [.user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
-        ]),
-      )
-        // An edit is a forgery whoever posted it: the watch writes a fresh
-        // comment per tick and never edits one.
-        .filter(
-          ([user, created, updated]) =>
-            STATE_AUTHORS.has(user) && updated === created,
-        )
-        .map(([, , , b]) => b64(b));
+      const comments = trustedCommentTexts(gh, repo, number);
       // The body is what FINDS the issue, never what the watch believes. It
       // cannot be trusted as state and cannot be cheaply checked either: the
       // Issues API bumps an issue's `updated_at` on ANY comment, so
@@ -1544,8 +1545,62 @@ function findMarkerIssue(gh, repo, label, state) {
   return null;
 }
 
+// decide()'s create titles all start with this prefix; the search fallback
+// below adopts by it when the label query finds nothing.
+export const ISSUE_TITLE_PREFIX = '/resolve is failing:';
+
+// The labelled scan above misses a tracker whose label was removed by hand —
+// and the tick would then file a fresh duplicate every six hours with no
+// rate ceiling. The marker-in-body rule cannot close that: the query's own
+// label filter already excluded the issue. Fall back to a title search, one
+// extra call only on ticks that found nothing, adopting with the same trust
+// basis as the primary path (a STATE_AUTHORS author) plus the exact title
+// shape this watch creates — matched client-side, because GitHub search
+// tokenizes punctuation away. State keeps coming only from the watch's own
+// unedited comments, so an adopted issue feeds this tick exactly like a
+// labelled one. The `closed` record borrow runs no fallback: losing it only
+// drops a conservative optimisation, never files anything twice.
+function findOpenIssueByTitle(gh, repo) {
+  const rows = tsvLines(
+    gh([
+      'api',
+      '-X',
+      'GET',
+      'search/issues',
+      '-f',
+      `q=repo:${repo} is:issue in:title resolve failing state:open`,
+      '-f',
+      'per_page=100',
+      '--paginate',
+      '--jq',
+      '.items[] | [.number, .user.login, .created_at, (.title // "" | @base64)] | @tsv',
+    ]),
+  );
+  // Search ranks by best match, not by time: sort so the newest candidate is
+  // adopted, mirroring the primary path's created-desc read.
+  rows.sort((a, b) => b[2].localeCompare(a[2]) || Number(b[0]) - Number(a[0]));
+  for (const [number, author, created_at, title] of rows) {
+    // The title is free text, base64'd like every free-text field: a tab in
+    // it would otherwise split the column the prefix check reads.
+    if (
+      !STATE_AUTHORS.has(author) ||
+      !b64(title).startsWith(ISSUE_TITLE_PREFIX)
+    ) {
+      continue;
+    }
+    return {
+      number: Number(number),
+      createdAt: created_at,
+      texts: trustedCommentTexts(gh, repo, number),
+    };
+  }
+  return null;
+}
+
 export function findOpenIssue(gh, repo, label) {
-  return findMarkerIssue(gh, repo, label, 'open');
+  return (
+    findMarkerIssue(gh, repo, label, 'open') ?? findOpenIssueByTitle(gh, repo)
+  );
 }
 
 export function apply(gh, repo, actions, label) {

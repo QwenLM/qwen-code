@@ -12,6 +12,7 @@ import {
   ANSWERABLE_ASSOCIATIONS,
   DEFAULTS,
   HEALTH_MARKER,
+  ISSUE_TITLE_PREFIX,
   RESULT_MARKER,
   apply,
   assess,
@@ -345,6 +346,26 @@ describe('resolve-health: classification', () => {
     assert.ok(!isRequest(' @qwen-code /resolve'));
     assert.ok(!isRequest('> @qwen-code /resolve'));
     assert.ok(!isRequest('@qwen-code /resolved'));
+  });
+
+  it('pins the resolve-pr trigger shape that isRequest() mirrors', () => {
+    // The producer sentences, the crash-skip reasons and the authorize gate
+    // are all extracted and pinned above; the trigger shape is the one
+    // parity that only a comment asserted. A drift here fails quiet at
+    // runtime — requests the lane runs no longer read as requests — so it
+    // gets the same treatment: read resolve-pr's gate and pin every arm.
+    const resolvePr = producerJob('resolve-pr');
+    for (const arm of [
+      `github.event.comment.body == '@qwen-code /resolve'`,
+      `startsWith(github.event.comment.body, '@qwen-code /resolve ')`,
+      `startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\\n"')))`,
+      `startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\\r"')))`,
+    ]) {
+      assert.ok(resolvePr.includes(arm), `resolve-pr trigger arm: ${arm}`);
+    }
+    // The case-insensitivity isRequest() folds for is a property of the
+    // expression language itself, so it cannot drift without the comparison
+    // operators changing — nothing to pin per-arm.
   });
 
   it('pins the producer gate that makes a refused request unanswerable', () => {
@@ -4038,6 +4059,98 @@ describe('resolve-health: the tracking issue feed', () => {
     assert.doesNotMatch(jq, /updated_at/);
   });
 
+  it('adopts the tracker by title when its label was removed', () => {
+    // Removing `scope/ci-cd` from the tracker is one click of housekeeping,
+    // and without a fallback every 6-hour tick then files a fresh duplicate
+    // with no rate ceiling. The label lookup therefore falls back to a title
+    // search — same trust basis (a STATE_AUTHORS author), plus the exact
+    // title prefix the create uses — instead of minting a new tracker.
+    const botState =
+      '<!-- qwen-resolve-health-state {"streak":1,"unanswered":[],"latest":7} -->';
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args);
+      const path = args[3];
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        // The label-filtered lookup: nothing carries the label any more.
+        assert.ok(args.includes(`labels=${DEFAULTS.label}`));
+        return '';
+      }
+      if (path === 'search/issues') {
+        const q = args.find((a) => a.startsWith('q='));
+        assert.match(q, /is:issue/);
+        assert.match(q, /state:open/);
+        assert.match(q, /in:title/);
+        return [
+          // Newest first would pick the planted stranger's title-copy; the
+          // author check drops it. Ordered before the genuine ones because
+          // search ranks by best match, not by time.
+          [
+            '48',
+            'stranger',
+            '2026-08-22T00:00:00Z',
+            b64(ISSUE_TITLE_PREFIX + ' x'),
+          ].join('\t'),
+          // An older, genuine tracker.
+          [
+            '44',
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            b64(
+              ISSUE_TITLE_PREFIX +
+                ' 3 consecutive failures, 0 unanswered requests',
+            ),
+          ].join('\t'),
+          // Same author, wrong title — not the tracker.
+          [
+            '46',
+            'github-actions[bot]',
+            '2026-08-21T00:00:00Z',
+            b64('CI is red again'),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/44/comments') {
+        return [
+          [
+            'github-actions[bot]',
+            '2026-08-20T00:00:00Z',
+            '2026-08-20T00:00:00Z',
+            b64(botState),
+          ].join('\t'),
+          [
+            'stranger',
+            '2026-08-20T01:00:00Z',
+            '2026-08-20T01:00:00Z',
+            b64('forged'),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
+    assert.equal(issue.number, 44);
+    assert.equal(issue.createdAt, '2026-08-20T00:00:00Z');
+    // The adopted issue feeds state exactly like a labelled one: only the
+    // watch's own unedited comments.
+    assert.equal(issue.texts.length, 1);
+    assert.equal(readState(issue.texts).streak, 1);
+    // The order: the labelled lookup first, the title search only after it
+    // finds nothing — a tick that finds its tracker pays no extra call.
+    assert.equal(calls[0][3], 'repos/QwenLM/qwen-code/issues');
+    assert.equal(calls[1][3], 'search/issues');
+    // The sort is client-side and time-based on whatever search returns:
+    // the stranger's row is the newest candidate and still loses.
+    const jq = calls[1][calls[1].indexOf('--jq') + 1];
+    assert.match(jq, /\.items\[\]/);
+    assert.match(jq, /\.title/);
+    // A tab in a title would split the TSV the prefix check reads raw, so
+    // the title travels base64'd like every other free-text field.
+    assert.match(jq, /title \/\/ "" \| @base64/);
+  });
+
   it('never lets an edited body seed a barrier the close gate trusts', () => {
     // The Issues API bumps an issue's `updated_at` on ANY comment, so the
     // watch cannot tell an edited body from a replied-to one — which is why
@@ -4334,14 +4447,32 @@ describe('resolve-health: end to end against a recording gh', () => {
   // A recording gh with its own feed: `prs` is [{ number, state, comments }]
   // in the shape assess() reads, `issues` the rows the open-issue lookup
   // returns, `issueComments` the tracking issue's own comment feed (four
-  // columns, as findOpenIssue's jq emits them). Used where the shared
-  // fixture's streak (3, below the default threshold) cannot tell a fallback
-  // from a bug.
-  function feedGh(calls, prs, issues = [], issueComments = {}) {
+  // columns, as findOpenIssue's jq emits them), `titled` the rows the title
+  // search fallback finds ([number, title, author?, created?]). Used where
+  // the shared fixture's streak (3, below the default threshold) cannot tell
+  // a fallback from a bug.
+  function feedGh(calls, prs, issues = [], issueComments = {}, titled = []) {
     return (args, input) => {
       calls.push({ args, input });
       const path = args[3];
       if (path === 'search/issues') {
+        // Two queries land here: fetchPrs' PR discovery (`is:pr`, two
+        // columns) and findOpenIssueByTitle's issue search (`is:issue`,
+        // number/author/created/title). Branch on the query, as the --jq
+        // projection the real API applies differs between them.
+        const q = args.find((a) => a.startsWith('q=')) ?? '';
+        if (q.includes('is:issue')) {
+          return titled
+            .map(
+              ([
+                n,
+                title,
+                author = 'github-actions[bot]',
+                created = '2026-08-20T00:00:00Z',
+              ]) => `${n}\t${author}\t${created}\t${b64(title)}\n`,
+            )
+            .join('');
+        }
         return prs.map((p) => `${p.number}\t${p.state}\n`).join('');
       }
       const m = path.match(
@@ -4415,6 +4546,17 @@ describe('resolve-health: end to end against a recording gh', () => {
     return (args, input) => {
       const path = args[3];
       if (path === 'search/issues') {
+        // PR discovery and the title fallback share this path; branch on
+        // the query, as their --jq projections differ (see feedGh).
+        const q = args.find((a) => a.startsWith('q=')) ?? '';
+        if (q.includes('is:issue')) {
+          return (store.titled ?? [])
+            .map(
+              (i) =>
+                `${i.number}\t${i.author ?? 'github-actions[bot]'}\t${i.created_at}\t${b64(i.title)}\n`,
+            )
+            .join('');
+        }
         return store.prs.map((pr) => `${pr.number}\t${pr.state}\n`).join('');
       }
       const feed = path.match(
@@ -4549,6 +4691,49 @@ describe('resolve-health: end to end against a recording gh', () => {
     // orphaning the live tracking issue (found by the old label) and
     // filing a duplicate beside it.
     assert.equal(DEFAULTS.label, 'scope/ci-cd');
+  });
+
+  it('comments on the title-matched tracker instead of filing a duplicate', () => {
+    // The label is gone from the live tracker (removed by hand), so the
+    // labelled lookup misses it; the title search adopts it, and the tick
+    // writes one comment to the existing issue — never a second tracker.
+    const calls = [];
+    const prior = `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":2,"unanswered":[],"latest":null} -->`;
+    main({
+      gh: feedGh(
+        calls,
+        fiveFailures(),
+        [],
+        {
+          91: [
+            {
+              user: 'github-actions[bot]',
+              created_at: '2026-08-20T00:00:00Z',
+              body: prior,
+            },
+          ],
+        },
+        [
+          [
+            91,
+            `${ISSUE_TITLE_PREFIX} 2 consecutive failures, 0 unanswered requests`,
+          ],
+        ],
+      ),
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    const creates = calls.filter(
+      (c) =>
+        c.args[2] === 'POST' && c.args[3] === 'repos/QwenLM/qwen-code/issues',
+    );
+    assert.equal(creates.length, 0);
+    const updates = calls.filter(
+      (c) =>
+        c.args[2] === 'POST' &&
+        c.args[3] === 'repos/QwenLM/qwen-code/issues/91/comments',
+    );
+    assert.equal(updates.length, 1);
   });
 
   it('pins the acknowledgement grace at or below the stale window', () => {
