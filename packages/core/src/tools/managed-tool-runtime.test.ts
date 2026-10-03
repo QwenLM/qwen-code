@@ -677,6 +677,14 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations).toHaveLength(1025);
   });
 
+  it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    expect(() => runtime.beginTurn({ ...identity, promptId: 'prompt-2' })).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('prepared');
+    expect(runtime.hasActiveWork()).toBe(true);
+  });
+
   it('refuses a new turn while an invocation is still executing and preserves access to it', async () => {
     const gate = deferred<ToolResult>();
     tool.setup = (invocation) =>
