@@ -71,6 +71,9 @@ final class ActionJournal {
                         options.path("createdAt").asLong(),
                         event -> {
                             event.put("kind", "action.changed");
+                            // The builder's default event ID shapes as a
+                            // Stage H chain ID, which the store reserves.
+                            event.put("eventId", id + ":change-" + changes);
                             if ("requested".equals(state)) {
                                 event.putObject("subject")
                                         .put("type", "activation")

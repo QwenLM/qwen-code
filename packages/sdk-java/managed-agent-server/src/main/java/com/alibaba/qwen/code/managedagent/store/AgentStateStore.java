@@ -236,13 +236,11 @@ public interface AgentStateStore {
             boolean terminal, String sourceKey);
 
     /**
-     * Appends a Session event unless one with the source key exists, when
-     * the tenant's Session exists and is neither deleted nor being deleted.
-     * The Session is locked before its status is read, so a deletion that
-     * commits first is always seen.
+     * Whether the tenant's Session exists and is neither deleted nor being
+     * deleted. The Session is locked before its status is read, so a
+     * deletion that commits first is always seen.
      */
-    void appendLiveSessionEventIfAbsent(String tenantId, String sessionId,
-            String type, Map<String, Object> data, String sourceKey);
+    boolean isLivePublicSession(String tenantId, String sessionId);
 
     SessionRecord requireSession(String tenantId, String sessionId);
 }

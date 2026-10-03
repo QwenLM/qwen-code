@@ -7675,6 +7675,7 @@
       "id": "prepared",
       "state": "PREPARED",
       "executionStatus": null,
+      "dispatchGeneration": 0,
       "execution": "intent",
       "inspection": {
         "outcome": "known",
@@ -7688,6 +7689,7 @@
       "id": "dispatching",
       "state": "DISPATCHING",
       "executionStatus": null,
+      "dispatchGeneration": 1,
       "execution": "intent",
       "inspection": {
         "outcome": "known",
@@ -7701,6 +7703,7 @@
       "id": "executing",
       "state": "EXECUTING",
       "executionStatus": null,
+      "dispatchGeneration": 1,
       "execution": "dispatch_started",
       "inspection": {
         "outcome": "known",
@@ -7714,6 +7717,7 @@
       "id": "cancel-requested",
       "state": "CANCEL_REQUESTED",
       "executionStatus": null,
+      "dispatchGeneration": 1,
       "execution": "dispatch_started",
       "inspection": {
         "outcome": "known",
@@ -7727,6 +7731,7 @@
       "id": "settled-not-started",
       "state": "SETTLED",
       "executionStatus": "not_started",
+      "dispatchGeneration": 1,
       "execution": "not_started_proven",
       "inspection": {
         "outcome": "known",
@@ -7743,6 +7748,7 @@
       "id": "settled-success",
       "state": "SETTLED",
       "executionStatus": "success",
+      "dispatchGeneration": 1,
       "execution": "settled",
       "inspection": {
         "outcome": "known",
@@ -7759,6 +7765,7 @@
       "id": "settled-error",
       "state": "SETTLED",
       "executionStatus": "error",
+      "dispatchGeneration": 1,
       "execution": "settled",
       "inspection": {
         "outcome": "known",
@@ -7775,7 +7782,25 @@
       "id": "settled-cancelled",
       "state": "SETTLED",
       "executionStatus": "cancelled",
+      "dispatchGeneration": 1,
       "execution": "settled",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "settled",
+          "result": {
+            "executionStatus": "cancelled"
+          }
+        }
+      },
+      "harnessExecution": "settled"
+    },
+    {
+      "id": "settled-cancelled-not-claimed",
+      "state": "SETTLED",
+      "executionStatus": "cancelled",
+      "dispatchGeneration": 0,
+      "execution": "not_started_proven",
       "inspection": {
         "outcome": "known",
         "status": {
@@ -7791,6 +7816,7 @@
       "id": "unknown",
       "state": "UNKNOWN",
       "executionStatus": null,
+      "dispatchGeneration": 0,
       "execution": "outcome_unknown",
       "inspection": {
         "outcome": "unknown"
@@ -7801,6 +7827,7 @@
       "id": "abandoned",
       "state": "ABANDONED",
       "executionStatus": null,
+      "dispatchGeneration": 1,
       "execution": "outcome_unknown",
       "inspection": {
         "outcome": "unknown"

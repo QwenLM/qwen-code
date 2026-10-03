@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -111,6 +112,12 @@ class ManagedActionsTest {
             request.put("recordDigest", ExtensionRecordJournal.sha256(changed));
             CommitTransactionRequest invalid =
                     json.treeToValue(request, CommitTransactionRequest.class);
+            // A malformed event envelope is refused by the shared record-line
+            // rules before the action applier sees the journal; a malformed
+            // action payload still reaches its own applier's refusal.
+            String expected = "version".equals(field)
+                    ? ManagedExtensionRecordStore.ERROR_REJECTED
+                    : "managed_session_action_rejected";
             assertThatThrownBy(
                             () ->
                                     journals.commit(
@@ -122,7 +129,7 @@ class ManagedActionsTest {
                             ApiException.class,
                             error ->
                                     assertThat(error.getCode())
-                                            .isEqualTo("managed_session_action_rejected"));
+                                            .isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
     }

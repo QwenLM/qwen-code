@@ -268,7 +268,10 @@ export type ManagedRuntimeExecutionView =
  * The physical execution state a Broker report proves. The wire folds a
  * claimed but unsent dispatch into `executing`, so this side reads it as
  * dispatched: taking a call that may have been sent for an unsent one could
- * run it twice, while the reverse still ends in a proof either way.
+ * run it twice, while the reverse still ends in a proof either way. The wire
+ * carries no dispatch generation either, so a cancellation of a call that
+ * was never claimed reads as `settled` here and as `not_started_proven` in
+ * the record mapping.
  */
 export function extensionExecutionOf(
   view: ManagedRuntimeExecutionView,

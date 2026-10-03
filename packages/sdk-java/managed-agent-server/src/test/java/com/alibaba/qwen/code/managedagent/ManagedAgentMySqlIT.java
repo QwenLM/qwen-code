@@ -741,8 +741,7 @@ class ManagedAgentMySqlIT {
                 AgentStateStore.class.getClassLoader(),
                 new Class<?>[] {AgentStateStore.class},
                 (proxy, method, arguments) -> {
-                    if ("appendLiveSessionEventIfAbsent".equals(
-                            method.getName())) {
+                    if ("isLivePublicSession".equals(method.getName())) {
                         CompletableFuture.runAsync(() -> {
                             String operation = inTransaction(transactions,
                                     () -> agents.beginOperation(tenant,
@@ -812,6 +811,10 @@ class ManagedAgentMySqlIT {
                 String.class, tenant, session);
         assertThat(events).endsWith("session.deleted")
                 .doesNotContain("task.updated");
+        // The deletion won the race, so the revision's announcement never
+        // reached the task-event outbox either.
+        assertThat(count(jdbc, "qwen_managed_session_task_event",
+                tenant, session)).isZero();
     }
 
     @Test

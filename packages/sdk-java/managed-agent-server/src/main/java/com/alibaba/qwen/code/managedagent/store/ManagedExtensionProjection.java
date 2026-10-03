@@ -145,14 +145,20 @@ public final class ManagedExtensionProjection {
      * claimed dispatch that was not sent yet is still an intent: the Broker
      * grants it again at the next generation instead of calling it unknown.
      * Only the Runtime's own not_started answer proves a call unsent, and an
-     * abandoned record's outcome stays unknown for good.
+     * abandoned record's outcome stays unknown for good. A record that
+     * settles as cancelled never started when no dispatch was ever claimed
+     * (a dispatchGeneration of 0, which the record itself enforces); a
+     * cancellation after a claim cannot be told from a sent call, so it
+     * settles.
      */
     public static String executionOf(ToolExecutionRecord.State state,
-            String executionStatus) {
+            String executionStatus, long dispatchGeneration) {
         return switch (state) {
             case PREPARED, DISPATCHING -> "intent";
             case EXECUTING, CANCEL_REQUESTED -> "dispatch_started";
             case SETTLED -> "not_started".equals(executionStatus)
+                    || ("cancelled".equals(executionStatus)
+                            && dispatchGeneration == 0)
                     ? "not_started_proven" : "settled";
             case UNKNOWN, ABANDONED -> "outcome_unknown";
         };

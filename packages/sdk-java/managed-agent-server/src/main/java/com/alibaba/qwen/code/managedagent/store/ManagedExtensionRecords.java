@@ -33,6 +33,13 @@ public final class ManagedExtensionRecords {
             "plan_mode", "team_state", "team_task", "team_message",
             "team_plan", "session_message", "session_metadata",
             "file_history", "session_source");
+    /** Mirrors MANAGED_SESSION_EVENT_KINDS on the authority side. */
+    public static final List<String> EVENT_KINDS = List.of("input.accepted",
+            "wake.requested", "activation.changed", "model.attempt",
+            "message.committed", "tool.intent", "action.changed",
+            "tool.receipt", "checkpoint.committed", "context.compacted",
+            "cancel.requested", "turn.settled", "config.bound",
+            "lifecycle.changed", "domain.committed", "message.delta");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
@@ -638,6 +645,15 @@ public final class ManagedExtensionRecords {
                 label + " must be an object with exactly " + keys));
     }
 
+    /** A closed object whose optional fields may be absent. */
+    static void closedSubset(JsonNode node, Set<String> keys,
+            String label) {
+        require(node != null && node.isObject(),
+                label + " must be an object with exactly " + keys);
+        node.fieldNames().forEachRemaining(name -> require(keys.contains(name),
+                label + " must be an object with exactly " + keys));
+    }
+
     static String id(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
                 .isEmpty(), label + " must be a non-empty string");
@@ -706,7 +722,7 @@ public final class ManagedExtensionRecords {
         digest(node.get("digest"), label + ".digest");
     }
 
-    private static String oneOf(JsonNode node, List<String> allowed,
+    static String oneOf(JsonNode node, List<String> allowed,
             String label) {
         require(node != null && node.isTextual()
                 && allowed.contains(node.textValue()),
