@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -414,6 +415,90 @@ class QwenHostedHarnessConnectorTest {
                         mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
         return connector;
+    }
+
+    @Test
+    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getRuntimeRecovery()).thenReturn(recovery);
+        when(attached.getHarnessLastEventId()).thenReturn(41L);
+        when(attached.getHarnessEventEpoch()).thenReturn("epoch-7");
+        when(client.createSession(any()))
+                .thenThrow(mock(SessionCreationOutcomeUnknownException.class));
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        HarnessConnector.Attachment admission =
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+
+        // The unknown-outcome create must recover by loading, and every
+        // Attachment component the coordinator resumes on must travel.
+        assertThat(admission.bootId()).isEqualTo(BOOT_ID);
+        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.lastEventId()).isEqualTo(41L);
+        assertThat(admission.eventEpoch()).isEqualTo("epoch-7");
+        verify(client).loadSession(any());
+    }
+
+    @Test
+    void loadPathAlsoPropagatesTheFullAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getRuntimeRecovery()).thenReturn(recovery);
+        when(attached.getHarnessLastEventId()).thenReturn(23L);
+        when(attached.getHarnessEventEpoch()).thenReturn("epoch-3");
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        HarnessConnector.Attachment admission =
+                connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        assertThat(admission.bootId()).isEqualTo(BOOT_ID);
+        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.lastEventId()).isEqualTo(23L);
+        assertThat(admission.eventEpoch()).isEqualTo("epoch-3");
+    }
+
+    @Test
+    void rethrowsANonConflictDaemonErrorWithoutLoading() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException failure = mock(DaemonHttpException.class);
+        when(failure.getStatusCode()).thenReturn(500);
+        when(client.createSession(any())).thenThrow(failure);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        // Widening the 409 fallback to any daemon error would mask a real
+        // daemon bug as an attach to an unrelated session.
+        assertThatThrownBy(
+                () -> connector.createOrLoad("tenant-a", SESSION_ID, false))
+                .isSameAs(failure);
+        verify(client, never()).loadSession(any());
     }
 
     private static ManagedAgentProperties properties() {

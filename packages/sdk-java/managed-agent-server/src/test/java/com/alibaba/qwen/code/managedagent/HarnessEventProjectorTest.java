@@ -26,6 +26,10 @@ class HarnessEventProjectorTest {
                 .containsEntry("itemId", "item_turn-1_assistant")
                 .containsEntry("contentPartId",
                         "part_turn-1_output_text");
+        // containsEntry cannot prove absence: the raw update map must never
+        // bleed through into the projected, persisted and re-streamed data.
+        assertThat(event.data()).doesNotContainKey("secret")
+                .doesNotContainValue("must-not-leak");
     }
 
     @Test
@@ -49,5 +53,15 @@ class HarnessEventProjectorTest {
         assertThat(event.errorCode()).isEqualTo("model_failed");
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
+    }
+
+    @Test
+    void substitutesTheSafeFallbackCodeForAnOutOfAlphabetErrorCode() {
+        ProjectedEvent event = projector.project(new SourceEvent(4L,
+                "turn_error", Map.of("code", "sql=1; DROP TABLE users --",
+                        "message", "tagged"), "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo("hosted_harness_error");
+        assertThat(event.type()).isEqualTo("turn.failed");
     }
 }
