@@ -59,10 +59,15 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 
 `bind-history`、`checkpoint` 和 `history` 的控制请求与响应限制为 8 MiB，其他操作为
 1 MiB。工具参数还受 core 既有的 256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过
-参数限制。`execute`、`status` 或 `cancel` 的结果超出所属操作响应预算时会被适配而非
-拒绝：worker 先淘汰最旧的 progress 事件（通过 `firstAvailableSeq`/`progressGap`
-告知），再把大文本字段按首尾截断并内联标记，shell 展示置 `truncated`；若大文本
-全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
+参数限制。`execute`、`status`、`cancel` 或 `confirmation` 的结果超出所属操作响应预算时会被适配而非
+拒绝：对于执行与状态等观察类结果，worker 先淘汰最旧的 progress 事件（通过
+`firstAvailableSeq`/`progressGap` 告知），再把大文本字段按首尾截断并内联标记，shell
+展示置 `truncated`；对于 `confirmation` 结果，按变体收集大文本字段（`edit` 收集 `fileDiff`、
+`originalContent` 和 `newContent`，`exec` 收集 `command`，`info` 收集 `prompt`），各变体必填
+字段与变体结构永不移除，新建文件的 `originalContent: null` 得以保留，被裁剪的 `edit` 确认会带回
+`hideModify: true` 并在 `warnings` 中提示内容被截断；与观察类结果不同，confirmation 不进行
+progress 淘汰，也不设置 `truncated` 标记。
+若大文本全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
 （例如 edit 的文件 diff，它只供界面使用），再丢弃同样只供客户端界面使用的 artifacts，
 最后丢弃 hook 结果；截断完全够不到的内容
 （内联媒体）会让模型内容变为明确的占位存根。截断按 JSON

@@ -603,6 +603,41 @@ function providerFitSlots(target: Record<string, unknown>): ProviderFitSlot[] {
   return slots;
 }
 
+/**
+ * The string leaves of one confirmation result that legitimately carry bulk
+ * text (diffs, file contents, long commands or prompts).
+ */
+function confirmationFitSlots(
+  target: Record<string, unknown>,
+): ProviderFitSlot[] {
+  const slots: ProviderFitSlot[] = [];
+  const collect = (key: string): void => {
+    if (typeof target[key] !== 'string') return;
+    slots.push({
+      get: () => target[key] as string,
+      set: (next) => {
+        target[key] = next;
+      },
+    });
+  };
+  switch (target['type']) {
+    case 'edit':
+      collect('fileDiff');
+      collect('originalContent');
+      collect('newContent');
+      break;
+    case 'exec':
+      collect('command');
+      break;
+    case 'info':
+      collect('prompt');
+      break;
+    default:
+      break;
+  }
+  return slots;
+}
+
 /** UTF-8 bytes one code point occupies inside a JSON string literal. */
 function jsonCodePointBytes(codePoint: number): number {
   if (codePoint === 0x22 || codePoint === 0x5c) return 2;
@@ -712,7 +747,7 @@ function providerFitLevel(
 }
 
 /**
- * Shrinks an `execute`/`status`/`cancel` result until its JSON fits the wire
+ * Shrinks an `execute`/`status`/`cancel`/`confirmation` result until its JSON fits the wire
  * budget, so a legitimately large tool result stays observable instead of
  * turning the route's size gate into a 400 that strands the execution as
  * UNKNOWN. Oldest progress events are evicted first (the client is told
@@ -728,7 +763,8 @@ export function fitManagedRuntimeProviderResult(
   if (
     operation.kind !== 'execute' &&
     operation.kind !== 'status' &&
-    operation.kind !== 'cancel'
+    operation.kind !== 'cancel' &&
+    operation.kind !== 'confirmation'
   )
     return value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
@@ -736,6 +772,29 @@ export function fitManagedRuntimeProviderResult(
   const fits = () =>
     Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
   if (fits()) return value;
+  if (operation.kind === 'confirmation') {
+    if (root['type'] === 'edit') {
+      root['hideModify'] = true;
+      root['warnings'] = [
+        ...(Array.isArray(root['warnings'])
+          ? (root['warnings'] as string[])
+          : []),
+        `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial.`,
+      ];
+    }
+    const slots = confirmationFitSlots(root).map((slot) => ({
+      slot,
+      bytes: jsonTextBytes(slot.get()),
+      floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
+    }));
+    const size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+    if (size > budgetBytes) {
+      const level = providerFitLevel(slots, size - budgetBytes);
+      for (const { slot, bytes } of slots)
+        if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
+    }
+    return value;
+  }
   const status = operation.kind === 'execute' ? undefined : root;
   const execution = (
     operation.kind === 'execute' ? root : status?.['result']
