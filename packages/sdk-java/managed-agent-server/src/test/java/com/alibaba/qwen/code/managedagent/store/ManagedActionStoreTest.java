@@ -192,6 +192,60 @@ class ManagedActionStoreTest {
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
+    // The re-admission gate keeps the Session check: on a Session that no
+    // longer accepts responses the replay returns the recorded failure
+    // instead of re-admitting deliveries that can never land.
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedOnAnInactiveSession()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().state()).isEqualTo("FAILED");
+        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+    }
+
     private String stage(String sessionId) {
         return jdbc.queryForObject("SELECT admission_stage FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"

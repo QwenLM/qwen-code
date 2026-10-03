@@ -374,6 +374,58 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // The terminal arm honours settle()'s zero-Runtime-calls invariant for a
+    // delete of an already closed bound Session: the completed CLOSE is the
+    // cleanup authority, so the give-up path must not call into the workspace
+    // either — even when the budget is spent for a non-writer reason.
+    @Test
+    void closedSessionDeleteTerminatesWithoutTouchingTheRuntime() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-delete", OperationKind.DELETE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1, 10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "CLOSED", null, null, 0, 0, 0, 1, 1, null, 1,
+                        BOUND_WORKSPACE));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        // This replica could close the workspace — and still must not, for
+        // this shape.
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        // A non-writer settle failure: the retirement lost its race with
+        // another operation, so the budget can legitimately terminate.
+        when(store.completeOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), eq(1L), anyBoolean()))
+                .thenThrow(new IllegalStateException(
+                        "Session was retired by another operation"));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-delete");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L),
+                    eq("session_lifecycle_delivery_failed"));
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
+                    anyString());
+            verify(runtimeWarmer, never()).closeWorkspace(anyString(),
+                    anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     // A writer check that itself fails is treated as live: the operation
     // keeps waiting rather than recording a failure it cannot verify.
     @Test
@@ -411,9 +463,11 @@ class OperationRetryTerminalStateTest {
         }
     }
 
-    // The terminal-record fallback keeps the blocked shape for a CLOSE: it
-    // is the only kind the recovery scan re-drives from BLOCKED, so the
-    // rescheduled operation must stay blocked-coded, not plainly retried.
+    // The terminal-record fallback keeps the blocked shape for a CLOSE. The
+    // recovery scan re-drives BLOCKED rows for CLOSE and for a DELETE
+    // admitted on a closed Session, but a blocked code can only come from
+    // settle()'s workspace-close path, which the closed-Session delete never
+    // enters — so CLOSE is the only shape that needs the blocked fallback.
     @Test
     void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails() {
         AgentStateStore store = mock(AgentStateStore.class);

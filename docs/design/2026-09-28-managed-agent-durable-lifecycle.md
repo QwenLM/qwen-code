@@ -201,10 +201,12 @@ pair for a bound Session — and terminates `failed` with the settle's failure
 code, so a Session whose settle can never succeed still reaches a terminal
 state instead of looping forever: the Session keeps its pending status, no
 `session.closed` is appended, and no completion is certified. The one
-exception is a live journal writer: a close or delete admitted on an active
-Session whose writer lease is still live can still succeed once that writer
-stops, so the budget does not terminate it — it keeps waiting until the
-writer stops or its lease lapses. After the Hosted Harness restarts, the Java
+exception is a live journal writer, whatever status the operation was
+admitted on — a close or delete of an active Session whose settle waits for
+the writer, or a delete of a closed Session whose retention retirement
+refuses while a residual writer holds the journal: either can still succeed
+once that writer stops, so the budget does not terminate it and it keeps
+waiting until the writer stops or its lease lapses. After the Hosted Harness restarts, the Java
 connector keeps the previous boot, so its calls fail with a generation error
 until Java restarts too, as Turn dispatch does; the operation waits meanwhile
 — within the same budget — and then until the old process's writer lease
