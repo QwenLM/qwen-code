@@ -1196,8 +1196,8 @@ describe('auto-memory relevant recall', () => {
       expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
       // The suppressed selector would have seen B, so the recall was ambiguous.
       expect(
-        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock.calls[0]?.[2] ??
-          [],
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
       ).toContainEqual(strongBelowWindow);
       expect(result.selectorSkipped).toBeUndefined();
     });
