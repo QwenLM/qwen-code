@@ -1001,6 +1001,7 @@ it.each([
   // and an alternative product that exhausts memory.
   { pattern: '{a,'.repeat(3400) + 'x' + '}'.repeat(3400) },
   { pattern: '{1..100000}/passwd' },
+  { pattern: '{9007199254740992..9007199254740992}/*' },
   { pattern: '{a,b}'.repeat(30) },
   { pattern: 'x'.repeat(1025) },
   { pattern: '**/*.ts', path: '/private/secret-host-path' },

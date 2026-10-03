@@ -28,21 +28,24 @@ Hosted Session 只能看到其固定 profile 声明的工具：
 Hosted Harness 在 Session 创建与加载时接受这两个新 profile 字符串，与 `/1`
 一样持久化进 Session 定义；以不同 profile 加载仍然是
 `409 hosted_tool_profile_conflict`，已有 Session 保留其固定的 `/1` 快照。
+初始回合与继续执行都用已保存的 profile 构建工具回合。
 Shell `/2` 原样继承 Shell 的接线（捕获容量、publisher 或延迟捕获选项）。
 
 `glob` 声明包含必填的 `pattern` 和可选的 `path`（相对于 Session 保存的
 工作目录）。Harness 在获取 Runtime 之前用现有的
 `normalizeWorkspaceRelativePath` 校验 `path`，绝对路径或 `..` 成为模型可
-纠正的拒绝，不产生 Runtime 工作，与现在 `file_path` 的处理一致。空
-`pattern` 以同样方式拒绝。
+纠正的拒绝，不产生 Runtime 工作，与现在 `file_path` 的处理一致。空白或 null
+`path` 按省略处理。去掉首尾空白的 `pattern` 必须为非空字符串；共享校验器在
+获取前拒绝绝对路径或含 `..` 的花括号备选及不安全的展开，worker 再次校验
+实际派发的值。pattern 用 `/` 分隔目录；反斜杠保留 glob 转义语义。
 
 glob 是只读工具，因此 hosted 审批策略在 `default` 与 `auto-edit` 模式下将
 它与 `read_file` 一并预批准。
 
 ## Worker
 
-worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持两条不变
-量，因为 Glob 自身的校验允许外部路径：
+worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持以下不变量，
+因为 Glob 自身的校验允许外部路径：
 
 - 搜索被钉在 Session 已安装上下文的目录内。省略 `path` 时解析到该目录
   （绝不使用跨 Session 共享挂载点的 workspace 级 include 列表），其他取值
@@ -52,23 +55,32 @@ worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持
   离开该目录的每个条目。任何 pattern 写法（`..`、`[.][.]`、`\.\.`、花括号
   备选、软链接目录）都无法遍历、报告或计数外部内容，因此外部路径存在与否
   得到完全相同的回答。
-- pattern 在被展开之前先设上界。brace-expansion 没有输出上限，glob 还会
-  再次展开同一个 pattern，因此 Harness（获取前）与 worker 都会拒绝超过
-  1024 字符、花括号不配对或按结构估算超过 64 个花括号备选的 pattern；通过
-  后才展开，并作为快速路径检查各备选是否为绝对路径或含 `..` 段。
-- 结果在到达网络、模型或持久记录之前改写为 Workspace 相对路径。Runtime
+- pattern 在被展开之前先设上界。brace-expansion 的输出上限超过 Hosted
+  搜索预算，glob 还会再次展开同一个 pattern。Harness（获取前）与 worker
+  都会拒绝超过 1024 字符、花括号不配对、数字端点、步长或跨度超出安全整数
+  范围，或按结构估算超过 64 个花括号备选的 pattern；通过后才展开，并作为
+  快速路径检查各备选是否为绝对路径或含 `..` 段。
+- 结果在到达网络、模型或持久记录之前改写为 Session 工作目录相对路径。Runtime
   宿主的物理目录布局不得泄露给 Harness；对搜索工具而言路径本身就是结果。
 
 Core 的忽略规则以 Session 目录为根。位于仓库子目录的 Session 不继承祖先
 目录的 `.gitignore`，依赖文件可能占满扫描上限；Session 自己的忽略文件仍
 生效。本切片不承诺仓库根目录的忽略语义。宽泛 glob 仅列出的外指软链接（如 venv
-的 `bin/python`）仍然可见，因为条目按其父目录的 realpath 判定。
+的 `bin/python`）仍然可见，因为条目按其父目录的 realpath 判定。遍历该链接
+会被剪掉，包括普通的 workspace 依赖链接；宽泛搜索仍保留 Session 内的匹配。
+
+boot v2 的文件工具范围校验允许访问挂载内的共享位置，但排除同一 worker 中
+另一已安装 Session 所拥有的目录。这个注册表检查只覆盖本 worker，并不保障
+不同 worker 之间按 Session 保密。它保留 `/1` 的链接依赖读取；文件历史仍
+保留自己的写入边界。boot v1 保持更严格的 Session 边界。非 ENOENT 的解析
+错误必须拒绝，并且不得暴露 Node 诊断中的宿主物理路径。
 
 ## 上限
 
 glob 的结果是路径列表。当序列化后的结果将超过 64 KiB 的 Session 内联上限
-时，Harness 保留能放下的最长整行前缀并附加缩小范围的提示（`Narrow the
-pattern or path.`），而不是把整个结果落入「输出被省略」路径——该路径由
+时，Harness 在实时回合和崩溃恢复中都保留能同时放入结果资源与转录记录的
+最长整行前缀，并附加缩小范围的提示（`Narrow the pattern or path.`），
+而不是把整个结果落入「输出被省略」路径——该路径由
 `read_file` 的 offset/limit 重试提示补充。如果连空列表都放不下，仍走现有
 的省略路径。
 
@@ -84,12 +96,16 @@ pattern or path.`），而不是把整个结果落入「输出被省略」路径
 
 ## 验证与验收
 
-聚焦测试覆盖：各 profile 版本的声明、`/1` Session 从未广告的 `glob` 调用
-被拒、获取前的模型可纠正参数拒绝、派发时的路径规范化、内联上限处的前缀
-截断，以及创建/加载中的 profile 固定。Worker 路由测试覆盖范围约束（同机
-其他 Session 的文件绝不被搜索）、相对输出与 `..` 拒绝。审批测试钉住 glob
-的预批准。本地验证：`packages/cli` 中涉及的文件类型检查干净，受影响的四
-个测试套件（995 个测试）全部通过。
+聚焦 CLI 套件为 `hosted-glob-pattern`、`hosted-workspace-tool-turn`、
+`hosted-harness-session`、`hosted-runtime-recovery`、`managed-context-worker`、
+`managed-runtime-tool-executor`、`hosted-tool-approval` 与
+`workspace-recovery-session`。它们覆盖各 profile 的声明与创建/加载/继续执行
+时的固定、无 Runtime 开销的可纠正拒绝和规范化派发、展开预算、实时与恢复
+路径在两种持久化上限内的前缀截断、相对输出和错误处理、本 worker 的文件
+范围校验、链接读取、经软链接创建，以及 W1 `/2` 恢复。相对化单测固定路径
+词法单元的锚定和文件系统根目录情形。Core 的 `glob` 套件覆盖受约束的遍历与
+普通 CLI 行为兼容。实际验证的平台和测试总数记在 PR 验证报告中，不写进这份
+会持续变化的设计清单。
 
 ## 风险与未决问题
 

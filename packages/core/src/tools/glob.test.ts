@@ -765,7 +765,9 @@ describe('GlobTool', () => {
       '{**/*.ts,peek/*}',
     ])('never walks or reports outside the root: %s', async (pattern) => {
       const result = await run({ pattern, path: session }, contained());
-      expect(String(result.llmContent)).not.toContain('secret.txt');
+      expect(result.collectedFilePaths ?? []).not.toContain(
+        path.join(tempRootDir, 'web/secret.txt'),
+      );
     });
 
     it('answers an existing and a missing outside file alike', async () => {
@@ -795,7 +797,9 @@ describe('GlobTool', () => {
         pattern: '[.][.]/web/secret.txt',
         path: session,
       });
-      expect(result.llmContent).toContain('secret.txt');
+      expect(result.collectedFilePaths).toContain(
+        path.join(tempRootDir, 'web/secret.txt'),
+      );
     });
   });
 

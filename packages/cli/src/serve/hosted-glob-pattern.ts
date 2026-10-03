@@ -26,9 +26,9 @@ export type HostedGlobPatternCheck = 'ok' | 'escapes' | 'too-complex';
 
 /**
  * Classifies a model-supplied glob pattern before anything expands it.
- * brace-expansion expands without an output cap here (minimatch passes no
- * `max`), and glob expands the same pattern again, so the size is bounded
- * from the pattern's structure first; only a pattern proven small is
+ * brace-expansion's output cap exceeds the Hosted search budget, and glob
+ * expands the same pattern again, so the size is bounded from the pattern's
+ * structure first; only a pattern proven small is
  * expanded, and its alternatives must stay relative and free of `..`
  * segments. The walk itself is contained too (GlobTool's
  * `containmentRoot`); this check is the cheap, model-correctable fast path.
@@ -107,11 +107,18 @@ function alternativesBound(text: string): number {
     if (items[0] > 1 || body.includes('{')) return Infinity;
     const range = SEQUENCE.exec(body);
     if (!range) return 1;
+    if (
+      [range[1], range[2], range[5]].some(
+        (value) => value !== undefined && !Number.isSafeInteger(Number(value)),
+      )
+    )
+      return Infinity;
     const step = Math.max(Math.abs(Number(range[5] ?? 1)), 1);
     const span =
       range[1] !== undefined
         ? Math.abs(Number(range[2]) - Number(range[1]))
         : Math.abs(range[4].charCodeAt(0) - range[3].charCodeAt(0));
+    if (!Number.isSafeInteger(span)) return Infinity;
     return Math.min(Math.floor(span / step) + 1, limit);
   };
 

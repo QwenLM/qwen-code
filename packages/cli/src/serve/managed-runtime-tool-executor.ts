@@ -1311,7 +1311,11 @@ async function realpathDeepestExisting(candidate: string): Promise<string> {
     try {
       return path.join(await realpath(resolved), ...tail);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT')
+        throw new Error(
+          `Path could not be resolved (${code ?? 'unknown error'}).`,
+        );
       const parent = path.dirname(resolved);
       if (parent === resolved) return path.join(resolved, ...tail);
       tail.unshift(path.basename(resolved));

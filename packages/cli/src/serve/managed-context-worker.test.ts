@@ -1254,7 +1254,37 @@ describe('Managed context tool gate', () => {
     expect(text).not.toContain('old.ts');
   });
 
-  it('refuses read_file through an in-context symlink that leaves the Session', async () => {
+  it.each([
+    ['read_file', {}],
+    ['write_file', { content: 'x' }],
+    ['edit', { old_string: 'x', new_string: 'y' }],
+  ] as const)(
+    'does not expose Runtime paths in %s resolution errors',
+    async (toolName, args) => {
+      const root = workspace();
+      fs.writeFileSync(path.join(root, 'services/api/package.json'), '{}');
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      const answer = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName,
+          input: { file_path: 'package.json/main', ...args },
+        })
+      ).json();
+      expect(answer.result.executionStatus).toBe('error');
+      expect(answer.result.error.message).toContain('ENOTDIR');
+      expect(JSON.stringify(answer)).not.toContain(realDirectory(root, '.'));
+    },
+  );
+
+  it('refuses read_file through a link to another Session installed in the same worker', async () => {
     // The glob admission makes the link enumerable; reading through it must
     // not hand a sibling Session's content to a files-only Session.
     const root = workspace(['services/api/src', 'services/web']);
@@ -1273,7 +1303,7 @@ describe('Managed context tool gate', () => {
     await post(origin, CONTEXT, install1);
     await post(origin, ACTIVATION, workspaceActivation(install1));
     // The sibling directory is protected because it is another installed
-    // Session's directory: the boundary names Sessions, not mount contents.
+    // Session's directory in this worker, not merely part of the mount.
     await post(
       origin,
       CONTEXT,
@@ -1309,7 +1339,7 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(own)).toContain('mine');
   });
 
-  it('refuses write_file that creates through an in-context symlink', async () => {
+  it('refuses write_file through a link to another Session installed in the same worker', async () => {
     // A create's leaf does not exist yet, so containment must resolve the
     // deepest existing ancestor: `peek/pwned.txt` is lexically inside the
     // Session but lands in the sibling through the link.
@@ -1425,40 +1455,42 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(sibling)).not.toContain('sibling');
   });
 
-  it('refuses a brace pattern with too many alternatives before expanding it', async () => {
-    // The bound is computed from the pattern's structure, never by
-    // expanding: twenty `{a,b}` groups are ~100 bytes that would otherwise
-    // block this shared worker's event loop for seconds.
-    const root = workspace(['services/api']);
-    const origin = await startWorker({
-      ...BOOT,
-      mountRoot: root,
-      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
-    });
-    const install1 = workspaceInstallation('session-1', 'services/api');
-    await post(origin, CONTEXT, install1);
-    await post(origin, ACTIVATION, workspaceActivation(install1));
+  it.each([
+    '{a,b}'.repeat(13) + '/*',
+    '{9007199254740992..9007199254740992}/*',
+  ])(
+    'refuses a costly brace pattern before expanding it: %s',
+    async (pattern) => {
+      const root = workspace(['services/api']);
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install1 = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install1);
+      await post(origin, ACTIVATION, workspaceActivation(install1));
 
-    const costly = await (
-      await post(origin, EXECUTE, {
-        ...shell('session-1', 'call-1', ''),
-        toolName: 'glob',
-        // 13 groups exceed the alternative bound and stay fast even unguarded.
-        input: { pattern: '{a,b}'.repeat(13) + '/*' },
-      })
-    ).json();
-    expect(costly.result.executionStatus).toBe('error');
-    expect(JSON.stringify(costly)).toContain('64 brace alternatives');
-    // An ordinary brace pattern stays admitted.
-    const fine = await (
-      await post(origin, EXECUTE, {
-        ...shell('session-1', 'call-2', ''),
-        toolName: 'glob',
-        input: { pattern: '*.{ts,tsx}' },
-      })
-    ).json();
-    expect(fine.result.executionStatus).not.toBe('error');
-  });
+      const costly = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName: 'glob',
+          input: { pattern },
+        })
+      ).json();
+      expect(costly.result.executionStatus).toBe('error');
+      expect(JSON.stringify(costly)).toContain('64 brace alternatives');
+      // An ordinary brace pattern stays admitted.
+      const fine = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-2', ''),
+          toolName: 'glob',
+          input: { pattern: '*.{ts,tsx}' },
+        })
+      ).json();
+      expect(fine.result.executionStatus).not.toBe('error');
+    },
+  );
 
   it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {
     // Degenerate root: '/' is both the boundary and every path's prefix, so

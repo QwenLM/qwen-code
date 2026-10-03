@@ -2203,7 +2203,7 @@ const HOSTED_GLOB_TRUNCATION_HINT =
  * a narrowing hint. Returns undefined when the response has no text output to
  * truncate or even the empty list does not fit.
  */
-function truncateHostedGlobResponse(
+export function truncateHostedGlobResponse(
   parts: Part[],
   fits: (candidate: Part[]) => boolean,
 ): Part[] | undefined {
