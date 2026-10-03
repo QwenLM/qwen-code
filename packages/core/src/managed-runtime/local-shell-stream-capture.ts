@@ -378,12 +378,17 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     const contents = parseToolResultManifestBytes(
       await this.resources.read(ref),
     );
+    const captureStatus: Exclude<
+      (typeof contents)['captureStatus'],
+      'pending'
+    > =
+      contents.captureStatus === 'pending' ? 'partial' : contents.captureStatus;
     this.finalEnvelope = {
       executionStatus,
       responseParts,
       ...(error ? { error } : {}),
       capture: {
-        captureStatus: contents.captureStatus,
+        captureStatus,
         captureReason: contents.captureReason,
         manifest: ref,
         previewTruncated: false,

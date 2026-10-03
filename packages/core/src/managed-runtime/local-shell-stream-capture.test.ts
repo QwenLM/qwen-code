@@ -13,6 +13,10 @@ import {
   isToolResultManifestSuccessor,
   MANAGED_TOOL_RESULT_KINDS,
 } from './managed-tool-result.js';
+import type {
+  ToolResultSegmentReceipt,
+  ToolResultStoreOutcome,
+} from './managed-tool-result.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import type { ToolResultSegmentStore } from './managed-tool-result-store.js';
@@ -204,11 +208,9 @@ describe('LocalShellStreamCapture', () => {
   it('latches a storage failure and never admits the lost bytes', async () => {
     const r = await rig({
       store: {
-        publish: async () => ({
-          status: 'error' as const,
-          code: 'io_error',
-          result: undefined as never,
-        }),
+        publish: async (): Promise<
+          ToolResultStoreOutcome<ToolResultSegmentReceipt>
+        > => ({ status: 'refused', code: 'managed_tool_result_conflict' }),
       },
     });
     r.captured.setStarted(1);
