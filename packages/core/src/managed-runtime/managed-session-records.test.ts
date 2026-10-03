@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_SESSION_DOMAINS,
+  MANAGED_SESSION_LIFECYCLE_STATES,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   assertManagedSessionEventActor,
@@ -67,6 +68,8 @@ const activationSubject = {
   activationId: 'act-1',
   epoch: 3,
 };
+
+const turnSubject = { type: 'turn', turnId: 'turn-1' };
 
 function harnessEvent(
   overrides: Record<string, unknown> = {},
@@ -447,6 +450,36 @@ describe('managed session shared field rules', () => {
     cycle['self'] = cycle;
     expectEventError(cancellation(cycle), /must not contain cycles/);
   });
+
+  it('walks a shared-reference graph once per distinct object', () => {
+    let shared: Record<string, unknown> = { leaf: 1 };
+    for (let level = 0; level < 24; level++) {
+      shared = { a: shared, b: shared };
+    }
+    // 25 distinct objects holding ~2^24 paths: the path-scoped ancestor walk
+    // needs a minute-scale run here, so this pin can only pass when the
+    // per-object height memo walks each object once.
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope('cancel.requested', 2, cancelPayload(shared)),
+      ),
+    ).not.toThrow();
+
+    let chain: unknown = null;
+    for (let depth = 0; depth < 60; depth++) {
+      chain = { nested: chain };
+    }
+    // The second visit to the shared chain is one level deeper, so the memo
+    // must not short-circuit the depth bound.
+    expectEventError(
+      envelope(
+        'cancel.requested',
+        2,
+        cancelPayload({ first: chain, shell: { second: chain } }),
+      ),
+      /maximum JSON depth/,
+    );
+  });
 });
 
 describe('managed session per-kind rules', () => {
@@ -524,6 +557,44 @@ describe('managed session per-kind rules', () => {
     expectEventError(activationEvent('paused'), /phase must be one of/);
   });
 
+  it('requires the payload subject to identify the activation it changes', () => {
+    expect(parseManagedSessionEvent(activationEvent('active')).kind).toBe(
+      'activation.changed',
+    );
+    expectEventError(
+      activationEvent('active', {
+        subject: { ...activationSubject, activationId: 'act-2' },
+      }),
+      /subject must identify the activation it changes/,
+    );
+    expectEventError(
+      activationEvent('active', {
+        subject: { ...activationSubject, epoch: 4 },
+      }),
+      /subject must identify the activation it changes/,
+    );
+  });
+
+  it('requires the envelope subject to match the payload subject', () => {
+    expect(
+      parseManagedSessionEvent({ ...wakeEvent(), subject: turnSubject }).kind,
+    ).toBe('wake.requested');
+    expect(
+      parseManagedSessionEvent({
+        ...activationEvent('active'),
+        subject: activationSubject,
+      }).kind,
+    ).toBe('activation.changed');
+    expectEventError(
+      { ...wakeEvent(), subject: { type: 'turn', turnId: 'turn-9' } },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      { ...activationEvent('active'), subject: turnSubject },
+      /requires event.subject to match payload.subject/,
+    );
+  });
+
   it('ties the action decision reference to the decided state', () => {
     expect(parseManagedSessionEvent(actionEvent()).kind).toBe('action.changed');
     expectEventError(
@@ -577,6 +648,46 @@ describe('managed session per-kind rules', () => {
       withPayload(eventForKind('context.compacted'), { fromSequence: 0 }),
       /sequence references must start at 1/,
     );
+  });
+
+  it('rejects a predecessor reference that cannot hold', () => {
+    expectEventError(
+      withPayload(eventForKind('message.committed'), {
+        parentMessageId: 'msg-1',
+      }),
+      /parentMessageId must not name itself/,
+    );
+    expectEventError(
+      withPayload(eventForKind('checkpoint.committed'), {
+        previousCheckpointId: 'checkpoint-1',
+      }),
+      /previousCheckpointId must not name itself/,
+    );
+    expectEventError(
+      withPayload(eventForKind('config.bound'), {
+        revision: 1,
+        previousRevision: 7,
+      }),
+      /previousRevision must precede payload.revision/,
+    );
+    expectEventError(
+      withPayload(eventForKind('config.bound'), {
+        revision: 5,
+        previousRevision: 5,
+      }),
+      /previousRevision must precede payload.revision/,
+    );
+    expect(
+      parseManagedSessionEvent(
+        withPayload(eventForKind('config.bound'), {
+          revision: 2,
+          previousRevision: 1,
+        }),
+      ).kind,
+    ).toBe('config.bound');
+    expect(
+      parseManagedSessionEvent(eventForKind('message.committed')).kind,
+    ).toBe('message.committed');
   });
 
   it('rejects a compaction range whose end precedes its start', () => {
@@ -706,13 +817,22 @@ describe('managed session lifecycle transitions', () => {
   });
 
   it('blocks every state except deleted and restores a legal stage', () => {
-    expectTransitions([
-      ['active', 'recovery_blocked', true],
-      ['deleted', 'recovery_blocked', false],
-      ['recovery_blocked', 'active', true],
-      ['recovery_blocked', 'deleted', false],
-      ['recovery_blocked', 'recovery_blocked', false],
-    ]);
+    expectTransitions(
+      MANAGED_SESSION_LIFECYCLE_STATES.flatMap(
+        (state): Array<[State, State, boolean]> => [
+          [
+            state,
+            'recovery_blocked',
+            state !== 'deleted' && state !== 'recovery_blocked',
+          ],
+          [
+            'recovery_blocked',
+            state,
+            state !== 'deleted' && state !== 'recovery_blocked',
+          ],
+        ],
+      ),
+    );
   });
 
   it('fails closed for invalid direct-call states and pins terminal transitions', () => {
@@ -755,6 +875,18 @@ describe('managed session header', () => {
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
         .minimumReader,
     ).toBe('managed-session/0');
+  });
+
+  it('refuses a malformed minimum-reader token', () => {
+    const malformed = [
+      'managed-session/01',
+      'managed-session/',
+      'managed-session/1 ',
+      'managed-session/1.0',
+    ];
+    for (const minimumReader of malformed) {
+      headerError({ minimumReader }, /is not supported by this reader/);
+    }
   });
 
   it('validates and preserves a base transcript proof', () => {

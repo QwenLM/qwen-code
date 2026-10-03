@@ -276,6 +276,7 @@ function assertJsonValue(
   label: string,
   ancestors = new Set<object>(),
   depth = 1,
+  heights = new Map<object, number>(),
 ): asserts value is ManagedSessionJsonValue {
   if (
     value === null ||
@@ -297,12 +298,33 @@ function assertJsonValue(
     );
   }
   if (ancestors.has(value)) fail(`${label} must not contain cycles.`);
+  // Sharing references is legal, but the ancestors set is path-scoped, so a
+  // shared DAG would be walked once per path — exponentially. Memo the
+  // subtree height so each distinct object is walked once per call while
+  // the depth bound still accounts for the visiting path.
+  const seen = heights.get(value);
+  if (seen !== undefined) {
+    if (depth + seen - 1 > MANAGED_SESSION_LIMITS.maxJsonDepth) {
+      fail(
+        `${label} exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
+      );
+    }
+    return;
+  }
 
   ancestors.add(value);
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const keys = Reflect.ownKeys(descriptors);
     const prototype = Object.getPrototypeOf(value) as object | null;
+    let height = 1;
+    const noteChild = (child: unknown): void => {
+      const childHeight =
+        typeof child === 'object' && child !== null
+          ? (heights.get(child) ?? 1)
+          : 1;
+      height = Math.max(height, childHeight + 1);
+    };
     if (Array.isArray(value)) {
       if (prototype !== Array.prototype) {
         fail(`${label} must be a plain JSON array.`);
@@ -322,13 +344,17 @@ function assertJsonValue(
         fail(`${label} must be a dense JSON array.`);
       }
       for (let index = 0; index < value.length; index++) {
+        const child = descriptors[String(index)].value;
         assertJsonValue(
-          descriptors[String(index)].value,
+          child,
           `${label}[${index}]`,
           ancestors,
           depth + 1,
+          heights,
         );
+        noteChild(child);
       }
+      heights.set(value, height);
       return;
     }
 
@@ -344,8 +370,16 @@ function assertJsonValue(
       if (!descriptor.enumerable || !('value' in descriptor)) {
         fail(`${keyLabel} must be an enumerable data property.`);
       }
-      assertJsonValue(descriptor.value, keyLabel, ancestors, depth + 1);
+      assertJsonValue(
+        descriptor.value,
+        keyLabel,
+        ancestors,
+        depth + 1,
+        heights,
+      );
+      noteChild(descriptor.value);
     }
+    heights.set(value, height);
   } finally {
     ancestors.delete(value);
   }
@@ -374,8 +408,9 @@ function boundedString(
   if (Buffer.byteLength(value, 'utf8') > maxBytes) {
     fail(`${label} exceeds ${maxBytes} UTF-8 bytes.`);
   }
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+  // Shared rule from textUtils: every stripped sequence holds a control
+  // character, so a changed result means control content was present.
+  if (stripAnsiAndControl(value) !== value) {
     fail(`${label} must not contain control characters.`);
   }
   return value;
@@ -566,6 +601,30 @@ function assertSubject(
     };
   }
   return fail(`${label}.type must be activation, turn or hook_operation.`);
+}
+
+function subjectsEqual(
+  left: ManagedSessionSubject,
+  right: ManagedSessionSubject,
+): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type === 'activation' && right.type === 'activation') {
+    return (
+      left.scopeId === right.scopeId &&
+      left.activationId === right.activationId &&
+      left.epoch === right.epoch
+    );
+  }
+  if (left.type === 'turn' && right.type === 'turn') {
+    return left.turnId === right.turnId;
+  }
+  if (left.type === 'hook_operation' && right.type === 'hook_operation') {
+    return (
+      left.operationId === right.operationId &&
+      left.occurrenceId === right.occurrenceId
+    );
+  }
+  return false;
 }
 
 type FieldKind =
@@ -893,6 +952,17 @@ function assertPayloadRules(
       return;
     }
     case 'activation.changed': {
+      const subject = payload['subject'] as Record<
+        string,
+        ManagedSessionJsonValue
+      >;
+      if (
+        subject['type'] === 'activation' &&
+        (subject['activationId'] !== payload['activationId'] ||
+          subject['epoch'] !== payload['epoch'])
+      ) {
+        fail(`${at}.subject must identify the activation it changes.`);
+      }
       const phase = assertEnum(
         payload['phase'],
         ['installing', 'active', 'released', 'revoked'] as const,
@@ -983,6 +1053,31 @@ function assertPayloadRules(
       if ((payload['coveredSequence'] as number) < 1) {
         fail(`${at}.coveredSequence must start at 1.`);
       }
+      if (
+        payload['previousCheckpointId'] !== null &&
+        payload['previousCheckpointId'] === payload['checkpointId']
+      ) {
+        fail(`${at}.previousCheckpointId must not name itself.`);
+      }
+      return;
+    }
+    case 'message.committed': {
+      if (
+        payload['parentMessageId'] !== null &&
+        payload['parentMessageId'] === payload['messageId']
+      ) {
+        fail(`${at}.parentMessageId must not name itself.`);
+      }
+      return;
+    }
+    case 'config.bound': {
+      if (
+        payload['previousRevision'] !== null &&
+        (payload['previousRevision'] as number) >=
+          (payload['revision'] as number)
+      ) {
+        fail(`${at}.previousRevision must precede ${at}.revision.`);
+      }
       return;
     }
     case 'domain.committed': {
@@ -1008,13 +1103,11 @@ function assertPayloadRules(
       return;
     }
     case 'input.accepted':
-    case 'message.committed':
     case 'tool.intent':
     case 'message.delta':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
-    case 'config.bound':
       return;
     default: {
       const exhaustive: never = kind;
@@ -1073,6 +1166,16 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
       : assertSubject(record['subject'], 'event.subject');
   if (ACTIVATION_SUBJECT_KINDS[kind] && subject?.type !== 'activation') {
     fail(`${kind} requires an activation subject.`);
+  }
+  if (
+    subject !== undefined &&
+    'subject' in schema.fields &&
+    !subjectsEqual(
+      subject,
+      assertSubject(payload['subject'], 'payload.subject'),
+    )
+  ) {
+    fail(`${kind} requires event.subject to match payload.subject.`);
   }
 
   return {
