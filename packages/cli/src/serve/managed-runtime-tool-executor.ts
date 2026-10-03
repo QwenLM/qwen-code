@@ -8,6 +8,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { braceExpand } from 'minimatch';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import {
@@ -310,7 +311,10 @@ export class ManagedToolExecutor {
       throw new ManagedToolUnavailableError(
         'Workspace context is unavailable.',
       );
-    const boundary = await fs.realpath(tools.workspaceRoot ?? tools.directory);
+    // Confine to the Session directory, not the whole mount: a symlink to a
+    // sibling Session's instruction file stays inside the mount root but
+    // must not be promoted into this Session's system instruction.
+    const boundary = await fs.realpath(tools.directory);
     const files: ManagedWorkspaceContextFile[] = [];
     for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
       let text: string;
@@ -856,12 +860,13 @@ export class ManagedToolExecutor {
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
-        // refuse anything that lands outside the Session directory. The
-        // ENOENT fallback keeps a nonexistent file reported by the tool
-        // itself rather than accused as traversal.
+        // refuse anything that lands outside the Session directory. A create
+        // resolves through its deepest existing ancestor so a symlinked
+        // parent is seen; a genuinely absent path stays lexical and keeps
+        // the tool's own not-found answer rather than a traversal accusation.
         const relative = path.relative(
-          await realpathIfPresent(directory),
-          await realpathIfPresent(params['file_path'] as string),
+          await realpathDeepestExisting(directory),
+          await realpathDeepestExisting(params['file_path'] as string),
         );
         if (
           relative === '..' ||
@@ -886,10 +891,20 @@ export class ManagedToolExecutor {
           typeof params['path'] === 'string' ? params['path'].trim() : '';
         // `pattern` is a second search root: glob resolves `..` segments and
         // treats an absolute pattern as absolute, so it is contained too, by
-        // segment so a literal `a/..b/*.ts` stays usable.
+        // segment so a literal `a/..b/*.ts` stays usable. The rule runs on
+        // the brace-expanded alternatives: `{/etc,/zz}/host*` composes an
+        // absolute search root the literal check cannot see, while
+        // `*.{ts,tsx}` expands to ordinary input. A braceless pattern
+        // expands to itself, so this is also the fast path.
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        if (path.isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) {
+        if (
+          braceExpand(pattern).some(
+            (alternative) =>
+              path.isAbsolute(alternative) ||
+              alternative.split(/[\\/]/).includes('..'),
+          )
+        ) {
           throw new Error(
             'Glob pattern must stay within the Session working directory.',
           );
@@ -901,8 +916,8 @@ export class ManagedToolExecutor {
         // Containment compares realpaths: a lexical compare cannot see a
         // symlink inside the Session context that leaves it.
         const relative = path.relative(
-          await realpathIfPresent(root),
-          await realpathIfPresent(resolved),
+          await realpathDeepestExisting(root),
+          await realpathDeepestExisting(resolved),
         );
         if (
           relative === '..' ||
@@ -981,18 +996,26 @@ export class ManagedToolExecutor {
           );
         // Contain the OUTPUT, not the pattern's grammar: brace expansion
         // (`{.,..}/**/*`) and a symlink named as a literal pattern segment
-        // both resolve after every input-side check, so each hit is compared
+        // both resolve after every input-side check, so each hit is judged
         // against the Session root's realpath and any escape refuses the
         // result rather than certifying a sibling Session's files as local.
         const resultPaths = (result as { resultFilePaths?: unknown })
           .resultFilePaths;
         if (Array.isArray(resultPaths)) {
-          const realRoot = await realpathIfPresent(root);
+          const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
+            // Judge by the hit's lexical name plus its parent's realpath:
+            // realpathing the hit itself would punish an ordinary outward
+            // symlink (a venv's `.venv/bin/python`) that is merely listed,
+            // while the parent arm still refuses a file reached *through* a
+            // symlinked directory (`peek/secret.txt`).
             const relative = path.relative(
               realRoot,
-              await realpathIfPresent(hit),
+              path.join(
+                await realpathDeepestExisting(path.dirname(hit)),
+                path.basename(hit),
+              ),
             );
             if (
               relative === '..' ||
@@ -1298,16 +1321,26 @@ function relativizeGlobResult(
 }
 
 /**
- * A path that does not exist has nothing to escape through, so containment
- * falls back to the lexical value and lets the tool report it; any other
- * failure to resolve is not something containment may assume away.
+ * A create's leaf does not exist yet, so a bare realpath cannot see a symlink
+ * mid-path (`peek/pwned.txt` through `peek -> ../web`): resolve the deepest
+ * ancestor that does exist and re-attach the lexical tail below it. A path
+ * with no symlink in its ancestry keeps its lexical value, so the tool keeps
+ * its own not-found answer rather than being accused as traversal; any
+ * non-ENOENT failure to resolve is not something containment may assume away.
  */
-async function realpathIfPresent(candidate: string): Promise<string> {
-  try {
-    return await realpath(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return candidate;
-    throw error;
+async function realpathDeepestExisting(candidate: string): Promise<string> {
+  let resolved = candidate;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(await realpath(resolved), ...tail);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      const parent = path.dirname(resolved);
+      if (parent === resolved) return path.join(resolved, ...tail);
+      tail.unshift(path.basename(resolved));
+      resolved = parent;
+    }
   }
 }
 

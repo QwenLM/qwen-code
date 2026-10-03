@@ -24,7 +24,10 @@ safe mode 是一个不可分割的捆绑（hooks、extensions、skills、MCP、�
 Session 工作目录之外的嵌套或层级发现；已取回上下文的持久记录。持久化需要
 新增 Session 域，而这是一个跨语言的契约变更（Java 存储侧镜像了封闭的域名
 空间），因此延后：冷加载的 Session 在下一个普通工具回合重新读取。恢复已运行中的工具回合
-不重新读取；仍接入的 Session 会保留已有文本。本切片覆盖原生 files/shell
+在同一条「每个 attachment 只读一次」的闩锁下读取：已持有文本的 attachment
+绝不重读，而冷加载的 attachment（跨进程接管会构造一个全新的）在其恢复回合
+重新获取 Runtime 时读取一次，因此写出用户可见回答的那个回合不会在 slot
+静默为空的情况下运行。本切片覆盖原生 files/shell
 profile；MCP 回合跳过此读取。
 
 ## 时机与 Stage A 不变量

@@ -1191,7 +1191,7 @@ async function executeHostedTurn(
               'Tool turn is unavailable.',
             );
           try {
-            await toolTurn.resumeCommittedResults();
+            await toolTurn.resumeCommittedResults(abort.signal);
           } catch (cause) {
             if (isRetryableWorkspaceAcquisition(cause)) throw cause;
             throw new HostedToolRecoveryRequiredError(cause);
@@ -2686,7 +2686,7 @@ export function registerHostedHarnessSessionRoutes(
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
           // wedges every later cold load.
-          await toolTurn.resumeCommittedResults();
+          await toolTurn.resumeCommittedResults(abort.signal);
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,

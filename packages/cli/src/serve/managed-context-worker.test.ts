@@ -1182,6 +1182,16 @@ describe('Managed context tool gate', () => {
     // filesystem: `follow: false` governs links met during a globstar walk,
     // not this one.
     const literalLink = await glob('call-6', { pattern: 'peek/**/*' });
+    // An outward link is reported under its own in-Session name, disclosing
+    // nothing: merely listing it must not fail the whole glob.
+    const listed = await glob('call-7', { pattern: '**/*' });
+    // A brace pair composes an absolute search root the literal segment
+    // check cannot see: it must be refused at the input gate (the pattern
+    // message), never reach the search, and never become a host-filesystem
+    // existence oracle through the output guard.
+    const bracedAbsolute = await glob('call-8', {
+      pattern: '{/etc,/zz-nonexistent}/host*',
+    });
 
     expect(dotdot.result.executionStatus).toBe('error');
     expect(absolute.result.executionStatus).toBe('error');
@@ -1202,6 +1212,13 @@ describe('Managed context tool gate', () => {
       expect(text).not.toContain(realDirectory(root, 'services/api'));
       expect(text).not.toContain('/etc/');
     }
+    expect(listed.result.executionStatus).toBe('success');
+    expect(JSON.stringify(listed)).toContain('src/index.ts');
+    expect(bracedAbsolute.result.executionStatus).toBe('error');
+    expect(JSON.stringify(bracedAbsolute)).toContain(
+      'Glob pattern must stay within the Session working directory.',
+    );
+    expect(JSON.stringify(bracedAbsolute)).not.toContain('host');
   });
 
   it('refuses read_file through an in-context symlink that leaves the Session', async () => {
@@ -1250,6 +1267,55 @@ describe('Managed context tool gate', () => {
     const own = await read('call-3', 'src/index.ts');
     expect(own.result.executionStatus).toBe('success');
     expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('refuses write_file that creates through an in-context symlink', async () => {
+    // A create's leaf does not exist yet, so containment must resolve the
+    // deepest existing ancestor: `peek/pwned.txt` is lexically inside the
+    // Session but lands in the sibling through the link.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+
+    const created = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'write_file',
+        input: { file_path: 'peek/pwned.txt', content: 'written by session-1' },
+      })
+    ).json();
+    expect(created.result.executionStatus).toBe('error');
+    expect(JSON.stringify(created)).toContain(
+      "Path 'peek/pwned.txt' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web/pwned.txt'))).toBe(
+      false,
+    );
+
+    // Control: an ordinary in-Session create still works.
+    const own = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-2', ''),
+        toolName: 'write_file',
+        input: { file_path: 'src/new.txt', content: 'mine too' },
+      })
+    ).json();
+    expect(own.result.executionStatus).toBe('success');
+    expect(
+      fs.readFileSync(path.join(root, 'services/api/src/new.txt'), 'utf8'),
+    ).toBe('mine too');
   });
 
   it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {

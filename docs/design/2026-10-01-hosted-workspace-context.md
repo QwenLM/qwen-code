@@ -26,9 +26,13 @@ Out of scope: project settings, skills, and rules directories (safe mode keeps
 them off deliberately); nested or hierarchical discovery outside the Session working directory; a durable record of the fetched context. Durability needs a new Session
 domain, which is a cross-language contract change (the Java store mirrors the
 closed domain namespace), so it is deferred: a cold-loaded Session refetches on
-its next ordinary tool turn. Recovery of an already-running tool turn does not
-refetch context; an attached Session retains any text it already has. This
-slice covers the native files/shell profiles; MCP turns skip this read.
+its next ordinary tool turn. Recovery of an already-running tool turn fetches
+under the same once-per-attachment latch: an attachment that already holds
+text never re-reads, while a cold-loaded attachment (a cross-process takeover
+builds a fresh one) reads once as its recovered turn re-acquires the Runtime,
+so the turn that writes the user-visible answer never runs with the slot
+silently empty. This slice covers the native files/shell profiles; MCP turns
+skip this read.
 
 ## Timing and the Stage A invariant
 

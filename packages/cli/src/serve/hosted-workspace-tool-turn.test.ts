@@ -981,6 +981,10 @@ it.each([
   { pattern: 7 },
   { pattern: '/**/*.ts' },
   { pattern: '../**/*' },
+  // Brace expansion composes what the literal segment check cannot see.
+  { pattern: '{/etc,/zz-nonexistent}/host*' },
+  { pattern: '{.,..}/**/*' },
+  { pattern: 'src/{..,x}/**' },
   { pattern: '**/*.ts', path: '/private/secret-host-path' },
   { pattern: '**/*.ts', path: '../escape' },
   { pattern: '**/*.ts', path: 'a\\b' },
@@ -1039,6 +1043,29 @@ it('normalizes a glob pattern and path before dispatch', async () => {
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('dispatches an ordinary brace pattern unchanged', async () => {
+  // `*.{ts,tsx}` is ordinary input: expansion must not refuse it.
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: 'src/*.{ts,tsx}' },
+  };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload).toEqual({
+    toolName: 'glob',
+    input: { pattern: 'src/*.{ts,tsx}' },
+  });
+  await turn.consumeResults();
+  await turn.finish();
 });
 
 it('treats a blank glob path as omitted and still dispatches', async () => {
@@ -1221,6 +1248,23 @@ it('latches an empty context when the Workspace has no instruction files', async
   );
   expect(slot.read()).toBe('');
   await turn.consumeResults();
+  await turn.finish();
+});
+
+it('populates the context slot on a recovery acquisition with an empty attachment', async () => {
+  // A takeover builds a fresh attachment whose slot is undefined: the
+  // recovery acquire must read under the latch alone, or the recovered turn
+  // drives the model with no project instructions.
+  const slot = contextSlot();
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'AGENTS.md', text: 'never touch prod' },
+  ]);
+  turn = turnWithContext(slot);
+  await turn.resumeCommittedResults(new AbortController().signal);
+  expect(slot.value).toBe(
+    '--- Context from: AGENTS.md ---\nnever touch prod\n--- End of Context from: AGENTS.md ---',
+  );
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
   await turn.finish();
 });
 

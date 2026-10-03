@@ -14,6 +14,7 @@ import {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import path from 'node:path';
+import { braceExpand } from 'minimatch';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -395,7 +396,7 @@ export class HostedWorkspaceToolTurn {
     return this.advertised;
   }
 
-  async resumeCommittedResults(): Promise<void> {
+  async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
     const saved = await readHostedFileHistory(this.session);
@@ -476,13 +477,18 @@ export class HostedWorkspaceToolTurn {
         if (original === this.broker) {
           this.acquired = true;
           this.uncertain = false;
+          // The acquire() path this bypasses is the context slot's writer: a
+          // takeover-built Session holds no text yet, so read once here under
+          // the same latch. A read failure never blocks the turn.
+          if (this.context?.read() === undefined && signal)
+            await this.fetchWorkspaceContext(signal);
           return;
         }
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    await this.acquire(true);
+    await this.acquire(true, signal);
     this.uncertain = false;
   }
 
@@ -519,8 +525,11 @@ export class HostedWorkspaceToolTurn {
         // The Workspace is reachable exactly here, before the first dispatch:
         // read its project instructions once, so this turn's later requests
         // and every later turn start with them. A read failure never blocks
-        // the tool turn it rode in on.
-        if (!recovering && this.context?.read() === undefined && signal)
+        // the tool turn it rode in on. The latch alone gates the read: a
+        // recovered attachment whose slot is still undefined (a takeover
+        // builds a fresh one) reads here too, while an attachment already
+        // holding text never re-reads.
+        if (this.context?.read() === undefined && signal)
           await this.fetchWorkspaceContext(signal);
       }
     } catch (cause) {
@@ -910,9 +919,15 @@ export class HostedWorkspaceToolTurn {
             // shapes here, pre-acquisition, with the identical segment
             // equality rule the worker applies after dispatch — a refusal
             // before acquisition stays model-correctable and costs no
-            // durable Runtime work (#13030).
-            path.isAbsolute(pattern) ||
-            pattern.split(/[\\/]/).includes('..')
+            // durable Runtime work (#13030). The rule runs on the
+            // brace-expanded alternatives: `{/etc,/zz}/host*` composes an
+            // absolute search root the literal check cannot see, while
+            // `*.{ts,tsx}` expands to ordinary input.
+            braceExpand(pattern).some(
+              (alternative) =>
+                path.isAbsolute(alternative) ||
+                alternative.split(/[\\/]/).includes('..'),
+            )
           ) {
             validationError = globError;
           } else {
