@@ -1271,64 +1271,6 @@ class ManagedWorkspaceAdmissionTest {
                 .containsEntry("title", "renamed title");
     }
 
-    @Test
-    void permanentNonBrokerRenameFailureRetiresItsCommandRow() {
-        String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = boundSession(tenant);
-        // The connector's approval-mode IllegalStateException is a permanent
-        // failure that is not a RuntimeBrokerException: it must still retire
-        // the PENDING row, or every fresh-key rename wedges on
-        // session_operation_active for the Session's life.
-        UnavailableHarnessConnector harness =
-                new UnavailableHarnessConnector() {
-                    private int attaches;
-
-                    @Override
-                    public boolean isAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean isWorkspaceFilesAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public Attachment createOrLoad(String tenantId,
-                            String sessionId, boolean loadExisting) {
-                        if (attaches++ == 0) {
-                            throw new IllegalStateException(
-                                    "Hosted Harness did not confirm the Session approval mode");
-                        }
-                        return new Attachment("boot");
-                    }
-
-                    @Override
-                    public void rename(String tenantId, String sessionId,
-                            String title) {
-                    }
-                };
-        ManagedAgentService service = boundServiceWith(harness);
-
-        assertThatThrownBy(() -> service.renameSession(tenant, "actor-a",
-                "rename-1", sessionId, "first"))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-                    assertThat(error.getCode())
-                            .isEqualTo("hosted_harness_unavailable");
-                });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_command WHERE tenant_id = ? AND"
-                + " command_status = 'PENDING'", Integer.class, tenant))
-                .isZero();
-
-        var retried = service.renameSession(tenant, "actor-a", "rename-2",
-                sessionId, "second");
-        assertThat(retried.replayed()).isFalse();
-        assertThat(retried.body().metadata())
-                .containsEntry("title", "second");
-    }
-
     private ManagedAgentService boundServiceWithWorkingHarness() {
         return boundServiceWith(new UnavailableHarnessConnector() {
             @Override

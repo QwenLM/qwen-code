@@ -663,7 +663,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
-        if (!workspaces.isSessionCreator(session.tenantId(), session.sessionId(), actorId)) {
+        if (!workspaces.createdSession(session.tenantId(), actorId, session.sessionId())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
                     "Only the Session creator may manage it.");
         }
