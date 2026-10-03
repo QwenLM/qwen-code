@@ -64,7 +64,7 @@
 11328 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
 11206 sync-release-to-oss.yml
-6586 tui-parity.yml
+6786 tui-parity.yml
 7187 update-ecs-runner-qwen.yml
 6206 verify-landlock-helper.yml
 2307 web-shell-visuals-cleanup.yml

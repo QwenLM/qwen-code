@@ -112,4 +112,8 @@ jobs:
       - name: 'Build cli'
         run: 'npm run build'
       - name: 'OpenTUI no-flicker gate (0 clears, balanced DEC2026)'
+        env:
+          # The script's default report dir is a fixed /tmp path, which
+          # concurrent runs on one ECS host would share.
+          OUT: '${{ runner.temp }}/opentui-noflicker-out'
         run: 'bash scripts/tui-parity/accept-noflicker.sh'

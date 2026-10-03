@@ -806,5 +806,11 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
         `${jobName} must fail fast on a saturated host`,
       );
     }
+    // accept-noflicker.sh defaults its report to a fixed /tmp path; one ECS
+    // host runs many jobs at once, so the report must be runner-scoped.
+    const gate = doc.jobs.noflicker.steps.find((s) =>
+      String(s.run || '').includes('accept-noflicker.sh'),
+    );
+    assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
 });
