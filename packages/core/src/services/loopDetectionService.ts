@@ -21,6 +21,7 @@ import {
 import type { Config } from '../config/config.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import { CANCELLED_TOOL_ERROR_PREFIX } from '../core/coreToolScheduler.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import { DEFERRED_TOOL_CALL_CANCELLATION_PREFIX } from '../tools/tool-call.js';
@@ -722,7 +723,7 @@ export class LoopDetectionService {
    * fingerprint every retry of the same failure uniquely and the streak
    * would never accumulate; issue #10887 surfaced on exactly this shape
    * (repeated git exit-128 failures with varied arguments). Reduce
-   * shell-shaped blocks to their stable failure core (Output/Error/Exit
+   * shell-shaped blocks to their stable failure core (Program/Output/Error/Exit
    * Code/Signal); other text passes through unchanged.
    */
   private static stripShellBlockVolatiles(text: string): string {
@@ -764,7 +765,16 @@ export class LoopDetectionService {
   private static normalizeToolErrorText(error: string): string {
     const mcpNormalized = LoopDetectionService.normalizeMcpToolError(error);
     if (mcpNormalized !== null) return mcpNormalized;
-    const enveloped = stripPersistenceEnvelope(error);
+    // The long-run advisory is producer-appended metadata carrying per-run
+    // elapsed seconds, not failure evidence: attached to an error-branch
+    // message it makes every round's fingerprint unique and the streak
+    // never accumulates. It is appended last, so cutting at its marker
+    // loses nothing of the failure.
+    const advisory = error.indexOf(
+      '\n\n---\nNote: this foreground command ran for ',
+    );
+    const stripped = advisory === -1 ? error : error.slice(0, advisory);
+    const enveloped = stripPersistenceEnvelope(stripped);
     if (enveloped.includes('Process Group PGID:')) {
       const digest = extractAnchoredStubDigest(enveloped);
       if (digest !== null) {
@@ -830,6 +840,12 @@ export class LoopDetectionService {
     for (const part of responseParts) {
       const response = part.functionResponse?.response;
       if (!response) continue;
+      // A policy denial never executed: it records the configuration's
+      // answer, not a failure the model can correct — the same class as a
+      // cancellation, which the guard already excludes. The producer marks
+      // it in the payload (createErrorResponse) because the message text
+      // alone is byte-identical per tool name.
+      if (response['errorType'] === ToolErrorType.EXECUTION_DENIED) continue;
       const error = response['error'];
       if (typeof error !== 'string' || error.trim().length === 0) continue;
       if (LoopDetectionService.isSyntheticToolError(error)) continue;

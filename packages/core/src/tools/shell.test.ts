@@ -1714,7 +1714,7 @@ describe('ShellTool', () => {
 
         expectSedSkipped();
         const message =
-          'Command timed out after 5000ms before it could complete.';
+          'Command timed out after 5000ms before it could complete (program: `sed`).';
         const text = `${message} There was no output before it timed out.`;
         expect(result.llmContent).toBe(text);
         expect(shellResultText(result.returnDisplay)).toBe(text);
@@ -2928,7 +2928,7 @@ describe('ShellTool', () => {
 
     it('embeds the stable failure-core digest in error blocks for the loop guards', async () => {
       // The error-repetition guard keys on the producer-embedded sha256 of
-      // the stable failure core (Output/Error/Exit Code/Signal) so varied
+      // the stable failure core (Program/Output/Error/Exit Code/Signal) so varied
       // retries of the same failure fingerprint identically (issue #10887).
       const result = await runFg('find missing-directory', {
         output: 'find: missing-directory: No such file or directory',
@@ -2944,15 +2944,33 @@ describe('ShellTool', () => {
         `Full output sha256: ${FAKE_BLOCK_DIGEST}`,
       );
       // The digest must cover exactly the stable failure core — not the
-      // per-call volatile Command/Directory/PGID lines.
+      // per-call volatile Command/Directory/PGID lines. The Program line
+      // keeps unrelated silent exit-1 probes from collapsing into one
+      // signature while varied retries of the same program still merge.
       expect(lastCreateHashInput).toBe(
         [
+          'Program: find',
           'Output: find: missing-directory: No such file or directory',
           'Error: (none)',
           'Exit Code: 1',
           'Signal: (none)',
         ].join('\n'),
       );
+    });
+
+    it('keys the failure-core digest by program, not by argument list', async () => {
+      // Three unrelated silent exit-1 probes share Output/Error/Exit
+      // Code/Signal exactly; only the Program line keeps them distinct.
+      await runFg('git diff --quiet', { output: '', exitCode: 1 });
+      const gitInput = lastCreateHashInput;
+      await runFg('cmp -s a b', { output: '', exitCode: 1 });
+      const cmpInput = lastCreateHashInput;
+      expect(gitInput).not.toBe(cmpInput);
+      expect(gitInput).toContain('Program: git');
+      expect(cmpInput).toContain('Program: cmp');
+      // Varied arguments of the same failure keep one identity (#10887).
+      await runFg('git diff --quiet HEAD~3', { output: '', exitCode: 1 });
+      expect(lastCreateHashInput).toBe(gitInput);
     });
 
     it('keeps successful shell blocks digest-free', async () => {
@@ -2980,6 +2998,7 @@ describe('ShellTool', () => {
       );
       expect(lastCreateHashInput).toBe(
         [
+          'Program: worker-process',
           'Output: (empty)',
           'Error: (none)',
           'Exit Code: (none)',
@@ -5211,7 +5230,7 @@ describe('ShellTool', () => {
 
   describe('timeout parameter', () => {
     const TIMED_OUT =
-      'Command timed out after 5000ms before it could complete.';
+      'Command timed out after 5000ms before it could complete (program: `long-running-command`).';
 
     /** Runs a 5s-timeout foreground command under `signal`, then settles it with `result`. */
     const runTimed = (

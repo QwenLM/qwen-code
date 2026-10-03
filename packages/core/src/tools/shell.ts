@@ -1952,7 +1952,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     effectiveTimeout: number,
   ): ToolResult {
     if (getAbortReasonName(signal) === 'TimeoutError') {
-      const message = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+      // The program name keeps unrelated hung commands from sharing one
+      // byte-identical timeout message (the error-repetition guard keys on
+      // the message text).
+      const program = this.params.command.trim().split(/\s+/)[0] ?? '';
+      const message = `Command timed out after ${effectiveTimeout}ms before it could complete (program: \`${program}\`).`;
       const detail = `${message} There was no output before it timed out.`;
       return {
         llmContent: detail,
@@ -2974,8 +2978,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       result.aborted &&
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
+    // The program name keeps three unrelated hung commands from sharing one
+    // byte-identical timeout message — the error-repetition guard keys on
+    // the message text and would halt a turn on a repetition that never
+    // happened.
     const timeoutSummary = wasTimeout
-      ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
+      ? `Command timed out after ${effectiveTimeout}ms before it could complete (program: \`${this.params.command.trim().split(/\s+/)[0] ?? ''}\`).`
       : undefined;
 
     let llmContent = '';
@@ -3014,8 +3022,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
         : '(none)';
 
       // The repeatable evidence of a failure: identical for every retry
-      // of the same dead end, unlike the command/directory/PGID lines.
+      // of the same dead end, unlike the command/directory/PGID lines. The
+      // program name is in the core so three unrelated silent exit-1 probes
+      // (`git diff --quiet`, `cmp -s a b`, `curl -sf <dead>`) do not
+      // collapse into one signature, while a retried `git` failure with
+      // varied arguments still does (issue #10887).
       const stableFailureCoreLines = [
+        `Program: ${this.params.command.trim().split(/\s+/)[0] ?? ''}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
         `Exit Code: ${result.exitCode ?? '(none)'}`,
@@ -3031,7 +3044,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ];
       // Failures embed a producer-owned stable identity for the loop
       // guards (issue #10887): a sha256 of the stable failure core
-      // (Output/Error/Exit Code/Signal) anchored as a
+      // (Program/Output/Error/Exit Code/Signal) anchored as a
       // FULL_OUTPUT_DIGEST_LABEL line. The block's remaining lines are
       // per-call volatile — the command itself (a dead-end loop varies it
       // by definition; multi-line commands put continuation lines the

@@ -575,7 +575,7 @@ function buildStub(
   // every poll, silently disabling every result-aware loop guard for exactly
   // the largest results (issue #9450). When the content already carries a
   // producer-anchored digest, reuse it: shell.ts failure blocks anchor a
-  // sha256 of the stable failure core (Output/Error/Exit Code/Signal), and
+  // sha256 of the stable failure core (Program/Output/Error/Exit Code/Signal), and
   // hashing the full block here instead would fold the per-call volatile
   // Command:/PGID lines into the envelope digest — every retry of the
   // identical failure would then fingerprint uniquely and the

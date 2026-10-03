@@ -1131,7 +1131,16 @@ const createErrorResponse = (
       functionResponse: {
         id: request.callId,
         name: getModelFacingToolName(request),
-        response: { error: error.message },
+        // A policy denial is not a tool failure: carry its identity in the
+        // payload so consumers of the Part (the error-repetition guard)
+        // can tell it apart — the message text alone is byte-identical per
+        // tool name and would otherwise count as failure evidence.
+        response: {
+          error: error.message,
+          ...(errorType === ToolErrorType.EXECUTION_DENIED
+            ? { errorType }
+            : {}),
+        },
       },
     },
   ],

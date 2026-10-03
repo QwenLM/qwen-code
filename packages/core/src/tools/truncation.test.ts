@@ -394,7 +394,7 @@ describe('persistAndTruncateToolResult', () => {
 
   it('reuses the producer-anchored failure-core digest instead of hashing the volatile full block', async () => {
     // shell.ts failure blocks anchor a sha256 of the stable failure core
-    // (Output/Error/Exit Code/Signal) as a FULL_OUTPUT_DIGEST_LABEL line;
+    // (Program/Output/Error/Exit Code/Signal) as a FULL_OUTPUT_DIGEST_LABEL line;
     // the Command:/Directory:/PGID lines are per-call volatile. buildStub
     // must reuse the anchored core digest: hashing the full block would
     // fold the volatile lines into the envelope digest, fingerprinting

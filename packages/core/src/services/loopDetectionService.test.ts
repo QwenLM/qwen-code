@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { Part } from '@google/genai';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import type { Config } from '../config/config.js';
 import type {
   ServerLlmContentEvent,
@@ -2226,6 +2227,77 @@ ${boardState}
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
+    it('never counts a policy denial as failure evidence', () => {
+      // The scheduler's denial payload carries errorType
+      // (createErrorResponse): a denied call never executed, so it is the
+      // configuration's answer — the same class as a cancellation, not a
+      // failure the model can correct. Without the marker the denial
+      // message is byte-identical per tool name and would halt a
+      // productive turn on the third round.
+      const denialResult = (callId: string): Part[] => [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'run_shell_command',
+            response: {
+              error: 'Tool "run_shell_command" is denied.',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+            },
+          },
+        },
+      ];
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD + 2; i++) {
+        expect(service.recordToolErrorBatch(denialResult(`denied-${i}`))).toBe(
+          false,
+        );
+      }
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it("sees through the long-run advisory's per-run seconds", () => {
+      // The error-branch message is `error.message + advisory`, and the
+      // advisory's elapsed seconds vary per round — hashing it verbatim
+      // fingerprinted every round uniquely and the streak never fired.
+      let fired = false;
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD && !fired; i++) {
+        fired = service.recordToolErrorBatch(
+          errorResult(
+            'spawn /usr/local/bin/thing EIO' +
+              `\n\n---\nNote: this foreground command ran for ${61 + i}s. ` +
+              'Next time, pass `is_background: true`.',
+            `err-${i}`,
+          ),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('keys timeout failures by program, not by the shared message', () => {
+      // The timeout message is otherwise byte-identical for every hung
+      // command: three unrelated hangs must not read as one repetition.
+      const timeout = (program: string, callId: string): Part[] =>
+        errorResult(
+          `Command timed out after 5000ms before it could complete (program: \`${program}\`).`,
+          callId,
+        );
+      for (const [i, program] of ['sleep', 'make', 'pytest'].entries()) {
+        expect(service.recordToolErrorBatch(timeout(program, `t-${i}`))).toBe(
+          false,
+        );
+      }
+      expect(service.getLastLoopType()).toBeNull();
+
+      // The same program's timeout on consecutive rounds is the repetition.
+      service.reset('');
+      let fired = false;
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD && !fired; i++) {
+        fired = service.recordToolErrorBatch(timeout('sleep', `s-${i}`));
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
     it('accumulates distinct signatures carried by the SAME round', () => {
       // The stuck shape this guard exists for is a model retrying a small set
       // of failing calls together, so one round routinely carries several
@@ -2578,7 +2650,7 @@ huge error content
     });
 
     // shell.ts embeds an anchored sha256 of the stable failure core
-    // (Output/Error/Exit Code/Signal) into every failure block; the tests
+    // (Program/Output/Error/Exit Code/Signal) into every failure block; the tests
     // below rebuild that producer shape and drive it through the guard.
     const SHELL_FAILURE_CORE = [
       'Output: fatal: unable to access',
