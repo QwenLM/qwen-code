@@ -103,7 +103,11 @@ import {
 } from '../memory/tree.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import {
+  ToolNames,
+  canonicalToolName,
+  resolveRegisteredToolName,
+} from '../tools/tool-names.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -4740,9 +4744,15 @@ export class LlmClient {
                 const bridgedName = (
                   call.args as Record<string, unknown> | undefined
                 )?.['name'];
+                if (typeof bridgedName !== 'string') {
+                  return false;
+                }
+                const targetName = canonicalToolName(bridgedName);
                 return (
-                  typeof bridgedName === 'string' &&
-                  canonicalToolName(bridgedName) === ToolNames.AGENT
+                  (resolveRegisteredToolName(
+                    targetName,
+                    this.config.getToolRegistry().getAllToolNames(),
+                  ) ?? targetName) === ToolNames.AGENT
                 );
               }),
             ) !== undefined;

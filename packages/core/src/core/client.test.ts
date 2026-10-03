@@ -845,6 +845,7 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi.fn().mockReturnValue([ToolNames.AGENT]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       clearReviewedDeclarations: vi.fn(),
@@ -2618,63 +2619,72 @@ describe('Gemini Client (client.ts)', () => {
       },
     );
 
-    it('forces the active todo reminder for a bridged Agent result under the tool_call envelope', async () => {
-      // A bridged delegation returns with the model-facing envelope name
-      // (coreToolScheduler preserves `modelFacingName` on the response part),
-      // so the result is recognised by correlating its call id with the
-      // functionCall recorded in history — the resolved target, not the
-      // envelope, decides whether delegated work just returned.
-      const reminder =
-        '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
-      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: LlmEventType.Content, value: 'response' };
-        })(),
-      );
-      client.getChat().setHistory([
-        {
-          role: 'model',
-          parts: [
+    it.each(['agent', 'AGENT', 'Agent', 'task'])(
+      'forces the active todo reminder for a bridged %s result under the tool_call envelope',
+      async (agentToolName) => {
+        // A bridged delegation returns with the model-facing envelope name
+        // (coreToolScheduler preserves `modelFacingName` on the response part),
+        // so the result is recognised by correlating its call id with the
+        // functionCall recorded in history — the resolved target, not the
+        // envelope, decides whether delegated work just returned.
+        const reminder =
+          '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+          (_promptId, force) => (force ? reminder : undefined),
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+        client.getChat().setHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-bridged-agent',
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: agentToolName,
+                    arguments: {
+                      description: 'd',
+                      prompt: 'p',
+                      subagent_type: 'Explore',
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const stream = client.sendMessageStream(
+          [
             {
-              functionCall: {
+              functionResponse: {
                 id: 'call-bridged-agent',
                 name: ToolNames.TOOL_CALL,
-                args: {
-                  name: 'agent',
-                  args: { description: 'd', prompt: 'p' },
-                },
+                response: { output: 'subagent finished the investigation' },
               },
             },
           ],
-        },
-      ]);
+          new AbortController().signal,
+          'prompt-bridged-agent-result',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
 
-      const stream = client.sendMessageStream(
-        [
-          {
-            functionResponse: {
-              id: 'call-bridged-agent',
-              name: ToolNames.TOOL_CALL,
-              response: { output: 'subagent finished the investigation' },
-            },
-          },
-        ],
-        new AbortController().signal,
-        'prompt-bridged-agent-result',
-        { type: SendMessageType.ToolResult },
-      );
-      for await (const _ of stream) {
-        // drain
-      }
-
-      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
-        'prompt-bridged-agent-result',
-        true,
-      );
-      const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
-      expect(request).toContain(reminder);
-    });
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-bridged-agent-result',
+          true,
+        );
+        const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+        expect(request).toContain(reminder);
+      },
+    );
 
     it('keeps the turn budget for a bridged result that did not resolve to Agent', async () => {
       // The goal tools are bridged through the same envelope; forcing on
