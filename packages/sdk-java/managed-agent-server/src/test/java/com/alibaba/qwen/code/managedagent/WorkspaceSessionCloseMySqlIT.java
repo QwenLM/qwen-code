@@ -164,7 +164,9 @@ class WorkspaceSessionCloseMySqlIT {
                 assertThrows(TimeoutException.class, () -> responses.get().get(100, TimeUnit.MILLISECONDS));
                 return first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true);
             });
-            assertCode(turns.get().get(5, TimeUnit.SECONDS), "workspace_unavailable");
+            // With Workspace files enabled, a bound Session admits later Turns (#13112), so
+            // the queued Turn reaches the Session status and sees the committed close.
+            assertCode(turns.get().get(5, TimeUnit.SECONDS), "session_not_active");
             assertCode(responses.get().get(5, TimeUnit.SECONDS), "session_inactive");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ?", Integer.class, tenant)).isZero();

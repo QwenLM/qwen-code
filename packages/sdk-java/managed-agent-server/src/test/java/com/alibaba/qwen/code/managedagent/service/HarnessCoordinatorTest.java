@@ -1,5 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.after;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -210,10 +220,135 @@ class HarnessCoordinatorTest {
     }
 
     @Test
-    void boundCancellationNeverCallsTheLegacyHarness() {
-        AgentStateStore store = mock(AgentStateStore.class);
+    void boundCancellationWaitsForTheWorkspaceOptIn() {
+        AgentStateStore store = boundCancellingStore();
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer warmer = mock(RuntimeWarmer.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), warmer, directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(store).requireSession("tenant", "session");
+            verify(harness).isWorkspaceFilesAvailable();
+            verifyNoMoreInteractions(harness);
+            verifyNoInteractions(warmer);
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    void cancelsABoundTurnThroughTheHarnessWithTheWorkspaceOptIn() {
+        AgentStateStore store = boundCancellingStore();
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        HarnessCoordinator coordinator = coordinator(store, harness);
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            // The admitted Turn's boot is already bound, so the cancel never
+            // attaches: an attach re-runs the Workspace authorization, which
+            // a revoked grant or a draining Workspace would refuse.
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean());
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean(), anyBoolean());
+            verify(harness).cancel("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted", "retry", "lease-lost", "completed"})
+    void runningOwnerObservesCancellationAfterStreamingStarts(String mode)
+            throws Exception {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt",
+                "epoch", 1);
+        AtomicReference<TurnRecord> current = new AtomicReference<>(running);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenAnswer(invocation -> Optional.of(current.get()));
+        when(store.renewTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(!"lease-lost".equals(mode));
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        CountDownLatch streaming = new CountDownLatch(1);
+        CountDownLatch cancelled = new CountDownLatch(1);
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenAnswer(invocation -> {
+            cancelled.await();
+            return new SourceEvent(2L, "turn_complete",
+                    Map.of("stopReason", "cancelled"), "prompt", Map.of());
+        }).thenReturn(null);
+        when(harness.stream("tenant", "session", 1, "epoch"))
+                .thenAnswer(invocation -> {
+                    streaming.countDown();
+                    return stream;
+                });
+        AtomicBoolean loseDelivery = new AtomicBoolean("retry".equals(mode));
+        doAnswer(invocation -> {
+            if (loseDelivery.getAndSet(false))
+                throw new IllegalStateException("lost");
+            current.set(turn("tenant", "session", "turn", "prompt",
+                    "epoch", 2, "CANCELLED"));
+            cancelled.countDown();
+            return null;
+        }).when(harness).cancel("tenant", "session");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(20));
+        ExecutorService executor = Executors.newCachedThreadPool();
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                executor, Clock.systemUTC(), properties);
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+            assertTrue(streaming.await(2, TimeUnit.SECONDS));
+            // Another API replica persists this state without calling the
+            // running owner's coordinator directly.
+            current.set(turn("tenant", "session", "turn", "prompt",
+                    "epoch", 1, "completed".equals(mode)
+                            ? "COMPLETED" : "CANCELLING"));
+            verify(store, timeout(2_000).atLeastOnce()).renewTurn(eq("tenant"),
+                    eq("session"), eq("turn"), anyString(),
+                    any(Duration.class));
+            if ("accepted".equals(mode) || "retry".equals(mode)) {
+                assertTrue(cancelled.await(2, TimeUnit.SECONDS));
+                verify(harness, timeout(2_000).times(
+                        "retry".equals(mode) ? 2 : 1))
+                        .cancel("tenant", "session");
+            } else {
+                verify(harness, after(200).never()).cancel(anyString(),
+                        anyString());
+            }
+        } finally {
+            cancelled.countDown();
+            coordinator.close();
+            executor.shutdownNow();
+        }
+    }
+
+    private static HarnessCoordinator coordinator(AgentStateStore store,
+            HarnessConnector harness) {
+        return new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+    }
+
+    private static AgentStateStore boundCancellingStore() {
+        AgentStateStore store = mock(AgentStateStore.class);
         when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(
                 turn("tenant", "session", "turn", "prompt", "epoch", 1,
                         "CANCELLING")));
@@ -222,16 +357,7 @@ class HarnessCoordinatorTest {
                         null, "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
                                 "storage-a", ".", "config-a", 1)));
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
-                new HarnessEventProjector(), warmer, directExecutor(),
-                Clock.systemUTC(), new ManagedAgentProperties());
-        try {
-            coordinator.cancel("tenant", "session", "turn");
-            verify(store).requireSession("tenant", "session");
-            verifyNoInteractions(harness, warmer);
-        } finally {
-            coordinator.close();
-        }
+        return store;
     }
 
     @Test

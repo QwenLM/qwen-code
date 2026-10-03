@@ -183,12 +183,12 @@ class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void drainingBlocksRivalStoragePlacementUntilStopIsProven(boolean jdbc) throws Exception {
+    @CsvSource({"false,RECOVERY_BLOCKED", "true,RECOVERY_BLOCKED", "false,LOST", "true,LOST"})
+    void drainingBlocksRivalStoragePlacementUntilStopIsProven(boolean jdbc, String state) throws Exception {
         RuntimeBindingRepository registry = jdbc ? bindings : new InMemoryRuntimeBindingRepository();
         var ready = ready(registry);
         var claimed = registry.claimOperation(ready.getBindingId(), "block", Duration.ofSeconds(10));
-        var blocked = registry.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+        var blocked = registry.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.valueOf(state),
                 claimed.getLease(), Instant.now()));
         assertNotNull(blocked);
         var binding = registry.releaseOperation(blocked.getBindingId(), "block", blocked.getOperationGeneration());
@@ -203,7 +203,8 @@ class RuntimeHarnessDrainTest {
                 provisioner, transport, registry, sessions, executions, "drainer", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
             service.requestHarnessDrain("tenant", "harness");
             var close = service.drainHarnessSession("tenant", "harness").toCompletableFuture();
-            assertEquals(RuntimeBindingRecord.State.DRAINING, registry.findById(binding.getBindingId()).getState());
+            assertEquals("LOST".equals(state) ? RuntimeBindingRecord.State.LOST : RuntimeBindingRecord.State.DRAINING,
+                    registry.findById(binding.getBindingId()).getState());
             assertEquals("runtime_placement_recovery_required",
                     assertThrows(RuntimeBrokerException.class, () -> registry.findOrCreate(rival)).getCode());
             registry.findOrCreate(new RuntimeProvisionRequest(rivalScope, "unrelated", "local-process", "other-storage"));
@@ -263,6 +264,28 @@ class RuntimeHarnessDrainTest {
             assertNull(retired.getLossEvidence());
             assertEquals(1, provisioner.stops);
             assertEquals(0, provisioner.provisions);
+        }
+    }
+
+    @Test
+    void lostBindingWithAnUnreleasedSessionStillRequiresRecovery() throws Exception {
+        var binding = ready();
+        var session = bindings.admitSession(sessions, candidate(binding, "one"));
+        var claimed = bindings.claimOperation(binding.getBindingId(), "setup", Duration.ofSeconds(10));
+        var lost = bindings.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.LOST,
+                claimed.getLease(), Instant.now()));
+        bindings.releaseOperation(lost.getBindingId(), "setup", lost.getOperationGeneration());
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            var failure = assertThrows(ExecutionException.class,
+                    () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals("workspace_close_execution_unsettled",
+                    assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertTrue(sessions.findById(scope, session.getRuntimeSessionId()).isActive());
+            assertEquals(RuntimeBindingRecord.State.LOST, bindings.findById(binding.getBindingId()).getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(0, transport.releases);
+            assertEquals(0, provisioner.stops);
         }
     }
 

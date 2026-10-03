@@ -270,6 +270,10 @@ function toSessionSummary(
       turnStatus,
     );
   const sessionActive = session.status.toLowerCase() === 'active';
+  // A bound Session takes later Turns only from the caller the service
+  // allows; everything else about a bound Session stays read-only.
+  const workspaceTurns =
+    Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
@@ -287,12 +291,14 @@ function toSessionSummary(
     runtimeState,
     capabilities: {
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
-      canSend: sessionActive && !active && !session.workspace,
+      canSend:
+        sessionActive && !active && (!session.workspace || workspaceTurns),
       canCancel:
         sessionActive &&
         active &&
         turnStatus !== 'cancelling' &&
-        !session.workspace,
+        (!session.workspace || workspaceTurns),
+      ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
