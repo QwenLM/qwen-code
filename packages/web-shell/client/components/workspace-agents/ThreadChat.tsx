@@ -74,15 +74,18 @@ function useNow(active: boolean): number {
  */
 function describeLiveRun(
   run: RunView,
+  hostOffline: boolean,
   now: number,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): { text: string; stalled: boolean } {
   const agent = run.agentName;
   if (run.status === 'queued') {
     return {
-      text: run.queueAhead
-        ? t('collab.run.queuedBehind', { agent, count: run.queueAhead })
-        : t('collab.run.queued', { agent }),
+      text: hostOffline
+        ? t('collab.run.hostOffline', { agent })
+        : run.queueAhead
+          ? t('collab.run.queuedBehind', { agent, count: run.queueAhead })
+          : t('collab.run.queued', { agent }),
       stalled: false,
     };
   }
@@ -208,6 +211,7 @@ function teamMembers(
 /** A member's one-word state, for the team list. */
 function memberStatus(
   member: TeamMember,
+  agents: readonly AgentEntry[],
   now: number,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): { text: string; tone: string } {
@@ -223,7 +227,10 @@ function memberStatus(
   if (!run) return { text: t('collab.member.idle'), tone: muted };
   switch (run.status) {
     case 'queued':
-      return { text: t('collab.member.queued'), tone: muted };
+      return agents.find((agent) => agent.id === run.agentId)?.runtime
+        ?.status === 'offline'
+        ? { text: t('collab.member.offline'), tone: attention }
+        : { text: t('collab.member.queued'), tone: muted };
     case 'running':
     case 'finishing':
     case 'cancelling': {
@@ -264,6 +271,8 @@ interface AgentEntry {
   color?: string;
   enabled: boolean;
   retiredAt?: number;
+  status?: string;
+  runtime?: { label: string; status: string };
 }
 
 /**
@@ -402,7 +411,7 @@ function TeamPanel({
       )}
       <ul className={styles.memberList}>
         {members.map((member) => {
-          const { text, tone } = memberStatus(member, now, t);
+          const { text, tone } = memberStatus(member, agents, now, t);
           const runs = live.filter((row) => row.run.agentName === member.name);
           const expandable = runs.length > 0 || member.run !== undefined;
           const open = expandable && (toggled[member.name] ?? runs.length > 0);
@@ -481,6 +490,9 @@ function TeamPanel({
                     <RunRowView
                       key={row.run.id}
                       row={row}
+                      agent={agents.find(
+                        (agent) => agent.id === row.run.agentId,
+                      )}
                       hideAgent
                       onOpenAgentSession={onOpenAgentSession}
                       onCancelRun={pending ? undefined : onCancelRun}
@@ -528,6 +540,7 @@ function TeamPanel({
             <RunRowView
               key={row.run.id}
               row={row}
+              agent={agents.find((agent) => agent.id === row.run.agentId)}
               onOpenAgentSession={onOpenAgentSession}
             />
           ))}
@@ -736,7 +749,9 @@ export function ThreadChat({
             !thread.posts.some(
               (post) =>
                 post.sourceRunId === run.id &&
-                post.text.trim() === run.progress?.outputText?.trim(),
+                (run.closeKind === 'review' ||
+                  run.closeKind === 'blocked' ||
+                  post.text.trim() === run.progress?.outputText?.trim()),
             ),
         )
         .map(
@@ -955,7 +970,10 @@ export function ThreadChat({
             <div className={group.group}>
               <div className={group.list}>
                 {working.map(({ run }) => {
-                  const described = describeLiveRun(run, now, t);
+                  const hostOffline =
+                    agents.find((agent) => agent.id === run.agentId)?.runtime
+                      ?.status === 'offline';
+                  const described = describeLiveRun(run, hostOffline, now, t);
                   const stalled =
                     described.stalled && now >= (snoozedUntil[run.id] ?? 0);
                   const text = stalled
@@ -1073,7 +1091,11 @@ export function ThreadChat({
                       >
                         {run.error === 'agent_run_stalled'
                           ? t('collab.run.timedOut', { agent: run.agentName })
-                          : t('collab.run.failed', { agent: run.agentName })}
+                          : run.error === 'agent_program_unavailable'
+                            ? t('collab.run.programUnavailable', {
+                                agent: run.agentName,
+                              })
+                            : t('collab.run.failed', { agent: run.agentName })}
                       </span>
                     </span>
                     {!pending && (

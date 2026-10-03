@@ -30,7 +30,9 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. Every response carries `X-Request-Id`, which error
+`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+`POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
+revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -52,7 +54,9 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
-[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
+AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-agent-definitions.md) |
+[简体中文](../../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
 ## Managed tool results (O3)
 
@@ -68,13 +72,13 @@ O2 verification settings are separate from the O3 content-read timeout below.
 
 All settings below use the `qwen.managed-agent.artifacts` prefix:
 
-| Setting                | Default | Meaning                                                                                                                    |
-| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled. |
-| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                     |
-| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                    |
-| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                 |
-| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks; storage requests also use the storage client's timeouts.                |
+| Setting                | Default | Meaning                                                                                                                                                       |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                    |
+| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                                                        |
+| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                       |
+| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                                                    |
+| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts. |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -94,8 +98,8 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in initial Workspace
-file Turn described in the G0 section below.
+process. It supports durable no-tool Sessions and the opt-in Workspace file
+Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -186,9 +190,16 @@ never means that tools stopped. After the Hosted Harness restarts, its calls fai
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`, and a failed rename leaves a `PENDING` command that the
-same idempotency key can safely resume. One lifecycle change runs at a time. A
-retry with the same key from the same actor returns the original operation.
+`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
+while retaining its receipt and request digest. The same
+key retries the same content with the replay flag set; changed content or a
+different Session conflicts. A successful concurrent request can still complete
+the receipt, and a failing sibling cannot overwrite that completed outcome.
+Retries do not re-append the original `requested` event. If the command store
+is unavailable during cleanup, the original API failure is preserved and the
+same key can resume its receipt when storage returns. Only an in-flight
+lifecycle change blocks another one. A retry with the same key from the same
+actor returns the original operation once it has completed.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -199,9 +210,11 @@ tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
 Delete writes a public tombstone: get and list stop returning the Session,
-while its operations stay readable. It does not physically erase the private
-journal, events or resources, and it does not mark the journal deleted;
-retention and garbage collection remain future work.
+while its operations stay readable. Completed deletion permanently marks an existing
+private journal `DELETED`, clears its writer and recovery references, and fences
+new writes and recovery. Close and archive keep output pinned. Deletion does
+not physically erase the journal, events or resources; output collection stays
+disabled by default and requires the retention deployment gates.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -342,8 +355,14 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later submit/cancel/lifecycle/cwd operations and broad Workspace capability
-advertisement remain gated. Shell and in-flight recovery are separate slices.
+Later Turns may be submitted by the Session's creator under the
+same opt-in while they can still read and create in the Workspace (the
+per-caller `workspaceTurns` capability flag reflects the caller's current
+grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
+the Session's running Turns and rename the Session. Workspace close follows
+its separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable Workspace
+close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -471,7 +490,16 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The opt-in W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above. Later public submit, cancel and lifecycle operations remain gated;
+in G0 above and to later Turns submitted by the Session's creator under the same
+opt-in while they can still read and create in the Workspace (the per-caller
+`workspaceTurns` capability flag reflects the caller's current grants and the
+registry's `ACTIVE` state); the creator may also cancel the Session's running
+Turns and rename the Session. Later Turns run
+under the creator's Workspace grants, so any other actor keeps the existing
+refusal: `workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. Public close follows its separate close
+capability and lifecycle admission. Archive, delete and unarchive follow their
+separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
@@ -553,8 +581,9 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace resume/next-turn admission still requires product-route integration; this
-internal guard is not a public resume capability yet.
+Workspace next-turn admission for the Session's creator under the G0 opt-in
+described above has landed; public Workspace resume still requires product-route
+integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:
 

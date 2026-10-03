@@ -14,9 +14,21 @@ and uses the deployment's global Workspace for every Session Store connection.
 
 G0 enables one initial file-tool Turn admitted with Session creation. It uses
 the existing public REST route and the WebShell creation adapter that shares its
-service. Later submit, cancel, rename, lifecycle and cwd operations retain their
-existing Workspace gates. Discovery continues to advertise only Workspace
-binding, not complete Workspace execution support. No UI changes are required.
+service. Discovery continues to advertise only
+Workspace binding, not complete Workspace execution support. G0 requires no UI
+changes; the follow-up's only UI changes are enabling the creator's composer and
+its Cancel control.
+
+A follow-up admits later Turns for the Session's creator under the same opt-in,
+and lets the creator cancel a running Turn, which the Hosted Harness aborts and
+settles through the original Runtime identities. Execution authorizes every
+Turn against the creator's Workspace grants, so any other actor, and every
+deployment without the opt-in, keeps the existing refusal:
+`workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. The creator may also rename the Session.
+Workspace close follows its separate close capability and lifecycle admission.
+Archive, delete and unarchive follow the separate retention capabilities after
+reliable Workspace close. Cwd operations remain gated for bound Sessions.
 
 ## Decisions
 
@@ -44,6 +56,8 @@ binding, not complete Workspace execution support. No UI changes are required.
 - Cold load of unsettled input remains blocked. G0 does not enable in-flight
   continuation, adopt workers, remove affinity or change the G1 failover gates.
 
+- A live cancellation reuses its admitted Harness attachment and is retried by the current lease owner. It never certifies a terminal failure from a fresh attach refusal. Recorded rename failures retain a `FAILED` command receipt and digest; same-content retries are replays, conflicting content remains rejected, and a concurrent success can complete the retained receipt.
+
 ## Changes and ownership
 
 | Layer                               | Change                                                                   | Scope                                    |
@@ -55,18 +69,17 @@ binding, not complete Workspace execution support. No UI changes are required.
 | Existing Broker/worker              | Reuse production routing and fencing                                     | Selected Runtime and persisted Workspace |
 | Contract and README                 | Document the narrow creation capability and remaining gates              | Public REST and WebShell adapter         |
 
-Production behavior changes only under `packages/sdk-java/managed-agent-server`
-and in the private Hosted DTOs in `packages/sdk-java/qwencode`; it stays limited
-to the initial Workspace Read/Write/Edit Turn. No core authority, tool
+Production behavior changes under `packages/sdk-java/managed-agent-server`, in
+the private Hosted DTOs in `packages/sdk-java/qwencode`, and in the WebShell
+managed Sessions page and its providers (`packages/web-shell`); it covers the
+initial Workspace Read/Write/Edit Turn and the creator's later-Turn submit,
+cancel and rename admission. No core authority, tool
 execution loop, database schema or public request field needs a new
 abstraction.
 
-The merged change also touched three places outside that scope, none of which
+The merged change also touched two places outside that scope, neither of which
 adds runtime behavior:
 
-- **Generated WebShell types.** `packages/web-shell` regenerates
-  `managed-agent-api.ts` from the updated OpenAPI descriptions; only the
-  documentation comments change.
 - **Runtime Broker fault gate.** `DurableLocalRuntimeFaultGateTest` holds the
   worker's `execute` response in its fault proxy, so the first Broker cannot
   record the result before it is killed. The replacement Broker's `acquire`
@@ -92,7 +105,10 @@ key and verify the same Session/Turn and no extra model/tool effects. Verify a
 different payload conflicts, unauthorized tenants/actors cannot create or read,
 unsupported profiles and unavailable Workspaces refuse, and disabling the
 opt-in preserves the current gate. Exercise the shared WebShell create adapter,
-unchanged later-operation gates, and unbound no-tool regression paths.
+the later-operation gates that changed (the creator's later-Turn submit, cancel
+and rename are admitted; close and retention follow their separate capabilities,
+while cwd remains gated), and unbound
+no-tool regression paths.
 
 Focused SDK serialization, connector, store/admission and coordinator tests
 cover create/load identity, authorization rechecks and disabled gates. Run the
@@ -104,7 +120,8 @@ bundle, focused tests and two clean diff audits precede completion.
 
 G0 lives under #12952 for this implementation; moving its tracking to D or W does
 not change the contract. This does not settle G3 scope. Shell, approvals, D8
-AgentDefinition, public profile selection, later Turns, lifecycle enablement,
+AgentDefinition, public profile selection, later Turns (since admitted for the
+creator, above), lifecycle enablement,
 distributed provisioning and W0e/G1–G3 recovery remain separate. The existing
 `EmbeddedRuntimeBroker` is a production component and remains allowed; the E2E
 must not replace it or bypass admission with direct store calls.

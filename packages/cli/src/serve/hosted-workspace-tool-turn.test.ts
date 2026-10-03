@@ -42,6 +42,7 @@ import {
 import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
+  HOSTED_WORKSPACE_FILE_TOOLS,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -826,6 +827,10 @@ it('refuses unsupported profile calls before acquiring or reserving work', async
   for (const call of [
     { ...calls[0], name: 'run_shell_command' },
     { ...calls[0], wasOutputTruncated: true },
+    // Arguments that arrived unterminated are refused even when the output
+    // token limit was not what cut them: this profile writes to a remote
+    // Workspace with no undo backup (#12970).
+    { ...calls[0], hadIncompleteArguments: true },
   ]) {
     await expect(
       turn.execute([call], parts, 'model', new AbortController().signal),
@@ -1156,6 +1161,79 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
     await expect(turn.finish()).resolves.toBeUndefined();
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['files', 'shell', 'mcp'])(
+  'discloses the %s backup contract without changing shared or MCP tools',
+  async (profile) => {
+    const remote = { name: 'mcp_write', description: 'Remote server tool.' };
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [remote],
+    };
+    const original = structuredClone(HOSTED_WORKSPACE_FILE_TOOLS);
+    const described = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      profile === 'shell'
+        ? {
+            resources: session.resources,
+            assertWritable: async () => undefined,
+          }
+        : undefined,
+      undefined,
+      undefined,
+      profile === 'mcp'
+        ? (mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession)
+        : undefined,
+    );
+    const declarations = await described.declarations(
+      new AbortController().signal,
+    );
+    for (const name of ['write_file', 'edit']) {
+      const description = declarations.find(
+        (tool) => tool.name === name,
+      )?.description;
+      if (profile === 'mcp') {
+        expect(description).toContain('no file backups or undo');
+        expect(description).not.toContain('preimages are backed up');
+      } else {
+        expect(description).toContain('preimages are backed up');
+        expect(description).toContain('content or permissions');
+        expect(description).toContain('same prompt');
+        expect(description).toContain('validate a fresh backup');
+      }
+    }
+    if (profile === 'shell')
+      expect(
+        declarations.find((tool) => tool.name === 'run_shell_command')
+          ?.description,
+      ).toContain('Shell file mutations are not backed up');
+    else
+      expect(
+        declarations.find((tool) => tool.name === 'run_shell_command'),
+      ).toBeUndefined();
+    if (profile === 'mcp') {
+      expect(declarations.map((tool) => tool.name)).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        'mcp_write',
+      ]);
+      expect(declarations.at(-1)).toEqual(remote);
+    }
+    expect(declarations.find((tool) => tool.name === 'read_file')).toEqual(
+      original[0],
+    );
+    expect(HOSTED_WORKSPACE_FILE_TOOLS).toEqual(original);
+    await described.close();
   },
 );
 
@@ -3171,28 +3249,52 @@ it('validates Hook-modified arguments before dispatch', async () => {
   ]);
 });
 
-it('does not execute a denied tool or emit a physical post-tool event', async () => {
-  const fire = vi
-    .fn<HostedHookSession['fire']>()
-    .mockImplementation(async (event) =>
-      event === HookEventName.PreToolUse
-        ? { decision: 'block', reason: 'policy' }
-        : undefined,
+it.each([
+  [{ decision: 'block', reason: 'policy' }, 'policy'],
+  [
+    {
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'policy',
+      },
+    },
+    'policy',
+  ],
+  [
+    {
+      continue: false,
+      stopReason: 'halt',
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecisionReason: 'needs approval',
+      },
+    },
+    'halt',
+  ],
+] as const)(
+  'does not execute a denied tool or emit a physical post-tool event (%j)',
+  async (output, error) => {
+    const fire = vi
+      .fn<HostedHookSession['fire']>()
+      .mockImplementation(async (event) =>
+        event === HookEventName.PreToolUse ? output : undefined,
+      );
+    turn = createTurn(false, { mode: 'yolo' }, hookSession(fire));
+    const responses = await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
     );
-  turn = createTurn(false, { mode: 'yolo' }, hookSession(fire));
-  const responses = await turn.execute(
-    [calls[0]],
-    [parts[0]],
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['error']).toBe('policy');
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(fire.mock.calls.map(([event]) => event)).toEqual([
-    HookEventName.PreToolUse,
-    HookEventName.PostToolBatch,
-  ]);
-});
+    expect(responses[0].functionResponse?.response?.['error']).toBe(error);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(fire.mock.calls.map(([event]) => event)).toEqual([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+  },
+);
 
 it('recovers a failed after Hook from the committed physical receipt without executing the tool again', async () => {
   let fail = true;
@@ -3528,6 +3630,92 @@ it('persists the prepared history before effects and settled history before cont
   expect(
     broker.fileHistory.mock.calls.map(([operation]) => operation.action),
   ).toEqual(['bind', 'prepare', 'snapshot']);
+});
+
+it.each(['pendingTurn', 'pendingUndo'] as const)(
+  'refuses a fresh turn with durable %s before binding or dispatching',
+  async (pending) => {
+    await commit('assistant', [{ text: 'previous turn' }], 'model');
+    await commitHostedFileHistory(session, {
+      schemaVersion: 1,
+      state: {
+        ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        snapshots: [],
+        files: {},
+      },
+      pendingTurn: pending === 'pendingTurn' ? 'previous-prompt' : null,
+      pendingUndo:
+        pending === 'pendingUndo'
+          ? { requestId: randomUUID(), promptId: randomUUID() }
+          : null,
+    });
+    const saved = await readHostedFileHistory(session);
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.acquire).toHaveBeenCalledOnce();
+    expect(broker.fileHistory).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.release).not.toHaveBeenCalled();
+    expect(await readHostedFileHistory(session)).toEqual(saved);
+  },
+);
+
+it('persists capacity refusals without dispatch or pending history and releases the runtime', async () => {
+  const names = Array.from(
+    { length: 160 },
+    (_, index) => `${index}-${'x'.repeat(60)}.txt`,
+  );
+  broker.fileHistory.mockImplementation(async (operation) => ({
+    ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    snapshots:
+      operation.action === 'prepare'
+        ? [
+            {
+              promptId: 'prompt',
+              timestamp: '2026-09-30T00:00:00.000Z',
+              trackedFileBackups: Object.fromEntries(
+                names.map((file) => [
+                  file,
+                  {
+                    backupFileName: null,
+                    version: 1,
+                    backupTime: '2026-09-30T00:00:00.000Z',
+                  },
+                ]),
+              ),
+            },
+          ]
+        : [],
+    files:
+      operation.action === 'prepare'
+        ? Object.fromEntries(names.map((file) => [file, null]))
+        : {},
+  }));
+  const responses = await turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.stringify(responses)).toContain('capacity is exhausted');
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['bind', 'prepare']);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(await readHostedFileHistory(session)).toBeUndefined();
+  expect(
+    (await session.sink.project())
+      .filter((record) => record.type === 'tool_result')
+      .flatMap((record) => record.message?.parts ?? []),
+  ).toEqual(responses);
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
 });
 
 it.each(['backup', 'persistence'])(

@@ -105,6 +105,24 @@ Runtime Session ID. Recovery can therefore find even an owner acquired only for
 a catalog request before the first Hook execution record. Earlier random owner
 IDs remain recoverable through execution records; an old random owner with no
 durable execution record requires operator recovery.
+Only load activations name owners. Each lifecycle Hook operation installs a
+`hook_operation` activation, and when it finishes it installs a restore
+activation whose ID is derived from the activation the operation replaced. The
+log always holds that activation, so the restore is recognized even when the
+`hook_operation` activation failed to install. The restore keeps the default
+activation subject, so the record format is unchanged, and the log refuses an
+activation ID it already holds, so a derived ID cannot replay an earlier
+install. Neither constructs a Hook session, so release skips both and its cost
+does not grow with the number of Hook operations. A load always installs a
+random activation ID, so it remains an owner even after a Hook operation that
+failed or was never restored.
+Parallel Hook executions in one Hook session share one acquisition, so they
+make one release pass between them. A later load releases the earlier load
+owners again; release is idempotent, so the repeat costs only a Broker round
+trip. A restore recorded before restore IDs were derived is released like a
+load, and the Broker answers that release with 404. A log written before this
+change therefore still costs each later load one release per earlier Hook
+operation.
 Before a replacement Hook owner acquires the Workspace, it releases earlier
 owners whose Hook records are all terminal, including owners reconciled through
 status. Tool-result continuation uses the same acquisition path. Broker checks
@@ -117,7 +135,11 @@ Commands reuse native output, timeout and TERM/KILL handling. Managed execution
 requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
 writable domain with `cgroup.kill`. A clean launcher enters a fresh unit before
 starting the command. Membership survives `setsid` and detached descendants;
-completion requires `cgroup.events` to report no remaining processes. Cancellation
+completion requires `cgroup.events` to report no remaining processes. A background
+descendant that outlives the command keeps the unit nonempty, so a command that
+has already printed its output and exited still settles as `timeout` when its
+Hook timeout expires; the unit is then killed and the output is not applied. Hook
+commands must not leave background processes behind. Cancellation
 sends TERM, then uses `cgroup.kill` if needed, and retains the owner when emptiness
 cannot be proved. This is lifecycle isolation for deployment-owned trusted Hooks,
 not a sandbox against scripts deliberately modifying the cgroup control plane.
@@ -297,7 +319,11 @@ they cannot settle a turn while ignoring its pending Hook effects or model scope
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
-cannot overlap a turn or another control operation. The public tenant/actor-scoped
+cannot overlap a turn or another control operation. A prompt refused while a Hook
+operation runs returns 409 `hosted_hook_operation_active`. Reusing a
+Notification/expansion operation ID with different input returns 409
+`hosted_hook_operation_conflict`, which a retry cannot resolve. The public
+tenant/actor-scoped
 `GET /v1/agents/sessions/{sessionId}/hook-catalog` projects only display metadata;
 it exposes no recipes, credentials, module paths or handler references. Existing
 Sessions without a Hook pin retain their current behavior.
