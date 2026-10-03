@@ -29,6 +29,8 @@ import {
 } from './acp-session-bridge.js';
 import { createManagedEngineChannelFactory } from './managed-engine-channel-factory.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { localManagedSessionKey } from '@qwen-code/qwen-code-core/utils/sessionStorageUtils.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
@@ -402,6 +404,64 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect(count('"tool.receipt"')).toBe(4);
     expect(count('"durable_wait"')).toBeGreaterThanOrEqual(1);
     expect(count('"turn_complete"')).toBeGreaterThanOrEqual(1);
+
+    // The batch closed behind the results: a consumed turn_settled
+    // checkpoint names every call settled with its outcome.
+    const checkpointRefs = log
+      .split('\n')
+      .filter(Boolean)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            managedSession?: { kind?: string; payload?: { stateRef?: never } };
+          },
+      )
+      .filter((line) => line.managedSession?.kind === 'checkpoint.committed')
+      .map((line) => line.managedSession!.payload!.stateRef!);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey: localManagedSessionKey(workspace, sessionId),
+    });
+    const checkpoints: Array<Record<string, never>> = [];
+    for (const ref of checkpointRefs) {
+      checkpoints.push(
+        JSON.parse((await resources.read(ref)).toString()) as Record<
+          string,
+          never
+        >,
+      );
+    }
+    const closed = checkpoints
+      .reverse()
+      .find(
+        (checkpoint) =>
+          (checkpoint as { continuation?: { phase?: string } }).continuation
+            ?.phase === 'turn_settled' &&
+          Array.isArray(
+            (checkpoint as { tools?: { items?: unknown[] } }).tools?.items,
+          ),
+      );
+    const closedItems = (
+      closed as unknown as {
+        tools: {
+          items: Array<{
+            state: string;
+            consumed: boolean;
+            outcomeRef: unknown;
+          }>;
+        };
+      }
+    )?.tools.items;
+    expect(closedItems).toBeDefined();
+    expect(closedItems!.length).toBe(4);
+    expect(
+      closedItems!.every(
+        (item) =>
+          item.state === 'settled' &&
+          item.consumed === true &&
+          item.outcomeRef !== null,
+      ),
+    ).toBe(true);
   }, 120_000);
 
   it('starts no worker for a session that calls no tool', async () => {
