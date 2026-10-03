@@ -42,6 +42,12 @@ import {
   ManagedMcpError,
   parseManagedMcpControl,
 } from './managed-mcp-runtime.js';
+import {
+  HookCommandIsolationUnavailableError,
+  type ManagedChildRunProcess,
+  type ManagedChildRunSupervisor,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
 
 export class ManagedMcpToolUnknownError extends Error {}
 
@@ -185,6 +191,7 @@ export interface ManagedShellCapturePublisher {
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
+  private readonly backgroundRegistry = new ManagedBackgroundShellRegistry();
   private readonly mcpCalls = new Map<
     string,
     {
@@ -280,6 +287,7 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
+    private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -552,9 +560,7 @@ export class ManagedToolExecutor {
       tool.validateToolParams(normalized) === null &&
       normalized['is_background'] === true
     ) {
-      throw new ManagedToolConflictError(
-        'Background Shell capture is unavailable.',
-      );
+      return this.executeV3Background(request, tools, normalized);
     }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
@@ -588,6 +594,140 @@ export class ManagedToolExecutor {
     entry.promise = this.run(entry, tool, tools);
     if (!entry.capturePublisher?.finish) await entry.promise;
     return v3View(entry);
+  }
+
+  /**
+   * H3 background Shell (v3): admission shares the foreground parameter and
+   * directory gates, the supervised process starts under its named cgroup
+   * unit, and the call settles with the durable handle while the registry
+   * keeps the Runtime hold. A refusal before any effect settles as an
+   * ordinary error result; it is never a transport error.
+   */
+  private async executeV3Background(
+    request: LocalShellCaptureRequest & {
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    },
+    tools: ManagedToolSet,
+    normalized: Record<string, unknown>,
+  ): Promise<ManagedToolV3View> {
+    const { reference, capture, input } = request;
+    const entry: JournalEntry = {
+      version: 3,
+      reference,
+      toolName: request.toolName,
+      input,
+      inputJson: JSON.stringify(input),
+      v3Capture: capture,
+      state: 'prepared',
+      lastSequence: 0,
+      controller: new AbortController(),
+    };
+    const settle = (result: ToolResultEnvelope): ManagedToolV3View => {
+      entry.v3Result = result;
+      entry.state = 'settled';
+      entry.lastSequence = 1;
+      this.entries.set(reference.callId, entry);
+      return v3View(entry);
+    };
+    if (!this.backgroundSupervisor) {
+      return settle({
+        executionStatus: 'error',
+        responseParts: [],
+        capture: null,
+        error: {
+          message:
+            'Background Shell requires a delegated Linux cgroup v2 root on this Runtime.',
+        },
+      });
+    }
+    let directory: string;
+    const requestedDirectory = normalized['directory'];
+    if (typeof requestedDirectory === 'string' && requestedDirectory !== '') {
+      if (!tools.admitsDirectory(requestedDirectory)) {
+        return settle({
+          executionStatus: 'error',
+          responseParts: [],
+          capture: null,
+          error: {
+            message: `Directory '${requestedDirectory}' is not within any of the registered workspace directories.`,
+          },
+        });
+      }
+      directory = requestedDirectory;
+    } else if (tools.directory !== undefined) {
+      directory = tools.directory;
+    } else {
+      return settle({
+        executionStatus: 'error',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime Session has no workspace directory.',
+        },
+      });
+    }
+    const command = normalized['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      return settle({
+        executionStatus: 'error',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Hosted Shell requires a nonempty command.' },
+      });
+    }
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
+    try {
+      prepared = await this.capturePublisher!.prepare({ reference, capture });
+    } catch (cause) {
+      throw new ManagedToolUnavailableError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+    const sink = prepared.sink;
+    const publisher = prepared.publisher ?? this.capturePublisher!;
+    const unitName = `qwen-bg-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    let process: ManagedChildRunProcess;
+    try {
+      process = this.backgroundSupervisor.start({
+        unitName,
+        executable: '/bin/sh',
+        args: ['-c', command],
+        env: backgroundEnv(),
+        cwd: directory,
+        onOutput: (stream, chunk) => sink.write(stream, chunk),
+      });
+    } catch (cause) {
+      return settle({
+        executionStatus: 'error',
+        responseParts: [],
+        capture: null,
+        error: {
+          message:
+            cause instanceof HookCommandIsolationUnavailableError
+              ? 'Background Shell requires a delegated Linux cgroup v2 directory on this Runtime.'
+              : `Background Shell could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
+    }
+    sink.setStarted(process.child.pid ?? 0);
+    this.backgroundRegistry.register({
+      unitName,
+      sessionId: reference.sessionId,
+      process,
+      sink,
+      publisher,
+      identity: prepared.identity,
+    });
+    return settle({
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text: `Background shell started under unit ${unitName}. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.`,
+        },
+      ],
+      capture: null,
+    });
   }
 
   statusV3(reference: ManagedToolReference): ManagedToolV3View {
@@ -637,15 +777,39 @@ export class ManagedToolExecutor {
       );
     }
     const actual = entry.v3Result.capture;
+    if (receipt.executionCallId !== entry.v3Capture?.executionCallId) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    // A result that owns no managed capture (a background start handle)
+    // acknowledges exactly with a null manifest.
     if (
-      !actual ||
-      receipt.executionCallId !== entry.v3Capture?.executionCallId ||
-      JSON.stringify(receipt.manifest) !== JSON.stringify(actual.manifest) ||
-      (receipt.deliveryStatus === 'committed' &&
-        (actual.captureStatus !== 'complete' ||
-          !Number.isSafeInteger(receipt.historyRevision) ||
-          (receipt.historyRevision ?? 0) < 1)) ||
-      (receipt.deliveryStatus === 'blocked' && receipt.historyRevision !== null)
+      actual === null
+        ? receipt.manifest !== null
+        : JSON.stringify(receipt.manifest) !== JSON.stringify(actual.manifest)
+    ) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    if (
+      actual !== null &&
+      receipt.deliveryStatus === 'committed' &&
+      (actual.captureStatus !== 'complete' ||
+        !Number.isSafeInteger(receipt.historyRevision) ||
+        (receipt.historyRevision ?? 0) < 1)
+    ) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    if (
+      receipt.deliveryStatus === 'blocked' &&
+      receipt.historyRevision !== null
     ) {
       throw new ManagedToolConflictError(
         'Tool result receipt conflicts.',
@@ -664,7 +828,16 @@ export class ManagedToolExecutor {
     entry.acknowledgement = receipt;
     entry.v3Result = {
       ...entry.v3Result,
-      capture: { ...actual, deliveryStatus: receipt.deliveryStatus },
+      capture:
+        actual === null
+          ? null
+          : {
+              captureStatus: actual.captureStatus,
+              captureReason: actual.captureReason,
+              manifest: actual.manifest,
+              previewTruncated: actual.previewTruncated,
+              deliveryStatus: receipt.deliveryStatus,
+            },
     };
     return v3View(entry);
   }
@@ -682,6 +855,7 @@ export class ManagedToolExecutor {
     return (
       this.mcp?.hasHolds(sessionId) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
+      this.backgroundRegistry.hasHolds(sessionId) ||
       [...this.entries.values()].some(
         (entry) =>
           entry.reference.sessionId === sessionId &&
@@ -757,6 +931,7 @@ export class ManagedToolExecutor {
         entry.promise ? [entry.promise] : [],
       ),
       this.provider?.close(),
+      this.backgroundRegistry.stopAll(5_000),
     ]);
   }
 
@@ -935,6 +1110,23 @@ export class ManagedToolExecutor {
       };
     }
   }
+}
+
+function backgroundEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [
+    'PATH',
+    'HOME',
+    'LANG',
+    'LC_ALL',
+    'TMPDIR',
+    'USER',
+    'SHELL',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
 }
 
 function mcpView(view: ManagedMcpOperationView): ManagedToolInvocationView {

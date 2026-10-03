@@ -103,7 +103,8 @@ class ManagedExtensionProjectionContractTest {
             ManagedExtensionRecords.requireRun(run);
             assertEquals(view(fixture.required("view")),
                     ManagedExtensionProjection.project(null, run,
-                            fixture.required("occurredAt").longValue()),
+                            fixture.required("occurredAt").longValue(),
+                            fixture.path("stopRequested").asBoolean(false)),
                     id(fixture));
             assertEquals(fixture.required("deliveryPending").booleanValue(),
                     ManagedExtensionProjection.isDeliveryPending(run),

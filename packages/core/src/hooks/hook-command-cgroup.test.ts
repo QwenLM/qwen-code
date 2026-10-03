@@ -9,7 +9,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { HookCommandCgroup } from './hook-command-cgroup.js';
+import {
+  HookCommandCgroup,
+  HookCommandIsolationUnavailableError,
+} from './hook-command-cgroup.js';
 
 let directory: string;
 beforeEach(async () => {
@@ -17,6 +20,23 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
+});
+
+describe('unit creation and attachment', () => {
+  it('refuses to create or attach without a delegated Linux root', () => {
+    expect(() => HookCommandCgroup.create(undefined)).toThrow(
+      HookCommandIsolationUnavailableError,
+    );
+    expect(() =>
+      HookCommandCgroup.create(join(directory, 'not-a-cgroup')),
+    ).toThrow(HookCommandIsolationUnavailableError);
+    expect(() =>
+      HookCommandCgroup.create(join(directory, 'not-a-cgroup'), 'qwen-bg-1'),
+    ).toThrow(HookCommandIsolationUnavailableError);
+    expect(() =>
+      HookCommandCgroup.attach(join(directory, 'not-a-cgroup'), 'qwen-bg-1'),
+    ).toThrow(HookCommandIsolationUnavailableError);
+  });
 });
 
 describe('managed command launcher environment', () => {

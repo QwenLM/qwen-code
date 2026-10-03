@@ -66,6 +66,7 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import { parseChildRun } from './managed-child-run-record.js';
 import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
@@ -1750,6 +1751,9 @@ export class LocalManagedSessionAuthority {
                 previous?.task ?? null,
                 parsed.run,
                 occurredAt,
+                domain === 'child_run'
+                  ? parseChildRun(parsed.record).stopRequested
+                  : false,
               ),
             }),
     });
@@ -1903,6 +1907,9 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'hook_execution') {
       const execution = parseHookExecution(record);
       refs = [execution.planRef, execution.inputRef, execution.resultRef];
+    } else if (domain === 'child_run') {
+      const child = parseChildRun(record);
+      refs = [child.commandRef, child.startReceiptRef, child.outputRef];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
