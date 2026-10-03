@@ -213,6 +213,35 @@ describe('JavaManagedAgentClient', () => {
     expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
   });
 
+  it('resyncs when a connection delivers nothing but a single skipped frame', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        // One skip is already one too many: nothing valid was delivered, so
+        // retrying the same cursor replays this frame identically. The stream
+        // ends normally here, so without the resync the hook reconnects every
+        // 3s forever with a frozen transcript and no visible error.
+        new Response(corrupt(2), { status: 200 }),
+      ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 1,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+    // The skip warning plus the end-of-stream resync warning: a resync from
+    // the fail-closed name check would log once instead, so this pins which
+    // guard produced the frame.
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
   it('resyncs on a corrupt action update frame instead of skipping it', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const client = new JavaManagedAgentClient({
