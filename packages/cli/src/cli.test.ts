@@ -1777,6 +1777,7 @@ describe('bootstrap import boundaries', () => {
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
       ['updateCommand', 'update'],
+      ['vonInstallCommand', 'von-install'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),
