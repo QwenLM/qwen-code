@@ -472,7 +472,7 @@ describe('onResponseChunk', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
     expect(flushedSessions.has('sess-1')).toBe(false);
     // The flush marker is NOT cleared here: it is ownership-keyed, and only
-    // the chain whose send is still in flight may release it (R8-4).
+    // the chain whose send is still in flight may release it.
     expect(flushingSessions.has('sess-1')).toBe(true);
 
     // Clean up the still-pending turn-1 send; its own chain releases the
@@ -1392,7 +1392,7 @@ describe('onResponseComplete', () => {
     // A superseded turn's stashed head is still parked in the side buffer
     // when the response boundary fires (new response window on the same
     // session). The boundary preserves it — a mid-turn boundary must not
-    // destroy a live turn's stash (R8-5) — but the next window's first fresh
+    // destroy a live turn's stash — but the next window's first fresh
     // entry must not prepend it: the drain site drops entries whose turn is
     // not the live turn.
     orphanBuffer.set('sess-1', {
@@ -2288,7 +2288,7 @@ describe('buffer limit flush (#11)', () => {
     ).toBe(bigChunk + 'b'.repeat(2000));
   });
 
-  it('caps a parked session diverting chunks into the orphan side buffer (R20-2)', async () => {
+  it('caps a parked session diverting chunks into the orphan side buffer', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -2321,7 +2321,7 @@ describe('buffer limit flush (#11)', () => {
     await drain();
   });
 
-  it('trims a sealed pre to stay a prefix of the capped stash (R20-2)', async () => {
+  it('trims a sealed pre to stay a prefix of the capped stash', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -2364,7 +2364,7 @@ describe('buffer limit flush (#11)', () => {
     await drain();
   });
 
-  it('caps the stash on a code-point boundary, never a lone surrogate (R20-2)', async () => {
+  it('caps the stash on a code-point boundary, never a lone surrogate', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -2397,7 +2397,7 @@ describe('buffer limit flush (#11)', () => {
     await drain();
   });
 
-  it('caps the handed-off stash merge while keeping the sealed head (R20-2)', async () => {
+  it('caps the handed-off stash merge while keeping the sealed head', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
@@ -2469,7 +2469,7 @@ describe('buffer limit flush (#11)', () => {
     stderrSpy.mockRestore();
   });
 
-  it('keeps the sealed head whole when the limit is smaller than the head (R20-2)', async () => {
+  it('keeps the sealed head whole when the limit is smaller than the head', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
@@ -2860,7 +2860,7 @@ describe('cancel/flush coordination', () => {
     vi.clearAllMocks();
     // clearAllMocks does not clear implementations, so install the default
     // send mock here: otherwise individual cases pass only through leakage
-    // from an earlier test's mockResolvedValue and fail standalone (R8-2).
+    // from an earlier test's mockResolvedValue and fail standalone.
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     vi.useFakeTimers();
   });
@@ -3561,7 +3561,7 @@ describe('cancel/flush coordination', () => {
     );
   });
 
-  it('final segment suspended in resolveRoute keeps msg-A seq when the session dies (R10-4)', async () => {
+  it('final segment suspended in resolveRoute keeps msg-A seq when the session dies', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
@@ -3619,7 +3619,7 @@ describe('cancel/flush coordination', () => {
     expect(tailBody['msg_seq']).toBe(2);
   });
 
-  it("deleteReplyContext keeps a parked residual's msg_seq counter (R10-6)", async () => {
+  it("deleteReplyContext keeps a parked residual's msg_seq counter", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
@@ -3695,7 +3695,7 @@ describe('cancel/flush coordination', () => {
     expect(seqMap.has('msg-A')).toBe(false);
   });
 
-  it('a failed concurrent send does not roll back a seq another send accepted (R11-1)', async () => {
+  it('a failed concurrent send does not roll back a seq another send accepted', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
@@ -4092,7 +4092,7 @@ describe('stash ownership regressions', () => {
     vi.useRealTimers();
   });
 
-  it("a mid-turn boundary keeps a live turn's stashed head (R8-5)", async () => {
+  it("a mid-turn boundary keeps a live turn's stashed head", async () => {
     const ch = makeChannel();
     const { orphanBuffer } = await reachStashedOrphan(ch);
     expect(orphanBuffer.get('s1')).toEqual({
@@ -4116,7 +4116,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents()).toContain('T2-HEAD T2-TAIL');
   });
 
-  it('a cancelled turn still delivers its stashed head at onPromptEnd (R8-6)', async () => {
+  it('a cancelled turn still delivers its stashed head at onPromptEnd', async () => {
     const ch = makeChannel();
     const { orphanBuffer, pendingStreamDelete } = await reachStashedOrphan(ch);
     expect(orphanBuffer.get('s1')).toEqual({
@@ -4236,7 +4236,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents()).toContain('T2-HEAD T2-REST');
   });
 
-  it('re-stashes the sealed head when the drained stash send fails permanently (R10-2)', async () => {
+  it('re-stashes the sealed head when the drained stash send fails permanently', async () => {
     const ch = makeChannel();
     const { orphanBuffer } = await reachStashedOrphan(ch);
 
@@ -4343,7 +4343,7 @@ describe('stash ownership regressions', () => {
     });
   });
 
-  it('tags a re-stashed sealed head with the live turn so a successor can consume it (self-review D1)', async () => {
+  it('tags a re-stashed sealed head with the live turn so a successor can consume it', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4406,7 +4406,7 @@ describe('stash ownership regressions', () => {
     ).toBe(true);
   });
 
-  it("keeps the superseded turn's sealed head with its in-flight flush owner (self-review D2, R12-2)", async () => {
+  it("keeps the superseded turn's sealed head with its in-flight flush owner", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4436,7 +4436,7 @@ describe('stash ownership regressions', () => {
 
     // Turn 3 starts and its first chunk finds turn 2's entry superseded. That
     // entry is the session's in-flight flush owner, so the branch must NOT
-    // hand the head off again (R12-2): the flush chain's settle arms decide —
+    // hand the head off again: the flush chain's settle arms decide —
     // its success path clears the seal, its permanent-failure arm re-stashes
     // it — and a second copy in the successor would deliver the head twice.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
@@ -4466,7 +4466,7 @@ describe('stash ownership regressions', () => {
     );
   });
 
-  it('re-stashes the sealed head when a superseded in-flight send fails permanently (R12-2b)', async () => {
+  it('re-stashes the sealed head when a superseded in-flight send fails permanently', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4475,7 +4475,7 @@ describe('stash ownership regressions', () => {
     >;
     await reachStashedOrphan(ch);
 
-    // Same shape as the R12-2 duplicate case: the drained send is in flight
+    // Same shape as the duplicate case: the drained send is in flight
     // with the sealed head in its payload.
     onResponseBoundary(ch, 'test-chat', 's1');
     let rejectDrain!: (e: unknown) => void;
@@ -4488,7 +4488,7 @@ describe('stash ownership regressions', () => {
     await drain();
 
     // Turn 3 supersedes turn 2 while its flush is in flight, so the superseded
-    // branch leaves the head with that chain (R12-2) and the successor starts
+    // branch leaves the head with that chain and the successor starts
     // without it.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
@@ -4497,7 +4497,7 @@ describe('stash ownership regressions', () => {
 
     // The in-flight send then fails permanently, so the head never went out.
     // The permanent-failure arm must hand it off even though this state is no
-    // longer the session's current entry (R12-2b): the guard alone would leave
+    // longer the session's current entry: the guard alone would leave
     // the head to a chain that can no longer deliver it, and it is lost.
     rejectDrain(new DeliveryError('FALLBACK_FAILED', 'permanent failure'));
     await drain();
@@ -4523,7 +4523,7 @@ describe('stash ownership regressions', () => {
     ).toHaveLength(1);
   });
 
-  it('re-stashes the sealed head when a superseded in-flight send fails transiently (R12-2c)', async () => {
+  it('re-stashes the sealed head when a superseded in-flight send fails transiently', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4532,7 +4532,7 @@ describe('stash ownership regressions', () => {
     >;
     await reachStashedOrphan(ch);
 
-    // Same shape as the R12-2b permanent case: the drained send is in flight
+    // Same shape as the permanent case: the drained send is in flight
     // carrying the sealed head in its payload.
     onResponseBoundary(ch, 'test-chat', 's1');
     let rejectDrain!: (e: unknown) => void;
@@ -4545,7 +4545,7 @@ describe('stash ownership regressions', () => {
     await drain();
 
     // Turn 3 supersedes turn 2 while its flush is in flight, so the superseded
-    // branch leaves the head with that chain (R12-2) and the successor starts
+    // branch leaves the head with that chain and the successor starts
     // without it.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
@@ -4555,7 +4555,7 @@ describe('stash ownership regressions', () => {
     // The in-flight send then fails TRANSIENTLY, so it takes the retry arm's
     // superseded branch rather than the permanent arm: no retry is scheduled
     // for turn 2's state and nothing will ever settle for it, so that branch
-    // must hand the sealed head off (R12-2c) or it is silently lost.
+    // must hand the sealed head off or it is silently lost.
     rejectDrain(new Error('transient'));
     await drain();
     expect(orphanBuffer.get('s1')).toEqual({
@@ -4580,7 +4580,7 @@ describe('stash ownership regressions', () => {
     ).toHaveLength(1);
   });
 
-  it('re-stashes the sealed head when a superseded in-flight state has no msgId (R12-2d)', async () => {
+  it('re-stashes the sealed head when a superseded in-flight state has no msgId', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4621,7 +4621,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().at(-1)).toContain('T2-HEAD ');
 
     // Turn 3 supersedes turn 2 while that send is in flight, so the superseded
-    // branch leaves the head with its in-flight owner (R12-2).
+    // branch leaves the head with its in-flight owner.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
@@ -4629,7 +4629,7 @@ describe('stash ownership regressions', () => {
 
     // The send then fails transiently with no retry scheduled for turn 2's
     // state. The head must still be handed off even though that state carries
-    // no msgId (R12-2d): gating the handoff on msgId drops it silently.
+    // no msgId: gating the handoff on msgId drops it silently.
     rejectDrain(new Error('transient'));
     await drain();
     expect(orphanBuffer.get('s1')).toEqual({
@@ -4654,7 +4654,7 @@ describe('stash ownership regressions', () => {
     ).toHaveLength(1);
   });
 
-  it('re-stashes the sealed head when a parked superseded in-flight send fails transiently (R12-2e)', async () => {
+  it('re-stashes the sealed head when a parked superseded in-flight send fails transiently', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4676,7 +4676,7 @@ describe('stash ownership regressions', () => {
     await drain();
 
     // Turn 3 supersedes turn 2 while that send is in flight, so the superseded
-    // branch leaves the head with its in-flight owner (R12-2).
+    // branch leaves the head with its in-flight owner.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
@@ -4691,7 +4691,7 @@ describe('stash ownership regressions', () => {
 
     // The in-flight send now fails TRANSIENTLY. The park flag is set AND the
     // captured state is no longer the session's entry, so no branch schedules a
-    // retry for it; the sealed head must still be handed off (R12-2e) or it is
+    // retry for it; the sealed head must still be handed off or it is
     // silently lost — the first implementation had no arm for this shape at
     // all, so it neither retried nor re-stashed.
     rejectDrain(new Error('transient'));
@@ -4718,7 +4718,7 @@ describe('stash ownership regressions', () => {
     ).toHaveLength(1);
   });
 
-  it('does not re-deliver a sealed head a successful flush already carried (R11-3)', async () => {
+  it('does not re-deliver a sealed head a successful flush already carried', async () => {
     const ch = makeChannel();
     const { orphanBuffer } = await reachStashedOrphan(ch);
 
@@ -4759,7 +4759,7 @@ describe('stash ownership regressions', () => {
     ]);
   });
 
-  it('re-stashes the sealed head when a transient send exhausts its retries (R10-2 exhaustion)', async () => {
+  it('re-stashes the sealed head when a transient send exhausts its retries (exhaustion)', async () => {
     const ch = makeChannel();
     await reachStashedOrphan(ch);
     onResponseBoundary(ch, 'test-chat', 's1');
@@ -4783,7 +4783,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().slice(failedAttempts)).toContain('T2-HEAD T2-REST');
   });
 
-  it('re-stashes the sealed head when an over-limit transient send exhausts its retries (R10-2 exhaustion)', async () => {
+  it('re-stashes the sealed head when an over-limit transient send exhausts its retries (exhaustion)', async () => {
     const ch = makeChannel({ bufferFlushLength: 15 });
     await reachStashedOrphan(ch);
     onResponseBoundary(ch, 'test-chat', 's1');
@@ -4805,7 +4805,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().slice(failedAttempts)).toContain('T2-HEAD T2-REST');
   });
 
-  it('delivers the sealed head on the parked turn when no successor can consume it (R10-2 parked terminal)', async () => {
+  it('delivers the sealed head on the parked turn when no successor can consume it (parked terminal)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -4840,7 +4840,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().slice(before)).toContain('T2-HEAD ');
   });
 
-  it('delivers the sealed head when a parked turn exhausts its transient retries (R10-2 parked exhaustion)', async () => {
+  it('delivers the sealed head when a parked turn exhausts its transient retries (parked exhaustion)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -4889,7 +4889,7 @@ describe('stash ownership regressions', () => {
     expect(completedTurns.has('s1')).toBe(false);
   });
 
-  it("delivers a cancelled turn's stashed head before the park early-return (R10-1)", async () => {
+  it("delivers a cancelled turn's stashed head before the park early-return", async () => {
     const ch = makeChannel();
     const { resolveSend, orphanBuffer, chp } = await reachStaleStash(ch);
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -4915,7 +4915,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().filter((c) => c === 'T2-HEAD ')).toHaveLength(1);
   });
 
-  it("deliverCancelledStash's anchored send is protected by the in-flight guard (R11-2)", async () => {
+  it("deliverCancelledStash's anchored send is protected by the in-flight guard", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
@@ -4966,7 +4966,7 @@ describe('stash ownership regressions', () => {
     await drain();
   });
 
-  it("services a successor's park armed against a superseded chain's marker (R9-2)", async () => {
+  it("services a successor's park armed against a superseded chain's marker", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
@@ -5011,7 +5011,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents()).toContain('T2-RESID');
   });
 
-  it('reclaims the parked anchor in the empty-buffer hand-off teardown (R9-2/R9-5)', async () => {
+  it('reclaims the parked anchor in the empty-buffer hand-off teardown', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
@@ -5068,7 +5068,7 @@ describe('stash ownership regressions', () => {
     expect(completedTurns.has('s1')).toBe(false);
   });
 
-  it('the parked self-heal does not postpone a live idle timer (R9-3)', async () => {
+  it('the parked self-heal does not postpone a live idle timer', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -5108,7 +5108,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents()).toContain('T1-resid ');
   });
 
-  it('a response boundary preserves a parked residual instead of destroying it (R9-4/R9-6)', async () => {
+  it('a response boundary preserves a parked residual instead of destroying it', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -5198,7 +5198,7 @@ describe('stash ownership regressions', () => {
     expect(streamState(ch).has('s1')).toBe(false);
   });
 
-  it('a stale-drop does not release the in-flight flush marker, so no second send starts (R8-4)', async () => {
+  it('a stale-drop does not release the in-flight flush marker, so no second send starts', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -5240,7 +5240,7 @@ describe('stash ownership regressions', () => {
     await drain();
   });
 
-  it("a superseded turn's permanent failure leaves the successor's park flag intact (R6-1)", async () => {
+  it("a superseded turn's permanent failure leaves the successor's park flag intact", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -5282,7 +5282,7 @@ describe('stash ownership regressions', () => {
     expect(pendingStreamDelete.has('s1')).toBe(true);
   });
 
-  it("a superseded turn's transient failure leaves the successor's park flag and delivery intact (R6-1)", async () => {
+  it("a superseded turn's transient failure leaves the successor's park flag and delivery intact", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
@@ -5330,9 +5330,9 @@ describe('stash ownership regressions', () => {
   });
 });
 
-// R13-1: the boundary must seal the live turn's buffer-resident prefix, not
+// The boundary must seal the live turn's buffer-resident prefix, not
 // only the text diverted through streamOrphanBuffer.
-describe('R13-1 acceptance: boundary seal for buffer-resident text', () => {
+describe('boundary seal for buffer-resident text', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -5371,7 +5371,7 @@ describe('R13-1 acceptance: boundary seal for buffer-resident text', () => {
   });
 });
 
-describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () => {
+describe('an in-flight flush must not clear a newer seal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -5592,7 +5592,7 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
     expect(sentContents().at(-1)).toBe('HEADBC');
   });
 
-  it('re-seals a residual whose text repeats the carried seal (R20-C1)', async () => {
+  it('re-seals a residual whose text repeats the carried seal', async () => {
     const ch = makeChannel({ maxFlushRetries: 2 });
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<string, { sealedPre?: string }>;
@@ -6168,7 +6168,7 @@ describe('ownership gates for a settling flush chain', () => {
   });
 });
 
-describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', () => {
+describe('tail hand-off must not stash under an ended turn', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -6262,7 +6262,7 @@ describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', (
   });
 });
 
-describe('R19-2 acceptance: a superseded head must keep its own reply anchor', () => {
+describe('a superseded head must keep its own reply anchor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -6430,7 +6430,7 @@ describe('R19-2 acceptance: a superseded head must keep its own reply anchor', (
   });
 });
 
-describe('completedTurns lifetime (R18-1)', () => {
+describe('completedTurns lifetime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -6599,7 +6599,7 @@ describe('boundary suppressed from the adapter hook still seals the stash', () =
 // is the code the flush path treats as transient, so the cancelled-stash
 // delivery must re-attempt it under the existing maxFlushRetries bound instead
 // of dropping it; the permanent codes must still drop.
-describe('R17-1 acceptance: cancelled-stash delivery failure classification', () => {
+describe('cancelled-stash delivery failure classification', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));

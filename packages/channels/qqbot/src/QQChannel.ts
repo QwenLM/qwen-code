@@ -1532,7 +1532,7 @@ export class QQChannel extends ChannelBase {
     // to the side buffer, and a cancel never runs onResponseComplete. Merge
     // the stash into the residual buffer here — creating the state when the
     // chain already freed it — so the branches below park and flush it. A
-    // stash is always older than the residual, so it is prepended (R8-6).
+    // stash is always older than the residual, so it is prepended.
     const stashed = this.streamOrphanBuffer.get(sessionId);
     if (stashed) {
       if (stashed.turn === (this.turnCounter.get(sessionId) ?? 0)) {
@@ -1620,7 +1620,7 @@ export class QQChannel extends ChannelBase {
    * maxFlushRetries bound flushAndTrack uses (<= 0 means unlimited). A
    * re-attempt is not routed through streamState/idleFlush: the turn is over,
    * so a state entry for it would be dropped as stale by the next prompt, and
-   * the entry-less in-flight guard below (R11-2) would be lost. Every attempt
+   * the entry-less in-flight guard below would be lost. Every attempt
    * reuses the anchor, the attribution label and the reply context captured
    * before the first one.
    *
@@ -1865,7 +1865,7 @@ export class QQChannel extends ChannelBase {
       // cleared from the bridge's collection — dropping it here would truncate
       // this turn's opening with no other copy. Hand it off before the delete,
       // like every other doomed-entry site — but ONLY when this state is not
-      // the session's in-flight flush owner (R12-2): that chain's payload
+      // the session's in-flight flush owner: that chain's payload
       // already carries the head, its success path clears sealedPre, and its
       // permanent-failure arm re-stashes an undelivered head. Handing off here
       // too would deliver the head twice; the guard alone would lose it if that
@@ -2132,7 +2132,7 @@ export class QQChannel extends ChannelBase {
           // Drop everything — including any residual buffer that arrived concurrently.
           const current = this.streamState.get(sessionId);
           // Hand the sealed pre-boundary head off BEFORE any delete and outside
-          // the identity guard below (R12-2): this entry carries the only copy,
+          // the identity guard below: this entry carries the only copy,
           // and the boundary cleared the bridge's collection so it is absent
           // from fullText. The handoff is itself gated on session ownership
           // inside handOffSealedPre (ownsSession), which drops the seal when the
@@ -2182,7 +2182,7 @@ export class QQChannel extends ChannelBase {
           }
           // Only consume the park/flush records when this chain still owns
           // the session's entry: a successor turn that parked its own
-          // residual must keep its flags (R6-1).
+          // residual must keep its flags.
           if (current === state && this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
             this.flushedSessions.delete(sessionId);
@@ -2196,7 +2196,7 @@ export class QQChannel extends ChannelBase {
         );
         // #1: Never undo previously-succeeded flush records on failure
         //
-        // R12-2: the sealed pre-boundary head must be handed off exactly when
+        // The sealed pre-boundary head must be handed off exactly when
         // this chain gives up on delivering it, and the chain gives up when it
         // neither succeeded nor scheduled a retry FOR THIS STATE. The predicate
         // is therefore "scheduled a retry", NOT "msgId present": a state with
@@ -2216,7 +2216,7 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           // Only consume the park flag when this chain still owns the
           // session's entry: a successor turn that parked its own residual
-          // must keep its flag (R6-1).
+          // must keep its flag.
           if (current === state) {
             this.pendingStreamDelete.delete(sessionId);
             // Prepend the failed send's text to whatever accumulated during
@@ -2375,14 +2375,14 @@ export class QQChannel extends ChannelBase {
             // The entry was destroyed while this send was in flight (session
             // death or a successor turn). Nothing will settle for this state,
             // so release its anchor here — expectedMsgId keeps a successor's
-            // anchor untouched. The sealed head is NOT handled here (R12-2):
+            // anchor untouched. The sealed head is NOT handled here:
             // ownership passes on by the retryScheduled check at the end of
             // this arm, whose predicate is "no retry armed for this state",
             // not "msgId present".
             this.releaseSessionReplyAnchor(sessionId, state.msgId);
           }
         }
-        // R12-2: no branch above armed a retry for this state, so this chain
+        // No branch above armed a retry for this state, so this chain
         // has given up on delivering the sealed pre-boundary head — pass its
         // ownership on. handOffSealedPre is idempotent (it clears sealedPre at
         // its top), so the exhaustion arms that already handed off are

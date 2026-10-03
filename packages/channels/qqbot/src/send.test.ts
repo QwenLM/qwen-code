@@ -417,7 +417,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
   });
 });
 
-describe('shared-session operator warning (R7-3)', () => {
+describe('shared-session operator warning', () => {
   function makeChannel(
     overrides: Record<string, unknown> = {},
   ): QQChannelInstance {
@@ -545,7 +545,7 @@ describe('purgeSingleScopeOrphans', () => {
         },
         // This channel's user-scope key under thread scope: doomed — under
         // thread scope the routing key is `channel:chatId`, so a user-scope
-        // key can never resolve again (R8-1).
+        // key can never resolve again.
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
@@ -1013,7 +1013,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
-  it("purges this channel's unroutable user-scope legacy keys under thread scope (R8-1), sparing a sibling channel", () => {
+  it("purges this channel's unroutable user-scope legacy keys under thread scope, sparing a sibling channel", () => {
     const removeSessionId = vi.fn(() => true);
     const discardSession = vi.fn().mockResolvedValue(undefined);
     const router = {
@@ -1086,7 +1086,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
   });
 
-  it('classifies legacy user keys by the router key, not by colon count (R8-1)', () => {
+  it('classifies legacy user keys by the router key, not by colon count', () => {
     const removeSessionId = vi.fn(() => true);
     const router = {
       getAll: () => [
@@ -1382,7 +1382,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(records[1].routes[0].sessionId).toBe('user-era-2');
   });
 
-  it('keeps the earlier records when a torn rescue write fails mid-way (R17-2)', () => {
+  it('keeps the earlier records when a torn rescue write fails mid-way', () => {
     const target = join(
       '/tmp/test-qwen',
       'channels',
@@ -1441,7 +1441,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(JSON.parse(files.get(target) as string)).toEqual(earlier);
   });
 
-  it('removes the sibling temp file when the rescue write fails (R17-2)', () => {
+  it('removes the sibling temp file when the rescue write fails', () => {
     const target = join(
       '/tmp/test-qwen',
       'channels',
@@ -1495,7 +1495,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(logged).toContain('rescue write failed');
   });
 
-  it('quarantines an unreadable rescue file instead of overwriting it (R17-2)', () => {
+  it('quarantines an unreadable rescue file instead of overwriting it', () => {
     const target = join(
       '/tmp/test-qwen',
       'channels',
@@ -4697,7 +4697,7 @@ describe('replyMsgId cleanup timer', () => {
 // resolveRoute yields null (token refresh failure, empty token, chat type
 // cleared), so "no exception" cannot mean "delivered": a transient class the
 // loop cannot see would otherwise drop the text with no retry and no drop log.
-describe('R20-3 acceptance: a null route is not a delivered stash', () => {
+describe('a null route is not a delivered stash', () => {
   function makeChannel(
     overrides: Record<string, unknown> = {},
   ): QQChannelInstance {
@@ -4899,7 +4899,7 @@ describe('R20-3 acceptance: a null route is not a delivered stash', () => {
     stderrSpy.mockRestore();
   });
 
-  it('drops a mis-typed chatType once instead of retrying it forever (R20-C2)', async () => {
+  it('drops a mis-typed chatType once instead of retrying it forever', async () => {
     // resolveRoute accepts only 'group' | 'c2c'; nothing validates chatTypes at
     // runtime, so a truthy-but-bogus value must classify as permanent.
     const ch = makeChannel({

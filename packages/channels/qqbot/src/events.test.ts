@@ -1942,7 +1942,7 @@ describe('群管理事件', () => {
       // counter and orphan-buffer ownership stay with the prompt lifecycle
       // (onPromptStart/onPromptEnd), not this group-removal loop: under
       // 'single' scope the matched session is channel-wide and its live turn
-      // must not be reset by a group deletion (R9-5).
+      // must not be reset by a group deletion.
       expect(streamState.has('sid-1')).toBe(false);
       expect(sessionReplyMsgId.has('sid-1')).toBe(false);
       expect(flushingSessions.has('sid-1')).toBe(false);
@@ -1962,7 +1962,7 @@ describe('群管理事件', () => {
     // shared predicate must keep it. The entry belongs to another chat, so this
     // teardown does not destroy it and its veto is the legitimate one; an entry
     // the same block deletes is covered by the case below.
-    it('keeps the counter when the session anchor moved but a surviving buffered entry still holds the context msgId (R10-7)', () => {
+    it('keeps the counter when the session anchor moved but a surviving buffered entry still holds the context msgId', () => {
       const ch = makeChannel();
       const pvt = ch as unknown as QQChannelRaw;
       const chp = ch as unknown as Record<string, unknown>;
@@ -2064,11 +2064,11 @@ describe('群管理事件', () => {
       expect(msgSeqMap.has('msg-1')).toBe(false);
     });
 
-    // R9-5: the release must carry the matched entry's msgId identity (the
+    // The release must carry the matched entry's msgId identity (the
     // shared single-scope session may already belong to a newer turn) and
     // must not touch the turn counter / orphan buffer, which the prompt
     // lifecycle owns.
-    it("does not delete the shared single-scope session's newer anchor or turn state (R9-5)", () => {
+    it("does not delete the shared single-scope session's newer anchor or turn state", () => {
       const ch = makeChannel({ sessionScope: 'single' });
       const pvt = ch as unknown as QQChannelRaw;
       const chp = ch as unknown as Record<string, unknown>;
@@ -2134,12 +2134,12 @@ describe('群管理事件', () => {
       });
     });
 
-    // R9-5: a matched entry with no msgId (proactive/loop turn) offers no
+    // A matched entry with no msgId (proactive/loop turn) offers no
     // identity to release against. Passing `undefined` to the release helper
     // means "no identity expectation", which would delete the shared
     // single-scope session's live anchor — the exact defect the identity gate
     // exists to prevent.
-    it('does not release the shared anchor when the matched entry has no msgId (R9-5)', () => {
+    it('does not release the shared anchor when the matched entry has no msgId', () => {
       const ch = makeChannel({ sessionScope: 'single' });
       const pvt = ch as unknown as QQChannelRaw;
       const chp = ch as unknown as Record<string, unknown>;
@@ -2554,7 +2554,7 @@ describe('Gateway message handling', () => {
           target: { channelName: 'test-bot' },
         },
         // User-scope key under thread scope: purged — unroutable under
-        // thread scope, where the routing key is channel:chatId (R8-1).
+        // thread scope, where the routing key is channel:chatId.
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
