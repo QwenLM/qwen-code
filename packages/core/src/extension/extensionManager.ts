@@ -29,6 +29,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
   EXTENSION_SETTINGS_FILENAME,
+  EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   substituteHookVariables,
@@ -580,6 +581,10 @@ export class ExtensionManager {
     assertManagedExtensionStateSeparation(this.managedExtensionsDir, [
       this.configDir,
       this.extensionStore.storeDir,
+      path.join(
+        Storage.getGlobalQwenDir(),
+        EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
+      ),
     ]);
     this.configFilePath = path.join(
       this.configDir,

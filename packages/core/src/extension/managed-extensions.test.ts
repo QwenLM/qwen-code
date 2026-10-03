@@ -45,6 +45,7 @@ import { resolveManagedExtensionsDir } from './managed-extension-dir.js';
 import { checkForExtensionUpdate } from './github.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
+  EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   type JsonValue,
@@ -1420,6 +1421,68 @@ describe('managed extensions', () => {
         }),
       }),
     ).toThrow('must not overlap writable extension state');
+  });
+
+  it.each(['equal', 'child'] as const)(
+    'rejects a managed collection %s to the global secret workspace inventory even with a custom store',
+    (relationship) => {
+      const inventoryRoot = path.join(
+        temporary,
+        'home',
+        EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
+      );
+      const deployment =
+        relationship === 'equal'
+          ? inventoryRoot
+          : path.join(inventoryRoot, 'deployment');
+      fs.mkdirSync(deployment, { recursive: true });
+      const customStore = new ExtensionStore({
+        extensionsDir: path.join(temporary, 'custom-extensions'),
+        storeDir: path.join(temporary, 'custom-store'),
+      });
+      expect(() =>
+        manager({
+          managedExtensionsDir: deployment,
+          extensionStore: customStore,
+        }),
+      ).toThrow('must not overlap writable extension state');
+    },
+  );
+
+  it('rejects a managed collection reached through a secret inventory symlink alias', () => {
+    const inventoryRoot = path.join(
+      temporary,
+      'home',
+      EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
+    );
+    fs.mkdirSync(path.join(inventoryRoot, 'deployment'), { recursive: true });
+    const alias = path.join(temporary, 'inventory-alias');
+    fs.symlinkSync(
+      inventoryRoot,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(() =>
+      manager({ managedExtensionsDir: path.join(alias, 'deployment') }),
+    ).toThrow('must not overlap writable extension state');
+  });
+
+  it('loads a managed collection beside the secret inventory with a shared name prefix', async () => {
+    const inventoryRoot = path.join(
+      temporary,
+      'home',
+      EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME,
+    );
+    fs.mkdirSync(inventoryRoot, { recursive: true });
+    const deployment = `${inventoryRoot}-deployment`;
+    writeExtension(deployment, 'separate-package');
+    const subject = manager({ managedExtensionsDir: deployment });
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'separate-package', source: 'managed' }),
+    ]);
+    expect(fs.readdirSync(inventoryRoot)).toEqual([]);
   });
 
   it.each(['omitted', 'absolute', 'explicit-cwd'] as const)(

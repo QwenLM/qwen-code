@@ -22,6 +22,8 @@ export const EXTENSIONS_DIRECTORY_NAME = path.join(QWEN_DIR, 'extensions');
 export const EXTENSIONS_CONFIG_FILENAME = 'qwen-extension.json';
 export const INSTALL_METADATA_FILENAME = '.qwen-extension-install.json';
 export const EXTENSION_SETTINGS_FILENAME = '.env';
+export const EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME =
+  'extension-secret-workspaces';
 
 export type JsonObject = { [key: string]: JsonValue };
 export type JsonArray = JsonValue[];
