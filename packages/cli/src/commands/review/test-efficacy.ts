@@ -1689,10 +1689,11 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // whenever it rewrites a file, and the restore below rewrites every tracked
   // file this tree has — so the same surface `scratch-tree` refuses to reset
   // through was, one directory over, run through twice per probe run. The
-  // screen reads repo-LOCAL config only: `git lfs install` writes
-  // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
-  // would put every contributor with git-lfs into permanent refusal — the same
-  // failure as a tripwire that fires on every healthy run.
+  // The screen walks repo-local config, then exempts a filter delivered from
+  // the same source file as the active global/system graph when that source is
+  // outside repository-controlled paths. `git lfs install` commonly writes
+  // there; refusing on it would put contributors with git-lfs into permanent
+  // refusal — the same failure as a tripwire that fires on every healthy run.
   // A non-empty answer is a refusal whichever half it came from: a filter the
   // screen found, or a candidate it could not read to the bottom. Both mean
   // the checkout below would execute something this screen did not clear.
@@ -2191,8 +2192,8 @@ export function runOneHunkProbe(
   // restore screened this tree three git spawns and several filesystem reads
   // ago, which is a window a detached planter can land in — the capability the
   // revert phase's own comment credits — and a plant that lands there is live
-  // here, once per hunk candidate, on the reviewer's host. Repo-local scope,
-  // for the git-lfs reason the restore's screen states.
+  // here, once per hunk candidate, on the reviewer's host. The screen refuses
+  // repo-delivered filters while exempting only matching trusted origins.
   const applyFilters = checkoutFilterCommands(probeTree);
   if (applyFilters.length > 0) {
     return {
@@ -3145,9 +3146,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // lose the whole revert probe to a screen protecting a command that
           // never executes.
           // `checkout base -- <paths>` rewrites files, and a rewrite EXECUTES
-          // `filter.<name>.smudge`. Repo-local scope, for the git-lfs reason
-          // the restore's screen states. A non-empty answer is a refusal
-          // whichever half it came from. The throw lands in this phase's
+          // `filter.<name>.smudge`. The screen refuses repo-delivered filters
+          // while exempting only matching trusted origins. A non-empty answer
+          // is a refusal whichever half it came from. The throw lands in this phase's
           // existing catch and is recorded as a probe that did not run.
           const revertFilters = checkoutFilterCommands(probeTree);
           if (revertFilters.length > 0) {
