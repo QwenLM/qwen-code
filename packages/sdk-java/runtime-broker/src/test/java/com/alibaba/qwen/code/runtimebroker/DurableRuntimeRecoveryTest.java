@@ -1131,15 +1131,14 @@ class DurableRuntimeRecoveryTest {
         }
 
         DurableProvisioner recovered = new DurableProvisioner();
-        // The retry backoff reaches the ninth call at ~7.15s of the 8s
-        // deadline (2s lease, 4x); the loss is observed there, and the
-        // cleanup's own observation leg then burns another ~1.2s, so the
-        // reclaim only finishes past the reconcile's original deadline.
-        // It must get a fresh deadline window at the handoff instead of
-        // being cut by the reconcile's.
-        recovered.startingBeforeNotFound = 8;
+        // The eighth call starts no earlier than 5.15s of the 8s deadline
+        // (2s lease, 4x), leaving 2.85s for loss discovery. The cleanup's
+        // 3s observation then finishes after 8.15s, past that deadline
+        // but within its own 4s step bound. This checks the fresh handoff
+        // window without relying on a 0.85s discovery margin.
+        recovered.startingBeforeNotFound = 7;
         recovered.notFoundOnce = true;
-        recovered.reconcileDelayMillis = 1200;
+        recovered.reconcileDelayMillis = 3000;
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 recovered, new TestTransport(), bindings, sessions,
@@ -1147,11 +1146,13 @@ class DurableRuntimeRecoveryTest {
                 Duration.ofSeconds(2))) {
             RuntimeBindingRecord original = bindings.findActive(
                     request(initial));
+            long started = System.nanoTime();
             Exception failure = assertThrows(Exception.class,
                     () -> service.warm("harness").toCompletableFuture()
                             .get(20, TimeUnit.SECONDS));
             assertEquals("runtime_broker_runtime_lost",
                     brokerFailure(failure).getCode());
+            assertTrue(System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(8));
             RuntimeBindingRecord pinned = bindings.findActive(
                     request(initial));
             assertEquals(original.getBindingId(), pinned.getBindingId());

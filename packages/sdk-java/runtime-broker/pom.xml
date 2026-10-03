@@ -22,6 +22,7 @@
         <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
         <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
         <mysql-connector.version>8.4.0</mysql-connector.version>
+        <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -114,6 +115,25 @@
                         <phase>test</phase>
                         <goals>
                             <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- High-confidence gate: the tree is clean at this threshold, so
+                 any new warning fails mvn verify. A false positive goes into
+                 spotbugs-excludes.xml with a justification in the PR. -->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>${spotbugs-maven-plugin.version}</version>
+                <configuration>
+                    <threshold>High</threshold>
+                    <excludeFilterFile>${project.basedir}/spotbugs-excludes.xml</excludeFilterFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
                         </goals>
                     </execution>
                 </executions>

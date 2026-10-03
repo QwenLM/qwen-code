@@ -90,9 +90,11 @@ so v1.13 records all four as `partial`:
 
 ### 4.4 `agent_revision` before AgentDefinition
 
-`PublicSession.agent_revision` is required, but `/v1/agents` is still
-`planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
-the server's agent configuration. D1 only records the missing field.
+`PublicSession.agent_revision` is required. D2 returns a fixed revision taken
+from the server's agent configuration, and D1 only records the missing field.
+D8a (v1.29) implements the `/v1/agents` routes as stored, immutable revisions;
+Sessions keep the configured revision until D8b pins a stored one. See
+[AgentDefinition revisions](2026-10-01-managed-agent-definitions.md).
 
 ### 4.5 W0d discovery and empty-session binding
 

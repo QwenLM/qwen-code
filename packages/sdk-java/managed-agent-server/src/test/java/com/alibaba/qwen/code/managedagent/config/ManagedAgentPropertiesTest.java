@@ -11,6 +11,76 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
 
 class ManagedAgentPropertiesTest {
+    private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
+    private static final String TRUSTED_KEY =
+            "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
+
+    @Test
+    void applicationYmlBindsTheDurableAndTrustedDefaults() throws java.io.IOException {
+        var values = applicationYmlValues();
+        // The named contract itself: reverting either fallback flips the
+        // binding below red; renaming or typoing either variable shows up here.
+        assertThat(values).containsEntry(DURABLE_KEY,
+                "${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:true}");
+        assertThat(values).containsEntry(TRUSTED_KEY,
+                "${QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:true}");
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        DURABLE_KEY + "=" + values.get(DURABLE_KEY),
+                        TRUSTED_KEY + "=" + values.get(TRUSTED_KEY))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.isDurableLocalProcess()).isTrue();
+                    assertThat(broker.isTrustedLocalRebootRecovery()).isTrue();
+                });
+    }
+
+    @Test
+    void theDocumentedEnvNamesOverrideTheYmlDefaults() throws java.io.IOException {
+        var values = applicationYmlValues();
+        var ambient = new java.util.LinkedHashMap<String, Object>();
+        System.getenv().forEach((name, value) -> {
+            if (!"QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS".equals(name)
+                    && !"QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY".equals(name)) {
+                ambient.put(name, value);
+            }
+        });
+        ambient.put("QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS", "false");
+        ambient.put("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY", "false");
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        DURABLE_KEY + "=" + values.get(DURABLE_KEY),
+                        TRUSTED_KEY + "=" + values.get(TRUSTED_KEY))
+                .withInitializer(ctx -> ctx.getEnvironment().getPropertySources().replace(
+                        "systemEnvironment",
+                        new org.springframework.core.env.MapPropertySource("systemEnvironment", ambient)))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.isDurableLocalProcess()).isFalse();
+                    assertThat(broker.isTrustedLocalRebootRecovery()).isFalse();
+                });
+    }
+
+    private static java.util.Map<String, Object> applicationYmlValues() throws java.io.IOException {
+        var loaded = new org.springframework.boot.env.YamlPropertySourceLoader().load(
+                "application.yml",
+                new org.springframework.core.io.ClassPathResource("application.yml"));
+        var values = new java.util.LinkedHashMap<String, Object>();
+        for (var source : loaded) {
+            var enumerable = (org.springframework.core.env.EnumerablePropertySource<?>) source;
+            for (String name : enumerable.getPropertyNames()) {
+                values.put(name, enumerable.getProperty(name));
+            }
+        }
+        return values;
+    }
+
     @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
