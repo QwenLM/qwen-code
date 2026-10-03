@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CODE_FENCE_RE } from './pending-rendered-height.js';
+
 /*
 **Background & Purpose:**
 
@@ -42,29 +44,40 @@ so rendered history chunks do not break fenced code blocks unnecessarily.
 /**
  * Finds the next fenced-code delimiter (a run of 3+ ``` or ~~~) at or after
  * `from`, returning its index, fence character and the FULL run length. Both
- * fence types are recognized. The run length matters: `indexOf('```')` matches
- * only the first 3 chars of a longer run, so callers must advance past the whole
- * run (index + length) or a 6-backtick fence would be miscounted as two.
+ * fence types are recognized. The run length matters: a fence line can carry a
+ * longer run than 3, so callers must advance past the whole run (index +
+ * length) or a 6-backtick fence would be miscounted as two.
+ *
+ * Only whole-line runs count: the renderer treats a fence as a line of its own
+ * (CODE_FENCE_RE), so an inline ``` or ~~~ inside prose or inline code is not a
+ * block delimiter here either.
  */
 const findNextFence = (
   content: string,
   from: number,
 ): { index: number; char: '`' | '~'; length: number } | null => {
-  const backtick = content.indexOf('```', from);
-  const tilde = content.indexOf('~~~', from);
-  if (backtick === -1 && tilde === -1) return null;
-  let index: number;
-  let char: '`' | '~';
-  if (tilde === -1 || (backtick !== -1 && backtick < tilde)) {
-    index = backtick;
-    char = '`';
-  } else {
-    index = tilde;
-    char = '~';
+  let lineStart = content.lastIndexOf('\n', from - 1) + 1;
+  while (lineStart < content.length) {
+    const lineEnd = content.indexOf('\n', lineStart);
+    const line = content.slice(
+      lineStart,
+      lineEnd === -1 ? content.length : lineEnd,
+    );
+    const match = CODE_FENCE_RE.exec(line);
+    if (match) {
+      const index = lineStart + line.indexOf(match[1]);
+      if (index >= from) {
+        return {
+          index,
+          char: match[1].charAt(0) as '`' | '~',
+          length: match[1].length,
+        };
+      }
+    }
+    if (lineEnd === -1) break;
+    lineStart = lineEnd + 1;
   }
-  let length = 0;
-  while (content[index + length] === char) length++;
-  return { index, char, length };
+  return null;
 };
 
 /**
