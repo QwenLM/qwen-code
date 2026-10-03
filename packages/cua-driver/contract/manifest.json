@@ -1453,6 +1453,10 @@
               "null"
             ]
           },
+          "include_child_windows": {
+            "description": "macOS 14.2+: include child content in this screenshot only. Default false.\nKeeps the requested window coordinate frame and accessibility scope.",
+            "type": "boolean"
+          },
           "include_screenshot": {
             "description": "Default true. Set false to skip the screenshot and return the tree only.",
             "type": "boolean"

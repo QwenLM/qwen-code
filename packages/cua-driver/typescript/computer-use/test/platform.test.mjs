@@ -32,6 +32,21 @@ test("platform metadata is refreshed instead of cached across owner changes", as
   assert.equal(await computer.getPlatform(), "linux");
 });
 
+test("expanded capture uses refreshed metadata and discards failed refreshes", async () => {
+  let metadata = '{"platform":"macos"}';
+  const { computer } = fixture(() => metadata);
+  const options = { pid: 42, windowId: 7, includeChildWindows: true };
+  await computer.getPlatform();
+  metadata = '{"platform":"windows"}';
+  await computer.getPlatform();
+  await assert.rejects(computer.observeWindow(options), { code: "unsupported_platform" });
+  metadata = '{"platform":"macos"}';
+  await computer.getPlatform();
+  metadata = '{}';
+  await assert.rejects(computer.getPlatform(), { code: "driver_platform_unavailable" });
+  await assert.rejects(computer.observeWindow(options), { code: "driver_platform_unavailable" });
+});
+
 for (const raw of ["{}", "null", "{", '{"platform":"darwin"}', '{"platform":42}']) {
   test(`missing or invalid metadata refuses without a host fallback: ${raw}`, async () => {
     const { computer } = fixture(() => raw);

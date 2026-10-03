@@ -125,24 +125,34 @@ function captureStatus(structured) {
   };
 }
 
-function observationText(treeText, capture, maxTextChars, appContext) {
-  let warning = "";
+function observationText(treeText, capture, maxTextChars, appContext, screenshotWarning = "") {
+  const notice = appContext
+    ? "Text truncated; call app.getState with disableDiff:true and a larger maxTextChars.\n"
+    : "Text truncated; inspect current .elements, or request disableDiff:true with a larger maxTextChars.\n";
+  let warning = screenshotWarning;
   if (capture.complete === false) {
-    warning =
+    warning +=
       capture.truncated && capture.readComplete !== false
         ? "Accessibility capture is incomplete (traversal limit); this view covers captured nodes only.\n"
         : `Accessibility capture is incomplete; use current snapshot ${appContext ? "IDs" : "tokens"} only. Retry after the UI settles or use a screenshot.\n`;
     if (capture.incompleteDetails.length) {
-      warning += `Capture details: ${capture.incompleteDetails.join("; ").slice(0, 180)}\n`;
+      const details = capture.incompleteDetails.join("; ");
+      // Reserve a short AX row as well as the truncation notice at the 512 floor.
+      const limit = screenshotWarning
+        ? Math.max(0, Math.min(180, maxTextChars - warning.length - notice.length - "Capture details: \n".length - 40))
+        : 180;
+      if (limit > 0) {
+        const detailText = screenshotWarning && details.length > limit
+          ? `${details.slice(0, limit - 1)}…`
+          : details.slice(0, limit);
+        warning += `Capture details: ${detailText}\n`;
+      }
     }
   }
   const lines = treeText.split("\n");
   if (warning.length + treeText.length <= maxTextChars) {
     return { text: warning + treeText, truncated: false };
   }
-  const notice = appContext
-    ? "Text truncated; call app.getState with disableDiff:true and a larger maxTextChars.\n"
-    : "Text truncated; inspect current .elements, or request disableDiff:true with a larger maxTextChars.\n";
   const selected = [];
   let length = warning.length + notice.length;
   for (const line of lines) {
@@ -594,6 +604,21 @@ export class ComputerUse {
     return this.#connectionGeneration;
   }
 
+  async validateChildWindowCapture(options = {}) {
+    if (options.includeChildWindows !== undefined && typeof options.includeChildWindows !== "boolean") {
+      throw new ComputerUseError("includeChildWindows must be a boolean");
+    }
+    if (!options.includeChildWindows) return;
+    this.#requireOpen();
+    requireDispatchableSignal("getPlatform", options.signal);
+    const platform = this.#connectedPlatform ?? await this.getPlatform({ signal: options.signal });
+    if (platform !== "macos") {
+      throw new ComputerUseError("includeChildWindows is only supported on macOS", {
+        code: "unsupported_platform",
+      });
+    }
+  }
+
   async getPlatform(options = {}) {
     this.#requireOpen();
     requireDispatchableSignal("getPlatform", options.signal);
@@ -963,6 +988,10 @@ export class ComputerUse {
       windowId: target.windowId,
       includeScreenshot,
     };
+    if (options.includeChildWindows !== undefined) {
+      await this.validateChildWindowCapture(options);
+      input.includeChildWindows = options.includeChildWindows;
+    }
     if (options.appContext) input.appContext = true;
     const projectionVersion = options.appContext ? "app-tree-v1" : ACCESSIBILITY_PROJECTION_VERSION;
     if (screenshotOutFile !== undefined) input.screenshotOutFile = screenshotOutFile;
@@ -1060,8 +1089,20 @@ export class ComputerUse {
     const { text, structured, images } = observed;
     const envelope = structured?.observation_revision;
     const capture = captureStatus(structured);
+    const screenshotError = structured?.screenshot_error;
+    const screenshotReason = [screenshotError?.code, screenshotError?.reason]
+      .filter((value) => typeof value === "string" && value).join(": ");
+    const screenshotDetail = screenshotReason.length > 100
+      ? `${screenshotReason.slice(0, 50)}…${screenshotReason.slice(-49)}`
+      : screenshotReason;
+    const screenshotRecovery = ["px_window_not_found", "px_frame_mismatch"].includes(screenshotError?.code)
+      ? "Re-observe the current window before using coordinates."
+      : "For default capture, retry with includeChildWindows: false.";
+    const screenshotWarning = options.includeChildWindows && structured?.screenshot_frame_valid === false
+      ? `Child-window screenshot unavailable${screenshotDetail ? `: ${screenshotDetail}` : ""}. ${screenshotRecovery}\n`
+      : "";
     const treeText = structured?.tree_markdown ?? text ?? "";
-    const publicText = observationText(treeText, capture, maxTextChars, options.appContext);
+    const publicText = observationText(treeText, capture, maxTextChars, options.appContext, screenshotWarning);
     return {
       pid,
       windowId,
