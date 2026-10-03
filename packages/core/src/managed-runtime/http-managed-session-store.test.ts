@@ -1359,6 +1359,7 @@ describe('HTTP Managed Session store', () => {
         { class: 'trusted_entry' },
       );
       const written = {
+        contractVersion: 1,
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         commits: server.commits,

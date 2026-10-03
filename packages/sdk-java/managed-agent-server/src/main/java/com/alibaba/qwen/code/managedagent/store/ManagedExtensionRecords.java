@@ -125,7 +125,8 @@ public final class ManagedExtensionRecords {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern PHASE = Pattern.compile(
             "[a-z][a-z0-9_]{0," + (MAX_PHASE_LENGTH - 1) + "}");
-    private static final List<String> TERMINAL = List.of("settled", "failed",
+    /** Run states after which no observation, output or run change may land. */
+    static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
