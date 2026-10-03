@@ -30,6 +30,7 @@ import {
 } from './managed-runtime-tool-executor.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import type { ManagedHookRuntime } from './managed-hook-runtime.js';
 
 vi.mock('node:fs/promises', async (original) => ({
   ...(await original<typeof import('node:fs/promises')>()),
@@ -78,6 +79,31 @@ it('restores overwritten files and removes new files after multiple batches and 
   expect(await readFile(existing, 'utf8')).toBe('before');
   await expect(readFile(created)).rejects.toMatchObject({ code: 'ENOENT' });
   expect((await restored.rewind('prompt')).filesChanged).toEqual([]);
+});
+
+it('retains later snapshots and tracked paths when rewinding an earlier prompt', async () => {
+  const existing = path.join(workspace, 'existing');
+  const created = path.join(workspace, 'new');
+  await writeFile(existing, 'before');
+  await history.prepare('prompt', ['existing']);
+  await history.execute('existing', () => writeFile(existing, 'after'));
+  await history.prepare('next-prompt', ['new']);
+  await history.execute('new', () => writeFile(created, 'created'));
+  const snapshots = history.state().snapshots;
+  const result = await history.rewind('prompt');
+  expect(result.conflict).toBe(false);
+  expect(result.filesFailed).toEqual([]);
+  expect(result.state.snapshots).toEqual(snapshots);
+  expect(result.state.snapshots.map((snapshot) => snapshot.promptId)).toEqual([
+    'prompt',
+    'next-prompt',
+  ]);
+  expect(result.state.files).toEqual({
+    existing: expect.objectContaining({ mode: expect.any(Number) }),
+    new: null,
+  });
+  expect(await readFile(existing, 'utf8')).toBe('before');
+  await expect(readFile(created)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 it('refuses external changes before undo without modifying another file', async () => {
@@ -453,6 +479,47 @@ it('rejects symlinks, traversal, foreign owners and mutation without preparation
     'prepared backup',
   );
   expect(await readFile(path.join(root, 'outside'), 'utf8')).toBe('decoy');
+});
+
+it('admits history preparation beside async Hooks while retaining their close and undo hold', async () => {
+  const runtime = 'hooks-activation-original';
+  const holds = vi.fn(() => true);
+  const executor = new ManagedToolExecutor(
+    async () => createManagedToolSet(workspace, runtime),
+    undefined,
+    undefined,
+    { hasHolds: holds } as unknown as ManagedHookRuntime,
+  );
+  const control = (
+    operation: Parameters<typeof executor.controlFileHistory>[2],
+  ) => executor.controlFileHistory(owner, runtime, operation);
+  await control({ kind: 'raw-file-history', action: 'bind', state: null });
+  await control({
+    kind: 'raw-file-history',
+    action: 'prepare',
+    promptId: 'original-prompt',
+    paths: ['new'],
+  });
+  await expect(
+    control({ kind: 'raw-file-history', action: 'snapshot' }),
+  ).resolves.toMatchObject({ ownerSessionId: owner });
+  expect(() => executor.closeSessionAdmission(runtime)).toThrow(
+    'unfinished work',
+  );
+  await expect(
+    control({
+      kind: 'raw-file-history',
+      action: 'rewind',
+      promptId: 'original-prompt',
+    }),
+  ).rejects.toThrow('idle');
+  holds.mockReturnValue(false);
+  await control({
+    kind: 'raw-file-history',
+    action: 'rewind',
+    promptId: 'original-prompt',
+  });
+  executor.closeSessionAdmission(runtime);
 });
 
 it('wires history to the real raw executor and preserves its original invocation', async () => {

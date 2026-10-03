@@ -2267,6 +2267,21 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('preserves a budget opened before prompt Hooks when the UserQuery starts', async () => {
+      turns.beginTurn({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+      sessionTokens.mockReturnValue(150);
+      await send([{ text: 'Hook rewritten prompt +10k' }], 'p1');
+      expect(turns.current('test-session-id')).toMatchObject({
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+    });
+
     it('leaves the turn alone for a tool result and for a side question', async () => {
       await send([{ text: 'fan out +500k' }], 'p1');
       sessionTokens.mockReturnValue(9_999);
@@ -9144,6 +9159,42 @@ Other open files:
 
       expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
       expect(mockTurnRunFn).toHaveBeenCalledTimes(MAX_SESSION_TURNS);
+    });
+
+    it('stamps a Notification entry the session-turn cap then refuses', async () => {
+      // Pins the accepted imprecision documented on `ChatRecord.deliveredTurn`:
+      // the stamp means the send path admitted the turn and recorded its user
+      // entry, not that the model accepted a request. The record cannot move
+      // below the cap without losing the resumed info item it exists to
+      // restore, so a refused turn is stamped too. Relocating the write under
+      // the gates turns this red.
+      const recordNotification = vi.fn();
+      vi.spyOn(client['config'], 'getMaxSessionTurns').mockReturnValue(1);
+      client['sessionTurnCount'] = 1; // already at limit; next call exceeds it
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      const events = await run(
+        [{ text: 'agent finished' }],
+        'prompt-id-capped-notification',
+        { type: SendMessageType.Notification },
+      );
+
+      expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
+      // The cap returned before `turn.run`, so no request reached the model.
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: 'agent finished' }],
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
     });
 
     /** A recall that never settles; returns a spy on its abort listener. */

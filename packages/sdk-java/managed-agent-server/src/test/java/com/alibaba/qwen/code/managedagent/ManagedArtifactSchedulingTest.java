@@ -1,13 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
@@ -37,18 +34,17 @@ class ManagedArtifactSchedulingTest {
     @Test
     void slowOriginalPublicationReadDoesNotStallMessageMaterializer() throws Exception {
         var fixture = ToolPublicationStoreTest.apiFixture();
-        var data = spy(fixture.publications());
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
-        doAnswer(
-                        invocation -> {
-                            entered.countDown();
-                            if (!release.await(5, TimeUnit.SECONDS)) {
-                                throw new IllegalStateException("fixture release timeout");
-                            }
-                            return invocation.callRealMethod();
-                        })
-                .when(data)
-                .readResource(any(), anyString(), anyString());
+        var data = mock(ToolPublicationDataStore.class, org.mockito.Mockito.withSettings()
+                .spiedInstance(fixture.publications()).defaultAnswer(invocation -> {
+                    if ("readResource".equals(invocation.getMethod().getName())) {
+                        entered.countDown();
+                        if (!release.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("fixture release timeout");
+                        }
+                    }
+                    return invocation.callRealMethod();
+                }));
         var beans = new StaticListableBeanFactory();
         beans.addBean("publication", data);
         var provider = beans.getBeanProvider(ToolPublicationDataStore.class);
