@@ -166,11 +166,14 @@ class HostedWorkspaceToolTurnIT {
         Path root = cli.getParent().getParent();
         Path worker = cli;
         int runtimeProvisioningDelayMs = 15_000;
-        if (latency) {
-            worker = temporary.resolve("delayed-worker.mjs");
+        if (latency || cancellations || sseGaps) {
+            worker = temporary.resolve("fixture-worker.mjs");
             ObjectMapper mapper = new ObjectMapper();
-            Files.writeString(worker, "await new Promise(resolve => setTimeout(resolve, "
-                    + runtimeProvisioningDelayMs + "));\nprocess.argv[1] = "
+            String setup = latency ? "await new Promise(resolve => setTimeout(resolve, "
+                    + runtimeProvisioningDelayMs + "));\n" : "await import("
+                    + mapper.writeValueAsString(root.resolve("integration-tests/helpers/hosted-file-read-gate.mjs")
+                            .toUri().toString()) + ");\n";
+            Files.writeString(worker, setup + "process.argv[1] = "
                     + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
                     + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
         }
@@ -191,6 +194,8 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
+                "--qwen.managed-agent.runtime-broker.durable-local-process=false",
+                "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + temporary,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("runtime"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",

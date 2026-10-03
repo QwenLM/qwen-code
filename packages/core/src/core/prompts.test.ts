@@ -983,6 +983,29 @@ describe('main-session style: reminder decision matches prompt section', () => {
     );
   });
 
+  it.each(['open', 'closed'] as const)(
+    'names effective command networking %s in the model prompt',
+    (network) => {
+      const config = {
+        ...headlessConfig(),
+        getShellExecutionSandbox: () => ({
+          filesystem: 'read-only' as const,
+          network,
+          requestedBackend: 'bwrap' as const,
+          effectiveBackend: 'bwrap' as const,
+          workspace: '/workspace',
+          installation: '/installation',
+          state: '/state',
+        }),
+      };
+      const prompt = getMainSessionBaseSystemPrompt(config);
+      expect(prompt).toContain(`command network policy is ${network}`);
+      expect(prompt.includes('Closed networking prevents')).toBe(
+        network === 'closed',
+      );
+    },
+  );
+
   it.each(['read-only', 'workspace-write'] as const)(
     'describes resolved Landlock restrictions for %s',
     (filesystem) => {
@@ -1003,6 +1026,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
 
       const prompt = getMainSessionBaseSystemPrompt(config);
       expect(prompt).toContain('# Tool Execution Sandbox (Landlock, partial)');
+      expect(prompt).toContain('Command network policy is open');
       expect(prompt).toContain(
         `workspace is ${filesystem === 'workspace-write' ? 'writable' : 'read-only'}`,
       );

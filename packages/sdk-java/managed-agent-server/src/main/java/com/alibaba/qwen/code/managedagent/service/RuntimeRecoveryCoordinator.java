@@ -41,6 +41,10 @@ final class RuntimeRecoveryCoordinator implements AutoCloseable {
         } catch (RuntimeException error) {
             running.set(false);
             LOG.warn("Saved Runtime recovery scan could not read its next batch", error);
+        } catch (Error error) {
+            // An Error must never leave the latch stuck; release it, then rethrow.
+            running.set(false);
+            throw error;
         }
     }
 

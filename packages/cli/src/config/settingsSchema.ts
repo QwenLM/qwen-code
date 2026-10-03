@@ -2977,6 +2977,16 @@ const SETTINGS_SCHEMA = {
           'Expose ordinary tools through the isolated exec JavaScript tool. Load deferred descriptions and schemas on demand with tool_search; if search is unavailable, include all allowed signatures in exec. Direct control tools remain available. Ignored in safe and bare modes.',
         showInDialog: true,
       },
+      freeform: {
+        type: 'boolean',
+        label: 'Freeform Tool Input (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.codeModeOnly is true and the selected model uses wireApi "responses". Enable only for endpoints that support Responses Custom Tools.',
+        showInDialog: false,
+      },
       sandbox: {
         type: 'object',
         label: 'Sandbox',

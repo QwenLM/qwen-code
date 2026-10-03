@@ -752,6 +752,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
@@ -841,6 +842,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_list_details' &&
       f !== 'extension_state' &&
       f !== 'extension_git_credentials' &&
       f !== 'extension_local_path_install' &&
@@ -894,6 +896,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'channel_reload',
   'channel_control',
   'channel_management',
+  'channel_delete_config_loss_convergence',
   'workspace_channel_observed_contacts',
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
@@ -912,6 +915,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
@@ -3769,7 +3773,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'channel_management') {
+        if (
+          feature === 'channel_management' ||
+          feature === 'channel_delete_config_loss_convergence'
+        ) {
           expect(predicate({ channelManagementAvailable: true })).toBe(true);
           expect(predicate({ channelManagementAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -5323,6 +5330,7 @@ describe('createServeApp', () => {
         (workspace: { primary?: boolean }) => workspace.primary,
       );
       expect(primary).toBeDefined();
+      expect(primary.agentCollaborationEnabled).toBeUndefined();
       await request(app)
         .get(`/workspaces/${primary.id}/agent/agents`)
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -5335,11 +5343,13 @@ describe('createServeApp', () => {
       );
       const home = path.join(root, 'home');
       const workspace = path.join(root, 'workspace');
+      const disabledWorkspace = path.join(root, 'disabled-workspace');
       const workspaceSettings = path.join(workspace, '.qwen', 'settings.json');
       const previousQwenHome = process.env['QWEN_HOME'];
       let app: ReturnType<typeof createServeApp> | undefined;
       try {
         await fsp.mkdir(home);
+        await fsp.mkdir(disabledWorkspace);
         await fsp.mkdir(path.dirname(workspaceSettings), { recursive: true });
         await fsp.writeFile(
           workspaceSettings,
@@ -5359,6 +5369,12 @@ describe('createServeApp', () => {
               primary: true,
               bridge,
             }),
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'disabled-id',
+              workspaceCwd: disabledWorkspace,
+              primary: false,
+              bridge,
+            }),
           ]),
         });
 
@@ -5366,12 +5382,19 @@ describe('createServeApp', () => {
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(before.body.features).toContain('agent_collaboration_v1');
+        expect(before.body.workspaces[0].agentCollaborationEnabled).toBe(true);
+        expect(
+          before.body.workspaces.find(
+            (entry: { id: string }) => entry.id === 'disabled-id',
+          ).agentCollaborationEnabled,
+        ).toBe(false);
 
         await fsp.writeFile(workspaceSettings, '{');
         const after = await request(app)
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(after.body.features).toContain('agent_collaboration_v1');
+        expect(after.body.workspaces[0].agentCollaborationEnabled).toBe(true);
         await expect(fsp.readFile(workspaceSettings, 'utf8')).resolves.toBe(
           '{',
         );
