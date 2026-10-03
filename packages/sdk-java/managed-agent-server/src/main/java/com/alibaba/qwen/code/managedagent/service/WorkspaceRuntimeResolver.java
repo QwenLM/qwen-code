@@ -7,8 +7,10 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.LinkedHashMap;
@@ -67,6 +69,45 @@ final class WorkspaceRuntimeResolver {
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        verifyMountIntact(mount);
+        return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+    }
+
+    /**
+     * The W2 settlement probe: proves for the target directory of a cwd
+     * change exactly what a later acquisition would prove for it — the
+     * administrator mount mapping and continuity, the storage guard when
+     * enabled against the *candidate* binding, and the directory rule
+     * {@code acquire()} enforces including its readability checks — without
+     * claiming storage or contacting a worker. Read-only and idempotent.
+     * Verifying the candidate instead of the current binding keeps a
+     * change *away from* a destroyed directory reachable, the escape this
+     * feature exists for.
+     */
+    void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
+        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (mount == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+        requireDirectory(mount.root().toString(), targetCwdRelative);
+        try {
+            authority.verifyMount(new ContextBinding(binding.getTenantId(),
+                    binding.getWorkspaceId(),
+                    binding.getWorkspaceGeneration(),
+                    binding.getStorageId(),
+                    WorkspaceRelativePath.normalize(targetCwdRelative),
+                    binding.getContextConfigRef(),
+                    binding.getContextRevision()));
+        } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace
+                .WorkspaceException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private static void verifyMountIntact(Mount mount) {
         try {
             if (!mount.root().equals(mount.root().toRealPath())
                     || !Objects.equals(mount.fileKey(), Files.readAttributes(
@@ -76,9 +117,23 @@ final class WorkspaceRuntimeResolver {
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
-                Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+    }
+
+    static void requireDirectory(String root, String cwdRelative) {
+        try {
+            Path base = Path.of(root);
+            Path directory = base.resolve(cwdRelative).normalize();
+            // The worker's install runs fs.access(R_OK|X_OK); the shared
+            // rule must not pass anything it would refuse later, after the
+            // storage claim, as an untyped wedge.
+            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
+                    || !directory.toRealPath().equals(directory)
+                    || !Files.isReadable(directory) || !Files.isExecutable(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     ContextBinding savedBinding(String sessionId) {

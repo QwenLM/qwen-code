@@ -50,6 +50,14 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    // The mount guard of an execution authority, without the Session-level
+    // checks; the W2 settlement probe must not fail a Session it only reads.
+    public void verifyMount(ContextBinding binding) {
+        if (storageGuard != null) {
+            storageGuard.verify(binding);
+        }
+    }
+
     public void authorizePassiveAttachment(SessionRecord session) {
         ContextBinding binding = session.workspace();
         if (binding == null || !"ACTIVE".equals(session.status())
