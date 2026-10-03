@@ -26,6 +26,7 @@ import {
   ghWithInputRetried,
   ensureAuthenticated,
   isOwnerRepo,
+  ghApiAllNested,
 } from './gh.js';
 
 // Host targeting is code, not prose: the subcommands thread `--host` here,
@@ -431,5 +432,108 @@ describe('ghRaw() transient retry (buffer stderr)', () => {
     expect(ghRaw('pr', 'diff', '1')).toBe('ok');
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
     stderrSpy.mockRestore();
+  });
+});
+
+describe('ghApiAllNested() paginates, decodes, and fails closed', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('passes --paginate and the per-key jq, and decodes the streamed NDJSON', () => {
+    // presubmit.test.ts mocks this helper out entirely, so nothing in the suite
+    // pins the argv it actually builds — yet that argv IS the fix for the
+    // first-page-only CI-classification bug: a plain ghApiAll would concatenate
+    // raw `{<key>:[…]}` pages into unparseable output, so this instead streams
+    // each element as NDJSON via `--paginate --jq '.<key>[]'`. A `--slurp`-based
+    // rewrite is not a drop-in here: these commands shell out to the caller's
+    // `gh` with no minimum-version gate, and `--slurp` is not available on every
+    // gh this runs against. A refactor that dropped --paginate, projected a
+    // single object (`.key` not `.key[]`), or switched the transport fails here.
+    mockExecFileSync.mockReturnValueOnce('{"name":"a"}\n{"name":"b"}\n');
+
+    const result = ghApiAllNested(
+      'repos/o/r/commits/sha/check-runs',
+      'check_runs',
+    );
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'gh',
+      [
+        'api',
+        '--paginate',
+        'repos/o/r/commits/sha/check-runs',
+        '--jq',
+        '.check_runs[]',
+      ],
+      expect.anything(),
+    );
+    // One request per call: a silent second round-trip (e.g. an empty-result
+    // fallback to an older-gh workaround) would double the CI-snapshot fetches.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(result).toEqual([{ name: 'a' }, { name: 'b' }]);
+  });
+
+  it('interpolates the caller-provided key into the jq projection', () => {
+    // The jq expression is templated on `key`, not hardcoded to check_runs: pin
+    // a second key so a regression that bakes in the first call site's key
+    // (silently mis-projecting other endpoints' nested arrays) goes red.
+    mockExecFileSync.mockReturnValueOnce('');
+
+    ghApiAllNested('repos/o/r/actions/workflows', 'workflows');
+
+    const argv = mockExecFileSync.mock.calls[0][1];
+    expect(argv).toContain('--jq');
+    expect(argv[argv.indexOf('--jq') + 1]).toBe('.workflows[]');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a non-transient fetch failure instead of an empty snapshot', () => {
+    // ghApiAllNested has no defensive `return []` (unlike ghApiAll): a failed
+    // fetch must throw, not collapse to an empty list. If it were harmonized
+    // with ghApiAll's `try { … } catch { return []; }`, a non-transient 403/401
+    // (TRANSIENT_RE only covers the 5xx family, so it is not retried) would hand
+    // classifyCi([], []) the no_checks/totalChecks:0 state the approve gate
+    // exempts — the fail-open this file's pagination fix exists to close.
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw ghError('Not Found (HTTP 404)');
+    });
+
+    expect(() =>
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toThrow(/Not Found/);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed on a malformed streamed line (strict-parse wiring)', () => {
+    // ghApiAllNested opts into strict parsing: flipping it to strict:false would
+    // silently skip a non-JSON line — e.g. an interleaved `gh version …` upgrade
+    // notice — hiding a failing check run. Blank lines are skipped
+    // unconditionally, so the fixture is a non-blank, non-JSON *string* line.
+    mockExecFileSync.mockReturnValueOnce(
+      '{"name":"a"}\ngh version 2.x available\n{"name":"b"}',
+    );
+
+    expect(() =>
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toThrow();
+  });
+
+  it('decodes every streamed record (no silent page cap)', () => {
+    // A decode-side cap defeats the pagination fix but is invisible to a
+    // 2-record fixture (`.slice(0, 30)` still returns both). Feed well past one
+    // default page — a documented real head had 508 check runs — so any cap
+    // below this count reddens and a failing run can never hide behind it.
+    const lines = Array.from(
+      { length: 509 },
+      (_, i) => `{"name":"r${i}"}`,
+    ).join('\n');
+    mockExecFileSync.mockReturnValueOnce(lines);
+
+    expect(
+      ghApiAllNested('repos/o/r/commits/sha/check-runs', 'check_runs'),
+    ).toHaveLength(509);
   });
 });
