@@ -39,7 +39,19 @@ import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
-import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import {
+  resolveSlimmingConfig,
+  slimCompactionInput,
+} from '../services/compactionInputSlimming.js';
+import {
+  CHARS_PER_TOKEN,
+  estimateContentTokens,
+} from '../services/tokenEstimation.js';
+import {
+  defaultOutputCeiling,
+  parsePositiveIntegerEnvValue,
+  tokenLimit,
+} from './tokenLimits.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -57,6 +69,163 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
 }
 
 /**
+ * Estimate the tokens a `systemInstruction` occupies on the wire. It travels
+ * with the request but is not part of `contents`, so a room term that measures
+ * only `contents` over-budgets by exactly this much (#13208). Callers pass a
+ * bare string, a `Part`, a `Part[]` or a `Content`, so normalize by shape
+ * before reusing the `contents` estimator.
+ */
+function estimateSystemInstructionTokens(
+  systemInstruction: GenerateContentConfig['systemInstruction'],
+): number {
+  if (!systemInstruction) return 0;
+  const value = systemInstruction as Content | Part | Part[] | string;
+  if (typeof value === 'string') {
+    return Math.ceil(value.length / CHARS_PER_TOKEN);
+  }
+  // Same shape-narrowing order `appendSystemInstruction` uses: a bare `Part`
+  // has every field optional, so `'parts' in value` alone cannot tell it apart
+  // from a `Content` — the array check on `.parts` is what decides.
+  let parts: Part[];
+  if (Array.isArray(value)) {
+    parts = value;
+  } else if (
+    typeof value === 'object' &&
+    'parts' in value &&
+    Array.isArray(value.parts)
+  ) {
+    parts = value.parts;
+  } else {
+    parts = [value as Part];
+  }
+  return estimateContentTokens([{ role: 'user', parts }]);
+}
+
+/**
+ * Give a request an output budget that fits the window it is actually going
+ * to, so `prompt + max_tokens <= window` holds (#13208) for the prompt terms
+ * this layer can measure: `contents` and `systemInstruction`. A `generateJson`
+ * tool declaration is not counted — the flat estimation margin that would
+ * cover it was declined on #13208 — so in JSON mode the invariant holds for
+ * the measured terms only.
+ *
+ * Side queries reach the provider through `generateJson`/`generateText` and
+ * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
+ * never runs on them: with no budget the wires that apply a ceiling fall back
+ * to `defaultOutputCeiling(model)`, which has no window term, and a large
+ * prompt overflows. That helper is deliberately not reused here either — it
+ * floors at MIN_CLAMPED_OUTPUT_TOKENS (4K), a floor that can itself exceed a
+ * tight window, which is exactly the invariant this path must keep. This
+ * budget adds the missing window term; it is not a second output-ceiling
+ * policy, and it stays out of the way when the window is not what binds.
+ *
+ * A caller-supplied `maxOutputTokens` passes through untouched (early return,
+ * so the prompt is not even measured): every caller that sets one has already
+ * budgeted it against the *receiving* model's window — compaction via
+ * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
+ * shrink it against a window it is not going to.
+ *
+ * An explicit user ceiling — `samplingParams.max_tokens`, else
+ * `QWEN_CODE_MAX_OUTPUT_TOKENS` — *replaces* `defaultOutputCeiling` as the
+ * term the room is compared against instead of intersecting it. That is the
+ * precedence the main turn already applies (`llm-chat.ts`
+ * `explicitOutputCeiling`), the one both providers apply when the request
+ * carries no output limit of its own
+ * (`openaiContentGenerator/provider/default.ts` `applyOutputTokenLimit`,
+ * `anthropicContentGenerator.ts` `buildSamplingParameters`), and the one
+ * `docs/users/configuration/settings.md` documents ("Takes precedence over the
+ * model-limit default but is overridden by `samplingParams.max_tokens`").
+ * Intersecting would silently cut an operator limit set above the auto ceiling
+ * — 100 000 down to 64 000, or to `DEFAULT_OUTPUT_TOKEN_LIMIT` for a
+ * self-hosted id — on side queries only, and `generateText` reports no
+ * `finishReason`, so the truncated page extract or recap would be stored as
+ * complete. When the room is below that ceiling the emitted budget is the room
+ * alone; above it nothing is emitted, so the ceiling-applying providers
+ * (`openaiContentGenerator/provider/default.ts`, `anthropicContentGenerator.ts`)
+ * apply the operator's value themselves as they did before, while the two wires
+ * that read no ceiling stay uncapped — which is also what they did before, and
+ * the point of not emitting.
+ *
+ * `resolvedContextWindowSize` is the window of the model the request is
+ * actually sent to, resolved by `resolveForModel` against that target (its
+ * registry-declared window, else the catalog/curated one). It is preferred
+ * over `contentGeneratorConfig.contextWindowSize`, which on a per-model route
+ * is inherited from `{ ...parentConfig }` and therefore describes the
+ * *session* model whenever the target's registry entry declares no window of
+ * its own — the default for a same-provider fast model, which is where side
+ * queries go unless the caller pins one.
+ *
+ * Call after `resolveForModel` so `model` is the resolved target and
+ * `contents` is the slimmed payload actually sent. Caveats:
+ *
+ * - On either `createRuntimeViewForModel` fallback — the target generator
+ *   failed to build, or the target is not registered — the session generator
+ *   sends the request, so `resolvedContextWindowSize` is `undefined` and the
+ *   session config supplies the window while `model` stays the resolved
+ *   target: the ceiling can then describe a different model than the window
+ *   does. That mismatch is inherent to the fallback (the target's own config
+ *   could not be built); the budget still never exceeds the window the request
+ *   is actually handed. It can however emit nothing there while the sending
+ *   wire applies its *own* fallback ceiling, which `anthropicContentGenerator`
+ *   derives from the session id (`this.contentGeneratorConfig.model`) rather
+ *   than the target id used here — so if that ceiling is the larger of the two
+ *   and the room sits between them, the request still overflows the window
+ *   exactly as it did before this budget existed. Closing that needs the
+ *   receiving wire's ceiling, which this layer cannot see.
+ * - For a target in neither the catalog nor the curated tables the window term
+ *   falls back to `DEFAULT_TOKEN_LIMIT` (200 000) and does not bind. That
+ *   fabrication is pre-existing and shared with the main turn
+ *   (`tokenLimit`), not something this budget introduces.
+ */
+function budgetOutputTokensForWindow(
+  requestConfig: GenerateContentConfig,
+  contents: Content[],
+  model: string,
+  contentGeneratorConfig: ContentGeneratorConfig | undefined,
+  resolvedContextWindowSize: number | undefined,
+  imageTokenEstimate: number,
+): GenerateContentConfig {
+  if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
+
+  const explicitCeiling =
+    contentGeneratorConfig?.samplingParams?.max_tokens ??
+    parsePositiveIntegerEnvValue(process.env['QWEN_CODE_MAX_OUTPUT_TOKENS']);
+  // `<= 0` means "not configured", the reading `config.ts` gives this same
+  // field: a cleared or mis-merged settings value must not become the window
+  // term and floor every governed side query to `max_tokens: 1`.
+  const declaredWindow = [
+    resolvedContextWindowSize,
+    contentGeneratorConfig?.contextWindowSize,
+  ].find((v): v is number => typeof v === 'number' && v > 0);
+  const room =
+    (declaredWindow ?? tokenLimit(model, 'input')) -
+    // The operator's resolved estimate, not `DEFAULT_IMAGE_TOKEN_ESTIMATE`:
+    // every other estimator on the send path uses it, and pricing a kept image
+    // low here over-states the room, which is the 400 this budget exists to
+    // prevent.
+    estimateContentTokens(contents, imageTokenEstimate) -
+    estimateSystemInstructionTokens(requestConfig.systemInstruction);
+
+  const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
+  // Only the window term is this layer's business: when it does not bind,
+  // leave the request alone so each wire keeps applying whatever output limit
+  // it applied before side queries were budgeted. Two wires apply none at all —
+  // Gemini/Vertex (`llm-content-generator.ts`) and OpenAI Responses
+  // (`responses-pipeline.ts`) — so always emitting one would cap them at
+  // `defaultOutputCeiling` (8 192 for `gemini-2.5-pro`, via the
+  // `[/^gemini-/, LIMITS['8k']]` row) and silently truncate side-query output
+  // that used to be uncapped.
+  //
+  // The ceiling has to stay inside this comparison: with an operator ceiling
+  // below the room (env 2 000, room 3 000) an auto-ceiling test would emit
+  // 3 000 and displace that value, since the ceiling-applying providers read
+  // the override only when the request carries no output limit of its own.
+  if (room >= ceiling) return requestConfig;
+
+  return { ...requestConfig, maxOutputTokens: Math.max(1, room) };
+}
+
+/**
  * The pair of generator and retry-authType to use for a request targeting
  * a specific model. When the requested model differs from the main session
  * model, both fields are resolved against that model's provider so that
@@ -70,6 +239,14 @@ export interface ResolvedGeneratorForModel {
   retryAuthType: string | undefined;
   retryErrorCodes?: readonly number[];
   model: string;
+  /**
+   * Context window of the model this request is actually sent to, resolved
+   * against that target: its registry-declared `contextWindowSize`, else
+   * `tokenLimit(target, 'input')`. `undefined` when the request falls back to
+   * the session generator, whose `contentGeneratorConfig.contextWindowSize`
+   * then describes the window the request is handed.
+   */
+  contextWindowSize?: number;
 }
 
 /**
@@ -264,11 +441,21 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
+      contextWindowSize: resolvedContextWindowSize,
     } = await this.resolveForModel(model);
     const requestContents = slimCompactionInput(
       contents,
       contentGeneratorConfig.modalities,
     ).slimmedHistory;
+    const budgetedConfig = budgetOutputTokensForWindow(
+      requestConfig,
+      requestContents,
+      requestModel,
+      contentGeneratorConfig,
+      resolvedContextWindowSize,
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate,
+    );
 
     try {
       const apiCall = () =>
@@ -276,7 +463,7 @@ export class BaseLlmClient {
           {
             model: requestModel,
             config: {
-              ...requestConfig,
+              ...budgetedConfig,
               tools,
               // Force the model to call the respond_in_schema tool rather
               // than free-texting. Without this, Anthropic-native and
@@ -396,16 +583,26 @@ export class BaseLlmClient {
       retryAuthType,
       retryErrorCodes,
       model: requestModel,
+      contextWindowSize: resolvedContextWindowSize,
     } = await this.resolveForModel(model, { failClosed: options.failClosed });
     const requestContents = slimCompactionInput(
       contents,
       contentGeneratorConfig.modalities,
     ).slimmedHistory;
+    const budgetedConfig = budgetOutputTokensForWindow(
+      requestConfig,
+      requestContents,
+      requestModel,
+      contentGeneratorConfig,
+      resolvedContextWindowSize,
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate,
+    );
 
     try {
       const request: PromptCacheSharingParameters = {
         model: requestModel,
-        config: requestConfig,
+        config: budgetedConfig,
         contents: requestContents,
         ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
@@ -595,13 +792,28 @@ export class BaseLlmClient {
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
     const retryErrorCodes =
       resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
+    const targetModel = resolvedModel?.id ?? requestModel;
+    // `contentGeneratorConfig` is built from `{ ...parentConfig }` and
+    // `applyResolvedModelConfig` overwrites `contextWindowSize` only when the
+    // registry declares one, so for a same-provider target it carries the
+    // *session* model's window. Resolve the window against the target instead.
+    // The session value stays authoritative only on the fallback route, where
+    // the session generator really is the one sending the request — detected
+    // by identity, since that fallback hands back the very object
+    // `mainGeneratorConfig` was read from.
+    const fellBackToSessionGenerator =
+      contentGeneratorConfig === mainGeneratorConfig;
 
     return {
       contentGenerator,
       contentGeneratorConfig,
       retryAuthType,
       retryErrorCodes,
-      model: resolvedModel?.id ?? requestModel,
+      model: targetModel,
+      contextWindowSize: fellBackToSessionGenerator
+        ? undefined
+        : (resolvedModel?.generationConfig?.contextWindowSize ??
+          tokenLimit(targetModel, 'input')),
     };
   }
 
