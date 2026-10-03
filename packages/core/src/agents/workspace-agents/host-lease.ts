@@ -748,10 +748,9 @@ export async function applyHostRunResult(
             }
           : { ok: false, reason: 'stale_lease' as const };
       }
-      // Terminal settlement ends this attempt's write authority, spend
-      // included: `tokensUsed` is what `enforceTreeBudgets` reads to cancel
-      // live runs elsewhere in the tree, so a Host returning after its lease
-      // died must not move it. The mismatch stays observable in the debug log.
+      // Terminal settlement ends this attempt's write authority, including
+      // usageByRound, which threadTokens sums for tree budget enforcement.
+      // Matching lease identity grants no writes, even before lease expiry.
       if (
         withHostUsage(run.usageByRound, input.attempt, input.tokens) !==
         run.usageByRound
