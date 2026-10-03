@@ -1,0 +1,1317 @@
+{
+  "contract": "managed-event-envelope/1",
+  "contractVersion": 1,
+  "formatVersion": 1,
+  "kinds": [
+    "input.accepted",
+    "wake.requested",
+    "activation.changed",
+    "model.attempt",
+    "message.committed",
+    "tool.intent",
+    "action.changed",
+    "tool.receipt",
+    "checkpoint.committed",
+    "context.compacted",
+    "cancel.requested",
+    "turn.settled",
+    "config.bound",
+    "lifecycle.changed",
+    "domain.committed",
+    "message.delta"
+  ],
+  "forbiddenFields": [
+    "absolutePath",
+    "localPath",
+    "pid",
+    "pod",
+    "runtimeBindingId",
+    "runtimeEndpoint",
+    "secretHandle",
+    "sidecar"
+  ],
+  "limits": {
+    "maxIdBytes": 512,
+    "maxTimeMs": 8640000000000000
+  },
+  "envelope": {
+    "v": 1,
+    "sessionId": "session-1",
+    "tenantId": "tenant-1",
+    "workspaceId": "workspace-1",
+    "sequence": 42,
+    "eventId": "evt-000042",
+    "kind": "domain.committed",
+    "occurredAt": 1760000000000,
+    "payloadRef": {
+      "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+    }
+  },
+  "envelopeCases": [
+    {
+      "id": "kind-input-accepted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 101,
+        "eventId": "evt-000101",
+        "kind": "input.accepted",
+        "occurredAt": 1760000000001,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-wake-requested",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 102,
+        "eventId": "evt-000102",
+        "kind": "wake.requested",
+        "occurredAt": 1760000000002,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-activation-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 103,
+        "eventId": "evt-000103",
+        "kind": "activation.changed",
+        "occurredAt": 1760000000003,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-model-attempt",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 104,
+        "eventId": "evt-000104",
+        "kind": "model.attempt",
+        "occurredAt": 1760000000004,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-message-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 105,
+        "eventId": "evt-000105",
+        "kind": "message.committed",
+        "occurredAt": 1760000000005,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-tool-intent",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 106,
+        "eventId": "evt-000106",
+        "kind": "tool.intent",
+        "occurredAt": 1760000000006,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-action-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 107,
+        "eventId": "evt-000107",
+        "kind": "action.changed",
+        "occurredAt": 1760000000007,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-tool-receipt",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 108,
+        "eventId": "evt-000108",
+        "kind": "tool.receipt",
+        "occurredAt": 1760000000008,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-checkpoint-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 109,
+        "eventId": "evt-000109",
+        "kind": "checkpoint.committed",
+        "occurredAt": 1760000000009,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-context-compacted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 110,
+        "eventId": "evt-000110",
+        "kind": "context.compacted",
+        "occurredAt": 1760000000010,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-cancel-requested",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 111,
+        "eventId": "evt-000111",
+        "kind": "cancel.requested",
+        "occurredAt": 1760000000011,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-turn-settled",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 112,
+        "eventId": "evt-000112",
+        "kind": "turn.settled",
+        "occurredAt": 1760000000012,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-config-bound",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 113,
+        "eventId": "evt-000113",
+        "kind": "config.bound",
+        "occurredAt": 1760000000013,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-lifecycle-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 114,
+        "eventId": "evt-000114",
+        "kind": "lifecycle.changed",
+        "occurredAt": 1760000000014,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-domain-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 115,
+        "eventId": "evt-000115",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000015,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-message-delta",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 116,
+        "eventId": "evt-000116",
+        "kind": "message.delta",
+        "occurredAt": 1760000000016,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "v-missing",
+      "valid": false,
+      "envelope": {
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "v-other",
+      "valid": false,
+      "envelope": {
+        "v": 2,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-not-string",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": 42,
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "éx",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-zero",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 0,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-negative",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": -1,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-fractional",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 1.5,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-max-safe",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 9007199254740991,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-not-integer",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": "42",
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-unknown",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "session.exploded",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-negative",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": -5,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-fractional",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000.5,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-over-max",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 8640000000000001,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-not-number",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": "now",
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "payload-ref-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000
+      }
+    },
+    {
+      "id": "payload-ref-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {}
+      }
+    },
+    {
+      "id": "payload-ref-extra-key",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000",
+          "resourceId": "res-1"
+        }
+      }
+    },
+    {
+      "id": "digest-uppercase",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      }
+    },
+    {
+      "id": "digest-short",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "id": "digest-not-hex",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        }
+      }
+    },
+    {
+      "id": "digest-null",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": null
+        }
+      }
+    },
+    {
+      "id": "unknown-field",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "note": "transport debugging"
+      }
+    },
+    {
+      "id": "envelope-not-object",
+      "valid": false,
+      "envelope": ["session-1", 42]
+    },
+    {
+      "id": "payload-body",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "payload": {
+          "domain": "monitor_run",
+          "version": 1,
+          "operationId": "op-000042",
+          "recordRef": {
+            "resourceId": "monitor-1",
+            "kind": "managed-monitor_run",
+            "schemaVersion": 1,
+            "byteLength": 128,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    {
+      "id": "forbidden-absolute-path",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "absolutePath": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-local-path",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "localPath": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-pid",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "pid": 4242
+      }
+    },
+    {
+      "id": "forbidden-pod",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "pod": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-runtime-binding-id",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "runtimeBindingId": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-runtime-endpoint",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "runtimeEndpoint": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-secret-handle",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "secretHandle": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-sidecar",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "sidecar": "leaked"
+      }
+    }
+  ],
+  "dedupeCases": [
+    {
+      "id": "same-key",
+      "same": true,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "same-key-different-surroundings",
+      "same": true,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-other",
+        "kind": "message.committed",
+        "occurredAt": 1760000099999,
+        "payloadRef": {
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "id": "different-tenant-same-key",
+      "same": true,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-2",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "different-sequence",
+      "same": false,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 43,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "different-session-id",
+      "same": false,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-2",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "unparseable-compares-false",
+      "same": false,
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    }
+  ],
+  "fromEventCases": [
+    {
+      "id": "from-domain-committed",
+      "event": {
+        "v": 1,
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payload": {
+          "domain": "monitor_run",
+          "version": 1,
+          "operationId": "op-000042",
+          "recordRef": {
+            "resourceId": "monitor-1",
+            "kind": "managed-monitor_run",
+            "schemaVersion": 1,
+            "byteLength": 128,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "22b95fa7653ac96a2afca57754cdef360bfccfdab0c87786e109857b4cbe072a"
+        }
+      }
+    },
+    {
+      "id": "from-message-committed",
+      "event": {
+        "v": 1,
+        "sequence": 7,
+        "eventId": "evt-000007",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "kind": "message.committed",
+        "occurredAt": 1760000000123,
+        "payload": {
+          "messageId": "msg-000007",
+          "role": "assistant",
+          "modelAttemptId": "attempt-3",
+          "parentMessageId": null,
+          "contentRef": {
+            "resourceId": "tool-msg-7",
+            "kind": "managed-tool-message",
+            "schemaVersion": 1,
+            "byteLength": 2048,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      },
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 7,
+        "eventId": "evt-000007",
+        "kind": "message.committed",
+        "occurredAt": 1760000000123,
+        "payloadRef": {
+          "digest": "059ea699791df6b2407e3b2298fb012ded39cb2e98d2689a72670d250a2b0f2f"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,253 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  assertManagedSessionDigest,
+  assertManagedSessionSequence,
+  assertManagedSessionStableId,
+  assertManagedSessionTime,
+  MANAGED_SESSION_EVENT_KINDS,
+  ManagedSessionRecordError,
+  managedSessionEventsDigest,
+  type ManagedSessionEvent,
+  type ManagedSessionEventKind,
+  type ManagedSessionJsonValue,
+} from './managed-session-records.js';
+
+// The managed-event-envelope/1 contract: the distribution notice an
+// EventTransport publishes after a Session Authority commit, for
+// materialization and cross-node wake. The design invariants pin it: only
+// committed facts fly, the transport is never Session truth and an offset is
+// never a recovery credential. So the envelope identifies the committed
+// event row by its public ordering key (sessionId + sequence), carries the
+// commit's own clock stamp and kind, and binds the body by digest only —
+// the payload body stays in the SQL record. Declared, not enabled: a
+// derivation from the committed row proves the commit path can supply every
+// field, but no runtime path consumes the envelope yet and the gate test
+// proves that.
+
+/** The envelope format version carried by `v`. */
+export const MANAGED_EVENT_ENVELOPE_FORMAT_VERSION = 1;
+
+/**
+ * The field names an envelope must never carry: the internals and secrets
+ * the design bars from every public surface (`SessionTaskView` hides
+ * `runtimeBindingId`, generation, Runtime endpoint, Pod, absolute path, raw
+ * PID, SecretHandle and local sidecar; the acceptance list forbids
+ * SecretHandle, Runtime endpoint, absolute path and PID on public APIs).
+ * A transport message reaches across nodes, so the same vocabulary is
+ * refused here by name rather than only by shape.
+ */
+export const MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS = Object.freeze([
+  'absolutePath',
+  'localPath',
+  'pid',
+  'pod',
+  'runtimeBindingId',
+  'runtimeEndpoint',
+  'secretHandle',
+  'sidecar',
+] as const);
+
+/**
+ * The identity by which a receiver fetches the body from the SQL record:
+ * the digest of the full committed event in the same canonical form the
+ * commit marker's `eventsDigest` uses, over the one-event range this
+ * envelope announces. The body itself never travels.
+ */
+export interface ManagedEventEnvelopePayloadRef {
+  readonly digest: string;
+}
+
+/**
+ * One committed event as distributed to other nodes. `sessionId`,
+ * `tenantId` and `workspaceId` flatten the row's `sessionKey`; `sequence`,
+ * `eventId`, `kind` and `occurredAt` are taken from the row unchanged —
+ * `occurredAt` is the authority-clock UTC Unix millisecond stamped at
+ * commit, the only clock the commit path records.
+ */
+export interface ManagedEventEnvelope {
+  readonly v: 1;
+  readonly sessionId: string;
+  readonly tenantId: string;
+  readonly workspaceId: string;
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly kind: ManagedSessionEventKind;
+  readonly occurredAt: number;
+  readonly payloadRef: ManagedEventEnvelopePayloadRef;
+}
+
+/** The receiver-side idempotence key: the per-key ordering coordinate. */
+export interface ManagedEventEnvelopeKey {
+  readonly sessionId: string;
+  readonly sequence: number;
+}
+
+const ENVELOPE_KEYS = [
+  'v',
+  'sessionId',
+  'tenantId',
+  'workspaceId',
+  'sequence',
+  'eventId',
+  'kind',
+  'occurredAt',
+  'payloadRef',
+] as const;
+const PAYLOAD_REF_KEYS = ['digest'] as const;
+
+function fail(message: string): never {
+  throw new ManagedSessionRecordError(message);
+}
+
+function closed<Key extends string>(
+  value: unknown,
+  keys: readonly Key[],
+  label: string,
+): Record<Key, ManagedSessionJsonValue> {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null)
+  ) {
+    fail(`${label} must be a plain JSON object.`);
+  }
+  for (const key of Object.keys(value)) {
+    if (
+      (MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS as readonly string[]).includes(
+        key,
+      )
+    ) {
+      fail(`${label} must not carry the forbidden field "${key}".`);
+    }
+  }
+  if (
+    Object.keys(value).length !== keys.length ||
+    Object.keys(value).some((key) => !keys.includes(key as Key))
+  ) {
+    fail(`${label} must have exactly the keys ${keys.join(', ')}.`);
+  }
+  return { ...value } as Record<Key, ManagedSessionJsonValue>;
+}
+
+function assertEnum<T extends string>(
+  value: ManagedSessionJsonValue,
+  allowed: readonly T[],
+  label: string,
+): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    fail(`${label} must be one of: ${allowed.join(', ')}.`);
+  }
+  return value as T;
+}
+
+export function parseManagedEventEnvelope(
+  value: unknown,
+): ManagedEventEnvelope {
+  const body = closed(value, ENVELOPE_KEYS, 'envelope');
+  if (body.v !== MANAGED_EVENT_ENVELOPE_FORMAT_VERSION) {
+    fail(`envelope.v must be ${MANAGED_EVENT_ENVELOPE_FORMAT_VERSION}.`);
+  }
+  const sequence = assertManagedSessionSequence(
+    body.sequence,
+    'envelope.sequence',
+  );
+  if (sequence < 1) {
+    fail('envelope.sequence must start at 1.');
+  }
+  const ref = closed(body.payloadRef, PAYLOAD_REF_KEYS, 'envelope.payloadRef');
+  return Object.freeze({
+    v: MANAGED_EVENT_ENVELOPE_FORMAT_VERSION,
+    sessionId: assertManagedSessionStableId(
+      body.sessionId,
+      'envelope.sessionId',
+    ),
+    tenantId: assertManagedSessionStableId(body.tenantId, 'envelope.tenantId'),
+    workspaceId: assertManagedSessionStableId(
+      body.workspaceId,
+      'envelope.workspaceId',
+    ),
+    sequence,
+    eventId: assertManagedSessionStableId(body.eventId, 'envelope.eventId'),
+    kind: assertEnum(body.kind, MANAGED_SESSION_EVENT_KINDS, 'envelope.kind'),
+    occurredAt: assertManagedSessionTime(
+      body.occurredAt,
+      'envelope.occurredAt',
+    ),
+    payloadRef: Object.freeze({
+      digest: assertManagedSessionDigest(
+        ref.digest,
+        'envelope.payloadRef.digest',
+      ),
+    }),
+  });
+}
+
+/**
+ * The envelope of one committed event, derived from the row the journal
+ * commits plus the digest the commit marker already computes. It exists to
+ * prove the commit path can supply every field today without new record
+ * state; it is not wired into that path.
+ */
+export function managedEventEnvelopeFrom(
+  event: ManagedSessionEvent,
+): ManagedEventEnvelope {
+  return Object.freeze({
+    v: MANAGED_EVENT_ENVELOPE_FORMAT_VERSION,
+    sessionId: event.sessionKey.sessionId,
+    tenantId: event.sessionKey.tenantId,
+    workspaceId: event.sessionKey.workspaceId,
+    sequence: event.sequence,
+    eventId: event.eventId,
+    kind: event.kind,
+    occurredAt: event.occurredAt,
+    payloadRef: Object.freeze({
+      digest: managedSessionEventsDigest([event]),
+    }),
+  });
+}
+
+/** The idempotence key of a parsed envelope: `(sessionId, sequence)`. */
+export function managedEventEnvelopeKey(
+  envelope: ManagedEventEnvelope,
+): ManagedEventEnvelopeKey {
+  return Object.freeze({
+    sessionId: envelope.sessionId,
+    sequence: envelope.sequence,
+  });
+}
+
+/**
+ * Redelivery-safe comparison: two parses announce the same committed event
+ * when their keys are exactly equal. A broker may redeliver a fact any
+ * number of times, and the committed row it identifies cannot change, so
+ * equality compares the key and nothing else — differing surroundings with
+ * an equal key still name the one fact, and anything unparseable announces
+ * nothing.
+ */
+export function isManagedEventEnvelopeRedelivered(
+  delivered: unknown,
+  seen: unknown,
+): boolean {
+  const keyOf = (candidate: unknown): ManagedEventEnvelopeKey | null => {
+    try {
+      return managedEventEnvelopeKey(parseManagedEventEnvelope(candidate));
+    } catch (error) {
+      if (error instanceof ManagedSessionRecordError) return null;
+      throw error;
+    }
+  };
+  const left = keyOf(delivered);
+  const right = keyOf(seen);
+  return (
+    left !== null &&
+    right !== null &&
+    left.sessionId === right.sessionId &&
+    left.sequence === right.sequence
+  );
+}
