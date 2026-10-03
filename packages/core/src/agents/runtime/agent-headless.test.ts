@@ -62,6 +62,12 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { beginRetryWait } from '../../utils/retry-wait.js';
+import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
+import {
+  isWorkflowAgentFailedError,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
@@ -1972,6 +1978,491 @@ describe('subagent.ts', () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
         await expectExecuteError(await createAgent(config), 'API Failure');
+      });
+    });
+
+    describe('execute - retry waits', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+      const doneChunk = {
+        type: 'chunk',
+        value: { candidates: [{ content: { parts: [{ text: 'Done.' }] } }] },
+      };
+
+      // Mirrors a retry layer's abortable backoff: announces the wait, sleeps,
+      // and rejects (ending the wait) when the round's signal aborts.
+      let onBackoff: (() => void) | undefined;
+      const backoffStarted = () =>
+        new Promise<void>((resolve) => (onBackoff = resolve));
+      const backoff = (delayMs: number, signal: AbortSignal) => {
+        const endWait = beginRetryWait(delayMs);
+        onBackoff?.();
+        return new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            endWait();
+            resolve();
+          }, delayMs);
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              endWait();
+              reject(new Error('Retry aborted by signal'));
+            },
+            { once: true },
+          );
+        });
+      };
+      const signalOf = (params: unknown) =>
+        (params as { config: { abortSignal: AbortSignal } }).config.abortSignal;
+
+      const createScope = async (
+        runConfig: RunConfig,
+        emitter = new AgentEventEmitter(),
+      ) => {
+        const { config } = await createMockConfig();
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+          undefined,
+          emitter,
+        );
+        const waits: Array<{ phase: string; round: number; promptId: string }> =
+          [];
+        emitter.on(AgentEventType.RETRY_WAIT, (e) => waits.push(e));
+        return { scope, emitter, waits };
+      };
+
+      it('publishes waits from send-time work and from the lazy stream with the round identity', async () => {
+        vi.useFakeTimers();
+        try {
+          mockSendMessageStream.mockImplementation(async (_m, params) => {
+            await backoff(1_000, signalOf(params)); // e.g. send-time compaction
+            return (async function* () {
+              await backoff(2_000, signalOf(params)); // the request's retry
+              yield doneChunk;
+            })();
+          });
+          const { scope, waits } = await createScope({ max_turns: 5 });
+          const run = scope.execute(new ContextState(), undefined, {
+            enforceTimeLimitDuringRetryWait: true,
+          });
+          await vi.advanceTimersByTimeAsync(3_000);
+          await run;
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(waits.map((w) => w.phase)).toEqual([
+            'start',
+            'end',
+            'start',
+            'end',
+          ]);
+          expect(new Set(waits.map((w) => w.round))).toEqual(new Set([1]));
+          expect(waits[0]!.promptId).toMatch(/#0$/);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('releases a wait the stream left open when the round ends, and drops late callbacks', async () => {
+        let lateEnd: (() => void) | undefined;
+        let call = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          call++;
+          return (async function* () {
+            if (call === 1) lateEnd = beginRetryWait(60_000);
+            yield doneChunk;
+          })();
+        });
+        const { scope, waits } = await createScope({ max_turns: 5 });
+        await scope.execute(new ContextState());
+        expect(waits.map((w) => w.phase)).toEqual(['start', 'end']);
+        lateEnd!();
+        expect(waits).toHaveLength(2);
+      });
+
+      it('keeps waits of parallel agents on the same config apart', async () => {
+        vi.useFakeTimers();
+        try {
+          mockSendMessageStream.mockImplementation(async (_m, params) =>
+            (async function* () {
+              await backoff(
+                (params as { message: Part[] }).message.some((p) =>
+                  p.text?.includes('A'),
+                )
+                  ? 1_000
+                  : 5_000,
+                signalOf(params),
+              );
+              yield doneChunk;
+            })(),
+          );
+          const a = await createScope({ max_turns: 5 });
+          const b = await createScope({ max_turns: 5 });
+          const ctxA = new ContextState();
+          ctxA.set('task_prompt', 'task A');
+          const ctxB = new ContextState();
+          ctxB.set('task_prompt', 'task B');
+          const runs = Promise.all([
+            a.scope.execute(ctxA),
+            b.scope.execute(ctxB),
+          ]);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await runs;
+          const delays = (w: Array<{ phase: string }>) =>
+            w.flatMap((e) => ('delayMs' in e ? [e.delayMs] : []));
+          expect(delays(a.waits)).toEqual([1_000]);
+          expect(delays(b.waits)).toEqual([5_000]);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      describe('under the workflow stall watchdog', () => {
+        // The single-attempt shape of a workflow dispatch: a fresh agent on
+        // the attempt's emitter, failing on any non-GOAL terminate mode.
+        const dispatch = (runConfig: RunConfig, stallMs: number) => {
+          let attempts = 0;
+          const result = runStallResilient(
+            async (signal, emitter) => {
+              attempts++;
+              const { scope } = await createScope(runConfig, emitter);
+              await scope.execute(new ContextState(), signal, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              const mode = scope.getTerminateMode();
+              if (mode === AgentTerminateMode.TIMEOUT) {
+                throw new WorkflowAgentFailedError('timed out', 'timeout');
+              }
+              if (mode !== AgentTerminateMode.GOAL) {
+                throw new Error(`did not complete (terminate mode: ${mode})`);
+              }
+              return 'ok';
+            },
+            { stallMs },
+          );
+          return { result, attempts: () => attempts };
+        };
+
+        it('keeps a backoff longer than stallMs on one attempt', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(240_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5 }, DEFAULT_STALL_MS);
+            await started;
+            await vi.advanceTimersByTimeAsync(240_000);
+            await expect(run.result).resolves.toBe('ok');
+            expect(run.attempts()).toBe(1);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('still retries a request that hangs after the backoff', async () => {
+          vi.useFakeTimers();
+          try {
+            let call = 0;
+            mockSendMessageStream.mockImplementation(async (_m, params) => {
+              call++;
+              return (async function* () {
+                if (call === 1) {
+                  await backoff(2_000, signalOf(params));
+                  await new Promise((_, reject) =>
+                    signalOf(params).addEventListener('abort', () =>
+                      reject(new Error('aborted')),
+                    ),
+                  );
+                }
+                yield doneChunk;
+              })();
+            });
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5 }, 500);
+            await started;
+            await vi.advanceTimersByTimeAsync(2_499);
+            expect(run.attempts()).toBe(1);
+            await vi.advanceTimersByTimeAsync(1);
+            await expect(run.result).resolves.toBe('ok');
+            expect(run.attempts()).toBe(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('reports a backoff past the agent time limit as timeout, not a stall', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5, max_time_minutes: 10 }, 500);
+            const settled = run.result.catch((e: unknown) => e);
+            await started;
+            await vi.advanceTimersByTimeAsync(600_000);
+            const error = await settled;
+            expect(isWorkflowAgentFailedError(error)).toBe(true);
+            expect((error as WorkflowAgentFailedError).kind).toBe('timeout');
+            expect(run.attempts()).toBe(1);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('keeps the time limit guard with the watchdog disabled', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const started = backoffStarted();
+            const run = dispatch({ max_turns: 5, max_time_minutes: 1 }, 0);
+            const settled = run.result.catch((e: unknown) => e);
+            await started;
+            await vi.advanceTimersByTimeAsync(60_000);
+            expect(((await settled) as WorkflowAgentFailedError).kind).toBe(
+              'timeout',
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      });
+
+      describe('agent time limit during a wait', () => {
+        // Each variant waits 2h after spending 30s of a 1-minute budget, so
+        // the limit passes 30s into the wait.
+        const variants = {
+          'the stream rejects': (params: unknown) =>
+            (async function* () {
+              await backoff(7_200_000, signalOf(params));
+              yield doneChunk;
+            })(),
+          'the stream yields after the abort': (params: unknown) =>
+            (async function* () {
+              await backoff(7_200_000, signalOf(params)).catch(() => {});
+              yield doneChunk;
+            })(),
+        };
+
+        it.each(Object.keys(variants))(
+          'ends with TIMEOUT when %s',
+          async (name) => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) => {
+                await new Promise((r) => setTimeout(r, 30_000));
+                return variants[name as keyof typeof variants](params);
+              });
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              let settled = false;
+              const run = scope
+                .execute(new ContextState(), undefined, {
+                  enforceTimeLimitDuringRetryWait: true,
+                })
+                .finally(() => (settled = true));
+              await vi.advanceTimersByTimeAsync(59_999);
+              expect(settled).toBe(false);
+              await vi.advanceTimersByTimeAsync(1);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+              expect(vi.getTimerCount()).toBe(0);
+            } finally {
+              vi.useRealTimers();
+            }
+          },
+        );
+
+        it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) => {
+              await new Promise((r) => setTimeout(r, 30_000));
+              await backoff(7_200_000, signalOf(params));
+              return (async function* () {
+                yield doneChunk;
+              })();
+            });
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(60_000);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('times out at once when the limit already passed as the wait starts', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                // Spent the whole budget inside the round before the retry.
+                await new Promise((r) => setTimeout(r, 61_000));
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(61_000);
+            // The guard fires on the next tick, not after the 2h backoff.
+            await vi.advanceTimersByTimeAsync(1);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('measures the limit from the original start and shares it across waits', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                for (let i = 0; i < 10; i++) {
+                  await backoff(20_000, signalOf(params));
+                }
+                yield doneChunk;
+              })(),
+            );
+            const { scope, waits } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(60_001);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            // The third wait is cut as the minute passes: no wait renewed the
+            // limit, and no fourth request or wait followed.
+            expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('clears the guard when the last wait ends early', async () => {
+          vi.useFakeTimers();
+          try {
+            let release!: () => void;
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(1_000, signalOf(params));
+                await new Promise<void>((r) => (release = r));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const run = scope.execute(new ContextState(), undefined, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(vi.getTimerCount()).toBe(0);
+            // Past the limit with no active wait: only the loop's own
+            // cooperative checks apply, so the round is not aborted.
+            await vi.advanceTimersByTimeAsync(120_000);
+            release();
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('lets a parent cancel during the wait win as CANCELLED', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            const parent = new AbortController();
+            const run = scope.execute(new ContextState(), parent.signal, {
+              enforceTimeLimitDuringRetryWait: true,
+            });
+            await vi.advanceTimersByTimeAsync(10_000);
+            parent.abort();
+            await run.catch(() => {});
+            expect(scope.getTerminateMode()).not.toBe(
+              AgentTerminateMode.TIMEOUT,
+            );
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('leaves agents without the opt-in on their between-round checks', async () => {
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async (_m, params) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({
+              max_turns: 5,
+              max_time_minutes: 1,
+            });
+            let settled = false;
+            const run = scope
+              .execute(new ContextState())
+              .finally(() => (settled = true));
+            await vi.advanceTimersByTimeAsync(7_199_000);
+            expect(settled).toBe(false);
+            await vi.advanceTimersByTimeAsync(1_000);
+            await run;
+            // Checked after the round, as before.
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
       });
     });
 

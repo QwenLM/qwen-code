@@ -24,6 +24,7 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import { beginRetryWait } from '../utils/retry-wait.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -1398,25 +1399,33 @@ function delay(
 } {
   let resolveRef: () => void;
   let timeoutId: ReturnType<typeof setTimeout>;
+  // Every settle path ends the announced retry wait synchronously — a skip or
+  // abort must not keep shielding the request until the generator resumes.
+  let endWait = () => {};
 
   const promise = new Promise<void>((resolve, reject) => {
-    resolveRef = resolve;
+    resolveRef = () => {
+      endWait();
+      resolve();
+    };
 
     if (signal?.aborted) {
       reject(signal.reason);
       return;
     }
 
-    timeoutId = setTimeout(resolve, delayMs);
+    timeoutId = setTimeout(resolveRef, delayMs);
 
     signal?.addEventListener(
       'abort',
       () => {
         clearTimeout(timeoutId);
+        endWait();
         reject(signal.reason);
       },
       { once: true },
     );
+    endWait = beginRetryWait(delayMs);
   });
 
   return {
