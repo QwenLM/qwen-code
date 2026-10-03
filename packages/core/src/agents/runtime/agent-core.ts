@@ -694,7 +694,12 @@ export class AgentCore {
 
     const isDisallowed = (name: string): boolean =>
       this.toolConfig?.disallowedTools?.some((pattern) =>
-        matchesToolPattern(pattern, name),
+        matchesToolPattern(
+          pattern,
+          name,
+          toolRegistry.getPermissionAliases?.(name),
+          toolRegistry.getMcpToolIdentity?.(name),
+        ),
       ) === true;
 
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
@@ -842,7 +847,12 @@ export class AgentCore {
       return toolsList.filter((t) => {
         if (!t.name) return true;
         return !disallowed.some((pattern) =>
-          matchesToolPattern(pattern, t.name!),
+          matchesToolPattern(
+            pattern,
+            t.name!,
+            toolRegistry.getPermissionAliases?.(t.name!),
+            toolRegistry.getMcpToolIdentity?.(t.name!),
+          ),
         );
       });
     }
@@ -1847,7 +1857,15 @@ export class AgentCore {
     if (!disallowed?.length) {
       return false;
     }
-    return disallowed.some((pattern) => matchesToolPattern(pattern, toolName));
+    const toolAliases = this.runtimeContext
+      .getToolRegistry()
+      .getPermissionAliases?.(toolName);
+    const mcpIdentity = this.runtimeContext
+      .getToolRegistry()
+      .getMcpToolIdentity?.(toolName);
+    return disallowed.some((pattern) =>
+      matchesToolPattern(pattern, toolName, toolAliases, mcpIdentity),
+    );
   }
 
   /**
