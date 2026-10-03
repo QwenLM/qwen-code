@@ -576,6 +576,35 @@ describe('LiveVoiceSettingsCard', () => {
     expect(save().disabled).toBe(true);
   });
 
+  it('does not settle a padded draft when a poll returns unchanged values', () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() => setInputValue(voice(), 'Tina '));
+
+    // The daemon SDK hands out a fresh status object per fetch. An install
+    // poll or focus refresh that returns unchanged saved values therefore
+    // arrives with a new identity but nothing converged, and must leave the
+    // in-progress draft alone.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status! } }}
+          />,
+        ),
+    );
+    expect(voice().value).toBe('Tina ');
+
+    act(() => setInputValue(voice(), 'Tina Smith'));
+    expect(save().disabled).toBe(false);
+  });
+
   it('keeps the shortcut capture disabled until the status loads', () => {
     const setup = { ...setupResult({}), status: undefined };
     const container = mount(setup);

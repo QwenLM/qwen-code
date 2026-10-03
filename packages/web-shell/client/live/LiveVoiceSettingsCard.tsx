@@ -162,12 +162,24 @@ export function LiveVoiceSettingsCard({
   // refresh that converged onto the staged value, and the next edit of that
   // field is blocked by a conflict the user never saw. Draft-only re-renders
   // must not settle: a padded draft that trims onto the saved value is still
-  // being typed into, so only a genuine status change may converge it.
+  // being typed into, so only a genuine status change may converge it — and
+  // the daemon SDK returns a fresh object per fetch, so "genuine" means a
+  // changed saved value, not a changed object identity; a 1s install poll
+  // returning unchanged data must not converge a draft mid-typing either.
   const lastSettleStatus = useRef<UseLiveVoiceSetupResult['status']>(undefined);
   useEffect(() => {
-    const statusChanged = lastSettleStatus.current !== status;
+    const previous = lastSettleStatus.current;
     lastSettleStatus.current = status;
-    if (!status || !statusChanged) return;
+    if (!status) return;
+    const valueChanged =
+      previous === undefined
+        ? true
+        : previous === status
+          ? false
+          : (
+              ['enabled', 'model', 'voice', 'endpoint', 'shortcut'] as const
+            ).some((key) => previous[key] !== status[key]);
+    if (!valueChanged) return;
     const settled = (
       ['enabled', 'model', 'voice', 'endpoint', 'shortcut'] as const
     ).filter((key) => {
