@@ -124,6 +124,7 @@ import {
   type AgentParams,
   ApprovalMode,
   type Config,
+  type ConfigParameters,
   type ConfigInitializeOptions,
   type DeviceAuthorizationData,
   type DiscoveredMCPPrompt,
@@ -3025,6 +3026,8 @@ export async function runAcpAgent(
     conversationsRuntimeProvenance?: boolean;
     /** Accepted by the CLI entry point only from a private ACP parent. */
     executionEngine?: 'managed';
+    /** Where a Managed host's sessions execute their tools. */
+    managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
@@ -3215,6 +3218,7 @@ export async function runAcpAgent(
         externalToolGuardProviderAttached,
         conversationsRuntimeProvenance,
         hostExecutionEngine,
+        options?.managedRuntimeEnvironment,
       );
       return agentInstance;
     }, stream);
@@ -4136,6 +4140,22 @@ class QwenAgent implements Agent {
     const configList = [...configs];
     const writerTerminals: Array<Promise<void>> = [];
     for (const config of configList) {
+      // A Managed session's Runtime worker stops before its log is handed
+      // off, so no call outlives the log; other writers close at once.
+      if (config.getSessionExecutionEngine?.() === 'managed') {
+        writerTerminals.push(
+          Promise.resolve()
+            .then(() => config.closeManagedRuntime())
+            .catch((error: unknown) => {
+              debugLogger.error(
+                '[ACP] Managed Runtime worker shutdown error:',
+                error,
+              );
+            })
+            .then(() => config.closeSessionWriter({ handoff: true })),
+        );
+        continue;
+      }
       try {
         writerTerminals.push(config.closeSessionWriter({ handoff: true }));
       } catch (error) {
@@ -4895,6 +4915,16 @@ class QwenAgent implements Agent {
             }
           }
 
+          // A Managed session's Runtime worker stops before its log is
+          // finished, so nothing it runs outlives the log.
+          try {
+            await session.getConfig().closeManagedRuntime?.();
+          } catch (error) {
+            debugLogger.error(
+              `Session ${sessionId} Managed Runtime worker shutdown error:`,
+              error,
+            );
+          }
           recorder?.finalize();
           let flushError: unknown;
           try {
@@ -5169,6 +5199,7 @@ class QwenAgent implements Agent {
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
+    private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
@@ -12003,6 +12034,14 @@ class QwenAgent implements Agent {
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
+        // A Managed session's Runtime worker is bound to the directory the
+        // session was admitted in, where M3 judged it.
+        if (config.getSessionExecutionEngine?.() === 'managed') {
+          throw RequestError.invalidParams(
+            { errorKind: 'unsupported_operation' },
+            'A Managed session cannot change its directory.',
+          );
+        }
         const standalone = isReservedStandaloneSessionSourceType(
           config.getSessionSourceType(),
         );
@@ -15333,6 +15372,11 @@ class QwenAgent implements Agent {
               : {}),
             ...(executionEngine ? { executionEngine } : {}),
             ...(agentHostReadOnly ? { agentHostReadOnly: true as const } : {}),
+            // Only the Managed host accepts `managed`: its tools run in the
+            // session's Runtime worker.
+            ...(executionEngine === 'managed' && this.managedRuntimeEnvironment
+              ? { managedRuntimeEnvironment: this.managedRuntimeEnvironment }
+              : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),

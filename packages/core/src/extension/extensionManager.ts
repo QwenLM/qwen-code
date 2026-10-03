@@ -1794,6 +1794,29 @@ export class ExtensionManager {
     return { snapshot, extensions };
   }
 
+  async refreshExtensionDetailsSnapshot(name: string): Promise<{
+    snapshot: ExtensionStoreSnapshot;
+    extension: Extension | null;
+  }> {
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        const loaded = await this.loadExtensionsFromExtensionsDir(
+          this.configDir,
+          this.workspaceDir,
+          { detailName: name },
+        );
+        return {
+          value: loaded,
+          extensions: loaded.map(({ id, name }) => ({ id, name })),
+        };
+      });
+    const extension =
+      extensions.findLast(
+        (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+      ) ?? null;
+    return { snapshot, extension };
+  }
+
   private static stampPath(target: string, followSymlinks = true): string {
     try {
       const stats = followSymlinks ? fs.statSync(target) : fs.lstatSync(target);
@@ -1993,6 +2016,7 @@ export class ExtensionManager {
     workspaceDir: string,
     options: {
       manifestOnly?: boolean;
+      detailName?: string;
       scanRefusals?: ScanRefusalCollector;
     } = {},
   ): Promise<Extension[]> {
@@ -2029,6 +2053,7 @@ export class ExtensionManager {
           },
           {
             manifestOnly: options.manifestOnly,
+            detailName: options.detailName,
             scanRefusals: options.scanRefusals,
           },
         ),
@@ -2161,6 +2186,7 @@ export class ExtensionManager {
     options: {
       throwOnError?: boolean;
       manifestOnly?: boolean;
+      detailName?: string;
       scanRefusals?: ScanRefusalCollector;
     } = {},
   ): Promise<Extension | null> {
@@ -2180,11 +2206,16 @@ export class ExtensionManager {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
       const head = await this.loadExtensionManifestHead(context, {
-        createDataDir: !options.manifestOnly,
+        createDataDir:
+          !options.manifestOnly && options.detailName === undefined,
       });
       extension = head.extension;
 
-      if (options.manifestOnly) {
+      if (
+        options.manifestOnly ||
+        (options.detailName !== undefined &&
+          extension.name.toLowerCase() !== options.detailName.toLowerCase())
+      ) {
         // Catalog-style loads: everything after the head is subresource work
         // the catalog never reads, and skipping it here keeps the inclusion
         // set identical to the full load — the head throws for the same
