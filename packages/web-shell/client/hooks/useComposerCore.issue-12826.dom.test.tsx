@@ -46,7 +46,7 @@
 //  - A layout effect stands in for the unresolved frame above, recording the
 //    editor's update phase when it runs and optionally dispatching into it.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, useEffect, useLayoutEffect, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Transaction } from '@codemirror/state';
@@ -168,6 +168,26 @@ function pressEnter() {
       }),
     );
   });
+}
+
+// Root.unmount() flushes sync work across ALL roots, so an unmount that runs
+// while CodeMirror is mid-update is exactly the #12826 hazard. Record the
+// editor's update phase at every unmount so a test can assert the call left
+// the cycle, instead of asserting its ordering against some nearby statement.
+function spyRootUnmountStates() {
+  const proto = Object.getPrototypeOf(root!) as Root;
+  const realUnmount = proto.unmount;
+  const states: number[] = [];
+  const spy = vi
+    .spyOn(proto, 'unmount')
+    .mockImplementation(function (this: Root) {
+      const view = latest?.viewRef.current;
+      if (view) {
+        states.push((view as unknown as ViewWithUpdateState).updateState);
+      }
+      return realUnmount.call(this);
+    });
+  return { states, restore: () => spy.mockRestore() };
 }
 
 afterEach(async () => {
@@ -306,5 +326,100 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
     );
     expect(hostDispatchErrors).toEqual([]);
     expect(view.state.doc.toString()).toBe('');
+  });
+
+  it('defers a failed inline tag content root out of the update cycle', async () => {
+    await mount();
+    const view = latest!.viewRef.current!;
+    const { states, restore } = spyRootUnmountStates();
+    const contentAppendError = new Error('content append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    // Narrow probe: toDOM()'s custom-content span is the only element carrying
+    // display:inline-flex together with a min-width (the built-in file-icon
+    // span has no min-width, the tooltip span is display:none). React DOM
+    // itself calls appendChild during commit, so a blanket throw would break
+    // the harness's own render.
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.style.display === 'inline-flex' &&
+          child.style.minWidth !== ''
+        ) {
+          throw contentAppendError;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      addFileChip('notes.txt');
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // Self-guard: the throw landed in toDOM()'s renderContent catch rather
+      // than in the earlier root-less one, because only the former runs after
+      // renderContent() has returned a node. Both emit the same message, so
+      // the error identity is what pins the site.
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag renderContent failed',
+        contentAppendError,
+      );
+      // The failed root was released (deferred, not skipped) ...
+      expect(states.length).toBeGreaterThan(0);
+      // ... and only once CodeMirror had left its update cycle.
+      expect(states).toEqual(states.map(() => CM_IDLE));
+      // That catch re-assigns this.contentRoot for the built-in file icon, so
+      // the deferred unmount has to release the root it captured, not the
+      // fresh one — otherwise the icon's subtree is torn down with it.
+      expect(
+        view.contentDOM.querySelector('span[aria-hidden="true"] svg'),
+      ).not.toBeNull();
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+      restore();
+    }
+  });
+
+  it('defers a failed inline tag tooltip root out of the update cycle', async () => {
+    await mount();
+    const view = latest!.viewRef.current!;
+    const { states, restore } = spyRootUnmountStates();
+    const tooltipAppendError = new Error('tooltip append failed');
+    const appendChild = HTMLElement.prototype.appendChild;
+    const appendChildSpy = vi
+      .spyOn(HTMLElement.prototype, 'appendChild')
+      .mockImplementation(function (child) {
+        if (
+          child instanceof HTMLElement &&
+          child.getAttribute('role') === 'tooltip'
+        ) {
+          throw tooltipAppendError;
+        }
+        return appendChild.call(this, child);
+      });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      addFileChip('notes.txt');
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        '[WebShell] inline tag tooltip render failed',
+        tooltipAppendError,
+      );
+      expect(view.contentDOM.querySelector('[role="tooltip"]')).toBeNull();
+      expect(states.length).toBeGreaterThan(0);
+      expect(states).toEqual(states.map(() => CM_IDLE));
+    } finally {
+      warn.mockRestore();
+      appendChildSpy.mockRestore();
+      restore();
+    }
   });
 });
