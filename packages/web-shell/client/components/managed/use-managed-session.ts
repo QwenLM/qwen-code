@@ -41,8 +41,9 @@ export function useManagedSession(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const cursorRef = useRef<string | undefined>(undefined);
-  // Whether any older page was ever loaded; the highest id any page returned
-  // (the paged region's top edge); and whether paging reached the beginning.
+  // Paging state: whether any older page was ever loaded, the highest id any
+  // page returned (the paged region's top edge), and whether the user paged
+  // all the way to the beginning.
   const pagedRef = useRef(false);
   const pagedHeadRef = useRef<number | undefined>(undefined);
   const exhaustedRef = useRef(false);
@@ -90,30 +91,35 @@ export function useManagedSession(
         // A non-empty snapshot without an older cursor already carries the
         // full history: nothing is left to page, and a stale paging cursor
         // would re-fetch raw events the snapshot has since assembled into
-        // items, duplicating them. Paging may matter again after a later
-        // raw-page gap, so exhaustion is reset too.
+        // items, duplicating them.
         const fullHistory = !empty && transcript.olderCursor === undefined;
+        // The paged region abuts the window exactly when its top edge is
+        // adjacent to it; only then may it stay — a retained region across
+        // a hole would render two unrelated delta runs as one bubble.
+        const contiguous =
+          firstId !== undefined &&
+          pagedHeadRef.current !== undefined &&
+          pagedHeadRef.current >= firstId - 1;
         // The cursor must fetch below the oldest retained event; one
         // decision feeds both the fetch gate (cursorRef) and the affordance
-        // (state.olderCursor). Pages top out at pagedHeadRef, so a window
-        // starting above it leaves a hole only the snapshot's own cursor
-        // can refill.
+        // (state.olderCursor). On a hole the window's own cursor is adopted
+        // so the user can page the hole back.
         let nextCursor: string | undefined;
-        if (fullHistory) nextCursor = undefined;
-        else if (empty) nextCursor = cursorRef.current;
+        if (fullHistory) {
+          nextCursor = undefined;
+          // The full history is already shown; a later raw-page gap can
+          // re-open paging, so exhaustion does not survive.
+          exhaustedRef.current = false;
+        } else if (empty) nextCursor = cursorRef.current;
         else if (!pagedRef.current) nextCursor = transcript.olderCursor;
-        else if (
-          pagedHeadRef.current !== undefined &&
-          pagedHeadRef.current < firstId - 1
-        ) {
-          // A hole between the paged pages and the window is content the
-          // exhaustion flag never covered: adopt the window's cursor so the
-          // hole stays pageable, and drop the now-stale exhaustion.
+        else if (!contiguous) {
+          // The hole is content exhaustion never covered: adopt the
+          // window's cursor and let exhaustion re-derive from re-paging.
           nextCursor = transcript.olderCursor;
           exhaustedRef.current = false;
-        } else if (exhaustedRef.current) nextCursor = cursorRef.current;
-        else nextCursor = cursorRef.current ?? transcript.olderCursor;
-        if (fullHistory) exhaustedRef.current = false;
+        } else if (!exhaustedRef.current)
+          nextCursor = cursorRef.current ?? transcript.olderCursor;
+        else nextCursor = cursorRef.current;
         cursorRef.current = nextCursor;
         setState((current) => {
           const kept = empty
@@ -122,11 +128,12 @@ export function useManagedSession(
                 if (event.id > transcript.lastEventId) return true;
                 if (event.id >= firstId) return false;
                 // Older than the window: only events the user paged in
-                // survive (anything else would grow and fuse text across a
-                // hole), and item projections never do — the raw originals
-                // are what the server stands behind after a retraction.
+                // survive, only while the paged region abuts the window,
+                // and item projections never do — the raw originals are
+                // what the server stands behind after a retraction.
                 return (
                   pagedRef.current &&
+                  contiguous &&
                   event.id <= (pagedHeadRef.current ?? -1) &&
                   event.assembledFromItem !== true
                 );
@@ -278,11 +285,18 @@ export function useManagedSession(
           error: undefined,
         }));
       } catch (error) {
-        if (!abort.signal.aborted && cursorRef.current === cursor)
-          setState((current) => ({
-            ...current,
-            error: error instanceof Error ? error.message : String(error),
-          }));
+        if (abort.signal.aborted) return;
+        if (cursorRef.current !== cursor) {
+          // The cursor moved mid-flight (a gap resync): retry once on the
+          // new cursor rather than swallowing the click silently.
+          const moved = cursorRef.current;
+          if (moved !== undefined && allowRetry) return fetchPage(moved, false);
+          return;
+        }
+        setState((current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : String(error),
+        }));
       }
     };
     try {

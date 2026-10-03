@@ -1037,7 +1037,62 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
   });
 
-  it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
+  it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
+    vi.useFakeTimers();
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(3, 'Recent')],
+        olderCursor: '3',
+        lastEventId: 3,
+      })
+      .mockResolvedValueOnce({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'accepted',
+            data: { prompt: [{ type: 'text', text: 'Original question' }] },
+          },
+          event(2, 'Earlier '),
+        ],
+        olderCursor: '1',
+        lastEventId: 3,
+      })
+      // The gap resync's snapshot window sits right above the paged page,
+      // and older events still exist below it.
+      .mockResolvedValue({
+        events: [event(3, 'Recent'), event(4, ' New')],
+        olderCursor: '3',
+        lastEventId: 4,
+      });
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await gapGate;
+      yield { ...event(3, ''), type: 'stream_gap' };
+    });
+    await render('s1');
+    await click('Older history');
+    expect(container.textContent).toContain('Original question');
+    await act(async () => {
+      deliverGap();
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+    });
+    // The paged page survives the gap resync; wholesale replacement would
+    // drop it.
+    expect(container.textContent).toContain('Original question');
+    expect(container.textContent).toContain('Earlier');
+    expect(container.textContent).toContain('Recent New');
+    expect(
+      [...document.body.querySelectorAll('button')].some(
+        (n) => n.textContent === 'Older history',
+      ),
+    ).toBe(true);
+  });
+
+  it('deduplicates replay and merges a gapped stream with a durable snapshot', async () => {
     vi.useFakeTimers();
     mocks.client.getTranscript
       .mockResolvedValueOnce({ events: [event(1, 'First')], lastEventId: 1 })

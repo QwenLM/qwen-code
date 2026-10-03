@@ -50,19 +50,15 @@ const MAX_CONSECUTIVE_CORRUPT_FRAMES = 3;
 // identity, and alternating corruption would otherwise log at stream rate.
 const SKIP_LOG_EVERY = 50;
 
-// Event names a skip cannot recover from: a retracted stream.reconciled
-// would leave withdrawn text on screen, a lost turn terminal would leave the
-// last message streaming forever (and mislabel its tools later), a lost tool
-// lifecycle update would strand its card, and a lost approval update leaves
-// the Hosted approval unreachable — all resync instead of skipping.
-const RESYNC_ON_CORRUPT = new Set([
-  'action.updated',
-  'stream.reconciled',
-  'turn.completed',
-  'turn.failed',
-  'turn.cancelled',
-  'item.tool_call.updated',
-  'item.tool_result.updated',
+// The only corrupt frames a skip can survive: delta text the durable
+// snapshot re-assembles. Anything else resyncs — a lost approval update
+// leaves the Hosted approval unreachable, a lost turn terminal leaves the
+// last message streaming forever, a lost turn.accepted drops the user's own
+// prompt, a lost stream.reconciled keeps retracted text on screen, and an
+// unknown name is by definition one the panel has not budgeted for.
+export const SKIP_ON_CORRUPT: ReadonlySet<string> = new Set([
+  'item.output_text.delta',
+  'item.reasoning.delta',
 ]);
 
 export function isJavaAgentResyncRequired(
@@ -415,18 +411,12 @@ export class JavaManagedAgentClient {
           .split(/\r?\n/)
           .some((line) => line && !line.startsWith(':'));
         if (!hasContent) return undefined; // heartbeat or comment
-        if (trailing) {
-          // A torn trailing buffer that never reached its data line still
-          // lost a frame: say so, without charging the corruption budget.
-          console.warn(
-            `[web-shell] the Managed Agent event stream closed mid-frame; the frame at id ${id ?? 'none'} was discarded`,
-          );
-          return undefined;
+        if (!trailing) {
+          // A mid-stream frame with id/event lines but no data line is
+          // malformed server output, not a heartbeat: count it as corrupt
+          // below instead of dropping it silently.
+          failure ??= new Error('frame has no data payload');
         }
-        // A mid-stream frame with id/event lines but no data line is
-        // malformed server output, not a heartbeat: count it as corrupt
-        // below instead of dropping it silently.
-        failure ??= new Error('frame has no data payload');
       }
       if (trailing) {
         // A leftover buffer at end of stream is a mid-frame disconnect, not
@@ -436,19 +426,18 @@ export class JavaManagedAgentClient {
         );
         return undefined;
       }
-      // Corrupt frame: unparseable JSON or a payload that is not an event
-      // object. Skip it and let later frames move the consumer's cursor past
-      // it — except the shapes a skip cannot recover from, which resync.
+      // Corrupt frame: unparseable JSON, a payload that is not an event
+      // object, or a mid-stream frame with no data line. Skip it and let
+      // later frames move the consumer's cursor past it — except the shapes
+      // a skip cannot recover from, which resync.
       consecutiveCorrupt += 1;
-      skippedTotal += 1;
       if (
-        // The only id-less data frame is resync_required: a corrupt one still
-        // calls for a resync.
-        (id === undefined && name === RESYNC_REQUIRED) ||
         // A run of corrupt frames means the log itself is poisoned: resync
-        // past the whole run instead of skipping forever.
+        // past the whole run instead of skipping forever. (The id-less
+        // resync marker is covered by the fail-closed rule too.)
         consecutiveCorrupt > MAX_CONSECUTIVE_CORRUPT_FRAMES ||
-        RESYNC_ON_CORRUPT.has(name ?? '')
+        // Fail closed: only delta text the snapshot re-assembles may skip.
+        !SKIP_ON_CORRUPT.has(name ?? '')
       ) {
         console.warn(
           `[web-shell] resyncing on a corrupt Managed Agent frame (id: ${id ?? 'none'}, event: ${name ?? 'unknown'}):`,
@@ -457,6 +446,7 @@ export class JavaManagedAgentClient {
         consecutiveCorrupt = 0;
         return resyncFrame();
       }
+      skippedTotal += 1;
       if (skippedTotal === 1 || skippedTotal % SKIP_LOG_EVERY === 0) {
         console.warn(
           `[web-shell] skipping a corrupt Managed Agent event frame (id: ${id ?? 'none'}, event: ${name ?? 'unknown'}):`,
