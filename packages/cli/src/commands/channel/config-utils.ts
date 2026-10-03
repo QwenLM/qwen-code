@@ -632,6 +632,29 @@ export function parseChannelWebhookConfigLenient(
   return { sources };
 }
 
+/**
+ * The session scope a channel runs with: an explicit config value wins, then
+ * multiSession forces 'user' (per-sender sessions are the only shape it
+ * supports, so a plugin's group-shared default must not be applied over it),
+ * then the plugin default, then 'user'.
+ *
+ * The parser and the settings store must resolve this identically: when the
+ * store resolved a plugin default that the parser had overridden for
+ * multiSession, an existing channel ran under one scope and every later save
+ * of it was rejected by the compatibility check.
+ */
+export function effectiveSessionScope(
+  rawConfig: Record<string, unknown>,
+  multiSession: boolean | undefined,
+  plugin: { defaultSessionScope?: ChannelConfig['sessionScope'] },
+): ChannelConfig['sessionScope'] {
+  return (
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    (multiSession ? 'user' : plugin.defaultSessionScope) ||
+    'user'
+  );
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -708,14 +731,11 @@ export async function parseChannelConfig(
     'purgeLegacySessions',
     rawConfig['purgeLegacySessions'],
   );
-  // multiSession only supports per-sender sessions (ChannelBase enforces the
-  // same invariant at construction), so a plugin's group-shared default must
-  // not be applied over it: an unconfigured scope keeps resolving to 'user'
-  // instead of tripping the compatibility check below.
-  const configuredSessionScope =
-    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-    (multiSession ? 'user' : plugin.defaultSessionScope) ||
-    'user';
+  const configuredSessionScope = effectiveSessionScope(
+    rawConfig,
+    multiSession,
+    plugin,
+  );
   const sessionRotation = parseSessionRotationConfig(
     name,
     rawConfig['sessionRotation'],

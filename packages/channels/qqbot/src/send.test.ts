@@ -572,6 +572,49 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('user-era-routed');
   });
 
+  it('purges a bracketed channel name for bare and route-suffixed keys', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // A channel name may start with '['; its keys are not route wrappers.
+        {
+          key: '[QQ]:__single__',
+          sessionId: 'bracket-bare',
+          target: { channelName: '[QQ]' },
+        },
+        {
+          key: JSON.stringify(['[QQ]:__single__', '/review']),
+          sessionId: 'bracket-routed',
+          target: { channelName: '[QQ]' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      '[QQ]',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession: vi.fn().mockResolvedValue(undefined) } as never,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('bracket-bare');
+    expect(removeSessionId).toHaveBeenCalledWith('bracket-routed');
+  });
+
   it('logs instead of silently skipping when the sessionScope is unrecognized', () => {
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')

@@ -422,9 +422,12 @@ export class QQChannel extends ChannelBase {
    * state entry once the chain settles and frees the entry, so the HEAD of a
    * reply is never silently dropped during the chain's settle window (up to
    * ~10s under rate-limit backoff). A teardown may only drop an entry whose
-   * turn is not the live turn; the consumption sites are onResponseChunk
-   * (the next turn's first chunk folds the stash in) and onResponseComplete
-   * (the owning turn's completion prepends the sealed `pre`).
+   * turn is not the live turn. The consumption sites are onResponseChunk
+   * (the next turn's first chunk folds the stash in), onResponseComplete (the
+   * owning turn's completion prepends the sealed `pre`), and onPromptEnd's two
+   * branches: a cancelled turn merges the stash into its residual buffer, or —
+   * when a parked chain can still deliver it — hands it to
+   * deliverCancelledStash instead.
    * `pre` seals the portion accumulated before the most recent
    * responseBoundary: the bridge accumulates every textChunk and only a
    * boundary clears that collection, so at completion only that sealed
@@ -3634,9 +3637,12 @@ export class QQChannel extends ChannelBase {
             return parsed[0];
           }
         } catch {
-          /* not a route-suffixed key */
+          // A channel name may legitimately start with '[', so an unparsable
+          // or non-wrapper '[' string is treated as the base key itself rather
+          // than dropped: failing closed here silently stops purging
+          // `[QQ]:__single__`.
         }
-        return undefined;
+        return key;
       };
       type PersistedRouteMeta = {
         cwd?: string;
