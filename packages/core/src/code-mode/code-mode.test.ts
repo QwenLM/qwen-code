@@ -478,6 +478,28 @@ describe('code mode protocol', () => {
 });
 
 describe('isolated code mode host', () => {
+  it('preserves nested JavaScript escapes through a String.raw tool argument', async () => {
+    const dispatch = vi.fn(async (name, args) => ({
+      callId: 'nested-source',
+      name,
+      status: 'success' as const,
+      output: args['code'],
+    }));
+    const source = 'const path = "C:/temp/app.exe"; text("line\\nnext");';
+    const result = await executeCodeMode(
+      'return (await tools.echo({ code: String.raw`' + source + '` })).output;',
+      plan('echo'),
+      runtime(dispatch),
+      new AbortController().signal,
+    );
+    expect(dispatch).toHaveBeenCalledWith(
+      'echo',
+      { code: source },
+      expect.any(AbortSignal),
+    );
+    expect(result.value).toBe(source);
+  });
+
   it('keeps a pending sibling result when allSettled handles a rejection', async () => {
     let releaseSibling!: () => void;
     const siblingGate = new Promise<void>((resolve) => {
