@@ -13,7 +13,6 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import path from 'node:path';
 import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
