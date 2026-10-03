@@ -1465,6 +1465,11 @@ describe('onResponseComplete', () => {
     // fresh entry is created — onResponseComplete still sees turn 1's.
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B');
     expect(turnCounter.get('sess-1')).toBe(2);
+    // The turn's chunk reaches the stale guard while turn 1's entry is parked:
+    // it is diverted into the orphan side buffer, so no fresh entry is created
+    // and turn 1's residual is left for its own chain.
+    onResponseChunk(ch, 'test-chat', 'turn-2-chunk', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.turn).toBe(1);
     // Seed msg-B's seq counter (a first flush of this reply would have
     // consumed it) so the stale-branch release's cascade is observable.
     seqMap.set('msg-B', 1);
