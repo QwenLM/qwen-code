@@ -3687,8 +3687,9 @@ export class AcpDispatcher {
             return;
           }
           assertGenerationOpen?.();
+          // No post-write assert: a grant that lands replaces this very
+          // generation, so the guard closing is the success signal.
           const result = await this.workspace.grantWorkspaceTrust(ctx);
-          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }

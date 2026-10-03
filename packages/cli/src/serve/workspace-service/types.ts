@@ -372,17 +372,12 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
  * about the grant not taking effect, not about persistence.
  */
 export class WorkspaceTrustGrantIneffectiveError extends Error {
-  readonly state: string;
-  readonly source: string;
-
   constructor(state: string, source: string) {
     super(
       `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
         'A pre-existing rule with higher precedence still wins — resolve or remove it first.',
     );
     this.name = 'WorkspaceTrustGrantIneffectiveError';
-    this.state = state;
-    this.source = source;
   }
 }
 

@@ -7870,7 +7870,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         explicitTrustLevel: null,
         requiresDaemonRestartForChanges: true,
       });
-    const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
+    // A real grant notifies the trust monitor, whose reconcile closes this
+    // generation before the reply is built, so the spy closes it too.
+    const generationGuard = createWorkspaceGenerationGuard();
+    const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
+    const grantSpy = vi
+      .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
+      .mockImplementation(async () => {
+        generationGuard.close();
+        return grant();
+      });
+    await restartServer({ generationGuard });
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
