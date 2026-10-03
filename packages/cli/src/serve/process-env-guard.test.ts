@@ -167,8 +167,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-context-worker.ts',
     {
       reason:
-        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests from the process environment; definitions are then scoped by tenant and workspace.',
+        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace.',
       accesses: {
+        'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:QWEN_MANAGED_HOOK_CONFIG': 1,
         'key:QWEN_MANAGED_MCP_CONFIG': 1,
       },

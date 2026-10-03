@@ -30,6 +30,7 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
@@ -242,6 +243,13 @@ export function registerManagedContextRoutes(
     loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
   );
   registerManagedHookRoutes(app, boot, hooks);
+  // H3 background Shells share the delegation the Hook commands already use;
+  // without a delegated root the executor keeps its committed refusal.
+  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const backgroundSupervisor =
+    cgroupRoot !== undefined
+      ? ManagedChildRunSupervisor.create({ cgroupRoot })
+      : undefined;
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -275,6 +283,7 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
+    backgroundSupervisor,
   );
   registerManagedRuntimeProviderRoute(
     app,
