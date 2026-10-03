@@ -44,16 +44,28 @@ final class LocalRuntimeStore {
 
         static HostIdentity linux() {
             try {
-                if (!"Linux".equals(System.getProperty("os.name"))) {
-                    throw new IOException("Durable local workers require Linux");
-                }
                 return new HostIdentity(Files.readString(Path.of("/etc/machine-id")).strip(),
                         Files.readString(Path.of("/proc/sys/kernel/random/boot_id")).strip(),
                         Files.readSymbolicLink(Path.of("/proc/self/ns/pid")).toString(),
                         Files.readSymbolicLink(Path.of("/proc/self/ns/time")).toString());
-            } catch (IOException error) {
-                throw new IllegalStateException("Trusted Linux host/boot identity is unavailable", error);
+            } catch (IOException | IllegalArgumentException error) {
+                if (!"Linux".equals(System.getProperty("os.name"))) {
+                    throw new IllegalStateException("Durable local-process mode requires Linux"
+                            + " (os.name='" + System.getProperty("os.name") + "'); opt out with"
+                            + " runtime-broker.durable-local-process=false and"
+                            + " runtime-broker.trusted-local-reboot-recovery=false.", error);
+                }
+                throw identityUnavailable(error);
             }
+        }
+
+        /** Malformed or unreadable identity fails closed into one operator-facing error. */
+        static IllegalStateException identityUnavailable(Throwable cause) {
+            return new IllegalStateException("Trusted Linux host/boot identity is unavailable"
+                    + " (/etc/machine-id, /proc/sys/kernel/random/boot_id,"
+                    + " /proc/self/ns/pid, /proc/self/ns/time); durable local-process mode requires it."
+                    + " Opt out with runtime-broker.durable-local-process=false and"
+                    + " runtime-broker.trusted-local-reboot-recovery=false.", cause);
         }
     }
 
@@ -153,8 +165,7 @@ final class LocalRuntimeStore {
         try {
             this.directory = directory.toAbsolutePath().normalize();
             this.identity = Objects.requireNonNull(identity);
-            this.owner = directory.getFileSystem().getUserPrincipalLookupService()
-                    .lookupPrincipalByName(System.getProperty("user.name"));
+            this.owner = processOwner();
             Path current = this.directory;
             while (current != null) {
                 if (Files.isSymbolicLink(current)) {
@@ -173,7 +184,25 @@ final class LocalRuntimeStore {
             }
             validate(this.directory, true);
         } catch (IOException error) {
-            throw new IllegalStateException("Private local Runtime directory is unavailable", error);
+            throw new IllegalStateException("Private local Runtime state directory is unavailable"
+                    + " at " + directory.toAbsolutePath().normalize()
+                    + "; durable local-process mode requires an owner-private 0700 state directory."
+                    + " Opt out with runtime-broker.durable-local-process=false and"
+                    + " runtime-broker.trusted-local-reboot-recovery=false.", error);
+        }
+    }
+
+    /** UID-resolved owner, so a numeric UID without a passwd entry never gates startup. */
+    private static UserPrincipal processOwner() throws IOException {
+        Path self = Path.of("/proc/self");
+        if (Files.exists(self)) {
+            return Files.getOwner(self);
+        }
+        Path probe = Files.createTempFile("owner-probe-", ".tmp");
+        try {
+            return Files.getOwner(probe);
+        } finally {
+            Files.deleteIfExists(probe);
         }
     }
 

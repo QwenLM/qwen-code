@@ -666,6 +666,107 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('resyncs a tool_search response committed through the streaming send path', async () => {
+    const syncReviewedDeclarations = vi.fn();
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getTool: vi.fn(),
+      syncReviewedDeclarations,
+    } as unknown as ReturnType<Config['getToolRegistry']>);
+    const searchResponse: Part = {
+      functionResponse: {
+        id: 'search',
+        name: 'tool_search',
+        response: { output: '<functions></functions>' },
+      },
+    };
+    chat.setHistory([
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'search', name: 'tool_search', args: {} } },
+        ],
+      },
+    ]);
+    syncReviewedDeclarations.mockClear();
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+      streamOf(stopResponse([{ text: 'Done.' }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: [searchResponse] },
+      'search-result',
+    );
+    for await (const _ of stream) {
+      /* consume */
+    }
+
+    expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
+    expect(syncReviewedDeclarations).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+      ]),
+      chat,
+    );
+  });
+
+  it('re-syncs over the popped history when a committed tool_search response is rolled back', async () => {
+    // The sync receives the live history array by reference, so snapshot its
+    // shape at call time — after the rollback both recorded calls would
+    // otherwise read as the same popped array.
+    const syncedShapes: Array<{ length: number; hasSearchResponse: boolean }> =
+      [];
+    const syncReviewedDeclarations = vi.fn((history: readonly Content[]) => {
+      syncedShapes.push({
+        length: history.length,
+        hasSearchResponse: history.some((entry) =>
+          (entry.parts ?? []).some((part) => part === searchResponse),
+        ),
+      });
+    });
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getTool: vi.fn(),
+      syncReviewedDeclarations,
+    } as unknown as ReturnType<Config['getToolRegistry']>);
+    const searchResponse: Part = {
+      functionResponse: {
+        id: 'search',
+        name: 'tool_search',
+        response: { output: '<functions></functions>' },
+      },
+    };
+    chat.setHistory([]);
+    syncReviewedDeclarations.mockClear();
+    syncedShapes.length = 0;
+    // Throw inside the setup window between the push and the generator's
+    // return (here: the request-history derivation), so the catch pops the
+    // committed response.
+    vi.spyOn(
+      chat as unknown as { getRequestHistoryForRoute: () => unknown },
+      'getRequestHistoryForRoute',
+    ).mockImplementation(() => {
+      throw new Error('setup window failure');
+    });
+
+    await expect(
+      chat.sendMessageStream(
+        'test-model',
+        { message: [searchResponse] },
+        'search-result',
+      ),
+    ).rejects.toThrow('setup window failure');
+
+    // Without the rollback-leg re-sync the registry keeps vouching for a
+    // schema that is no longer in history. The push synced once with the
+    // response present; the rollback must sync again over the popped
+    // history.
+    expect(syncedShapes).toEqual([
+      { length: 1, hasSearchResponse: true },
+      { length: 0, hasSearchResponse: false },
+    ]);
+    expect(chat.getHistory()).toEqual([]);
+  });
+
   describe('system instruction helpers', () => {
     const block = (ctx: string) =>
       `<qwen:session-start-context hidden="true">\nSessionStart additional context:\n${ctx}\n</qwen:session-start-context>`;
@@ -858,6 +959,19 @@ describe('LlmChat', async () => {
         expectPersisted,
       };
     }
+
+    it('sends nothing for a Managed session that a lost tool outcome blocked', async () => {
+      const blocked = new Error('outcome unknown');
+      (
+        mockConfig as Config & { getManagedSessionBlock: () => Error }
+      ).getManagedSessionBlock = () => blocked;
+      const history = chat.getHistory();
+      await expect(sendAny('continue', 'prompt-id-blocked')).rejects.toBe(
+        blocked,
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(chat.getHistory()).toEqual(history);
+    });
 
     it('releases the sleep inhibitor after the stream is consumed', async () => {
       mockStream(textStream('done'));

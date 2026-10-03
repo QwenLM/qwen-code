@@ -322,7 +322,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
     void assertReport(Map<String, Object> session, JsonNode report) throws Exception {
         assertThat(failure.get()).as("independent Shell output probe").isNull();
         assertThat(report.path("fault").asText()).isEqualTo(session.get("fault"));
-        assertThat(report.path("injections").asInt()).isEqualTo(1);
+        assertThat(report.path("injections").asInt())
+                .isEqualTo(session.get("fault").toString().startsWith("receipt-") ? 3 : 1);
         assertThat(report.path("modelCalls").asInt()).isEqualTo(1);
         var row = execution(session.get("sessionId").toString());
         assertThat(row.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());

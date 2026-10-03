@@ -59,6 +59,7 @@ import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { isSafeHref, Markdown } from '../messages/Markdown';
@@ -515,7 +516,12 @@ function AgentActivityTab({
   ) => void;
 }) {
   const workspace = useWorkspace();
-  if (!workspace.capabilities?.features?.includes('agent_collaboration_v1')) {
+  if (
+    !isAgentCollaborationEnabledForWorkspace(
+      workspace.capabilities,
+      workspaceCwd,
+    )
+  ) {
     return null;
   }
   return (
