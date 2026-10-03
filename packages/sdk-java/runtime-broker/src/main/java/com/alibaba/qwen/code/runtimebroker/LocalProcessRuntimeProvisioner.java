@@ -348,14 +348,32 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     void stop(RuntimeLease lease) {
-        OwnedProcess process = owned.remove(ownershipKey(lease));
+        OwnedProcess process;
+        synchronized (lifecycle) {
+            // Move the worker from owned to starting under the same lock
+            // terminateAll() snapshots with, so an exit can never find it in
+            // neither set. Once terminated, that snapshot already covered it.
+            process = owned.remove(ownershipKey(lease));
+            if (process != null && !terminated) {
+                starting.add(process);
+            }
+        }
         if (process != null) {
             process.process.destroy();
             // A worker that ignores SIGTERM must not outlive its release;
             // escalate after the grace window without blocking the caller.
+            // That escalation runs on a daemon thread which dies with the
+            // JVM, so the worker stays in `starting` until it finishes.
             try {
-                executor.execute(() -> forceAfterGrace(process.process));
+                executor.execute(() -> {
+                    try {
+                        forceAfterGrace(process.process);
+                    } finally {
+                        starting.remove(process);
+                    }
+                });
             } catch (RejectedExecutionException closing) {
+                starting.remove(process);
                 process.process.destroyForcibly();
             }
         }

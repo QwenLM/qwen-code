@@ -40,18 +40,21 @@ import org.junit.jupiter.api.Test;
 class Issue13183AdversarialTest {
 
     /**
-     * N rounds; in each round one thread admits an execution while another
-     * runs beginSessionRelease from a second repository stack. Half the
-     * rounds release both from one latch as a tight race; the other half
-     * hold the release until the admission has committed, so both
-     * directions are covered rather than whichever one the scheduler
-     * favours. The two outcomes must never contradict: a
-     * committed admission forces runtime_session_busy; a committed
-     * RELEASING transition forces runtime_admission_closed. The
+     * Rounds of one thread admitting an execution while another runs
+     * beginSessionRelease from a second repository stack. Odd rounds release
+     * both from one latch as a tight race: the release wins almost all of
+     * them, because admission takes the placement-domain lock and does two
+     * reads first, and a missing Session row lock shows up here as the
      * contradictory end state - admission committed AND session RELEASING -
-     * must never occur, and neither call may hit a lock failure. Both
-     * interleavings must actually occur, so a one-sided schedule cannot pass
-     * the exact-error-code checks by never exercising one direction.
+     * in a few percent of rounds. Even rounds hold the release until the
+     * admission has committed, the direction a tight race does not reach, so
+     * the transition's own re-check must answer runtime_session_busy. The
+     * two outcomes must never contradict: a committed admission forces
+     * runtime_session_busy; a committed RELEASING transition forces
+     * runtime_admission_closed. Neither call may hit a lock failure. The win
+     * counters assert that both arms ran, so the exact-error-code checks
+     * cover both outcomes; they do not claim a contradictory interleaving
+     * was reached, which is what the raced arm is for.
      */
     @Test
     void concurrentCrossProcessAdmitAndReleaseNeverContradict()
@@ -68,7 +71,9 @@ class Issue13183AdversarialTest {
         JdbcToolExecutionRepository executionsB = new JdbcToolExecutionRepository(
                 dataSource);
 
-        int rounds = 200;
+        // 300 raced rounds: a missing Session row lock contradicts in a few
+        // percent of them, so the count sets the odds of catching it.
+        int rounds = 600;
         ExecutorService pool = Executors.newFixedThreadPool(2);
         AtomicInteger contradictions = new AtomicInteger();
         AtomicInteger unexpected = new AtomicInteger();
@@ -89,11 +94,10 @@ class Issue13183AdversarialTest {
                         fixture.binding.getRequest().getScope(),
                         fixture.session.getRuntimeSessionId());
                 CountDownLatch gate = new CountDownLatch(1);
-                // Half the rounds are a tight race; the other half hold the
-                // release until the admission has committed. The release
-                // reaches the session row first in a tight race often enough
-                // that racing alone would leave the committed-admission
-                // direction unexercised.
+                // Odd rounds race; even rounds hold the release until the
+                // admission has committed. The release wins a tight race
+                // almost every time, so racing alone would leave the
+                // committed-admission direction unexercised.
                 boolean raced = (round & 1) == 1;
                 CountDownLatch admitDone = new CountDownLatch(raced ? 0 : 1);
                 AtomicReference<Throwable> admitOutcome =
@@ -168,11 +172,10 @@ class Issue13183AdversarialTest {
                 "admission and release contradicted each other");
         assertEquals(0, unexpected.get(),
                 () -> "unexpected failure: " + surprises);
-        // Both interleavings must actually have occurred, or the exact
-        // error-code checks above only covered the direction the scheduler
-        // happened to favour.
+        // Both arms must have run, or the exact error-code checks above only
+        // covered one of the two outcomes.
         assertTrue(admitWins.get() > 0 && releaseWins.get() > 0,
-                "the stress never exercised both interleavings: admission won "
+                "one arm of the stress never ran: admission won "
                         + admitWins.get() + " rounds, release won "
                         + releaseWins.get() + " of " + rounds);
     }
@@ -440,28 +443,31 @@ class Issue13183AdversarialTest {
     /**
      * The exit hook must reclaim even a worker that is still in its ready
      * handshake when the JVM exits: it is registered in {@code starting}
-     * from spawn. This forks a broker JVM that is signalled mid-provision
-     * and then checks that the worker did not outlive it. Before the fix,
-     * the worker survived: it only entered {@code owned} after the
-     * handshake, which the exit never reached. The forked worker obeys
-     * SIGTERM, so this covers the hook's {@code destroy()}; the forcible
-     * fallback on the exit path is exercised by the close() and release()
-     * escalation tests instead.
+     * from spawn. This forks a broker JVM that exits on its own mid-provision,
+     * at the test's signal, and then checks that the worker did not outlive
+     * it. Before the fix, the worker survived: it only entered {@code owned}
+     * after the handshake, which the exit never reached. The forked worker
+     * obeys SIGTERM, so this covers the hook's {@code destroy()}; the
+     * forcible fallback on the exit path is exercised by the close() and
+     * release() escalation tests instead.
      */
     @Test
     void exitHookReclaimsAWorkerStillInStartup() throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
         String classpath = System.getProperty("java.class.path");
         Path harnessLog = Files.createTempFile("exit-harness", ".log");
+        Path exitSignal = Files.createTempFile("exit-signal", ".flag");
+        Files.delete(exitSignal);
         Process harness = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java")
                         .toString(),
-                "-cp", classpath, ExitHarnessMain.class.getName())
+                "-cp", classpath, ExitHarnessMain.class.getName(),
+                exitSignal.toString())
                 .redirectErrorStream(true)
                 .redirectOutput(harnessLog.toFile()).start();
         long harnessPid = harness.pid();
+        long worker = -1;
         try {
-            long worker = -1;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
             while (System.nanoTime() < deadline) {
                 java.util.Optional<ProcessHandle> node = ProcessHandle
@@ -480,22 +486,18 @@ class Issue13183AdversarialTest {
             assertTrue(worker > 0,
                     "the harness never spawned a worker; harness log: "
                             + logTail(harnessLog));
-            // The test ends the harness JVM rather than waiting for a timer
-            // inside it: SIGTERM runs the same shutdown hooks a natural exit
-            // would, and the observation window above no longer has to fit
-            // inside the harness's own sleep.
-            harness.destroy();
+            // The test, not a timer inside the harness, decides when that
+            // JVM exits, so the observation window above is not a race. The
+            // harness exits itself rather than being killed from here:
+            // System.exit runs the shutdown hooks on every platform, while
+            // destroy() would not run them on Windows.
+            Files.createFile(exitSignal);
             assertTrue(harness.waitFor(20, TimeUnit.SECONDS),
                     "the harness never exited; harness log: "
                             + logTail(harnessLog));
             Thread.sleep(1000);
             boolean leaked = ProcessHandle.of(worker)
                     .map(ProcessHandle::isAlive).orElse(false);
-            if (leaked) {
-                // Do not leave the proof behind on the machine.
-                ProcessHandle.of(worker).ifPresent(
-                        process -> process.destroyForcibly());
-            }
             assertTrue(!leaked,
                     "worker " + worker
                             + " survived the broker JVM exit mid-handshake;"
@@ -504,7 +506,115 @@ class Issue13183AdversarialTest {
             if (harness.isAlive()) {
                 harness.destroyForcibly();
             }
+            // A failed assertion above must not leave the harness's worker
+            // spinning on the runner: nothing else ever stops it.
+            if (worker > 0) {
+                ProcessHandle.of(worker)
+                        .ifPresent(ProcessHandle::destroyForcibly);
+            }
             Files.deleteIfExists(harnessLog);
+            Files.deleteIfExists(exitSignal);
+        }
+    }
+
+    /**
+     * The release grace window is tracked the same way the ready handshake
+     * is: a worker that ignores SIGTERM is escalated by a daemon thread, and
+     * that thread dies with the JVM, so an exit inside the window can only
+     * be saved by the hook finding the worker. POSIX-only, like the other
+     * escalation tests: on Windows destroy() terminates outright, so there
+     * is no wedged worker to strand.
+     */
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void exitHookReclaimsAWorkerInsideItsReleaseGraceWindow() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        String classpath = System.getProperty("java.class.path");
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        Path harnessLog = Files.createTempFile("release-harness", ".log");
+        Process harness = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java")
+                        .toString(),
+                "-cp", classpath, ReleaseGraceHarnessMain.class.getName(),
+                script.toString())
+                .redirectErrorStream(true)
+                .redirectOutput(harnessLog.toFile()).start();
+        long worker = -1;
+        try {
+            assertTrue(harness.waitFor(60, TimeUnit.SECONDS),
+                    "the harness never exited; harness log: "
+                            + logTail(harnessLog));
+            worker = reportedWorker(harnessLog);
+            assertTrue(worker > 0,
+                    "the harness never reported its worker; harness log: "
+                            + logTail(harnessLog));
+            // The hook shares one 5s grace window across the processes it
+            // reclaimed; the loop only has to outlast that.
+            long pid = worker;
+            boolean alive = true;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (alive && System.nanoTime() < deadline) {
+                alive = ProcessHandle.of(pid)
+                        .map(ProcessHandle::isAlive).orElse(false);
+                Thread.sleep(100);
+            }
+            assertTrue(!alive,
+                    "worker " + worker
+                            + " survived a JVM exit inside its release grace"
+                            + " window; harness log: " + logTail(harnessLog));
+        } finally {
+            if (harness.isAlive()) {
+                harness.destroyForcibly();
+            }
+            // A failed assertion must not leave the wedged worker behind.
+            if (worker > 0) {
+                ProcessHandle.of(worker)
+                        .ifPresent(ProcessHandle::destroyForcibly);
+            }
+            Files.deleteIfExists(harnessLog);
+        }
+    }
+
+    /** The pid the harness printed, or -1 when it never got that far. */
+    private static long reportedWorker(Path log) {
+        try {
+            return Files.readAllLines(log).stream()
+                    .filter(line -> line.startsWith("worker-pid "))
+                    .map(line -> line.substring("worker-pid ".length()).trim())
+                    .mapToLong(Long::parseLong).findFirst().orElse(-1L);
+        } catch (Exception unreadable) {
+            return -1;
+        }
+    }
+
+    /**
+     * Harness JVM: releases a worker that ignores SIGTERM and exits at once,
+     * inside the escalation's grace window, so only the shutdown hook can
+     * still reclaim it.
+     */
+    public static final class ReleaseGraceHarnessMain {
+        public static void main(String[] args) throws Exception {
+            LocalProcessRuntimeProvisioner provisioner =
+                    new LocalProcessRuntimeProvisioner(
+                            List.of("node", args[0], "--ignore-term"),
+                            Path.of(".").toAbsolutePath(),
+                            new HttpRuntimeTransport());
+            RuntimeLease lease = provisioner
+                    .provision(ManagedContextProtocolTest.request(),
+                            ManagedContextProtocolTest.seed())
+                    .toCompletableFuture().join();
+            long worker = ProcessHandle.current().children()
+                    .map(ProcessHandle::pid).findFirst().orElse(-1L);
+            System.out.println("worker-pid " + worker);
+            System.out.flush();
+            provisioner.release(ManagedContextProtocolTest.request(), lease)
+                    .toCompletableFuture().join();
+            // Exit inside the 5s grace window: the daemon escalation thread
+            // dies here, so the hook is the only thing left that can reclaim
+            // a worker ignoring SIGTERM.
+            System.exit(0);
         }
     }
 
@@ -518,11 +628,13 @@ class Issue13183AdversarialTest {
     }
 
     /**
-     * Harness JVM: starts provisioning a silent worker, stays in the ready
-     * handshake until the test ends the JVM, and so exits mid-start.
+     * Harness JVM: starts provisioning a silent worker, waits for the test
+     * to signal that it has been observed, and then exits mid-handshake on
+     * its own so the shutdown hooks run.
      */
     public static final class ExitHarnessMain {
         public static void main(String[] args) throws Exception {
+            Path exitSignal = Path.of(args[0]);
             LocalProcessRuntimeProvisioner provisioner =
                     new LocalProcessRuntimeProvisioner(
                             List.of("node", "-e", "setInterval(() => {}, 1000)"),
@@ -531,9 +643,13 @@ class Issue13183AdversarialTest {
             provisioner.provision(ManagedContextProtocolTest.request(),
                     ManagedContextProtocolTest.seed());
             // The worker never prints a ready line, so it stays in `starting`
-            // for as long as this JVM lives; the sleep only bounds an
-            // orphaned harness.
-            Thread.sleep(60_000);
+            // for as long as this JVM lives. The deadline only bounds a
+            // harness the test abandoned.
+            Instant giveUp = Instant.now().plusSeconds(60);
+            while (!Files.exists(exitSignal)
+                    && Instant.now().isBefore(giveUp)) {
+                Thread.sleep(50);
+            }
             System.exit(0);
         }
     }

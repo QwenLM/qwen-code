@@ -548,7 +548,7 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(200, retried.statusCode(), retried.body());
             assertEquals("settled", JSON.parseObject(retried.body())
                     .getJSONObject("status").getString("state"),
-                    "a mutation response must describe post-mutation truth");
+                    "a mutation response must not serve the cooldown cache");
         }
     }
 

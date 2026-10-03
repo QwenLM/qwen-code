@@ -8,7 +8,7 @@ Status: implemented in `packages/sdk-java/runtime-broker` (PR #13214, issue #131
 
 A code audit of the Runtime Broker found three high-risk defects. First, the session release decision and the no-active-execution check ran in separate transactions guarded only by a process-local lock: with two Broker processes sharing one database, an execution could be admitted while its session was marked `RELEASED`. Second, every lease renewal ran on one scheduled thread shared with retries, deadline fences, and polling, all with synchronous JDBC: a 1–2 s storage stall queued renewals past their lease and fenced healthy bindings. Third, the broker's HTTP face served one global Bearer token over plaintext HTTP and accepted non-loopback listen addresses.
 
-Two cheaper medium findings are fixed in the same change. A released worker that ignored SIGTERM was never destroyed forcibly, and a JVM exit during the ready handshake could strand one. A LOST reclaim also repeated its bounded 100-row recovery passes with no budget, so a generation larger than one pass could spin.
+Two cheaper medium findings are fixed in the same change. A released worker that ignored SIGTERM was never destroyed forcibly, and a JVM exit during the ready handshake could strand one. A LOST reclaim also ran a single bounded 100-row recovery pass per phase, so a generation larger than one pass stayed LOST and answered `runtime_broker_runtime_lost` on every later attempt.
 
 ## Decisions
 

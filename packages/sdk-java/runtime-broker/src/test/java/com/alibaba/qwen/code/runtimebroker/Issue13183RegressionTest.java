@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -62,6 +63,11 @@ class Issue13183RegressionTest {
     static final RuntimeResourceHandle HANDLE =
             new RuntimeResourceHandle("test-scheduler", 1,
                     Map.of("resourceId", "runtime-resource"));
+    // destroy() is a SIGTERM on POSIX and an outright kill on Windows, so
+    // only POSIX has a grace window that --ignore-term can survive.
+    static final boolean DESTROY_IS_SIGTERM = !System
+            .getProperty("os.name", "")
+            .toLowerCase(Locale.ROOT).contains("windows");
 
     /**
      * Finding 1: an admission committed between another process's snapshot
@@ -581,10 +587,14 @@ class Issue13183RegressionTest {
                     first.getRecord().getState());
 
             // Observer B arrives inside the cooldown holding its
-            // pre-settlement snapshot, at the settled record's own version:
-            // the version comparison alone would then prefer B's UNKNOWN
-            // record, so only the "replay a settled cache whole" branch can
-            // keep the terminal answer off a stale record.
+            // pre-settlement snapshot. No repository can produce that pair:
+            // both backends refuse a CAS whose expectation is terminal and
+            // always bump the version, so a settled record outranks any
+            // snapshot taken before it settled and the version comparison
+            // below already prefers the cache. B's snapshot is stamped with
+            // the settled record's own version to pin the explicit
+            // settled-cache branch anyway - it is what still holds the
+            // invariant if that comparison is ever narrowed.
             ExecutionReconciliation second;
             executions.stale = unknownSnapshot.withVersion(
                     first.getRecord().getVersion());
@@ -869,7 +879,10 @@ class Issue13183RegressionTest {
      * and stopping at 2s, so a finished result is never picked up later
      * than the cap allows. Asserted on the computation rather than on the
      * wall clock, which cannot resolve a 2s cap from a 2.5s one without
-     * depending on scheduler jitter.
+     * depending on scheduler jitter. The sweep past the cap pins the inner
+     * clamp: a 30-minute window reaches attempt 900, and an unclamped shift
+     * wraps there, so dropping it would schedule zero and negative delays
+     * and return the polling to the rate the backoff exists to remove.
      */
     @Test
     void v3ResultPollingDelayDoublesToTheCap() {
@@ -878,6 +891,12 @@ class Issue13183RegressionTest {
                 IntStream.rangeClosed(0, 7)
                         .mapToObj(RuntimeBrokerService::v3PollDelayMillis)
                         .toList());
+        IntStream.rangeClosed(0, 1000).forEach(attempt -> {
+            long delay = RuntimeBrokerService.v3PollDelayMillis(attempt);
+            assertTrue(delay >= 100L && delay <= 2_000L,
+                    "backoff left its bounds at attempt " + attempt + ": "
+                            + delay);
+        });
     }
 
     /**
@@ -901,12 +920,13 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * The window is validated: below the first poll tick the polling could
-     * never complete a retry, so construction fails instead of silently
-     * degrading every v3 execution.
+     * The window is validated against a floor: a suffix-less duration config
+     * binds as milliseconds, so a window meant as "30" minutes arrives as
+     * 30ms and construction fails instead of silently degrading every v3
+     * execution to UNKNOWN.
      */
     @Test
-    void v3ResultWindowBelowTheFirstPollTickIsRefused() {
+    void v3ResultWindowBelowTheFloorIsRefused() {
         assertThrows(IllegalArgumentException.class,
                 () -> v3Service(new V3Transport(), Duration.ofMillis(30)));
     }
@@ -983,6 +1003,9 @@ class Issue13183RegressionTest {
      * {@code starting} inside the {@code lifecycle} lock that
      * {@code terminateAll()} also holds, so no teardown snapshot can fall
      * between the two, and nothing outside that lock can interleave there.
+     * The guard half needs the wedged worker's grace window, so it is
+     * asserted only where destroy() is a signal; the lingering-children half
+     * is platform-independent.
      */
     @Test
     void provisionDuringCloseNeverOrphansAWorker() throws Exception {
@@ -1032,8 +1055,15 @@ class Issue13183RegressionTest {
             Thread.sleep(20);
         }
         closer.join(TimeUnit.SECONDS.toMillis(15));
-        assertNotNull(refused,
-                "a provision racing the close must hit the closed guard");
+        if (DESTROY_IS_SIGTERM) {
+            // Only where the wedged worker holds close() inside its grace
+            // window does the loop reliably overlap the teardown. On Windows
+            // destroy() terminates outright, close() finishes in
+            // milliseconds, and the loop can miss it entirely; the lingering
+            // check below is the assertion that still applies there.
+            assertNotNull(refused,
+                    "a provision racing the close must hit the closed guard");
+        }
         // Killed children linger as zombies until the JVM reaper runs, so
         // wait them out rather than snapshot once.
         await(() -> {
