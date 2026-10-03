@@ -10,6 +10,9 @@ import {
   type ManagedHarnessHandle,
 } from './managed-harness-factory.js';
 import {
+  createNextTurnReadyHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
   parseHarnessCheckpointV1,
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
@@ -90,6 +93,43 @@ export class LocalManagedRuntimeOutcomes {
     // evidence starts here, covering the committed log. A session whose
     // checkpoint blocks it stops here, before anything is dispatched.
     await this.harness.ensureCheckpoint();
+    // Results committed but the closing steps never ran — a close or crash
+    // between the batch's commits and its consumption — join them now:
+    // every outcome is already committed, so closing is not replaying.
+    if (
+      (await this.latestCheckpoint())?.continuation.phase === 'results_ready'
+    ) {
+      await this.finalizeBatch();
+    }
+    const tail = await this.latestCheckpoint();
+    // A turn that settled under an earlier prompt ends before this prompt's
+    // batch begins, or this prompt would inherit its batch and its attempt.
+    if (
+      tail?.continuation.phase === 'turn_settled' &&
+      tail.identity.turnId !== promptId
+    ) {
+      const state = encodeHarnessCheckpointV1(
+        createNextTurnReadyHarnessCheckpoint({
+          previous: tail,
+          checkpointId: `ckpt-${authority.committedSequence + 1}`,
+          coveredSequence: authority.committedSequence,
+          previousCheckpointId: tail.identity.checkpointId,
+          activationId: session.activation.activationId,
+          turnId: promptId,
+          promptId,
+        }),
+      );
+      await authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: `harness:next_turn_ready:${session.activation.activationId}:${promptId}:${authority.committedSequence}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(state).digest('hex'),
+        },
+        { state, boundary: HARNESS_TURN_COMPLETE_BOUNDARY },
+        { class: 'harness', activation: session.activation },
+      );
+    }
     const argsRef = await session.resources.publish(
       'managed-tool-args',
       Buffer.from(JSON.stringify(input.params), 'utf8'),

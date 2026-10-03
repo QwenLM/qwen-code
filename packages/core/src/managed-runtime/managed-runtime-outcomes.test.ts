@@ -89,10 +89,14 @@ async function openSession(root: string, id: string): Promise<OpenedSession> {
   };
 }
 
-const admission = (id: string, params: Record<string, unknown> = {}) => ({
+const admission = (
+  id: string,
+  params: Record<string, unknown> = {},
+  promptId = 'prompt-a',
+) => ({
   functionCallId: id,
   toolName: 'read_file',
-  promptId: 'prompt-a',
+  promptId,
   params,
   toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
   workerIncarnation: 'incarnation-a',
@@ -344,6 +348,32 @@ describe('LocalManagedRuntimeOutcomes', () => {
     }
   });
 
+  it('admits concurrent calls with distinct ordinals in one batch', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const { session } = await openSession(root, 'session-concurrent');
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await Promise.all([
+        outcomes.admit(admission('call-a')),
+        outcomes.admit(admission('call-b')),
+      ]);
+      const intents = events(session, 'tool.intent');
+      expect(intents).toHaveLength(2);
+      expect(intents.map((intent) => intent.payload['ordinal']).sort()).toEqual(
+        [0, 1],
+      );
+      expect(
+        new Set(intents.map((intent) => intent.payload['batchId'])).size,
+      ).toBe(1);
+      const checkpoint = (await checkpointOf(session))!;
+      expect(checkpoint.tools?.items).toHaveLength(2);
+      expect(checkpoint.runtime?.bindings).toHaveLength(2);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('re-admits a call idempotently for the same call id', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);
@@ -423,8 +453,60 @@ describe('restored runtime block', () => {
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toBeUndefined();
+      // The leftover continuation closes at the next admission: the turn is
+      // not replayed, and the new prompt's batch is its own.
+      const outcomes = new LocalManagedRuntimeOutcomes(restored);
+      await outcomes.admit(admission('call-b', {}, 'prompt-b'));
+      const intents = events(restored, 'tool.intent');
+      expect(intents).toHaveLength(2);
+      expect(intents[1]!.payload).toMatchObject({
+        batchId: 'batch-call-b',
+        ordinal: 0,
+      });
+      const checkpoint = (await checkpointOf(restored))!;
+      expect(checkpoint.continuation.phase).toBe('await_runtime');
+      expect(checkpoint.identity.turnId).toBe('prompt-b');
+      expect(checkpoint.attempt?.attemptId).toBe('attempt:prompt-b');
+      expect(
+        checkpoint.tools?.items.map((item) => item.executionCallId),
+      ).toEqual(['call-b']);
     } finally {
       await restored.close();
+    }
+  });
+
+  it('starts a fresh batch and attempt for the prompt after a settled turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const { session } = await openSession(root, 'session-prompts');
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      });
+      await outcomes.finalizeBatch();
+      expect((await checkpointOf(session))!.continuation.phase).toBe(
+        'turn_settled',
+      );
+
+      await outcomes.admit(admission('call-b', {}, 'prompt-b'));
+      const intents = events(session, 'tool.intent');
+      expect(intents).toHaveLength(2);
+      expect(intents[1]!.payload).toMatchObject({
+        batchId: 'batch-call-b',
+        ordinal: 0,
+      });
+      const checkpoint = (await checkpointOf(session))!;
+      expect(checkpoint.identity.turnId).toBe('prompt-b');
+      expect(checkpoint.attempt?.attemptId).toBe('attempt:prompt-b');
+      expect(
+        checkpoint.tools?.items.map((item) => item.executionCallId),
+      ).toEqual(['call-b']);
+    } finally {
+      await session.close();
     }
   });
 
