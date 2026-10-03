@@ -80,7 +80,11 @@ so a staler snapshot is self-consistent; `transcript` additionally tails
 events past the snapshot (bounded by the caller's `limit`, the newest kept
 with the truncation reported for paging), so a WebShell stream's event view
 does not lose freshness — its items array is the snapshot's and lags by the
-same bound Section 9 states for `listPublicItems`.
+same bound Section 9 states for `listPublicItems`. A backward walk across
+the page seam can return the first page's inlined control events a second
+time (the cursor path serves the raw stream before the cursor, unfiltered);
+event sequences are stable identifiers and clients deduplicate on them, as
+the WebShell client's merge does.
 
 ## 4. SSE read-grant recheck window
 
@@ -148,14 +152,17 @@ in-range `activation.changed` payload during the extension-record parse pass
 that every commit already runs (no extra decode of the record bytes) and
 writes its fields into the head in the same single head `UPDATE` that bumps
 `journal_revision`; the stamp `activation_head_revision = journal_revision`
-is written on every commit, whether or not the batch carried an activation
-change. The head row therefore carries the journal's current activation
-state under the same lock discipline, and the stamp says which journal
-revision the columns reflect: a commit from a binary that does not maintain
-the columns still bumps `journal_revision`, so its head fails the stamp
-equality check and authorization rescans the journal — the rolling window is
-self-healing, since the scan's backfill rewrites the columns and re-stamps
-them. `expiresAt` may be absent from the payload (`timeOrNull`); a NULL
+is written on every activation-carrying commit, and on any other commit
+only when the preserved columns were current at the previous revision — a
+commit that keeps columns whose stamp already lags leaves the stamp
+lagging, so a skew left by a pre-V34 writer is never re-stamped into
+looking fresh. The head row therefore carries the journal's current
+activation state under the same lock discipline, and the stamp says which
+journal revision the columns reflect: a commit from a binary that does not
+maintain the columns still bumps `journal_revision`, so its head fails the
+stamp equality check and authorization rescans the journal — the rolling
+window is self-healing, since the scan's backfill rewrites the columns and
+re-stamps them. `expiresAt` may be absent from the payload (`timeOrNull`); a NULL
 column then fails the freshness check exactly like the journal scan reading
 the value as absent does. All three readers of the payload's `expiresAt` (the
 commit extraction and the two backfill scans) share one lenient helper — an

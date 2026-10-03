@@ -425,9 +425,17 @@ public class ManagedSessionStore {
                                 || activation.phase().length()
                                         <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS);
         // activation_head_revision stamps which journal revision the
-        // columns reflect, on every commit, so a head written by a binary
-        // that does not maintain the columns is detected (stamp lags
-        // journal_revision) and rescanned instead of trusted.
+        // columns reflect, so a head written by a binary that does not
+        // maintain the columns is detected (stamp lags journal_revision)
+        // and rescanned instead of trusted. A commit that keeps the
+        // existing columns advances their stamp only when they were
+        // current at the previous revision — re-stamping a skewed set
+        // would certify it as fresh.
+        Long activationHeadRevision = head.activationHeadRevision();
+        if (activation != null || (activationHeadRevision != null
+                && activationHeadRevision == head.journalRevision())) {
+            activationHeadRevision = revision;
+        }
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
@@ -450,7 +458,7 @@ public class ManagedSessionStore {
                         : fits ? activation.epoch() : null,
                 activation == null ? head.activationExpiresAt()
                         : fits ? activation.expiresAt() : null,
-                revision, now, tenantId, sessionId);
+                activationHeadRevision, now, tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }

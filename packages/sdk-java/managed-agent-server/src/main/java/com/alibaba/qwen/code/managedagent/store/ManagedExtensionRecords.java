@@ -682,8 +682,9 @@ public final class ManagedExtensionRecords {
                         ? new BigDecimal(node.textValue().trim())
                         : node.decimalValue();
                 // A long holds at most 19 integer digits; never materialize
-                // anything wider.
-                if (value.precision() - value.scale() > 19) {
+                // anything wider. Widen to long first: precision - scale can
+                // itself overflow int on an extreme exponent.
+                if ((long) value.precision() - value.scale() > 19) {
                     return null;
                 }
                 return value.toBigIntegerExact().longValueExact();

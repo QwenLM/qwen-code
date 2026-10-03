@@ -32,7 +32,7 @@ Managed Agent Runtime Broker 的四条热路径把数据库工作量放大到远
 
 被规则 4 推迟的已取完批次会让 snapshot 落后于投影,而 consumer progress 已经覆盖,因此推迟被记录在进度行上:该批次的进度更新把 `snapshot_stale_since` 写为 snapshot 的 `updated_at`(迁移 `V36`),`findMaterializationTargets` 重新选中标记已至少 `SNAPSHOT_REFRESH_MILLIS` 旧的会话;被重新选中的(空)周期把 snapshot 收敛并清除标记。若没有这一重选,已追平的空闲会话永远不会被再次访问,snapshot 将永久陈旧;该标记使每周期扫描无需逐行探测 snapshot 表。
 
-所有 snapshot 读方(`listPublicItems`、`transcript`、SSE resync 帧、`advanceReplayFloor`)本来就以 snapshot 自身的 `covered_sequence` 为准,因此更陈旧的 snapshot 仍然自洽;`transcript` 还会续读 snapshot 之后的事件(以调用方的 `limit` 为界,保留最新事件并报告截断供翻页),因此 WebShell 流的事件视图不失去实时性——其 items 数组来自 snapshot,滞后幅度与第 9 节对 `listPublicItems` 所述相同。
+所有 snapshot 读方(`listPublicItems`、`transcript`、SSE resync 帧、`advanceReplayFloor`)本来就以 snapshot 自身的 `covered_sequence` 为准,因此更陈旧的 snapshot 仍然自洽;`transcript` 还会续读 snapshot 之后的事件(以调用方的 `limit` 为界,保留最新事件并报告截断供翻页),因此 WebShell 流的事件视图不失去实时性——其 items 数组来自 snapshot,滞后幅度与第 9 节对 `listPublicItems` 所述相同。跨越页缝的回翻可能把首页内联的控制事件再返回一次(cursor 路径不加过滤地返回 cursor 之前的原始事件流);事件 sequence 是稳定标识,客户端按它去重——WebShell 客户端的合并逻辑正是如此。
 
 ## 4. SSE 读授权复检窗口
 
@@ -54,7 +54,7 @@ Managed Agent Runtime Broker 的四条热路径把数据库工作量放大到远
 
 ## 6. 发布授权 O(1)
 
-迁移 `V34` 为 `qwen_managed_session_journal_head` 增加五个可空列:`activation_id`、`activation_phase`、`activation_event_epoch`、`activation_expires_at` 与 `activation_head_revision`。`ManagedSessionStore.commit` 在每次提交本就要做的扩展记录解析遍历中顺带收集最后一条区间内的 `activation.changed` 的 payload(不再额外解码记录字节),把其字段写入 head——与推进 `journal_revision` 在同一条 head `UPDATE` 中;时间戳 `activation_head_revision = journal_revision` 在每次提交时都写入,无论该批是否携带 activation 变更。因此 head 行在相同的锁纪律下承载 journal 的当前 activation 状态,而时间戳标明这些列反映到哪个 journal revision:不维护这些列的二进制的提交仍会推进 `journal_revision`,于是其 head 无法通过时间戳相等检查,授权回退重扫 journal——滚动窗口因此自愈:扫描的回填会重写各列并重新打戳。payload 可能缺少 `expiresAt`(`timeOrNull`);对应列为 NULL 时新鲜性检查失败,与 journal 扫描读不到该值的效果一致。payload 的 `expiresAt` 的三个读取方(commit 提取与两处回填扫描)共用一个宽松 helper——整数数字或整数字符串,否则视为缺失,且在任何 BigInteger 物化之前先做宽度预检,指数形态字符串零开销——因此扫描与 head 列对「是否可表示」永不分歧。
+迁移 `V34` 为 `qwen_managed_session_journal_head` 增加五个可空列:`activation_id`、`activation_phase`、`activation_event_epoch`、`activation_expires_at` 与 `activation_head_revision`。`ManagedSessionStore.commit` 在每次提交本就要做的扩展记录解析遍历中顺带收集最后一条区间内的 `activation.changed` 的 payload(不再额外解码记录字节),把其字段写入 head——与推进 `journal_revision` 在同一条 head `UPDATE` 中;时间戳 `activation_head_revision = journal_revision` 在携带 activation 变更的提交上写入,在其余提交上仅当被保留的列在上一 revision 还是最新时才推进——被保留列的时间戳已经落后时提交保持其落后,因此 pre-V34 写入方留下的偏差永远不会被重新打戳伪装成新鲜。因此 head 行在相同的锁纪律下承载 journal 的当前 activation 状态,而时间戳标明这些列反映到哪个 journal revision:不维护这些列的二进制的提交仍会推进 `journal_revision`,于是其 head 无法通过时间戳相等检查,授权回退重扫 journal——滚动窗口因此自愈:扫描的回填会重写各列并重新打戳。payload 可能缺少 `expiresAt`(`timeOrNull`);对应列为 NULL 时新鲜性检查失败,与 journal 扫描读不到该值的效果一致。payload 的 `expiresAt` 的三个读取方(commit 提取与两处回填扫描)共用一个宽松 helper——整数数字或整数字符串,否则视为缺失,且在任何 BigInteger 物化之前先做宽度预检,指数形态字符串零开销——因此扫描与 head 列对「是否可表示」永不分歧。
 
 当滚动部署的集群仍可能运行 pre-V34 旧二进制(提交时不维护这些列)时,head 尚不可信,因此 `qwen.managed-agent.tool-publication.journal-head-authorization`(默认 `false`)让授权继续走 journal 扫描。待所有写入方都运行 V34 schema 对应的代码后,运维打开开关:
 

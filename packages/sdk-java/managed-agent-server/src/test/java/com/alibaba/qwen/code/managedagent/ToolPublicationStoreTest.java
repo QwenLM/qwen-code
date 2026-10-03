@@ -1352,8 +1352,12 @@ class ToolPublicationStoreTest {
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null).path("state").asText()).isEqualTo("FENCED");
     }
 
-    @Test
-    void sameEpochReleasePreventsReserveAndRenew() {
+    // The release fence must hold on the shipped legacy scan and on the
+    // head fast path alike.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sameEpochReleasePreventsReserveAndRenew(boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
         reserve();
         append("activation.release", event(3, "activation.changed", activation("released")) + "{}\n", 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");

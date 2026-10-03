@@ -52,6 +52,18 @@ class ManagedAgentPropertiesTest {
                 .load("application.yml",
                         new org.springframework.core.io.ClassPathResource(
                                 "application.yml"));
+        // The flattened keys must exist: a renamed or dropped key would
+        // bind nothing, and the value assertions below would pass on the
+        // Java defaults.
+        assertThat(yaml).anySatisfy(source -> {
+            assertThat(source.containsProperty("qwen.managed-agent.events"
+                    + ".read-grant-recheck-interval")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.artifacts"
+                    + ".read-revalidation-interval")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent"
+                    + ".tool-publication.journal-head-authorization"))
+                    .isTrue();
+        });
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withInitializer(ctx -> yaml.forEach(

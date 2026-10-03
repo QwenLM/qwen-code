@@ -1025,6 +1025,55 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void noChangeCommitDoesNotRestampASkewedHead() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        // The rolling-window skew: the columns hold the active activation,
+        // then a pre-V34 binary commits a release (journal row + revision
+        // bump, columns and stamp untouched) — reproduced by restoring the
+        // pre-commit columns and stamp after a real release commit.
+        var head = fixture.jdbc.queryForMap("SELECT activation_id,"
+                + " activation_phase, activation_event_epoch,"
+                + " activation_expires_at, activation_head_revision"
+                + " FROM qwen_managed_session_journal_head");
+        append("activation.release",
+                event(journal.sequence + 1, "activation.changed",
+                        activation("released")) + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " activation_id = ?, activation_phase = ?,"
+                        + " activation_event_epoch = ?,"
+                        + " activation_expires_at = ?,"
+                        + " activation_head_revision = ?",
+                head.get("activation_id"), head.get("activation_phase"),
+                head.get("activation_event_epoch"),
+                head.get("activation_expires_at"),
+                head.get("activation_head_revision"));
+        // A current binary then commits a batch with no activation change:
+        // it must not advance the skewed columns' stamp, or the stale
+        // active state would be certified as current.
+        append("tool.dispatch",
+                event(journal.sequence + 1, "tool.progress",
+                        JSON.createObjectNode()) + "{}\n",
+                1, List.of(), null);
+        var stamped = fixture.jdbc.queryForMap(
+                "SELECT activation_head_revision, journal_revision"
+                        + " FROM qwen_managed_session_journal_head");
+        assertThat(stamped.get("activation_head_revision"))
+                .isNotEqualTo(stamped.get("journal_revision"));
+        // The skew stays detectable: authorization rescans the journal and
+        // fences the release.
+        fixture.ledger.reset();
+        assertThatThrownBy(() -> publication.store().verifyDispatch(
+                publication.executions().findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isGreaterThan(0);
+    }
+
+    @Test
     void unrepresentableExpiresAtFencesTheHeadCleanly() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
@@ -1072,6 +1121,20 @@ class Issue13181QueryBudgetTest {
                 .put("phase", "active").put("expiresAt", "1e100000000");
         append("activation.exponent",
                 event(journal.sequence + 1, "activation.changed", exponent) + "{}\n",
+                1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
+                "checkpoint-1");
+        assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
+                        + " FROM qwen_managed_session_journal_head",
+                Long.class)).isNull();
+        // The width check itself must not overflow: the largest exponent a
+        // JSON string can carry wraps an int precision-minus-scale negative,
+        // which must still read as absent rather than materialize.
+        ObjectNode maxExponent = JSON.createObjectNode()
+                .put("activationId", ACTIVATION_ID).put("epoch", 1)
+                .put("phase", "active").put("expiresAt", "1e2147483647");
+        append("activation.max-exponent",
+                event(journal.sequence + 1, "activation.changed", maxExponent)
+                        + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
