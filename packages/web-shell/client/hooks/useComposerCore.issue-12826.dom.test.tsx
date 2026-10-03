@@ -31,7 +31,10 @@
 //    itself (ChatEditor's handleAddMenuInsertReference and file-reference
 //    paths, both placement:'inline') and gets its React root from the
 //    built-in preview-icon branch in toDOM(), never from a host
-//    renderContent. The last test below covers that branch.
+//    renderContent. The 'does not re-enter the editor for a chip built by the
+//    built-in file-icon branch' test below covers that branch; the two 'defers
+//    a failed inline tag ...' tests cover the host-renderer catch paths, which
+//    that host never reaches.
 //  - NOT resolved: the specific commit-phase frame that dispatched into the
 //    editor in the reporter's minified stack (webview.js:680:8046). The
 //    panel has no useLayoutEffect and web-shell exposes no onSubmit prop
@@ -352,6 +355,9 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
         return appendChild.call(this, child);
       });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Captured before the chip is added: chipUnmounts is a module-level counter
+    // reset per test, so the release can only be read as a before/after delta.
+    const unmountsBefore = chipUnmounts;
 
     try {
       addFileChip('notes.txt');
@@ -367,9 +373,13 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
         '[WebShell] inline tag renderContent failed',
         contentAppendError,
       );
-      // The failed root was released (deferred, not skipped) ...
+      // The failed content root was released (deferred, not skipped). Only that
+      // root renders <ChipProbe/>, so its cleanup counter is root-scoped, while
+      // the shared unmount spy sees every root alive in the window ...
+      expect(chipUnmounts).toBeGreaterThan(unmountsBefore);
       expect(states.length).toBeGreaterThan(0);
-      // ... and only once CodeMirror had left its update cycle.
+      // ... and each observed unmount ran only once CodeMirror had left its
+      // update cycle.
       expect(states).toEqual(states.map(() => CM_IDLE));
       // That catch re-assigns this.contentRoot for the built-in file icon, so
       // the deferred unmount has to release the root it captured, not the
@@ -414,6 +424,11 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
         tooltipAppendError,
       );
       expect(view.contentDOM.querySelector('[role="tooltip"]')).toBeNull();
+      // Twin of the icon guard above: only the tooltip root is released here.
+      // Custom content rendered fine, so the live content root must survive.
+      expect(
+        view.contentDOM.querySelector('[data-testid="chip-content"]'),
+      ).not.toBeNull();
       expect(states.length).toBeGreaterThan(0);
       expect(states).toEqual(states.map(() => CM_IDLE));
     } finally {
