@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -716,6 +717,61 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void boundWebShellPageBatchesTheCreatorSubmitCapability() {
+        Fixture fixture = new Fixture();
+        when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        String tenant = "tenant-" + UUID.randomUUID();
+        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+                + " (tenant_id, workspace_id, workspace_generation,"
+                + " storage_id, display_name, config_ref, policy_ref, state)"
+                + " VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?,"
+                + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        for (String actor : new String[] {"actor", "other"}) {
+            fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                    + " (tenant_id, workspace_id, actor_id, can_read,"
+                    + " can_create) VALUES (?, 'workspace', ?, TRUE, TRUE)",
+                    tenant, actor.getBytes(StandardCharsets.UTF_8));
+        }
+        List<String> ids = new ArrayList<>();
+        for (int index = 0; index < 6; index++) {
+            String creator = index < 4 ? "actor" : "other";
+            String key = "ws-" + index + "-" + UUID.randomUUID();
+            String title = "w-" + index;
+            ids.add(fixture.tx.execute(status -> fixture.store
+                    .insertWorkspaceSessionCommand(tenant, creator, key,
+                            "digest", "qwen-code", null, title,
+                            List.of(), null,
+                            new WorkspaceSelection("workspace", ".")))
+                    .sessionId());
+        }
+        // One creator-owned session is closed: the shape gate fences it even
+        // for its creator.
+        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+                + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
+                ids.get(3));
+        fixture.ledger.reset();
+        var page = fixture.service.listWebShellSessions(tenant, "actor",
+                null, 20).data();
+        assertThat(page).hasSize(6);
+        System.out.println("[issue-13181] listWebShellSessions(6 mixed"
+                + " creator rows): " + fixture.ledger.summary());
+        // Page + latest turns + the close batch + the creator batch + the
+        // grant batch: constant, not two registry reads per row.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
+        assertThat(fixture.ledger.count(
+                "from managed_workspace_create_command")).isEqualTo(1);
+        assertThat(fixture.ledger.count("from managed_workspace_registry"))
+                .isEqualTo(1);
+        // workspaceTurns holds exactly for the caller's own ACTIVE sessions.
+        for (var row : page) {
+            int index = ids.indexOf(row.sessionId());
+            assertThat(row.capabilities().workspaceTurns())
+                    .isEqualTo(index < 3);
+        }
+    }
+
+    @Test
     void transcriptTailIsBoundedByTheCallerLimit() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
@@ -1407,6 +1463,7 @@ class Issue13181QueryBudgetTest {
         final SessionEventHub hub = new SessionEventHub();
         final ManagedAgentStore store;
         final ManagedAgentService service;
+        final HarnessConnector harness = mock(HarnessConnector.class);
 
         Fixture() {
             this(Clock.systemUTC());
@@ -1429,7 +1486,7 @@ class Issue13181QueryBudgetTest {
                     registry, new ManagedAgentProperties());
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
-                    mock(HarnessConnector.class), registry);
+                    harness, registry);
         }
     }
 
