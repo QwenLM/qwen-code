@@ -1278,7 +1278,8 @@ describe('ACP Bridge execution engines', () => {
       }),
       promptImpl: () => running.promise,
     });
-    const p = paired({}, engineChannel('legacy'), managed);
+    const onDiagnosticLine = vi.fn();
+    const p = paired({ onDiagnosticLine }, engineChannel('legacy'), managed);
     const valid = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const turn = p.bridge.sendPrompt(valid.sessionId, {
       sessionId: valid.sessionId,
@@ -1298,6 +1299,17 @@ describe('ACP Bridge execution engines', () => {
     await turn;
     await vi.waitFor(() => expect(managed.killed).toBe(true));
     expect(p.legacy.killed).toBe(false);
+    expect(p.bridge.getSessionSummary('legacy-1')).toBeDefined();
+    expect(
+      onDiagnosticLine.mock.calls.filter(([line]) =>
+        line.includes('channel exited'),
+      ),
+    ).toEqual([
+      [
+        'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+        'warn',
+      ],
+    ]);
   });
 
   it('rejects foreign-channel permission requests without creating a vote', async () => {

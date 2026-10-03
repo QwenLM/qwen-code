@@ -22,6 +22,8 @@ export interface HarnessChannel {
   workspaceControlInFlight: number;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
+  /** Diagnostic cause, separate from the scheduling flag above. */
+  retiringAfterWorkspaceTimeout?: boolean;
   /**
    * Set when an empty channel should be reaped after overlapping
    * session/workspace-control work drains.
