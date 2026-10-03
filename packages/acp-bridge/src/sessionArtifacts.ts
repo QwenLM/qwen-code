@@ -425,8 +425,13 @@ export class SessionArtifactStore {
             this.findPublishedUpgradeTarget(artifact) ??
             this.findPublishedWorkspaceTarget(artifact);
           if (!existing) {
+            // Standalone publish of a local file:// page (non-snapshot):
+            // coerce to ephemeral so it never journals as a durable record
+            // that restore cannot relink. Upgrade merges keep the
+            // predecessor's retention — mergeRetention decides.
+            const coerced = this.coerceStandalonePublishedFile(artifact);
             const stored: StoredArtifact = {
-              ...artifact,
+              ...coerced,
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
@@ -604,8 +609,14 @@ export class SessionArtifactStore {
     });
   }
 
+  // Narrowed to the fields the helper reads: a future field read inside
+  // must fail typecheck here instead of silently seeing undefined at
+  // partial-literal call sites (R5-3).
   private findPublishedUpgradeTarget(
-    artifact: NormalizedArtifact,
+    artifact: Pick<
+      NormalizedArtifact,
+      'storage' | 'trustedPublisher' | 'managedId' | 'url'
+    >,
   ): StoredArtifact | undefined {
     if (
       artifact.storage !== 'published' ||
@@ -642,6 +653,31 @@ export class SessionArtifactStore {
     }
 
     return undefined;
+  }
+
+  // Restore-time trust rules treat a local file:// published page
+  // (non-snapshot) as untrusted, so journaling it `restorable` produces a
+  // dead record whose only effect is piled-up restore warnings. Coerce it
+  // to `ephemeral` up front and mark the choice explicit so later merges
+  // keep the pin. Runs only for records with no durable predecessor —
+  // upgrade merges keep the predecessor's retention instead (R4-1).
+  private coerceStandalonePublishedFile(
+    artifact: NormalizedArtifact,
+  ): NormalizedArtifact {
+    if (
+      artifact.retention !== 'ephemeral' &&
+      artifact.storage === 'published' &&
+      artifact.url !== undefined &&
+      isFileArtifactUrl(artifact.url) &&
+      getWebPreviewSnapshotId(artifact) === undefined
+    ) {
+      return {
+        ...artifact,
+        retention: 'ephemeral',
+        retentionExplicit: true,
+      };
+    }
+    return artifact;
   }
 
   private findPublishedWorkspaceTarget(
@@ -785,10 +821,31 @@ export class SessionArtifactStore {
             warnings,
             options.workspaceAccess === 'metadata-only',
           );
+          // Legacy `published + file://` marker artifacts fail the trust
+          // check in normalizeRestoredMarkerArtifact; the helper pushes a
+          // `skipped marker artifact` warning. Strip that specific warning
+          // so the cascade (completeness check, restore rollback, snapshot
+          // reclamation block) doesn't fire. The gate mirrors the main
+          // loop: source + storage/URL/snapshot shape, no toolName — the
+          // workspace→published upgrade keeps the workspace producer's
+          // name, which would otherwise leave mainstream markers loud.
+          if (
+            !markerArtifact &&
+            artifact.storage === 'published' &&
+            typeof artifact.url === 'string' &&
+            isFileArtifactUrl(artifact.url) &&
+            getWebPreviewSnapshotId(artifact) === undefined &&
+            (artifact.source === 'tool' || artifact.source === 'hook') &&
+            warnings.at(-1)?.startsWith('skipped marker artifact ') &&
+            warnings.at(-1)?.includes('url must use http or https')
+          ) {
+            warnings.pop();
+          }
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
         }
       }
+      let legacyPublishedFileCount = 0;
       for (const artifact of snapshot?.artifacts ?? []) {
         try {
           const input = persistedArtifactToInput(artifact);
@@ -873,6 +930,35 @@ export class SessionArtifactStore {
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
+          // Drop legacy `published + file:// + restorable` records
+          // quietly: they were written before write-time coercion,
+          // restore-time trust rejects them, and pushing `skipped …`
+          // would (a) trip `isArtifactSnapshotCompletenessWarning`,
+          // (b) count toward the `restoredCount === 0` rollback, and
+          // (c) block snapshot reclamation. A `published + file://`
+          // record can only exist if a trusted-publisher ingest accepted
+          // it (`normalizeArtifactUrl(url, false)` throws for everyone
+          // else), so the source plus the storage/URL/snapshot shape is
+          // enough; toolName is deliberately NOT part of the gate —
+          // records this store produced itself via the workspace→
+          // published upgrade carry the workspace producer's name
+          // (e.g. `write_file`), and gating on the artifact-tool name
+          // would let exactly the mainstream legacy shape fall back to
+          // the loud path this PR exists to prevent. Non-tool sources
+          // (client, hook) still flow through the trust check and stay
+          // loud.
+          const isLegacyFileArtifact =
+            error instanceof Error &&
+            error.message === 'url must use http or https' &&
+            artifact.storage === 'published' &&
+            typeof artifact.url === 'string' &&
+            isFileArtifactUrl(artifact.url) &&
+            getWebPreviewSnapshotId(artifact) === undefined &&
+            (artifact.source === 'tool' || artifact.source === 'hook');
+          if (isLegacyFileArtifact) {
+            legacyPublishedFileCount++;
+            continue;
+          }
           warnings.push(
             `skipped artifact restore: ${
               error instanceof Error ? error.message : String(error)
@@ -880,7 +966,12 @@ export class SessionArtifactStore {
           );
         }
       }
-      if (snapshot.artifacts.length > 0 && restoredCount === 0) {
+      if (
+        snapshot.artifacts.length > legacyPublishedFileCount &&
+        restoredCount === 0
+      ) {
+        // At least one snapshot record wasn't a legacy drop — a real
+        // restore failure. Roll back to preserve live state.
         this.restoreState(previousState);
         const rollbackWarnings = [
           ...baselineWarnings,
@@ -888,6 +979,30 @@ export class SessionArtifactStore {
         ];
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
+      }
+      if (
+        snapshot.artifacts.length > 0 &&
+        legacyPublishedFileCount > 0 &&
+        restoredCount === 0
+      ) {
+        // Every snapshot record was a legacy published file:// drop — no
+        // real restore was attempted. Preserve previous state and carry
+        // the RESTORE_FAILED prefix so `isArtifactRestoreFailureWarning`
+        // classifies this restore as failed: three control-plane callers
+        // (attach ingest, deferred replay, rewind snapshot) key off that
+        // predicate to decide whether to ingest/replay/record afterwards,
+        // and reporting an empty restore as success silently drops
+        // replay-frame-only artifacts and can overwrite a rewind
+        // target's journal. The text avoids a leading `skipped ` so the
+        // snapshot-completeness channel is not tripped as well — failure
+        // and completeness are independent classifications here.
+        this.restoreState(previousState);
+        const allLegacyWarnings = [
+          ...baselineWarnings,
+          `${RESTORE_FAILED_WARNING_PREFIX}; ${snapshot.artifacts.length} snapshot records were all legacy published file:// drops; live state preserved without a restore attempt`,
+        ];
+        this.setLastRestoreWarnings(allLegacyWarnings);
+        return allLegacyWarnings;
       }
       if (
         previousState.artifacts.size > 0 &&
@@ -1681,6 +1796,12 @@ export class SessionArtifactStore {
     const retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
+    // Local file:// published pages (non-snapshot) are coerced to
+    // `ephemeral` by the upsert apply loop, not here: standalone-vs-upgrade
+    // is a property of the store state at apply time, so deciding it during
+    // normalization would make durability depend on batch boundaries
+    // (R5-3). The snapshot path stays restorable via
+    // `getWebPreviewSnapshotId`.
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
         ? {
@@ -2248,6 +2369,7 @@ function mergeArtifact(
         ? existing.metadata
         : mergeMetadata(existing, incoming),
     retention: mergeRetention(existing, incoming),
+    retentionExplicit: existing.retentionExplicit || incoming.retentionExplicit,
     restoreState: 'live',
     persistenceWarning:
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
