@@ -19,9 +19,16 @@ RUN mvn --batch-mode --no-transfer-progress \
 FROM eclipse-temurin:21-jre
 
 WORKDIR /app
+# Version-independent: the build fails (not a silent bad image) unless the
+# package step produced exactly one jar.
 COPY --from=build \
-  /workspace/packages/sdk-java/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  /workspace/packages/sdk-java/managed-agent-server/target/qwen-managed-agent-server-*.jar \
   /app/qwen-managed-agent-server.jar
+
+# A published image must listen beyond loopback for -p to work; the
+# application.yml loopback defaults stay host-appropriate.
+ENV QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+    QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0
 
 EXPOSE 8080 4182
 USER 10001
