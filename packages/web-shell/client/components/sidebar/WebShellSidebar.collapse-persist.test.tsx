@@ -2028,6 +2028,10 @@ describe('WebShellSidebar rail navigation', () => {
   });
 
   it('restores the column from the Channels rail entry', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_source_metadata'],
+    };
     const onCollapsedChange = vi.fn();
     renderSidebar(true, { layout: 'rail', onCollapsedChange });
     await flushSidebar();
@@ -2040,6 +2044,49 @@ describe('WebShellSidebar rail navigation', () => {
       ),
     );
     expect(onCollapsedChange).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the persisted collapse when Channels has no column to restore', async () => {
+    // Without the session_source_metadata capability the Channels rail entry
+    // opens a full page, not a column, so its click must leave the persisted
+    // collapse preference untouched.
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, { layout: 'rail', onCollapsedChange });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Channels"]',
+        )!,
+      ),
+    );
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+  });
+
+  it('does not persist the expansion when the rail entry is tapped in the mobile drawer', async () => {
+    // The drawer forces the effective collapsed state false, so a tap that
+    // only navigates must not write the desktop collapse preference.
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_source_metadata'],
+    };
+    const onCollapsedChange = vi.fn();
+    renderSidebar(false, {
+      layout: 'rail',
+      mobileOpen: true,
+      onCollapsedChange,
+    });
+    await flushSidebar();
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Channels"]',
+        )!,
+      ),
+    );
+    expect(onCollapsedChange).not.toHaveBeenCalled();
   });
 
   it('restores the persisted width from state when a drag collapses the sidebar', async () => {
@@ -2074,7 +2121,7 @@ describe('WebShellSidebar rail navigation', () => {
   });
 
   it('never persists a drag width beyond half the container', async () => {
-    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    renderSidebar(false, { layout: 'rail', containerWidth: 800 });
     await flushSidebar();
     const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
     act(() => {
@@ -2094,7 +2141,80 @@ describe('WebShellSidebar rail navigation', () => {
     // must not record a width the user never saw.
     expect(
       window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
-    ).toBe('300');
+    ).toBe('400');
+  });
+
+  it('keeps the wider stored width when a capped drag cannot move the edge', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    // The CSS caps the rendered width at half the container, so the measured
+    // rect is narrower than the stored preference.
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 302, pointerId: 1 }),
+      );
+    });
+
+    // The 2px displacement lands past the container cap, so the edge never
+    // moved: persisting the capped width here would let a temporarily narrow
+    // host shrink the user's wider preference.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+  });
+
+  it('restores the state width when a drag returns to its start', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 400, pointerId: 1 }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 300, pointerId: 1 }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 300, pointerId: 1 }),
+      );
+    });
+
+    // Starting a drag and letting go where it began changes nothing: the
+    // state width returns to the stored preference, which stays untouched.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
   });
 
   it('keeps the rendered width at the rail minimum while dragging below it', async () => {

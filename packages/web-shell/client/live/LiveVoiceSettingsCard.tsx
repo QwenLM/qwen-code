@@ -160,9 +160,14 @@ export function LiveVoiceSettingsCard({
   // A draft field the latest status now saves verbatim is settled — drop it
   // and its conflict baseline. Otherwise the stale baseline survives a
   // refresh that converged onto the staged value, and the next edit of that
-  // field is blocked by a conflict the user never saw.
+  // field is blocked by a conflict the user never saw. Draft-only re-renders
+  // must not settle: a padded draft that trims onto the saved value is still
+  // being typed into, so only a genuine status change may converge it.
+  const lastSettleStatus = useRef<UseLiveVoiceSetupResult['status']>(undefined);
   useEffect(() => {
-    if (!status) return;
+    const statusChanged = lastSettleStatus.current !== status;
+    lastSettleStatus.current = status;
+    if (!status || !statusChanged) return;
     const settled = (
       ['enabled', 'model', 'voice', 'endpoint', 'shortcut'] as const
     ).filter((key) => {

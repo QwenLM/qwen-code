@@ -1072,14 +1072,16 @@ export function WebShellSidebar({
   // Column-restoring entries (Home, Channels, Live) must leave the collapsed
   // state behind or a collapsed user's click appears to do nothing; full-page
   // entries keep the column hidden regardless, so they leave the persisted
-  // collapse preference untouched.
+  // collapse preference untouched. Only an actually collapsed rail restores:
+  // the mobile drawer forces `collapsed` false, and writing the expansion
+  // from there would silently clear the user's desktop collapse preference.
   const openNavigation = (
     open: (() => void) | undefined,
     restoresColumn = false,
   ) => {
     if (railLayout) {
       setMoreOpen(false);
-      if (restoresColumn) onCollapsedChange(false);
+      if (restoresColumn && collapsed) onCollapsedChange(false);
     }
     open?.();
   };
@@ -4387,8 +4389,10 @@ export function WebShellSidebar({
       function handlePointerUp(upEvent: PointerEvent) {
         // A press-release without movement is a click, not a drag. Persisting
         // here would store the container-capped rendered width over the user's
-        // wider preference.
+        // wider preference; pointer moves may also have clamped the state
+        // width to that cap, so restore the pre-drag width in state as well.
         if (upEvent.clientX === startX) {
+          setSidebarWidth(clampSidebarWidth(startStateWidth, sidebarMinWidth));
           teardown(true);
           return;
         }
@@ -4402,8 +4406,18 @@ export function WebShellSidebar({
           sidebarMinWidth,
           containerWidth,
         );
-        setSidebarWidth(nextWidth);
-        writeSidebarWidth(nextWidth);
+        // A drag that ends past the container cap while the cap already
+        // bound the start width could never move the visible edge. Storing
+        // the capped width would let a temporarily narrow host shrink the
+        // user's preference, so keep the pre-drag (window-capped) width.
+        const cappedByContainer =
+          rawWidth >= getSidebarDragMaxWidth(containerWidth) &&
+          startStateWidth > nextWidth;
+        const finalWidth = cappedByContainer
+          ? clampSidebarWidth(startStateWidth, sidebarMinWidth)
+          : nextWidth;
+        setSidebarWidth(finalWidth);
+        writeSidebarWidth(finalWidth);
         teardown(true);
       }
       function handlePointerCancel() {
@@ -5606,7 +5620,9 @@ export function WebShellSidebar({
           aria-current={
             railLayout && activePage === 'channels' ? 'page' : undefined
           }
-          onClick={() => openNavigation(onOpenChannels, true)}
+          onClick={() =>
+            openNavigation(onOpenChannels, channelNavigationEnabled)
+          }
         >
           <span className={styles.navIcon}>
             <MessagesSquareIcon size={16} strokeWidth={1.2} />

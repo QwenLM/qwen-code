@@ -534,6 +534,48 @@ describe('LiveVoiceSettingsCard', () => {
     expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
   });
 
+  it('does not settle a draft while the user is typing into it', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    // No status refresh happens while typing, so the padded draft keeps its
+    // in-progress characters even when its trimmed form matches the saved
+    // value.
+    act(() => setInputValue(voice(), ''));
+    for (const character of 'Tina Smith') {
+      act(() => {
+        const input = voice();
+        setInputValue(input, input.value + character);
+      });
+    }
+    expect(voice().value).toBe('Tina Smith');
+
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      voice: 'Tina Smith',
+    });
+  });
+
+  it('keeps a padded draft that trims onto the saved value until a refresh converges it', () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() => setInputValue(voice(), 'Tina '));
+    expect(voice().value).toBe('Tina ');
+
+    // A trimmed draft is excluded from the update payload, so Save stays
+    // disabled until the value diverges from the saved one.
+    expect(save().disabled).toBe(true);
+  });
+
   it('keeps the shortcut capture disabled until the status loads', () => {
     const setup = { ...setupResult({}), status: undefined };
     const container = mount(setup);

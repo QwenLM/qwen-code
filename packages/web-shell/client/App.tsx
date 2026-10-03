@@ -9431,14 +9431,19 @@ export function App({
     sidebarOptions.enabled &&
     sidebarRailEnabled &&
     (sidebarLayoutWidth ?? window.innerWidth) > 760;
+  // In the split-view fold band the auto-fold, not the user, owns the
+  // rendered state. Toggles issued there must rewrite the unchanged
+  // preference rather than toggle it, or a visually no-op keypress flips the
+  // stored value (and a stored `true` can never be reached again).
+  const splitFoldedSidebar =
+    mainView === 'split' && !splitSidebarHasRoom && !mobileDrawerOpen;
   // The collapsed value the sidebar actually renders: the split-view
   // auto-fold and the mobile drawer override the persisted preference.
   // Keyboard toggles and dock breakpoints must read this expression, not the
   // raw state, or they silently invert the stored preference while the
   // auto-fold owns the screen.
   const sidebarCollapsedEffective =
-    (sidebarCollapsed || (mainView === 'split' && !splitSidebarHasRoom)) &&
-    !mobileDrawerOpen;
+    (sidebarCollapsed || splitFoldedSidebar) && !mobileDrawerOpen;
   // One compact-chrome signal for the whole shell: the sidebar drawer chrome
   // and the empty-chat welcome layout both key off it, so they cannot split
   // when an embedded container disagrees with the viewport.
@@ -9568,7 +9573,9 @@ export function App({
         }
         return;
       }
-      handleSidebarCollapsedChange(!sidebarCollapsedEffective);
+      handleSidebarCollapsedChange(
+        splitFoldedSidebar ? sidebarCollapsed : !sidebarCollapsedEffective,
+      );
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -9576,7 +9583,9 @@ export function App({
     sidebarOptions.enabled,
     mobileDrawerOpen,
     forceMobileDrawer,
+    sidebarCollapsed,
     sidebarCollapsedEffective,
+    splitFoldedSidebar,
     sidebarLayoutWidth,
     handleSidebarCollapsedChange,
   ]);
@@ -20099,11 +20108,15 @@ export function App({
                   containerWidth={sidebarLayoutWidth}
                   activePage={sidebarPage}
                   onOpenHome={() => {
+                    // No handleSidebarCollapsedChange here: the rail's
+                    // openNavigation already restores the column when it is
+                    // actually collapsed; writing from inside the forced-open
+                    // mobile drawer would silently clear the desktop
+                    // preference.
                     closeMobileDrawer();
                     setSidebarSection('home');
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
-                    handleSidebarCollapsedChange(false);
                   }}
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
