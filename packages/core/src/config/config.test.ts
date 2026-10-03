@@ -10,7 +10,15 @@ import {
 } from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import type {
   ConfigParameters,
@@ -113,11 +121,20 @@ import {
   getUserAutoMemoryIndexPath,
 } from '../memory/paths.js';
 import {
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import {
+  notifyMemoryEnabledChange,
+  notifyMemoryFileChange,
+  registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
+  type MemoryChangedNotice,
+} from '../memory/memory-file-change.js';
+import { runAutoMemoryExtract } from '../memory/extract.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
@@ -233,6 +250,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
+  ToolRegistryMock.prototype.stop = vi.fn().mockResolvedValue(undefined);
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
@@ -283,6 +301,9 @@ vi.mock('../memory/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/extract.js', () => ({
+  runAutoMemoryExtract: vi.fn(),
 }));
 vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
@@ -1548,6 +1569,304 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getMessageBus()).toBeUndefined();
       expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('memory change listener registration', () => {
+    it.each([false, true])(
+      'retains the closing session listener through a scheduled memory write (idle sibling=%s)',
+      async (withSibling) => {
+        const temp = await mkdtemp(path.join(os.tmpdir(), 'memory-shutdown-'));
+        vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', temp);
+        clearAutoMemoryRootCache();
+        const workspace = path.join(temp, 'repo');
+        await mkdir(path.join(workspace, '.git'), { recursive: true });
+        const config = new Config({
+          ...baseParams,
+          cwd: workspace,
+          targetDir: workspace,
+        });
+        await config.initialize();
+        const hooks = config.getHookSystem()!;
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+        const fire = vi.fn().mockResolvedValue({});
+        hooks.fireMemoryChangedEvent = fire;
+        const sibling = withSibling
+          ? new Config({ ...baseParams, cwd: workspace, targetDir: workspace })
+          : undefined;
+        await sibling?.initialize();
+        const siblingFire = vi.fn().mockResolvedValue({});
+        if (sibling)
+          sibling.getHookSystem()!.fireMemoryChangedEvent = siblingFire;
+        const file = path.join(
+          path.dirname(getAutoMemoryIndexPath(config.getProjectRoot())),
+          'after-close.md',
+        );
+        await mkdir(path.dirname(file), { recursive: true });
+        let enter!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+          async (params) => {
+            await withCoalescedMemoryChanges(
+              params.projectRoot,
+              config.getMemoryHookDeliveryId(),
+              async () => {
+                enter();
+                await gate;
+                await writeFile(file, 'durable fact after close\n');
+              },
+            );
+            return {
+              touchedTopics: ['user'],
+              cursor: {
+                sessionId: params.sessionId,
+                updatedAt: new Date().toISOString(),
+              },
+            };
+          },
+        );
+        const task = config.getMemoryManager().scheduleExtract({
+          projectRoot: config.getProjectRoot(),
+          sessionId: config.getSessionId(),
+          config,
+          history: [
+            { role: 'user', parts: [{ text: 'Keep this durable fact.' }] },
+          ],
+        });
+        try {
+          await entered;
+          await config.shutdown({ shutdownTelemetry: false });
+          await config.shutdown({ shutdownTelemetry: false });
+          release();
+          await task;
+          await config.getMemoryManager().drain();
+          await Promise.resolve();
+          expect(await readFile(file, 'utf8')).toBe(
+            'durable fact after close\n',
+          );
+          expect(fire).toHaveBeenCalledOnce();
+          expect(fire).toHaveBeenCalledWith(
+            expect.objectContaining({
+              operation: 'create',
+              relativePaths: ['after-close.md'],
+            }),
+            undefined,
+          );
+          expect(siblingFire).not.toHaveBeenCalled();
+          const delivered = fire.mock.calls.length;
+          await notifyMemoryEnabledChange(
+            config.getProjectRoot(),
+            false,
+            config.getMemoryHookDeliveryId(),
+          );
+          expect(fire).toHaveBeenCalledTimes(delivered);
+          expect(siblingFire).not.toHaveBeenCalled();
+          if (sibling) {
+            await notifyMemoryEnabledChange(
+              sibling.getProjectRoot(),
+              false,
+              sibling.getMemoryHookDeliveryId(),
+            );
+            expect(siblingFire).toHaveBeenCalledOnce();
+          }
+        } finally {
+          release();
+          await task;
+          await config.shutdown({ shutdownTelemetry: false });
+          await sibling?.shutdown({ shutdownTelemetry: false });
+          vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+          vi.mocked(runAutoMemoryExtract).mockReset();
+          await rm(temp, { recursive: true, force: true });
+          vi.unstubAllEnvs();
+          clearAutoMemoryRootCache();
+        }
+      },
+    );
+    it('does not intercept id-less memory changes while shutdown tasks drain', async () => {
+      const liveSeen: MemoryChangedNotice[] = [];
+      const config = new Config({ ...baseParams });
+      const unregisterLive = registerMemoryChangedListener(
+        config.getProjectRoot(),
+        (change) => {
+          liveSeen.push(change);
+        },
+      );
+      await config.initialize();
+      const hooks = config.getHookSystem()!;
+      vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+      const fire = vi.fn().mockResolvedValue({});
+      hooks.fireMemoryChangedEvent = fire;
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(async (params) => {
+        enter();
+        await gate;
+        return {
+          touchedTopics: [],
+          cursor: {
+            sessionId: params.sessionId,
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      });
+      const task = config.getMemoryManager().scheduleExtract({
+        projectRoot: config.getProjectRoot(),
+        sessionId: config.getSessionId(),
+        config,
+        history: [
+          { role: 'user', parts: [{ text: 'Keep this durable fact.' }] },
+        ],
+      });
+      try {
+        await entered;
+        await config.shutdown({ shutdownTelemetry: false });
+        await notifyMemoryEnabledChange(config.getProjectRoot(), false);
+        expect.soft(liveSeen).toHaveLength(1);
+        expect.soft(fire).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await task;
+        await config.getMemoryManager().drain();
+        await config.shutdown({ shutdownTelemetry: false });
+        unregisterLive();
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+        vi.mocked(runAutoMemoryExtract).mockReset();
+      }
+    });
+
+    it('releases its memory listener after ordinary shutdown', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hooks = config.getHookSystem()!;
+      vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+      const fire = vi.fn().mockResolvedValue({});
+      hooks.fireMemoryChangedEvent = fire;
+      const notify = () =>
+        notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+      try {
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+        await config.shutdown({ shutdownTelemetry: false });
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+      }
+    });
+
+    it('does not register a memory listener after shutdown during hook initialization', async () => {
+      const config = new Config({ ...baseParams });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(HookSystem.prototype.initialize).mockReturnValueOnce(gate);
+      const internal = config as unknown as {
+        shutdownResourcesOnce: () => Promise<void>;
+      };
+      const cleanup = vi.spyOn(internal, 'shutdownResourcesOnce');
+      const initialize = config.initialize();
+      try {
+        await vi.waitFor(() => expect(config.getHookSystem()).toBeDefined());
+        await config.shutdown({ shutdownTelemetry: false });
+        release();
+        await initialize;
+        await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+        await cleanup.mock.results[0].value;
+
+        const hooks = config.getHookSystem()!;
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+        const fire = vi.fn().mockResolvedValue({});
+        hooks.fireMemoryChangedEvent = fire;
+        expect(config.getMemoryHookDeliveryId()).toBeDefined();
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        expect(fire).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await initialize;
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(HookSystem.prototype.hasHooksForEvent).mockReturnValue(false);
+        cleanup.mockRestore();
+      }
+    });
+
+    it('assigns a hooks-disabled Config a delivery id that matches no registration', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      await config.initialize();
+
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(
+        config.getProjectRoot(),
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        // Hooks are disabled for this Config, so its id is registered
+        // nowhere and must not fall through to another session's listener.
+        expect(seen).toEqual([]);
+        // Control: an id-less toggle still reaches the newest registration.
+        await notifyMemoryEnabledChange(config.getProjectRoot(), true);
+        expect(seen).toHaveLength(1);
+      } finally {
+        unregister();
+      }
+    });
+
+    it('forwards the caller abort signal to the MemoryChanged hook firing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hookSystem = config.getHookSystem();
+      expect(hookSystem).toBeDefined();
+      vi.mocked(hookSystem!.hasHooksForEvent).mockReturnValue(true);
+      const fireMemoryChangedEvent = vi.fn().mockResolvedValue({});
+      (hookSystem as unknown as Record<string, unknown>)[
+        'fireMemoryChangedEvent'
+      ] = fireMemoryChangedEvent;
+
+      const signal = AbortSignal.abort();
+      await notifyMemoryFileChange(
+        path.join(config.getProjectRoot(), '.qwen', 'memory', 'MEMORY.md'),
+        config.getProjectRoot(),
+        'update',
+        config.getMemoryHookDeliveryId(),
+        signal,
+      );
+
+      // The caller's signal must reach the hook firing unchanged: an aborted
+      // caller (a finished /forget, a torn-down session) must not run the
+      // hook to completion — executeHook returns 'cancelled' for an
+      // already-aborted signal (covered in hookRunner tests).
+      expect(fireMemoryChangedEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ scope: 'project', operation: 'update' }),
+        signal,
+      );
     });
   });
 
@@ -7754,64 +8073,106 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFilePaths()).toEqual([]);
   });
 
-  it('guards and rolls back the memory recall mode transition by revision', async () => {
-    const config = Object.create(Config.prototype) as Config;
-    Object.assign(config, {
-      memoryRecallMode: 'legacy',
-      memoryRecallModeInitialized: true,
-      memoryCorpusRevision: 'legacy-revision',
-      autoMemoryPrompt: 'legacy prompt',
-    });
-    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
-    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
-    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
-    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
-    const scan = vi
-      .fn()
-      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+  it.each([
+    { trusted: false, local: '0' },
+    { trusted: true, local: '0' },
+    { trusted: false, local: '1' },
+    { trusted: true, local: '1' },
+  ])(
+    'guards and rolls back the memory recall mode transition by revision (trusted=$trusted, local=$local)',
+    async ({ trusted, local }) => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', local);
+      clearAutoMemoryRootCache();
+      try {
+        const config = Object.create(Config.prototype) as Config;
+        Object.assign(config, {
+          memoryHookDeliveryId: Symbol('transition-owner'),
+          memoryRecallMode: 'legacy',
+          memoryRecallModeInitialized: true,
+          memoryCorpusRevision: 'legacy-revision',
+          autoMemoryPrompt: 'legacy prompt',
+        });
+        vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+        vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+        vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(
+          true,
+        );
+        vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+        vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+        vi.spyOn(config, 'isTrustedFolder').mockReturnValue(trusted);
+        const scan = vi
+          .fn()
+          .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+        Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
-    scan.mockResolvedValueOnce({
-      ready: false,
-      revision: 'not-ready-revision',
-    });
-    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
-      undefined,
-    );
-    expect(config.getMemoryRecallMode()).toBe('legacy');
+        scan.mockResolvedValueOnce({
+          ready: false,
+          revision: 'not-ready-revision',
+        });
+        await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+          undefined,
+        );
+        expect(config.getMemoryRecallMode()).toBe('legacy');
 
-    const transition = await config.prepareMemoryRecallTransition();
-    expect(transition).toMatchObject({
-      from: 'legacy',
-      to: 'structured',
-      revision: 'structured-revision',
-      previousRevision: 'not-ready-revision',
-      previousAutoMemoryPrompt: 'legacy prompt',
-    });
-    expect(transition?.autoMemoryPrompt).toContain(
-      'Use the complete tree and focused metadata for routing.',
-    );
-    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
-    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
-    await expect(
-      config.confirmMemoryRecallTransition(transition!),
-    ).resolves.toBe(true);
+        const transition = await config.prepareMemoryRecallTransition();
+        expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledWith(
+          '/tmp/project',
+          config.getMemoryHookDeliveryId(),
+        );
+        expect(transition).toMatchObject({
+          from: 'legacy',
+          to: 'structured',
+          revision: 'structured-revision',
+          previousRevision: 'not-ready-revision',
+          previousAutoMemoryPrompt: 'legacy prompt',
+        });
+        expect(transition?.autoMemoryPrompt).toContain(
+          'Use the complete tree and focused metadata for routing.',
+        );
+        if (trusted || local === '0') {
+          expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+            '/tmp/project',
+            config.getMemoryHookDeliveryId(),
+          );
+        } else {
+          expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+        }
+        if (trusted) {
+          expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledWith(
+            '/tmp/project',
+            {
+              deliveryId: config.getMemoryHookDeliveryId(),
+            },
+          );
+        } else {
+          expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+          expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
+        }
+        await expect(
+          config.confirmMemoryRecallTransition(transition!),
+        ).resolves.toBe(true);
 
-    config.commitMemoryRecallTransition(transition!);
-    expect(config.getMemoryRecallMode()).toBe('structured');
-    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
+        config.commitMemoryRecallTransition(transition!);
+        expect(config.getMemoryRecallMode()).toBe('structured');
+        expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
-    config.rollbackMemoryRecallTransition(transition!);
-    expect(config.getMemoryRecallMode()).toBe('legacy');
-    expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+        config.rollbackMemoryRecallTransition(transition!);
+        expect(config.getMemoryRecallMode()).toBe('legacy');
+        expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
 
-    scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
-    await expect(
-      config.confirmMemoryRecallTransition(transition!),
-    ).resolves.toBe(false);
-  });
+        scan.mockResolvedValueOnce({
+          ready: true,
+          revision: 'changed-revision',
+        });
+        await expect(
+          config.confirmMemoryRecallTransition(transition!),
+        ).resolves.toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+        clearAutoMemoryRootCache();
+      }
+    },
+  );
 
   it('prepareMemoryRecallTransition tolerates a failed tier index rebuild', async () => {
     // A tier that cannot be read or written (EACCES, a rejected root) leaves
@@ -11537,36 +11898,54 @@ describe('Model Switching and Config Updates', () => {
       },
     );
 
-    it('dispatches with the captured owner rather than untrusted input metadata', async () => {
-      const observed: unknown[] = [];
-      const fire = vi.fn(async () => {
-        observed.push(getHookExecutionOwner());
-        return undefined;
-      });
-      const config = await withHookSystem({
-        runtimeId: 'runtime-A',
-        firePreToolUseEvent: fire,
-      });
-      const owner = captureHookExecutionOwner(config, 'A');
-      const response = await config
-        .getMessageBus()!
-        .request<HookExecutionRequest, HookExecutionResponse>(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            owner,
-            eventName: 'PreToolUse',
-            input: {
-              tool_name: 'read_file',
-              agent_id: 'B',
-              session_id: 'other-session',
+    it.each([
+      ['PreToolUse', 'firePreToolUseEvent', { tool_name: 'read_file' }],
+      [
+        'MemoryChanged',
+        'fireMemoryChangedEvent',
+        {
+          memory_scope: 'user',
+          operation: 'update',
+          paths: ['/memories/a.md'],
+          relative_paths: ['a.md'],
+        },
+      ],
+    ] as const)(
+      'dispatches %s with the captured owner rather than untrusted input metadata',
+      async (eventName, method, input) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const observed: unknown[] = [];
+        const fire = vi.fn(async () => {
+          observed.push(getHookExecutionOwner());
+          return { finalOutput: undefined };
+        });
+        // @ts-expect-error - a focused dispatcher test double
+        config['hookSystem'] = {
+          runtimeId: 'runtime-A',
+          [method]: fire,
+        };
+        const owner = captureHookExecutionOwner(config, 'A');
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner,
+              eventName,
+              input: {
+                ...input,
+                agent_id: 'B',
+                session_id: 'other-session',
+              },
             },
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        );
-      expect(response.success).toBe(true);
-      expect(observed).toEqual([owner]);
-      expect(getHookExecutionOwner()).toBeUndefined();
-    });
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        expect(response.success).toBe(true);
+        expect(observed).toEqual([owner]);
+        expect(getHookExecutionOwner()).toBeUndefined();
+      },
+    );
   });
 
   describe('every hook event through the hook execution bridge', () => {
@@ -11603,7 +11982,25 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(config),
+              eventName,
+              input:
+                eventName === HookEventName.MemoryChanged
+                  ? {
+                      memory_scope: 'user',
+                      operation: 'update',
+                      paths: ['/memories/a.md'],
+                      relative_paths: ['a.md'],
+                    }
+                  : {},
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -11628,6 +12025,19 @@ describe('Model Switching and Config Updates', () => {
         input,
         signal,
       );
+
+    it('rejects malformed MemoryChanged payloads without firing hooks', async () => {
+      const fire = vi.fn().mockResolvedValue(undefined);
+      const response = await dispatch(
+        'fireMemoryChangedEvent',
+        fire,
+        'MemoryChanged',
+        { operation: 'Update' },
+        new AbortController().signal,
+      );
+      expect(fire).not.toHaveBeenCalled();
+      expect(response.success).toBe(false);
+    });
 
     // Events whose fire method returns the hook output itself, or undefined
     // when no hook is configured.

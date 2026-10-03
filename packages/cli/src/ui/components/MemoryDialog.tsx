@@ -17,6 +17,7 @@ import {
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -321,13 +322,41 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
 
   const handleToggleAutoMemory = useCallback(() => {
     const newValue = !autoMemoryOn;
-    loadedSettings.setValue(
-      SettingScope.Workspace,
-      'memory.enableManagedAutoMemory',
-      newValue,
-    );
-    setAutoMemoryOn(newValue);
-  }, [autoMemoryOn, loadedSettings]);
+    // setValue recomputes the merged view after committing, so read the
+    // effective value back from it: a System-scope override (or an untrusted
+    // workspace, whose settings are stripped from the merge) can mask a
+    // Workspace-scope write, and announcing the requested value would
+    // announce a change that did not take effect.
+    const previousEffective =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    try {
+      loadedSettings.setValue(
+        SettingScope.Workspace,
+        'memory.enableManagedAutoMemory',
+        newValue,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    } catch (toggleError) {
+      setError(
+        toggleError instanceof Error
+          ? toggleError.message
+          : String(toggleError),
+      );
+      return;
+    }
+    setError(null);
+    const effectiveValue =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    setAutoMemoryOn(!bareMode && !safeMode && effectiveValue);
+    if (effectiveValue !== previousEffective) {
+      void notifyMemoryEnabledChange(
+        config.getProjectRoot(),
+        effectiveValue,
+        config.getMemoryHookDeliveryId(),
+      );
+    }
+  }, [autoMemoryOn, bareMode, safeMode, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {
     const newValue = !autoDreamOn;

@@ -66,6 +66,8 @@ export enum HookEventName {
   TodoCompleted = 'TodoCompleted',
   // InstructionsLoaded - When an instruction or context file is loaded
   InstructionsLoaded = 'InstructionsLoaded',
+  // MemoryChanged - After managed memory documents change, or memory is toggled
+  MemoryChanged = 'MemoryChanged',
 }
 
 /**
@@ -290,6 +292,28 @@ export interface InstructionsLoadedInput extends HookInput {
   load_reason: InstructionLoadReason;
   trigger_file_path?: string;
   parent_file_path?: string;
+}
+
+export type MemoryChangedScope = 'user' | 'project' | 'team';
+export type MemoryChangedOperation = 'create' | 'update' | 'delete';
+
+/**
+ * Input for MemoryChanged hook events.
+ * Fired after the change is already applied. Hook output does not roll it back.
+ * Document changes set `operation`. `paths` is `[path]` for one file and
+ * `[path1, path2]` when several changed together. `relative_paths` is the
+ * stable key inside the memory root, in the same order. `workspace` is present
+ * for project and team memory and omitted for user memory.
+ * The on/off toggle sets `enabled` and leaves `paths` empty. It omits
+ * `operation` and `memory_scope`.
+ */
+export interface MemoryChangedInput extends HookInput {
+  paths: string[];
+  relative_paths: string[];
+  memory_scope?: MemoryChangedScope;
+  operation?: MemoryChangedOperation;
+  workspace?: string;
+  enabled?: boolean;
 }
 
 /**

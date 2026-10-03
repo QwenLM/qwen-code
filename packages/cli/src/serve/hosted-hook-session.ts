@@ -641,6 +641,10 @@ export class HostedHookSession {
         hook_event_name: event,
         timestamp: new Date().toISOString(),
       };
+      const memoryPaths =
+        event === HookEventName.MemoryChanged
+          ? (fields['relative_paths'] as string[] | undefined)
+          : undefined;
       const target = getHookMatcherTarget(event, {
         toolName: fields['tool_name'] as string | undefined,
         commandName: fields['command_name'] as string | undefined,
@@ -649,7 +653,10 @@ export class HostedHookSession {
           | undefined,
         agentType: fields['agent_type'] as string | undefined,
         notificationType: fields['notification_type'] as string | undefined,
-        filePath: fields['file_path'] as string | undefined,
+        filePath:
+          event === HookEventName.MemoryChanged
+            ? memoryPaths?.[0]
+            : (fields['file_path'] as string | undefined),
         error: fields['error'] as string | undefined,
       });
       const usedOnce = new Set(
@@ -669,12 +676,15 @@ export class HostedHookSession {
           (!hook.onceKey || !usedOnce.has(hook.onceKey)) &&
           (!hook.matcher ||
             !target?.target ||
-            matchesHookPattern(
-              hook.matcher,
-              target.target,
-              target.kind === 'toolName'
-                ? { aliases: getToolMatcherTargets(target.target) }
-                : {},
+            (memoryPaths?.length ? memoryPaths : [target.target]).some(
+              (subject) =>
+                matchesHookPattern(
+                  hook.matcher!,
+                  subject,
+                  target.kind === 'toolName'
+                    ? { aliases: getToolMatcherTargets(subject) }
+                    : {},
+                ),
             )),
       )
         .filter(

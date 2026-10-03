@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { registerMemoryChangedListener } from './memory-file-change.js';
 import {
   clearAutoMemoryRootCache,
   getUserAutoMemoryMetadataPath,
@@ -272,6 +273,61 @@ describe('User Memory dream', () => {
     expect(result.touchedTopics).toEqual(['user']);
     expect(result.createdEntries).toBe(1);
     expect(result.systemMessage).toContain('Managed User Memory dream');
+  });
+
+  it('delivers a manifest deletion only to the owning session', async () => {
+    const root = getUserAutoMemoryRoot();
+    const file = path.join(root, 'user', 'obsolete.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(
+      file,
+      '---\ntype: user\nname: Obsolete\ndescription: Old preference\ncategory: basic_information\nkeywords:\n  - old preference\n  - user preference\nusage_scenarios:\n  - Personalizing answers\n---\n\nOld preference.\n',
+    );
+    vi.mocked(planUserAutoMemoryDreamByAgent).mockImplementation(async () => {
+      await fs.writeFile(
+        path.join(root, DREAM_OPERATIONS_FILENAME),
+        JSON.stringify({
+          version: 1,
+          delete: ['user/obsolete.md'],
+          operations: [],
+        }),
+      );
+      return {
+        status: 'completed',
+        finalText: 'Deleted obsolete preference.',
+        filesTouched: [],
+      };
+    });
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    config.getMemoryHookDeliveryId = () => unregisterOwner.id;
+    const controller = new AbortController();
+    try {
+      const result = await runManagedUserAutoMemoryDream(
+        projectRoot,
+        config,
+        controller.signal,
+      );
+      expect(result.deletedEntries).toBe(1);
+      await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(sibling).not.toHaveBeenCalled();
+      expect(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'user',
+          operation: 'delete',
+          relativePaths: ['user/obsolete.md'],
+        }),
+        undefined,
+      );
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+    }
   });
 
   it('does not apply a manifest left by an earlier run', async () => {

@@ -18,6 +18,7 @@ import {
 } from './paths.js';
 import type { AutoMemoryMetadata } from './types.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
+import { registerMemoryChangedListener } from './memory-file-change.js';
 
 vi.mock('./dreamAgentPlanner.js', () => ({
   planManagedAutoMemoryDreamByAgent: vi.fn(),
@@ -46,6 +47,7 @@ describe('managed auto-memory dream', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -104,6 +106,65 @@ describe('managed auto-memory dream', () => {
     expect(result.systemMessage).toContain(
       'Managed auto-memory dream (agent):',
     );
+  });
+
+  it('attributes a replaced symlink index to the dreaming session', async () => {
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+    await fs.mkdir(path.join(projectRoot, '.git'));
+    await ensureAutoMemoryScaffold(projectRoot);
+    const topicPath = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'routing.md',
+    );
+    await fs.mkdir(path.dirname(topicPath), { recursive: true });
+    await fs.writeFile(
+      topicPath,
+      '---\nname: Routing memory\ndescription: Owner routing\ntype: project\n---\nKeep session ownership.\n',
+    );
+    const indexPath = getAutoMemoryIndexPath(projectRoot);
+    const target = path.join(tempDir, 'index.md');
+    await fs.writeFile(target, 'stale index');
+    await fs.rm(indexPath);
+    await fs.symlink(target, indexPath);
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    mockConfig.getMemoryHookDeliveryId = () => unregisterOwner.id;
+    const controller = new AbortController();
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Updated routing memory.',
+      filesTouched: [indexPath],
+    });
+    try {
+      await runManagedAutoMemoryDream(
+        projectRoot,
+        new Date(),
+        mockConfig,
+        controller.signal,
+      );
+      expect(await fs.readFile(target, 'utf-8')).toBe('stale index');
+      expect((await fs.lstat(indexPath)).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(indexPath, 'utf-8')).toContain('Routing memory');
+      expect.soft(sibling).not.toHaveBeenCalled();
+      expect.soft(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['MEMORY.md'],
+        }),
+        undefined,
+      );
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('applies a validated dedupe manifest after the canonical file exists', async () => {

@@ -10,7 +10,10 @@ import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import { getHookMatcherTarget } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
-import type { SessionHooksManager } from './sessionHooksManager.js';
+import type {
+  SessionHookEntry,
+  SessionHooksManager,
+} from './sessionHooksManager.js';
 import { HookEventName } from './types.js';
 import type {
   HookConfig,
@@ -55,6 +58,7 @@ import type {
   InstructionsLoadedInput,
   InstructionMemoryType,
   InstructionLoadReason,
+  MemoryChangedInput,
   BackgroundTaskInfo,
   CronJobInfo,
 } from './types.js';
@@ -78,6 +82,7 @@ import {
 } from './hook-execution-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { MemoryChangedNotice } from '../memory/memory-file-change.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
 import type { CronJob } from '../services/cronScheduler.js';
@@ -348,6 +353,41 @@ export class HookEventHandler {
       input,
       {
         filePath,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MemoryChanged event after managed-memory documents are written or
+   * deleted, or after managed auto-memory is toggled. Relative paths are
+   * matcher targets. Hook output does not undo the change.
+   */
+  async fireMemoryChangedEvent(
+    change: MemoryChangedNotice,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: MemoryChangedInput = {
+      ...this.createBaseInput(HookEventName.MemoryChanged),
+      paths: [...change.paths],
+      relative_paths: [...change.relativePaths],
+    };
+    if ('enabled' in change) {
+      input.workspace = change.workspace;
+      input.enabled = change.enabled;
+    } else {
+      input.memory_scope = change.scope;
+      input.operation = change.operation;
+      if (change.workspace !== undefined) {
+        input.workspace = change.workspace;
+      }
+    }
+    return this.executeHooks(
+      HookEventName.MemoryChanged,
+      input,
+      {
+        filePath: change.relativePaths[0] ?? '',
+        filePaths: [...change.relativePaths],
       },
       signal,
     );
@@ -991,19 +1031,37 @@ export class HookEventHandler {
         owner,
       );
 
-      // Get session hooks and merge with registry hooks
+      // Get session hooks and merge with registry hooks. Mirrors
+      // HookPlanner.matchesContext: an event without a target — e.g. the
+      // MemoryChanged on/off toggle — matches every session hook, and a
+      // batched filePath event matches on ANY of its paths.
       const sessionId = input.session_id;
-      const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
-      const registeredSessionHooks =
-        sessionId !== undefined
-          ? matcherTarget === undefined
-            ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
-            : this.sessionHooksManager.getMatchingHooks(
-                sessionId,
-                eventName,
-                matcherTarget,
-              )
-          : [];
+      const matcherTarget = getHookMatcherTarget(eventName, context);
+      let registeredSessionHooks: SessionHookEntry[] = [];
+      if (sessionId !== undefined) {
+        if (!matcherTarget || !matcherTarget.target) {
+          registeredSessionHooks = this.sessionHooksManager.getHooksForEvent(
+            sessionId,
+            eventName,
+          );
+        } else if (
+          matcherTarget.kind === 'filePath' &&
+          context?.filePaths?.length
+        ) {
+          registeredSessionHooks =
+            this.sessionHooksManager.getMatchingHooksForSubjects(
+              sessionId,
+              eventName,
+              context.filePaths,
+            );
+        } else {
+          registeredSessionHooks = this.sessionHooksManager.getMatchingHooks(
+            sessionId,
+            eventName,
+            matcherTarget.target,
+          );
+        }
+      }
       // The second side of the project-skill trust gate: a hook registered
       // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
       // only while the folder is STILL trusted. `Config.isTrustedFolder()`
