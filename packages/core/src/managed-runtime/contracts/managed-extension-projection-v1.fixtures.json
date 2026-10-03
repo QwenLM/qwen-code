@@ -5,7 +5,8 @@
     "mcp_configuration": null,
     "mcp_operation": null,
     "hook_registration": null,
-    "hook_execution": null
+    "hook_execution": null,
+    "child_run": "background_shell"
   },
   "taskStates": [
     "pending",

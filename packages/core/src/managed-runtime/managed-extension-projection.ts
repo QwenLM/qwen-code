@@ -31,6 +31,11 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import {
+  isChildRunStart,
+  isChildRunSuccessor,
+  parseChildRun,
+} from './managed-child-run-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -135,6 +140,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isMonitorRunStart,
     isSuccessor: isMonitorRunSuccessor,
+  }),
+  child_run: Object.freeze({
+    taskKind: 'background_shell',
+    parse: (value: unknown) => {
+      const record = parseChildRun(value);
+      return { record, recordId: record.shellId, run: record.run };
+    },
+    isStart: isChildRunStart,
+    isSuccessor: isChildRunSuccessor,
   }),
 });
 
