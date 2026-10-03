@@ -14,6 +14,7 @@ import {
   encodeHarnessCheckpointV1,
   HARNESS_TURN_COMPLETE_BOUNDARY,
   parseHarnessCheckpointV1,
+  tryParseHarnessCheckpointV1,
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
@@ -177,10 +178,18 @@ export class LocalManagedRuntimeOutcomes {
       }),
       { class: 'harness', activation: session.activation },
     );
-    const routeRef = await (this.routeRef ??= session.resources.publish(
-      'managed-execution-route',
-      Buffer.from(JSON.stringify(ROUTE_BODY), 'utf8'),
-    ));
+    // Cached like the definitions, except a rejected publish retries: a
+    // transient failure of one admission must not wedge later ones.
+    this.routeRef ??= session.resources
+      .publish(
+        'managed-execution-route',
+        Buffer.from(JSON.stringify(ROUTE_BODY), 'utf8'),
+      )
+      .catch((error: unknown) => {
+        this.routeRef = undefined;
+        throw error;
+      });
+    const routeRef = await this.routeRef;
     await this.harness.commitAwaitRuntimeBatch(
       [
         {
@@ -291,11 +300,23 @@ export async function unresolvedRuntimeWorkReason(
   authority: LocalManagedSessionAuthority,
 ): Promise<string | undefined> {
   if (authority.latestCheckpoint === undefined) return undefined;
-  const state = await authority.readCheckpointState();
+  let state: Buffer | undefined;
+  try {
+    state = await authority.readCheckpointState();
+  } catch {
+    return 'its checkpoint state cannot be read';
+  }
   if (state === undefined) {
     return 'its checkpoint state cannot be read';
   }
-  const checkpoint = parseHarnessCheckpointV1(state);
+  const parsed = tryParseHarnessCheckpointV1(state);
+  if (!parsed.ok) {
+    // An unparseable checkpoint is an unknowable Runtime state, which is
+    // exactly the case this gate blocks for: the session opens blocked, its
+    // history readable, nothing replayed.
+    return 'its checkpoint state cannot be parsed as a Harness v1 checkpoint';
+  }
+  const checkpoint = parsed.checkpoint;
   if (checkpoint.continuation.phase !== 'await_runtime') return undefined;
   const pending =
     checkpoint.tools?.items.some((item) => item.state === 'in_progress') ===

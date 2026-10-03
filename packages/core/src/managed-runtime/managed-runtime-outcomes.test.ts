@@ -7,7 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
   openManagedSession,
@@ -405,6 +406,42 @@ describe('LocalManagedRuntimeOutcomes', () => {
   });
 });
 
+describe('admission failure recovery', () => {
+  it('retries the route publish that a transient failure rejected', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const { session } = await openSession(root, 'session-routefail');
+    try {
+      const original = session.resources.publish.bind(session.resources);
+      let failed = 0;
+      vi.spyOn(session.resources, 'publish').mockImplementation(
+        async (kind: string, bytes: Buffer) => {
+          if (kind === 'managed-execution-route' && failed === 0) {
+            failed += 1;
+            throw new Error('disk pressure');
+          }
+          return original(kind, bytes);
+        },
+      );
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await expect(outcomes.admit(admission('call-a'))).rejects.toThrow(
+        'disk pressure',
+      );
+      expect(events(session, 'tool.intent')).toHaveLength(1);
+
+      await outcomes.admit(admission('call-b'));
+      expect(failed).toBe(1);
+      expect(events(session, 'tool.intent')).toHaveLength(2);
+      const checkpoint = (await checkpointOf(session))!;
+      expect(
+        checkpoint.tools?.items.map((item) => item.executionCallId),
+      ).toEqual(['call-b']);
+    } finally {
+      await session.close();
+    }
+  });
+});
+
 describe('restored runtime block', () => {
   it('answers for a log whose dispatch never settled, across a reopen', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
@@ -531,6 +568,76 @@ describe('restored runtime block', () => {
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toBeUndefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('answers a reason for a checkpoint that cannot be read', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-gone-state');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await seal();
+      // A checkpoint whose state no longer exists on disk.
+      const stateRoot = path.join(
+        root,
+        'runtime',
+        'resources',
+        'session-gone-state',
+      );
+      let removed = 0;
+      for (const kind of await fs.readdir(stateRoot)) {
+        const dir = path.join(stateRoot, kind);
+        for (const file of await fs.readdir(dir)) {
+          if (file.startsWith('.')) continue;
+          const candidate = path.join(dir, file);
+          const content = await fs.readFile(candidate);
+          removed += content.includes('ckpt-') ? 1 : 0;
+          if (content.includes('ckpt-')) {
+            await fs.writeFile(candidate, Buffer.alloc(0));
+          }
+        }
+      }
+      expect(removed).toBeGreaterThan(0);
+    }
+
+    const { session: restored } = await openSession(root, 'session-gone-state');
+    try {
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toContain('cannot be read');
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('answers a reason for a checkpoint it cannot parse', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-bad-state');
+      const garbage = Buffer.from('{"v":2,"opaque":true}', 'utf8');
+      await session.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'garbage-checkpoint-1',
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(garbage).digest('hex'),
+        },
+        { state: garbage, boundary: null },
+        { class: 'harness', activation: session.activation },
+      );
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-bad-state');
+    try {
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toContain('cannot be parsed');
     } finally {
       await restored.close();
     }
