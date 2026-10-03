@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import type { LocalManagedRuntimeOutcomes } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-outcomes.js';
 import { processBootLoaderEnv } from '../config/shared-env-keys.js';
 import { createServer } from 'node:http';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
@@ -125,6 +126,10 @@ const server = http.createServer(async (req, res) => {
     }
     globalThis.cancelRecorded = true;
     return send(200, { protocolVersion: 2, state: 'cancel_requested' });
+  }
+  if (route === 'acknowledge') {
+    if (mode === 'fails-before-journal') return send(200, { protocolVersion: 2, state: 'unknown' });
+    return send(200, { protocolVersion: 2, state: 'acknowledged' });
   }
   send(404, {});
 });
@@ -666,7 +671,37 @@ describe.skipIf(process.platform === 'win32')(
     let logFile: string;
     let config: Config;
     let environment: ReturnType<typeof createManagedRuntimeEnvironment>;
+    let admissions: Array<Record<string, unknown>>;
+    let settlements: Array<Record<string, unknown>>;
+    /** Gates the fake recorder's commit awaits, per test. */
+    const outcomeWaiters: { admit?: Promise<void>; settle?: Promise<void> } =
+      {};
+    /** Fires as the fake recorder enters a commit, per test. */
+    const outcomeSignals: { admit?: () => void; settle?: () => void } = {};
+    /** Makes the fake recorder's commits fail, per test. */
+    const outcomeFailures: { admit?: Error; settle?: Error } = {};
     const signal = new AbortController().signal;
+
+    function recordOutcomes(target: Config) {
+      const recorder = {
+        admit: async (input: Record<string, unknown>) => {
+          if (outcomeFailures.admit) throw outcomeFailures.admit;
+          outcomeSignals.admit?.();
+          if (outcomeWaiters.admit) await outcomeWaiters.admit;
+          admissions.push(input);
+        },
+        settle: async (input: Record<string, unknown>) => {
+          if (outcomeFailures.settle) throw outcomeFailures.settle;
+          outcomeSignals.settle?.();
+          if (outcomeWaiters.settle) await outcomeWaiters.settle;
+          settlements.push(input);
+        },
+        finalizeBatch: async () => undefined,
+      };
+      vi.spyOn(target, 'getManagedRuntimeOutcomes').mockReturnValue(
+        recorder as unknown as LocalManagedRuntimeOutcomes,
+      );
+    }
 
     beforeEach(async () => {
       root = await mkdtemp(path.join(os.tmpdir(), 'qwen-m5-env-'));
@@ -674,6 +709,14 @@ describe.skipIf(process.platform === 'win32')(
       logFile = path.join(root, 'log.jsonl');
       await writeFile(script, FAKE_WORKER);
       await writeFile(logFile, '');
+      admissions = [];
+      settlements = [];
+      outcomeWaiters.admit = undefined;
+      outcomeWaiters.settle = undefined;
+      outcomeSignals.admit = undefined;
+      outcomeSignals.settle = undefined;
+      outcomeFailures.admit = undefined;
+      outcomeFailures.settle = undefined;
       config = new Config({
         sessionId: SESSION_ID,
         targetDir: root,
@@ -684,6 +727,7 @@ describe.skipIf(process.platform === 'win32')(
         telemetry: { enabled: false },
         deferTelemetryInitialization: true,
       });
+      recordOutcomes(config);
     });
 
     afterEach(async () => {
@@ -740,20 +784,216 @@ describe.skipIf(process.platform === 'win32')(
         { text: `ran ${JSON.stringify({ file_path: file, content: 'x' })}` },
       ]);
       // The worker's journal names the call by the host's id for it.
-      const execute = (await readFile(logFile, 'utf8'))
+      const entries = (await readFile(logFile, 'utf8'))
         .split('\n')
         .filter(Boolean)
         .map(
           (line) =>
             JSON.parse(line) as {
               route?: string;
+              boot?: string;
               request?: { reference?: { callId?: string } };
             },
-        )
-        .find((entry) => entry.route === 'execute');
+        );
+      const execute = entries.find((entry) => entry.route === 'execute');
       expect(execute?.request?.reference?.callId).toBe('write');
+      // The call was admitted before dispatch: the intent and the checkpoint
+      // name the tool, the final parameters and this worker's incarnation.
+      expect(admissions).toEqual([
+        expect.objectContaining({
+          functionCallId: 'write',
+          toolName: 'write_file',
+          params: { file_path: file, content: 'x' },
+          workerIncarnation: entries.find((entry) => entry.boot)?.boot,
+        }),
+      ]);
+      // It settled with a success the recorder saw, and the worker then
+      // forgot it.
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          functionCallId: 'write',
+          executionStatus: 'success',
+        }),
+      ]);
+      await vi.waitFor(async () => {
+        const acknowledgesNow = (await readFile(logFile, 'utf8'))
+          .split('\n')
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                route?: string;
+                request?: { reference?: { callId?: string } };
+              },
+          )
+          .filter((entry) => entry.route === 'acknowledge');
+        expect(acknowledgesNow).toHaveLength(1);
+        expect(acknowledgesNow[0]!.request?.reference?.callId).toBe('write');
+      });
       // The host prepared it but never wrote the file.
       await expect(readFile(file, 'utf8')).rejects.toThrow();
+    });
+
+    it('waits for the admission before it dispatches the call', async () => {
+      const env = create('ok');
+      let release!: () => void;
+      outcomeWaiters.admit = new Promise((resolve) => {
+        release = resolve;
+      });
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      const result = env.execute('write', signal);
+      // The admission holds while the worker stands ready: dispatch is
+      // blocked, not merely slow.
+      for (;;) {
+        const log = await readFile(logFile, 'utf8');
+        if (log.includes('"boot"')) {
+          expect(log).not.toContain('"execute"');
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      release();
+      await result;
+      expect(admissions).toHaveLength(1);
+      expect(await readFile(logFile, 'utf8')).toContain('"execute"');
+    });
+
+    it('does not dispatch a call whose admission fails', async () => {
+      const env = create('ok');
+      outcomeFailures.admit = new Error('the journal is unavailable');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await expect(env.execute('write', signal)).rejects.toThrow(
+        'journal is unavailable',
+      );
+      expect(admissions).toHaveLength(0);
+      expect(settlements).toHaveLength(0);
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+    });
+
+    it('commits the outcome before the model sees the result', async () => {
+      const env = create('ok');
+      let release!: () => void;
+      outcomeWaiters.settle = new Promise((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const settleStarted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      outcomeSignals.settle = entered;
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      let resolved = false;
+      const result = env.execute('write', signal).then((value) => {
+        resolved = true;
+        return value;
+      });
+      // The settle commit entered, then paused; the commit has not landed,
+      // so the model loop waits even though the worker settled the call.
+      await settleStarted;
+      await vi.waitFor(async () => {
+        expect(await readFile(logFile, 'utf8')).toContain('"execute"');
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(resolved).toBe(false);
+      release();
+      await result;
+      expect(settlements).toHaveLength(1);
+      expect(resolved).toBe(true);
+      // The worker forgot the call only after its commit landed.
+      await vi.waitFor(async () => {
+        const acknowledgesNow = (await readFile(logFile, 'utf8'))
+          .split('\n')
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                route?: string;
+                request?: { reference?: { callId?: string } };
+              },
+          )
+          .filter((entry) => entry.route === 'acknowledge');
+        expect(acknowledgesNow).toHaveLength(1);
+        expect(acknowledgesNow[0]!.request?.reference?.callId).toBe('write');
+      });
+    });
+
+    it('commits a refused call as not started and still settles it', async () => {
+      const env = create('refuse');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      const result = await env.execute('write', signal);
+      expect(result.error?.message).toContain('The tool call did not run');
+      expect(admissions).toHaveLength(1);
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          functionCallId: 'write',
+          executionStatus: 'not_started',
+        }),
+      ]);
+    });
+
+    it('settles a call cancelled after its admission without dispatching it', async () => {
+      const env = create('ok');
+      let release!: () => void;
+      outcomeWaiters.admit = new Promise((resolve) => {
+        release = resolve;
+      });
+      const controller = new AbortController();
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        controller.signal,
+      );
+      let entered!: () => void;
+      const admitStarted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      outcomeSignals.admit = entered;
+      const result = env.execute('write', controller.signal);
+      await admitStarted;
+      controller.abort();
+      release();
+      const settled = await result;
+      expect(settled.error?.message).toBe('The tool call was cancelled.');
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          functionCallId: 'write',
+          executionStatus: 'cancelled',
+        }),
+      ]);
+      // The worker heard nothing: the admission stands, the cancelled
+      // settlement closes it.
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
     });
 
     it.each([true, 'true'])(
@@ -897,6 +1137,7 @@ describe.skipIf(process.platform === 'win32')(
         telemetry: { enabled: false },
         deferTelemetryInitialization: true,
       });
+      recordOutcomes(other);
       const launch = () => ({
         command: process.execPath,
         args: [script],
@@ -926,14 +1167,18 @@ describe.skipIf(process.platform === 'win32')(
             (line) =>
               JSON.parse(line) as {
                 pid?: number;
+                route?: string;
                 request?: { reference?: { sessionId?: string } };
               },
           );
         expect(new Set(entries.flatMap((entry) => entry.pid ?? [])).size).toBe(
           2,
         );
+        const executions = entries.filter((entry) => entry.route === 'execute');
         expect(
-          entries.flatMap((entry) => entry.request?.reference?.sessionId ?? []),
+          executions.flatMap(
+            (entry) => entry.request?.reference?.sessionId ?? [],
+          ),
         ).toEqual([SESSION_ID, '5b0b2a5c-9f53-4a5e-8d0c-2f1b7c4e6a90']);
       } finally {
         await first.dispose();
@@ -958,6 +1203,12 @@ describe.skipIf(process.platform === 'win32')(
       expect(config.getManagedSessionBlock()).toBe(
         await failure.catch((error: unknown) => error),
       );
+      // The call was admitted before dispatch; its item never settles, which
+      // is the durable form of the block.
+      expect(admissions).toEqual([
+        expect.objectContaining({ functionCallId: 'read' }),
+      ]);
+      expect(settlements).toEqual([]);
       // Whatever the worker still runs is stopped with it.
       const [{ pid }] = (await readFile(logFile, 'utf8'))
         .split('\n')
@@ -1014,7 +1265,11 @@ describe('toToolResult', () => {
   it.each([
     ['error', { message: 'boom' }, 'boom'],
     ['error', undefined, 'The tool call failed.'],
-    ['not_started', { message: 'refused' }, 'refused'],
+    [
+      'not_started',
+      { message: 'refused' },
+      'The tool call did not run: refused',
+    ],
     ['cancelled', undefined, 'The tool call was cancelled.'],
   ] as const)(
     'reports a %s call as an error',

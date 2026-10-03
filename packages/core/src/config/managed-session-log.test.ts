@@ -33,6 +33,7 @@ import {
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { SessionService } from '../services/sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -1335,6 +1336,48 @@ describe('Managed Session log recording', () => {
     expect(() => recorder.bindManagedSink(writer)).toThrow(
       SessionWriterUnavailableError,
     );
+  });
+
+  it('blocks a restore whose log shows Runtime work that never settled', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('never settled');
+    await restored.closeSessionWriter();
+  });
+
+  it('restores a log whose Runtime calls settled, without blocking', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await outcomes.settle({
+      functionCallId: 'call-a',
+      executionStatus: 'success',
+      payload: { executionStatus: 'success', responseParts: [] },
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
   });
 });
 

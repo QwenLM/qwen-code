@@ -53,9 +53,9 @@ export const MANAGED_RUNTIME_RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
 const LOCAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256')
   .update('qwen-code/managed-session-runtime/1')
   .digest('hex')}`;
-type RouteKey = 'attest' | 'execute' | 'status' | 'cancel';
+type RouteKey = 'attest' | 'execute' | 'status' | 'cancel' | 'acknowledge';
 
-interface StartedWorker {
+export interface StartedWorker {
   readonly tracked: TrackedChildProcess;
   readonly url: URL;
   readonly boot: ManagedRuntimeWorkerBoot;
@@ -253,12 +253,23 @@ export class ManagedSessionRuntimeWorker {
     callId: string = randomUUID(),
   ): Promise<ManagedToolResultPayload> {
     signal.throwIfAborted();
-    // The parameters as the wire carries them: a built invocation can hold
-    // keys whose value is undefined, which JSON drops.
-    input = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
-    const argsDigest = `sha256:${managedToolDigest(input)}`;
-    // Starting can take a while: a call cancelled meanwhile returns at once,
-    // and the worker goes on starting for the session's next call.
+    const worker = await this.ensureStarted(signal);
+    // A session closed or a call cancelled while the worker started is not
+    // sent.
+    if (worker === undefined) {
+      return { executionStatus: 'cancelled', responseParts: [] };
+    }
+    return this.executeIn(worker, toolName, input, signal, callId);
+  }
+
+  /**
+   * The session's worker, started on its first use. A call cancelled while it
+   * starts resolves undefined and is not sent; the worker goes on starting
+   * for the session's next call. The caller reads the incarnation for the
+   * binding it writes before dispatching.
+   */
+  async ensureStarted(signal: AbortSignal): Promise<StartedWorker | undefined> {
+    signal.throwIfAborted();
     let stopWatching = () => {};
     const cancelled = new Promise<undefined>((resolve) => {
       const onAbort = () => resolve(undefined);
@@ -276,12 +287,30 @@ export class ManagedSessionRuntimeWorker {
     } finally {
       stopWatching();
     }
-    // A session closed or a call cancelled while the worker started is not
-    // sent.
+    // A session closed while the worker started gets no more calls.
     if (this.closed) throw new Error('The Managed session is closing.');
-    if (worker === undefined || signal.aborted) {
-      return { executionStatus: 'cancelled', responseParts: [] };
-    }
+    if (worker === undefined || signal.aborted) return undefined;
+    return worker;
+  }
+
+  /**
+   * Runs one call on an already started worker, so the binding the caller
+   * committed names the very worker the call goes to. A worker that died
+   * meanwhile answers undelivered: the call is reported not started instead
+   * of being quietly handed to the next generation it has no binding for.
+   */
+  async executeIn(
+    worker: StartedWorker,
+    toolName: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    callId: string,
+  ): Promise<ManagedToolResultPayload> {
+    signal.throwIfAborted();
+    // The parameters as the wire carries them: a built invocation can hold
+    // keys whose value is undefined, which JSON drops.
+    input = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
+    const argsDigest = `sha256:${managedToolDigest(input)}`;
     const reference: ManagedToolReference = {
       sessionId: this.sessionId,
       promptId: promptIdContext.getStore() ?? 'unknown',
@@ -375,6 +404,43 @@ export class ManagedSessionRuntimeWorker {
       signal.removeEventListener('abort', cancel);
       clearTimeout(giveUpTimer);
       if (!settled) await cancelling;
+    }
+  }
+
+  /**
+   * Tells the worker its caller settled a call durably, so the worker may
+   * drop the call's payload. Best-effort: nothing depends on it landing — a
+   * worker that never hears it is as correct, and as large, as before. A
+   * replaced worker generation answers unknown, which changes nothing either.
+   */
+  async acknowledge(
+    callId: string,
+    input: Record<string, unknown>,
+  ): Promise<void> {
+    let worker: StartedWorker | undefined;
+    try {
+      worker = this.starting !== undefined ? await this.starting : undefined;
+    } catch {
+      return;
+    }
+    if (worker === undefined || this.closed) return;
+    const normalized = JSON.parse(JSON.stringify(input)) as Record<
+      string,
+      unknown
+    >;
+    const reference: ManagedToolReference = {
+      sessionId: this.sessionId,
+      promptId: promptIdContext.getStore() ?? 'unknown',
+      callId,
+      argsDigest: `sha256:${managedToolDigest(normalized)}`,
+    };
+    try {
+      await this.request(worker, 'acknowledge', {
+        protocolVersion: 2,
+        reference,
+      });
+    } catch {
+      // The committed outcome stands; the payload stays with the worker.
     }
   }
 
@@ -772,11 +838,15 @@ export function toToolResult(payload: ManagedToolResultPayload): ToolResult {
   if (payload.executionStatus === 'success') {
     return { llmContent: parts, returnDisplay: text };
   }
+  // A call that never ran says so: it is no tool failure, and nothing it
+  // would have done took effect.
   const message =
-    payload.error?.message ??
-    (payload.executionStatus === 'cancelled'
-      ? 'The tool call was cancelled.'
-      : 'The tool call failed.');
+    payload.executionStatus === 'not_started'
+      ? `The tool call did not run: ${payload.error?.message ?? 'the Runtime worker did not run it.'}`
+      : (payload.error?.message ??
+        (payload.executionStatus === 'cancelled'
+          ? 'The tool call was cancelled.'
+          : 'The tool call failed.'));
   return {
     llmContent: parts.length > 0 ? parts : message,
     returnDisplay: text || message,
@@ -811,16 +881,79 @@ export function createManagedRuntimeEnvironment(
   const prepared = new LocalExecutionEnvironment(config, {
     toolNames: MANAGED_RUNTIME_TOOL_NAMES,
     run: async (call, signal) => {
+      // The durable outcome writer exists for every recorded Managed
+      // session; without one there is nothing to dispatch against.
+      const outcomes = config.getManagedRuntimeOutcomes();
+      if (!outcomes) {
+        throw new Error('This Managed session records no log.');
+      }
+      const started = await worker.ensureStarted(signal);
+      // A call cancelled while the worker started is not sent and commits
+      // nothing, including its admission.
+      if (!started) {
+        return toToolResult({
+          executionStatus: 'cancelled',
+          responseParts: [],
+        });
+      }
+      // The parameters as the wire carries them, once, so the intent, the
+      // binding and the worker all name the same payload.
+      const params = JSON.parse(JSON.stringify(call.params)) as Record<
+        string,
+        unknown
+      >;
+      const promptId = promptIdContext.getStore() ?? 'unknown';
+      // Admitted before dispatch; an admission that fails never sends.
+      await outcomes.admit({
+        functionCallId: call.id,
+        toolName: call.toolName,
+        promptId,
+        params,
+        toolDefinition: prepared.toolDefinition(call.toolName),
+        workerIncarnation: started.boot.runtimeIncarnation,
+      });
+      // Cancelled between the admission and the dispatch: the worker never
+      // hears the call, so its outcome is known — cancelled — and settles
+      // the same way, without contacting the worker.
+      if (signal.aborted) {
+        const payload: ManagedToolResultPayload = {
+          executionStatus: 'cancelled',
+          responseParts: [],
+        };
+        await outcomes.settle({
+          functionCallId: call.id,
+          executionStatus: payload.executionStatus,
+          payload,
+        });
+        return toToolResult(payload);
+      }
       try {
-        const result = toToolResult(
-          await worker.execute(call.toolName, call.params, signal, call.id),
+        const payload = await worker.executeIn(
+          started,
+          call.toolName,
+          params,
+          signal,
+          call.id,
         );
+        // Settled before the model continues, then forgotten by the worker.
+        await outcomes.settle({
+          functionCallId: call.id,
+          executionStatus: payload.executionStatus,
+          payload,
+        });
+        // Fire-and-forget: the outcome is committed, and nothing in the turn
+        // may wait on the worker hearing the receipt — a wedged boot or
+        // worker must never hold a settled result back.
+        void worker.acknowledge(call.id, params);
+        const result = toToolResult(payload);
         // As Legacy, a read shows no copy of the file it returns.
         return call.toolName === ToolNames.READ_FILE && !result.error
           ? { ...result, returnDisplay: '' }
           : result;
       } catch (error) {
         if (error instanceof ManagedRuntimeOutcomeUnknownError) {
+          // The checkpoint item stays in progress: that is the durable form
+          // of the block, which every later open of the log re-applies.
           config.blockManagedSession(error);
           await worker.close().catch(() => undefined);
         }
