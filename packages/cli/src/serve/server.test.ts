@@ -752,6 +752,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
@@ -845,6 +846,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_list_details' &&
       f !== 'extension_state' &&
       f !== 'extension_git_credentials' &&
       f !== 'extension_local_path_install' &&
@@ -916,6 +918,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
