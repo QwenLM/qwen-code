@@ -396,6 +396,29 @@ export class ToolRegistry {
     return undefined;
   }
 
+  getMcpToolIdentities(): Array<{
+    serverName: string;
+    serverToolName: string;
+  }> {
+    const identities = new Map<
+      string,
+      { serverName: string; serverToolName: string }
+    >();
+    for (const tool of [...this.tools.values(), ...this.mcpAppTools.values()]) {
+      if (tool instanceof DiscoveredMCPTool) {
+        const identity = {
+          serverName: tool.serverName,
+          serverToolName: tool.serverToolName,
+        };
+        identities.set(
+          JSON.stringify([identity.serverName, identity.serverToolName]),
+          identity,
+        );
+      }
+    }
+    return [...identities.values()];
+  }
+
   /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.

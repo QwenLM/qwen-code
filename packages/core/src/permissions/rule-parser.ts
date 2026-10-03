@@ -1669,7 +1669,8 @@ export interface McpToolIdentity {
  * from a flattened tool name, which cannot tell server `foo` from `foo_`
  * (R4-2).
  */
-function mcpSegmentSpellings(serverName: string): string[] {
+function mcpSegmentSpellings(serverName: string, rawOnly = false): string[] {
+  if (rawOnly) return [serverName];
   return [
     serverName,
     serverName.replace(/[^A-Za-z0-9_-]/g, '_'),
@@ -1700,6 +1701,9 @@ function mcpSegmentSpellings(serverName: string): string[] {
  * A rule written provider-safe (`mcp__foo_bar`) still matches any server
  * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
  * registered spelling a literal comparison runs against *is* that reduction.
+ * PermissionManager rejects ambiguous grants against the live registry via
+ * `hasAmbiguousMcpGrant`; raw-only matching here identifies rules that do not
+ * depend on a lossy spelling. Restrictive callers keep the compatibility match.
  * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
  * `disallowedTools`, which is why the gates thread the alias channel (the
  * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
@@ -1710,6 +1714,7 @@ export function matchesMcpPattern(
   rawToolName?: string,
   toolAliases?: readonly string[],
   mcpIdentity?: McpToolIdentity,
+  rawOnly = false,
 ): boolean {
   if (pattern === toolName) {
     return true;
@@ -1766,7 +1771,10 @@ export function matchesMcpPattern(
       // `foo`) are the same string family under startsWith, and a tool whose
       // name starts with '_' reads as separator continuation there. The rule
       // may name its server in any of that key's own spellings.
-      const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
+      const serverSpellings = mcpSegmentSpellings(
+        mcpIdentity.serverName,
+        rawOnly,
+      );
       const segments = prefix.split('__');
       const boundary = serverSpellings
         .map((spelling) => `mcp__${spelling}__`)
@@ -1794,8 +1802,8 @@ export function matchesMcpPattern(
       if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
         return (
           serverSpellings.includes(segments[1] ?? '') &&
-          mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
-            spelling.startsWith(toolPrefix),
+          mcpSegmentSpellings(mcpIdentity.serverToolName, rawOnly).some(
+            (spelling) => spelling.startsWith(toolPrefix),
           )
         );
       }
@@ -1814,8 +1822,8 @@ export function matchesMcpPattern(
         toolPrefix === '' ||
         (registeredToolSegment !== undefined &&
           registeredToolSegment.startsWith(toolPrefix)) ||
-        mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
-          spelling.startsWith(toolPrefix),
+        mcpSegmentSpellings(mcpIdentity.serverToolName, rawOnly).some(
+          (spelling) => spelling.startsWith(toolPrefix),
         )
       );
     }
@@ -1841,7 +1849,7 @@ export function matchesMcpPattern(
       // server `foo` can never reach server `foo_`'s tools and vice versa.
       // The rule may name the server in any of that key's own spellings — the
       // config key, the registered provider-safe rendering, or the legacy one.
-      return mcpSegmentSpellings(mcpIdentity.serverName).includes(
+      return mcpSegmentSpellings(mcpIdentity.serverName, rawOnly).includes(
         patternParts[1] ?? '',
       );
     }
@@ -1863,6 +1871,77 @@ export function matchesMcpPattern(
   return false;
 }
 
+/** A lossy spelling may restrict every claimant, but must not grant to them. */
+export function hasAmbiguousMcpGrant(
+  pattern: string,
+  identity: McpToolIdentity,
+  registeredIdentities: readonly McpToolIdentity[],
+): boolean {
+  const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
+  if (matchesMcpPattern(pattern, rawName, rawName, undefined, identity, true)) {
+    return false;
+  }
+
+  // A unique exact registration is already an authority; a shortened alias is not.
+  if (
+    pattern === normalizeMcpToolName(rawName) &&
+    !registeredIdentities.some(
+      (other) =>
+        (other.serverName !== identity.serverName ||
+          other.serverToolName !== identity.serverToolName) &&
+        normalizeMcpToolName(
+          `mcp__${other.serverName}__${other.serverToolName}`,
+        ) === pattern,
+    )
+  ) {
+    return false;
+  }
+
+  const prefix = pattern.endsWith('*') ? pattern.slice(0, -1) : undefined;
+  const matchesSpelling = (spelling: string): boolean =>
+    prefix === undefined ? pattern === spelling : spelling.startsWith(prefix);
+  const serverAliases = mcpSegmentSpellings(identity.serverName).filter(
+    (spelling) => spelling !== identity.serverName,
+  );
+  const toolSpellings = [
+    normalizeMcpToolName(rawName),
+    generateLegacyMcpToolName(rawName),
+  ];
+
+  return registeredIdentities.some((other) => {
+    if (
+      other.serverName === identity.serverName &&
+      other.serverToolName === identity.serverToolName
+    ) {
+      return false;
+    }
+    if (
+      other.serverName !== identity.serverName &&
+      serverAliases.some((spelling) => {
+        const server = `mcp__${spelling}`;
+        return (
+          mcpSegmentSpellings(other.serverName).includes(spelling) &&
+          (pattern === server ||
+            pattern.startsWith(`${server}__`) ||
+            (prefix !== undefined && server.startsWith(prefix)))
+        );
+      })
+    ) {
+      return true;
+    }
+    const otherRawName = `mcp__${other.serverName}__${other.serverToolName}`;
+    const otherSpellings = [
+      otherRawName,
+      normalizeMcpToolName(otherRawName),
+      generateLegacyMcpToolName(otherRawName),
+    ];
+    return toolSpellings.some(
+      (spelling) =>
+        otherSpellings.includes(spelling) && matchesSpelling(spelling),
+    );
+  });
+}
+
 /**
  * Pick the advertised alias that serves as the tool's raw identity for
  * matching, or `undefined` when no alias can vouch for it.
@@ -1878,8 +1957,9 @@ export function matchesMcpPattern(
  * the identity THIS resolver returns: exact 3-part entries additionally
  * match the advertised legacy reduction through `matchesAdvertisedExactName`
  * without this normalization check, so a length-preserving legacy alias that
- * reduces onto another server's spelling still satisfies such an entry (the
- * disclosed variant-2 residual; publication gating in
+ * reduces onto another server's spelling still satisfies this compatibility
+ * predicate. PermissionManager's registry guard prevents an ambiguous grant;
+ * publication gating in
  * `DiscoveredMCPTool.permissionAliases` is what keeps a *truncated*
  * reduction attributable to one server, R12-1).
  */
@@ -1938,7 +2018,8 @@ function resolveLegacyMcpSpelling(
  * keys can reduce to one byte-identical spelling — a middle-truncated
  * reduction whose head window does not pin down the key boundary is never
  * advertised (R12-1), and a length-preserving reduction shared by keys that
- * substitute onto each other is the disclosed variant-2 residual (R2-6).
+ * substitute onto each other remains a compatibility match; ambiguous
+ * allow grants are refused by PermissionManager's live registry guard.
  */
 function matchesAdvertisedExactName(
   pattern: string,

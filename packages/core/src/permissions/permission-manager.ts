@@ -8,12 +8,14 @@ import {
   parseRules,
   parseRule,
   matchesRule,
+  hasAmbiguousMcpGrant,
   resolveToolName,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
-import type { PathMatchContext } from './rule-parser.js';
+import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import {
@@ -148,6 +150,7 @@ function splitCommandForRules(command: string, toolName: string): string[] {
  * PermissionManager therefore only needs these three getters.
  */
 export interface PermissionManagerConfig {
+  getToolRegistry?(): Pick<ToolRegistry, 'getMcpToolIdentities'>;
   getShellExecutionSandbox?(): unknown;
   getToolMode?(): ToolMode;
   /** Merged allow-rules (settings + coreTools + allowedTools). */
@@ -441,6 +444,20 @@ export class PermissionManager {
     return bashDecision;
   }
 
+  private isMcpAllowAmbiguous(
+    pattern: string,
+    identity: McpToolIdentity | undefined,
+  ): boolean {
+    if (identity === undefined) return false;
+    const registry = this.config.getToolRegistry?.();
+    if (registry === undefined) return false;
+    return hasAmbiguousMcpGrant(
+      pattern,
+      identity,
+      registry.getMcpToolIdentities(),
+    );
+  }
+
   /**
    * Evaluate a single (non-compound) context against all rules.
    *
@@ -510,8 +527,12 @@ export class PermissionManager {
         ...this.activeSessionAllowRules(),
         ...this.persistentRules.allow,
       ]) {
-        if (matchesRule(rule, ...matchArgs, undefined, mcpIdentity))
+        if (
+          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
+        ) {
           return 'allow';
+        }
       }
       return 'default';
     })();
@@ -1267,8 +1288,10 @@ export class PermissionManager {
       restrictiveRules.some((rule) =>
         matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
       ) ||
-      allowRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, undefined, mcpIdentity),
+      allowRules.some(
+        (rule) =>
+          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
       )
     );
   }
