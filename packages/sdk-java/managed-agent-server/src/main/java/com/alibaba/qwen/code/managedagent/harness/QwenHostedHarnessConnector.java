@@ -171,7 +171,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission cancelManagedRuntime(String tenantId, String sessionId,
             String promptId, String checkpointId, String activationId) {
         PromptReceipt receipt = client().cancelManagedRuntime(
-                new CancelManagedRuntime(attachment(tenantId, sessionId, false),
+                new CancelManagedRuntime(cancellationAttachment(tenantId, sessionId),
                         promptId, checkpointId, activationId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
         return new Admission(receipt.getLastEventId(),
@@ -226,7 +226,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void cancel(String tenantId, String sessionId) {
-        client().cancelTurn(attachment(tenantId, sessionId, false));
+        client().cancelTurn(cancellationAttachment(tenantId, sessionId));
     }
 
     @Override
@@ -265,10 +265,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attachment;
     }
 
-    private void requireReadyForNewWork(String tenantId, String sessionId) {
-        if (!workspaceExecution.verifiedRecoveryEnabled()) {
-            return;
+    private HarnessSessionRef cancellationAttachment(String tenantId, String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attached = attachments.get(key);
+        if (attached == null) {
+            recoverManagedRuntime(tenantId, sessionId, true);
+            attached = attachments.get(key);
         }
+        return attached;
+    }
+
+    private void requireReadyForNewWork(String tenantId, String sessionId) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -335,7 +342,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         + " require the Managed Action store");
             }
             if (cancellation) {
-                workspaceExecution.authorizePassiveAttachment(session);
+                workspaceExecution.authorizeCancellation(session);
             } else {
                 workspaceExecution.authorize(session);
             }

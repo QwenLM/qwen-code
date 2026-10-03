@@ -5712,10 +5712,42 @@ describe('Hosted Harness tool approvals', () => {
     },
   );
 
-  it('cancels a waiting approval through the cancel route and releases the Workspace', async () => {
+  it('passively reattaches a live Turn and cancels it without opening another writer', async () => {
     const { server, clientId, answer, status } = await waitingSession();
+    for (const changed of [
+      { tenantId: 'other' },
+      { workspaceId: 'other' },
+      { baseUrl: 'http://other-store.test' },
+    ]) {
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: { ...store(), ...changed },
+          passiveManagedRuntimeRecovery: true,
+        })
+        .expect(404);
+    }
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({ managedSessionStore: store(), toolProfile: files })
+      .expect(409);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        passiveManagedRuntimeRecovery: true,
+      })
+      .expect(409);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body).toMatchObject({ clientId, approvalMode: 'default' });
+    expect(loaded.body._meta).toBeUndefined();
+    expect(await status()).toMatchObject({ hasActivePrompt: true });
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
-      .set('X-Qwen-Client-Id', clientId)
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
       .expect(204);
     await waitFor(async () =>
       expect(await status()).toMatchObject({
@@ -6778,7 +6810,18 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(200);
     expect(acquireSpy).not.toHaveBeenCalled();
-    const recovery = loaded.body._meta?.[
+    // The owner may lose its first load reply after Harness registered it.
+    const reloaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(reloaded.status).toBe(200);
+    expect(reloaded.body.clientId).toBe(loaded.body.clientId);
+    expect(acquireSpy).not.toHaveBeenCalled();
+    const recovery = reloaded.body._meta?.[
       'qwen.daemon.managedRuntimeRecovery'
     ] as {
       phase: string;

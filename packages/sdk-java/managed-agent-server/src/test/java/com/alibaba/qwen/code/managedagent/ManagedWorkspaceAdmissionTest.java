@@ -1151,13 +1151,15 @@ class ManagedWorkspaceAdmissionTest {
                 "workspace_unavailable");
     }
 
-    @Test
-    void reRegistrationRefusesLaterWorkBeforeAnyCommandIsWritten() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reRegistrationRefusesLaterWorkBeforeAnyCommandIsWritten(boolean storageOnly) {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         ManagedAgentService enabled = boundService(true);
         jdbc.update("UPDATE managed_workspace_registry SET"
-                + " workspace_generation = workspace_generation + 1"
+                + (storageOnly ? " storage_id = 'replacement-storage'"
+                        : " workspace_generation = workspace_generation + 1")
                 + " WHERE tenant_id = ?", tenant);
 
         assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
