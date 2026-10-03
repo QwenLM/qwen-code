@@ -378,7 +378,10 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
       sessionScope: 'chat_thread' as const,
     });
     expect(ch.config.sessionScope).toBe('chat_thread');
-    expect(capturedStderr()).not.toContain('WARNING');
+    // No scope-mismatch warning (chat_thread is shared), but the operator
+    // warning does fire: chat_thread shares direct-message sessions too.
+    expect(capturedStderr()).not.toContain('groupAllPolicy is');
+    expect(capturedStderr()).toContain('makes every session shared');
   });
 
   it('emits NO warning for groupAllPolicy=all when sessionScope is single (global-session exemption)', () => {
@@ -387,7 +390,10 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
     expect(ch.config.sessionScope).toBe('single');
-    expect(capturedStderr()).not.toContain('WARNING');
+    // No scope-mismatch warning ('single' is a shared-context scope), but the
+    // operator warning fires because 'single' shares every session.
+    expect(capturedStderr()).not.toContain('groupAllPolicy is');
+    expect(capturedStderr()).toContain('makes every session shared');
   });
 
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
@@ -463,6 +469,23 @@ describe('shared-session operator warning', () => {
     expect(capturedStderr()).toContain('no operators are configured');
   });
 
+  it('warns for a DM-only channel on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // No group access at all: 'single' shares direct-message sessions too, so
+    // the lockout is identical and must be warned about.
+    const ch = makeChannel({ sessionScope: 'single' });
+    expect(ch.config.groupPolicy).toBe('disabled');
+    const logged = capturedStderr();
+    expect(logged).toContain('makes every session shared');
+    expect(logged).toContain('no operators are configured');
+  });
+
+  it('stays silent on the user scope, where a direct message is never shared', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
   it('emits NO operator warning when operators are configured', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     makeChannel({ groupPolicy: 'open', operators: ['member-1'] });
@@ -512,6 +535,113 @@ describe('purgeSingleScopeOrphans', () => {
   function callPurge(ch: QQChannelInstance): void {
     (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
+
+  it('purges a legacy user-scope key that a message route suffixed', () => {
+    const removeSessionId = vi.fn(() => true);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = {
+      getAll: () => [
+        // The same unroutable user-era key, wrapped as [base, routeKey] by a
+        // message route (SessionRouter.routingKey).
+        {
+          key: JSON.stringify(['test-bot:u1:c1', '/review']),
+          sessionId: 'user-era-routed',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // A sibling channel's suffixed key stays untouched.
+        {
+          key: JSON.stringify(['other-bot:user-9:chat-9', '/review']),
+          sessionId: 'sibling-routed',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession },
+      ),
+    );
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-routed');
+  });
+
+  it('logs instead of silently skipping when the sessionScope is unrecognized', () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = { getAll: () => [], removeSessionId: vi.fn(() => true) };
+    callPurge(
+      makeChannelWithRouter(router, {
+        sessionScope: 'Threads',
+        purgeLegacySessions: true,
+      }),
+    );
+    // Fail closed must not be silent: the operator asked for a cleanup.
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'unrecognized sessionScope',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('records worktree isolation metadata in the rescue file', () => {
+    const store = '/tmp/test-qwen/routes.json';
+    const persisted = {
+      'test-bot:u1:c1': {
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        cwd: '/wt/one',
+        isolation: 'worktree',
+        workspaceCwd: '/ws/one',
+        turns: 3,
+        startedAt: 111,
+      },
+    };
+    vi.mocked(existsSync).mockImplementation(
+      (path: unknown) => String(path) === store,
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      String(path) === store ? JSON.stringify(persisted) : '') as never);
+    vi.mocked(writeFileSync).mockImplementation((() => undefined) as never);
+    const router = {
+      persistPath: store,
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId: vi.fn(() => true),
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession: vi.fn().mockResolvedValue(undefined) },
+      ),
+    );
+    const rescued = vi
+      .mocked(writeFileSync)
+      .mock.calls.map((call) => String(call[1]))
+      .find((text) => text.includes('worktree'));
+    expect(rescued).toBeDefined();
+    const record = (
+      JSON.parse(rescued!) as Array<{
+        routes: Array<Record<string, unknown>>;
+      }>
+    ).at(-1)!.routes[0];
+    // A hand-restore needs the isolation and its workspace root, not just cwd.
+    expect(record['isolation']).toBe('worktree');
+    expect(record['workspaceCwd']).toBe('/ws/one');
+    expect(record['cwd']).toBe('/wt/one');
+  });
 
   it('leaves every doomed route in place by default, with no rescue file', () => {
     vi.mocked(writeFileSync).mockClear();
@@ -3865,6 +3995,34 @@ describe('replyMsgId cleanup timer', () => {
     expect(msgSeqMap.get('msg-A')).toBe(5);
 
     ch.disconnect();
+  });
+
+  it('reclaims the group reply entry counter immediately when nothing else holds it', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    vi.spyOn(ch, 'onSessionDied').mockImplementation(() => {});
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    expect(replyMsgId.has(groupId)).toBe(false);
+    // The entry was the last holder: the reclaim now runs after it is removed,
+    // so the counter is dropped without waiting for the next sweep tick.
+    expect(msgSeqMap.has('msg-X')).toBe(false);
   });
 
   it('reclaims a msg_seq counter orphaned by group removal on the next tick', () => {

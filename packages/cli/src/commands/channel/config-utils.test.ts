@@ -572,6 +572,23 @@ describe('parseChannelConfig', () => {
     expect(result.sessionScope).toBe('user');
   });
 
+  it('validates purgeLegacySessions like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      purgeLegacySessions: true,
+    });
+    expect(result.purgeLegacySessions).toBe(true);
+    // A stringified "true" must not silently leave the QQ purge off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        purgeLegacySessions: 'true',
+      }),
+    ).rejects.toThrow(/purgeLegacySessions.*must be a boolean/);
+  });
+
   it('parses owner-scoped named sessions only for user scope', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

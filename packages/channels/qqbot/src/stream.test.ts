@@ -2459,9 +2459,7 @@ describe('buffer limit flush (#11)', () => {
     expect(stashed.text.startsWith(stashed.pre!)).toBe(true);
     const drops = stderrSpy.mock.calls
       .map((c) => String(c[0]))
-      .filter((line) =>
-        line.includes('handed-off sealed head over the buffer limit'),
-      )
+      .filter((line) => line.includes('successor stash over the buffer limit'))
       .map((line) => Number(/dropping (\d+) chars/.exec(line)?.[1] ?? '0'));
     expect(drops).toEqual([2]);
     // The logged loss telescopes: kept + dropped is what the merge held.
@@ -2530,9 +2528,7 @@ describe('buffer limit flush (#11)', () => {
     expect(stashed.text.startsWith(stashed.pre!)).toBe(true);
     const drops = stderrSpy.mock.calls
       .map((c) => String(c[0]))
-      .filter((line) =>
-        line.includes('handed-off sealed head over the buffer limit'),
-      )
+      .filter((line) => line.includes('successor stash over the buffer limit'))
       .map((line) => Number(/dropping (\d+) chars/.exec(line)?.[1] ?? '0'));
     // The whole successor tail, measured from what was kept.
     expect(drops).toEqual([long.length]);
@@ -7041,5 +7037,103 @@ describe('flush-chain guards pinned by witness tests', () => {
       (chp['streamOrphanBuffer'] as Map<string, { text: string }>).get('sess-1')
         ?.text,
     ).toBe('SEALED-HEAD ');
+  });
+});
+
+// Round-1 robustness pins.
+describe('round-1 robustness pins', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function stash(
+    ch: QQChannelClass,
+    held: {
+      turn: number;
+      text: string;
+      pre?: string;
+      sourceLabel?: string;
+    },
+  ): void {
+    (
+      (ch as unknown as Record<string, unknown>)['streamOrphanBuffer'] as Map<
+        string,
+        typeof held
+      >
+    ).set('s1', held);
+  }
+
+  it("keeps a diverted stash's sealed pre when a cancelled turn merges it", () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // State a cancelled turn leaves: chunks diverted to the side buffer and
+    // sealed by a boundary, with no streamState entry of its own.
+    stash(ch, { turn: 1, text: 'STALE-HEAD ', pre: 'STALE-HEAD ' });
+    onPromptEnd(ch, 'test-chat', 's1');
+    const state = streamState(ch).get('s1')!;
+    // The flush took the buffer into the send (state.buffer is cleared
+    // synchronously), but the seal must stay on the entry: it is the only copy
+    // the bridge cleared at the boundary, and a permanent failure of this flush
+    // has nothing to hand off without it.
+    expect((state as { sealedPre?: string }).sealedPre).toBe('STALE-HEAD ');
+  });
+
+  it("keeps the diverted turn's attribution label when a cancelled turn merges its stash", () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    stash(ch, {
+      turn: 1,
+      text: 'LABELLED-HEAD ',
+      sourceLabel: 'SUB-1',
+    });
+    onPromptEnd(ch, 'test-chat', 's1');
+    // The label was captured when the chunks were diverted; the merged flush
+    // must not go out unattributed.
+    expect(streamState(ch).get('s1')!.sourceLabel).toBe('SUB-1');
+  });
+
+  it('does not re-arm a live idle timer on a response boundary', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const states = chp['streamState'] as Map<string, Record<string, unknown>>;
+    const armed = setTimeout(() => {}, 9999);
+    const state = {
+      chatId: 'test-chat',
+      buffer: 'RESID',
+      timer: armed,
+      timerReconnectId: chp['_reconnectId'],
+      retryCount: 0,
+      turn: 1,
+    };
+    states.set('s1', state);
+    (chp['turnCounter'] as Map<string, number>).set('s1', 1);
+
+    onResponseBoundary(ch, 'test-chat', 's1');
+    // The handle was already going to deliver this residual (a parked retry's
+    // backoff): re-arming at the shorter idle cadence would collapse that tier.
+    expect(states.get('s1')!['timer']).toBe(armed);
+    clearTimeout(armed);
+  });
+
+  it('logs the head a session death discards from the side buffer', () => {
+    const ch = makeChannel();
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stash(ch, { turn: 1, text: 'DEAD-HEAD ' });
+    ch.onSessionDied('s1');
+    // Head text the bridge already cleared must not vanish silently.
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 10 chars',
+    );
+    stderrSpy.mockRestore();
   });
 });

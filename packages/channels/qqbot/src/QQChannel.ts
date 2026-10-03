@@ -422,7 +422,9 @@ export class QQChannel extends ChannelBase {
    * state entry once the chain settles and frees the entry, so the HEAD of a
    * reply is never silently dropped during the chain's settle window (up to
    * ~10s under rate-limit backoff). A teardown may only drop an entry whose
-   * turn is not the live turn; the only drain site is onResponseChunk.
+   * turn is not the live turn; the consumption sites are onResponseChunk
+   * (the next turn's first chunk folds the stash in) and onResponseComplete
+   * (the owning turn's completion prepends the sealed `pre`).
    * `pre` seals the portion accumulated before the most recent
    * responseBoundary: the bridge accumulates every textChunk and only a
    * boundary clears that collection, so at completion only that sealed
@@ -433,7 +435,7 @@ export class QQChannel extends ChannelBase {
    */
   private streamOrphanBuffer: Map<
     string,
-    { turn: number; text: string; pre?: string }
+    { turn: number; text: string; pre?: string; sourceLabel?: string }
   > = new Map();
   /**
    * The turn whose onResponseComplete has already run, per session. The
@@ -513,22 +515,34 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // A shared-scope group session is operated only by config.operators (see
-    // ChannelBase.isSharedSessionOperator) — group membership grants no
-    // session-control rights. Warn when group access is on and no operator is
-    // configured: otherwise permission requests and /clear, /cancel, /who,
-    // /status, /loop, /btw, /approve*, /deny are unreachable for every member
-    // of an approved group, with no other signal.
+    // A shared-scope session is operated only by config.operators (see
+    // ChannelBase.isSharedSessionOperator) — membership grants no
+    // session-control rights. Warn whenever such a session exists and no
+    // operator is configured: permission requests, the session-control
+    // commands (/clear, /cancel, /who, /status, /loop, /btw, /approve*, /deny)
+    // and steering an in-flight turn are then unreachable, with no other
+    // signal. Group access is not required for the lockout: 'single' and
+    // 'chat_thread' share direct-message sessions too, so a DM-only channel on
+    // those scopes has the same dead end ('thread' shares only group sessions,
+    // because a direct message is one chat with one sender).
+    const sharedScope =
+      config.sessionScope === 'thread' ||
+      config.sessionScope === 'chat_thread' ||
+      config.sessionScope === 'single';
+    const dmSharedScope =
+      config.sessionScope === 'single' || config.sessionScope === 'chat_thread';
+    const groupAccess =
+      config.groupPolicy !== undefined && config.groupPolicy !== 'disabled';
     if (
-      config.groupPolicy !== undefined &&
-      config.groupPolicy !== 'disabled' &&
-      (config.sessionScope === 'thread' ||
-        config.sessionScope === 'chat_thread' ||
-        config.sessionScope === 'single') &&
+      sharedScope &&
+      (groupAccess || dmSharedScope) &&
       (config.operators ?? []).length === 0
     ) {
+      const where = groupAccess
+        ? `group access is enabled with shared sessionScope '${config.sessionScope}'`
+        : `sessionScope '${config.sessionScope}' makes every session shared, direct messages included`;
       process.stderr.write(
-        `[QQ:${name}] WARNING: group access is enabled with shared sessionScope '${config.sessionScope}' but no operators are configured — no member of an approved group can answer permission requests or run session-control commands until 'operators' is set.\n`,
+        `[QQ:${name}] WARNING: ${where}, but no operators are configured — no one can answer permission requests, run session-control commands, or steer an in-flight turn until 'operators' is set.\n`,
       );
     }
 
@@ -912,11 +926,7 @@ export class QQChannel extends ChannelBase {
     );
   }
 
-  async sendMessage(
-    chatId: string,
-    text: string,
-    msgIdOverride?: string,
-  ): Promise<void> {
+  async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
     const replyContext =
@@ -925,13 +935,7 @@ export class QQChannel extends ChannelBase {
         : latest
           ? { chatId, ...latest }
           : undefined;
-    await this.sendMessageWithReplyContext(
-      chatId,
-      text,
-      replyContext,
-      undefined,
-      msgIdOverride,
-    );
+    await this.sendMessageWithReplyContext(chatId, text, replyContext);
   }
 
   protected override async sendThreadMessage(
@@ -1541,6 +1545,22 @@ export class QQChannel extends ChannelBase {
           state = this.createStreamState(chatId, sessionId, '', stashed.turn);
           this.streamState.set(sessionId, state);
         }
+        // The stash carries the diverted turn's attribution label (a
+        // sub-agent/loop segment): without it the merged flush would go out
+        // unattributed. An existing state's own label wins.
+        if (
+          state.sourceLabel === undefined &&
+          stashed.sourceLabel !== undefined
+        ) {
+          state.sourceLabel = stashed.sourceLabel;
+        }
+        // The stash may carry a sealed pre-boundary prefix whose only other
+        // copy the bridge cleared at a boundary: without it on the state, a
+        // permanent failure of the flush below has nothing to hand off and the
+        // opening is lost. Same merge as onResponseChunk's drain site.
+        if (stashed.pre !== undefined) {
+          state.sealedPre = stashed.pre + (state.sealedPre ?? '');
+        }
         state.buffer = stashed.text + state.buffer;
       } else {
         this.dropOrphanStash(sessionId, stashed);
@@ -1793,10 +1813,31 @@ export class QQChannel extends ChannelBase {
         // bound the stash like state.buffer is bounded. Keep the head — the
         // sealed opening — and log the dropped tail.
         const limit = this.streamBufferLimit(state);
-        const stashed: { turn: number; text: string; pre?: string } =
+        const stashed: {
+          turn: number;
+          text: string;
+          pre?: string;
+          sourceLabel?: string;
+        } =
           held && held.turn === currentTurn
-            ? { turn: currentTurn, text: held.text + chunk, pre: held.pre }
-            : { turn: currentTurn, text: chunk };
+            ? {
+                turn: currentTurn,
+                text: held.text + chunk,
+                pre: held.pre,
+                ...(segment?.sourceLabel !== undefined ||
+                held.sourceLabel !== undefined
+                  ? {
+                      sourceLabel: segment?.sourceLabel ?? held.sourceLabel,
+                    }
+                  : {}),
+              }
+            : {
+                turn: currentTurn,
+                text: chunk,
+                ...(segment?.sourceLabel !== undefined
+                  ? { sourceLabel: segment.sourceLabel }
+                  : {}),
+              };
         if (stashed.text.length > limit) {
           const before = stashed.text.length;
           // Cap in UTF-16 units on code-point boundaries, so the cut cannot
@@ -2514,10 +2555,6 @@ export class QQChannel extends ChannelBase {
     // still needs the anchor to deliver its residual.
     const staleMsgId =
       state && state.turn !== currentTurn ? state.msgId : undefined;
-    if (state?.timer) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
     if (
       state &&
       (state.buffer ||
@@ -2538,15 +2575,29 @@ export class QQChannel extends ChannelBase {
       if (state.buffer) {
         // The live turn's prefix is already sealed above by
         // captureBoundaryClear, which applies the same live-turn gate.
-        if (state.timer) clearTimeout(state.timer);
-        const reconnectId = this._reconnectId;
-        state.timer = setTimeout(() => {
-          this.idleFlush(sessionId, reconnectId);
-        }, QQChannel.IDLE_FLUSH_MS);
-        state.timerReconnectId = reconnectId;
-        state.timer.unref?.();
+        // Leave a handle already live under this generation alone: a parked
+        // retry's backoff timer is already going to deliver this residual, and
+        // re-arming at the shorter idle cadence on every boundary would
+        // collapse that tier and push the parked residual's deadline out. Same
+        // guard as the divert self-heal below.
+        const timerLive =
+          state.timer !== null && state.timerReconnectId === this._reconnectId;
+        if (!timerLive) {
+          if (state.timer) clearTimeout(state.timer);
+          const reconnectId = this._reconnectId;
+          state.timer = setTimeout(() => {
+            this.idleFlush(sessionId, reconnectId);
+          }, QQChannel.IDLE_FLUSH_MS);
+          state.timerReconnectId = reconnectId;
+          state.timer.unref?.();
+        }
       }
       return;
+    }
+    // The entry is being dropped: disarm its timer before the delete.
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
     }
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
@@ -2803,7 +2854,7 @@ export class QQChannel extends ChannelBase {
    */
   private dropOrphanStash(
     sessionId: string,
-    held: { turn: number; text: string; pre?: string },
+    held: { turn: number; text: string; pre?: string; sourceLabel?: string },
   ): void {
     this.streamOrphanBuffer.delete(sessionId);
     if (held.text) {
@@ -2963,6 +3014,9 @@ export class QQChannel extends ChannelBase {
         turn: existing.turn,
         text: sealed + successorText,
         pre: sealed + truncateUtf16Units(existing.pre ?? '', room),
+        ...(existing.sourceLabel !== undefined
+          ? { sourceLabel: existing.sourceLabel }
+          : {}),
       };
       // `pre` is a prefix of `text` and is what onResponseComplete prepends, so
       // it must never outrun the kept text; the trims above keep that true, and
@@ -2973,7 +3027,7 @@ export class QQChannel extends ChannelBase {
       const dropped = existing.text.length - successorText.length;
       if (dropped > 0) {
         process.stderr.write(
-          `[QQ:${this.name}] dropping ${dropped} chars of handed-off sealed head over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
+          `[QQ:${this.name}] dropping ${dropped} chars of successor stash over the buffer limit, sealed head kept, for ${sanitizeLogText(sessionId, 64)}\n`,
         );
       }
     }
@@ -3004,7 +3058,10 @@ export class QQChannel extends ChannelBase {
     this.flushedSessions.delete(sessionId);
     this.activePromptSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
-    this.streamOrphanBuffer.delete(sessionId);
+    // The stash is head text the bridge already cleared at a boundary, so its
+    // loss must be observable like every other drop rather than silent.
+    const heldStash = this.streamOrphanBuffer.get(sessionId);
+    if (heldStash) this.dropOrphanStash(sessionId, heldStash);
     this.completedTurns.delete(sessionId);
     super.onSessionDied(sessionId);
   }
@@ -3488,6 +3545,15 @@ export class QQChannel extends ChannelBase {
       scope === 'chat_thread' ||
       scope === 'single';
     const singleScope = scope === 'single';
+    if (!knownScope) {
+      // Fail closed, but not silently: the operator asked for a cleanup (or at
+      // least has a scope this build cannot reason about) and must know that
+      // nothing was counted or purged.
+      process.stderr.write(
+        `[QQ:${this.name}] purgeSingleScopeOrphans skipped: unrecognized sessionScope '${sanitizeLogText(scope, 32)}' — refusing to guess which keys a scope would build, so nothing was purged\n`,
+      );
+      return;
+    }
     try {
       // Optional-call like the READY path: an externally supplied router may
       // not expose getAll; fall back to an empty list rather than crash.
@@ -3519,7 +3585,33 @@ export class QQChannel extends ChannelBase {
         typeof routerPersistPath === 'string' && routerPersistPath.length > 0
           ? routerPersistPath
           : this.globalSessionsPath;
-      const persistedCwdByKey = new Map<string, string>();
+      // A message route persists its key as JSON.stringify([baseKey, routeKey])
+      // (SessionRouter.routingKey), so an entry's base key has to be unwrapped
+      // before the orphan predicates can match it.
+      const baseRoutingKey = (key: string): string | undefined => {
+        if (!key.startsWith('[')) return key;
+        try {
+          const parsed: unknown = JSON.parse(key);
+          if (
+            Array.isArray(parsed) &&
+            parsed.length === 2 &&
+            typeof parsed[0] === 'string'
+          ) {
+            return parsed[0];
+          }
+        } catch {
+          /* not a route-suffixed key */
+        }
+        return undefined;
+      };
+      type PersistedRouteMeta = {
+        cwd?: string;
+        isolation?: 'worktree';
+        workspaceCwd?: string;
+        turns?: number;
+        startedAt?: number;
+      };
+      const persistedCwdByKey = new Map<string, PersistedRouteMeta>();
       try {
         if (existsSync(cwdStorePath)) {
           const raw: unknown = JSON.parse(readFileSync(cwdStorePath, 'utf-8'));
@@ -3527,9 +3619,31 @@ export class QQChannel extends ChannelBase {
             for (const [key, value] of Object.entries(
               raw as Record<string, unknown>,
             )) {
-              const cwd = (value as { cwd?: unknown } | null)?.cwd;
-              if (typeof cwd === 'string' && cwd.length > 0) {
-                persistedCwdByKey.set(key, cwd);
+              const entry = value as Record<string, unknown> | null;
+              const meta: PersistedRouteMeta = {};
+              if (
+                typeof entry?.['cwd'] === 'string' &&
+                entry['cwd'].length > 0
+              ) {
+                meta.cwd = entry['cwd'];
+              }
+              if (entry?.['isolation'] === 'worktree') {
+                meta.isolation = 'worktree';
+              }
+              if (
+                typeof entry?.['workspaceCwd'] === 'string' &&
+                entry['workspaceCwd'].length > 0
+              ) {
+                meta.workspaceCwd = entry['workspaceCwd'];
+              }
+              if (typeof entry?.['turns'] === 'number') {
+                meta.turns = entry['turns'];
+              }
+              if (typeof entry?.['startedAt'] === 'number') {
+                meta.startedAt = entry['startedAt'];
+              }
+              if (Object.keys(meta).length > 0) {
+                persistedCwdByKey.set(key, meta);
               }
             }
           }
@@ -3537,49 +3651,51 @@ export class QQChannel extends ChannelBase {
       } catch (e) {
         // Best-effort: a rescue record without cwd is still restorable by hand.
         process.stderr.write(
-          `[QQ:${this.name}] purgeSingleScopeOrphans cwd read failed, rescue copies omit cwd: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+          `[QQ:${this.name}] purgeSingleScopeOrphans route metadata read failed, rescue copies omit cwd/isolation: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
       }
       const doomed: Array<
-        RouterRoute & { kind: 'single' | 'user'; cwd?: string }
+        RouterRoute & { kind: 'single' | 'user' } & PersistedRouteMeta
       > = [];
       for (const entry of all) {
-        // Exact-match only this channel's own keys: in daemon mode the router
-        // is shared across channels, so a suffix match on ':__single__' would
-        // also hit sibling channels' live single-scope routing state and
-        // silently reset their sessions. Orphan keys from the single-scope
-        // era are `<thisChannel>:__single__`, so the exact match still cleans
-        // up this channel's orphans without touching sibling routes — but
-        // only when the current scope is not 'single', where this exact key
-        // is the live one. Gated on knownScope too, and there the purge is
-        // suppressed deliberately: an unrecognized scope cannot tell us which
+        // Match only this channel's own keys, on the entry's base key (a
+        // message route wraps it as JSON.stringify([base, routeKey]), see
+        // baseRoutingKey above): in daemon mode the router is shared across
+        // channels, so a suffix match on ':__single__' would also hit sibling
+        // channels' live single-scope routing state and silently reset their
+        // sessions. Orphan keys from the single-scope era are
+        // `<thisChannel>:__single__`, so the base-key match still cleans up
+        // this channel's orphans without touching sibling routes — but only
+        // when the current scope is not 'single', where this key is the live
+        // one. Gated on knownScope too, and there the purge is suppressed
+        // deliberately (with a log): an unrecognized scope cannot tell us which
         // keys a scope would build, so even a currently unreachable
         // `__single__` route is left for the operator rather than guessed at.
-        const isSingleOrphan =
-          knownScope && !singleScope && entry.key === `${this.name}:__single__`;
         // Legacy user-scope routes of THIS channel are unroutable under every
         // non-'user' scope (including 'single', whose key is
         // `<channel>:__single__`), so a persisted user-era key there can never
         // resolve again. Ownership comes from the entry's target, not from a
         // key prefix, so a sibling channel whose name prefixes ours is never
-        // touched. The key is compared against the exact string the router
-        // builds for 'user' scope rather than being split on ':' — the channel
-        // name is unrestricted user config and may itself contain colons, so
-        // the part count does not identify the scope.
+        // touched. The base key is compared against the exact string the
+        // router builds for 'user' scope rather than being split on ':' — the
+        // channel name is unrestricted user config and may itself contain
+        // colons, so the part count does not identify the scope.
+        const baseKey = baseRoutingKey(entry.key);
+        const isSingleOrphan =
+          knownScope && !singleScope && baseKey === `${this.name}:__single__`;
         const isOwnLegacyUserKey =
           knownScope &&
           scope !== 'user' &&
           entry.target?.channelName === this.name &&
-          entry.key ===
+          baseKey ===
             `${entry.target.channelName}:${entry.target.senderId}:${entry.target.chatId}`;
         if (isSingleOrphan || isOwnLegacyUserKey) {
-          const cwd = persistedCwdByKey.get(entry.key);
           doomed.push({
             kind: isSingleOrphan ? 'single' : 'user',
             key: entry.key,
             sessionId: entry.sessionId,
             target: entry.target,
-            ...(cwd !== undefined ? { cwd } : {}),
+            ...(persistedCwdByKey.get(entry.key) ?? {}),
           });
         }
       }
@@ -3876,8 +3992,10 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
-   * to prevent orphaned entries accumulating over time.
+   * Set replyMsgId for a chat, replacing any previous entry. The previous
+   * msgId's msg_seq counter is deliberately NOT dropped here (see the NOTE
+   * below): it is left to the TTL sweep, which reclaims it only once no
+   * holder remains.
    */
   private setReplyMsgId(chatId: string, msgId: string): void {
     const timestamp = Date.now();
@@ -3916,6 +4034,10 @@ export class QQChannel extends ChannelBase {
     this.replyMsgIdCleanupTimer = setInterval(() => {
       const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
       let dirty = false;
+      // Whether any of the tick's steps reclaimed a counter, so the explicit
+      // save below only runs for a tick that evicted entries without dropping
+      // one (reclaimMsgSeq persists internally).
+      let reclaimed = false;
       for (const context of this.replyContextByMessageId.values()) {
         if (context.timestamp < cutoff) {
           this.deleteReplyContext(context);
@@ -3924,14 +4046,12 @@ export class QQChannel extends ChannelBase {
       }
       for (const [chatId, entry] of this.replyMsgId) {
         if (entry.timestamp < cutoff) {
-          // A streaming reply anchored to this msgId may still be in flight
-          // (per-session msgId): reclaimMsgSeq keeps its msg_seq counter
-          // alive while any holder remains. The entry is deleted right after,
-          // so this site's own veto (the entry still names the counter) is
-          // expected; the orphan pass at the end of the tick picks the
-          // counter up once it is gone.
-          this.reclaimMsgSeq(entry.msgId);
+          // Drop the naming entry BEFORE the reclaim, like deleteReplyContext:
+          // while it is still present it is itself a holder, so reclaiming
+          // first would always veto. A still-live holder (session anchor,
+          // stream entry, in-flight send, routing map) vetoes as before.
           this.replyMsgId.delete(chatId);
+          if (this.reclaimMsgSeq(entry.msgId)) reclaimed = true;
           dirty = true;
         }
       }
@@ -3958,7 +4078,7 @@ export class QQChannel extends ChannelBase {
       // than leaking. reclaimMsgSeq persists internally when it drops a counter,
       // which already covers the TTL evictions above; the explicit save below
       // is only needed for a tick that evicted entries without dropping one.
-      const reclaimed = this.reclaimOrphanMsgSeqCounters();
+      if (this.reclaimOrphanMsgSeqCounters()) reclaimed = true;
       if (dirty && !reclaimed) this.saveQQState();
     }, 60_000);
     this.replyMsgIdCleanupTimer.unref();
@@ -4291,6 +4411,10 @@ export class QQChannel extends ChannelBase {
               })
               .catch(() => {
                 this.fixRestoredSessions();
+                // A partial restore attached orphans too (each loaded session
+                // is exactly what the purge releases), so the repair branch
+                // must run the same purge as the success branch.
+                this.purgeSingleScopeOrphans();
                 process.stderr.write(
                   `[QQ:${this.name}] WARNING: router session restore failed — cron messages will be dropped until sessions re-establish\n`,
                 );
@@ -5178,15 +5302,17 @@ export class QQChannel extends ChannelBase {
     }
     this.chatTypeMap.delete(groupId);
     this.groupActiveMsgEnabled.delete(groupId);
-    // msgSeqMap is keyed by message ID, not group_openid — get the
-    // message ID from replyMsgId before deleting the reply entry. The entry
-    // still names the counter here, so the reclaim is expected to veto; the
-    // sweep's orphan pass reclaims once every holder is gone.
+    // msgSeqMap is keyed by message ID, not group_openid — get the message ID
+    // from replyMsgId before dropping the entry. The entry is removed BEFORE
+    // the reclaim: while it is still present it is itself a holder, so
+    // reclaiming first would always veto and leave the counter until the next
+    // 60s sweep tick. A still-live holder (session anchor, stream entry,
+    // in-flight send, routing map) vetoes as before.
     const replyEntry = this.replyMsgId.get(groupId);
+    this.replyMsgId.delete(groupId);
     if (replyEntry) {
       this.reclaimMsgSeq(replyEntry.msgId);
     }
-    this.replyMsgId.delete(groupId);
     for (const context of this.replyContextByMessageId.values()) {
       if (context.chatId === groupId) {
         this.replyContextByMessageId.delete(context.msgId);

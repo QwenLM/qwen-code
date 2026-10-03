@@ -124,6 +124,17 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
+  // code-point boundaries, so a pair is never split.
+  truncateUtf16Units: (text: string, max: number): string => {
+    if (text.length <= max) return text;
+    let kept = '';
+    for (const ch of text) {
+      if (kept.length + ch.length > max) break;
+      kept += ch;
+    }
+    return kept;
+  },
   sanitizeLogText: (text: string, maxLen: number): string => {
     const sanitized = Array.from(text, (c) => {
       const cp = c.codePointAt(0)!;
@@ -2526,6 +2537,51 @@ describe('Gateway message handling', () => {
     ch.disconnect();
   });
 
+  it('READY cold start: a failed restore still purges orphaned routes', async () => {
+    const ch = makeChannel({ sessionScope: 'thread' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    // A partial restore: earlier sessions were loaded (each one is exactly what
+    // the purge releases) and a later one rejects.
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockRejectedValue(new Error('half restored'));
+    const purgeSpy = vi.spyOn(
+      ch as unknown as { purgeSingleScopeOrphans: () => void },
+      'purgeSingleScopeOrphans',
+    );
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // The repair branch runs in the rejected promise's catch: flush microtasks.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(purgeSpy).toHaveBeenCalled();
+
+    purgeSpy.mockRestore();
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
   it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps live thread-scope keys', async () => {
     // The purge must run as part of the READY restore chain and drop
     // single-era orphan keys from the router (thread 62 gate: previously the
@@ -3375,5 +3431,14 @@ describe('inbound media', () => {
     expect(env.attachments?.every((entry) => entry.type === 'video')).toBe(
       true,
     );
+  });
+});
+
+describe('channel-base test double', () => {
+  it('exports truncateUtf16Units, which QQChannel imports', async () => {
+    const base = await import('@qwen-code/channel-base');
+    expect(
+      typeof (base as { truncateUtf16Units?: unknown }).truncateUtf16Units,
+    ).toBe('function');
   });
 });
