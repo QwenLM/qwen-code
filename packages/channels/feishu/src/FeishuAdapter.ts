@@ -10,6 +10,7 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
+  sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import {
@@ -2752,24 +2753,41 @@ export class FeishuChannel extends ChannelBase {
                 );
                 if (media) {
                   const dir = join(tmpdir(), 'channel-files', randomUUID());
-                  mkdirSync(dir, { recursive: true });
-                  const rawName = basename(content.fileName).replace(/\0/g, '');
-                  const safeName =
-                    rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
-                    `feishu_file_${Date.now()}`;
-                  const filePath = join(dir, safeName);
-                  writeFileSync(filePath, media.buffer);
-                  downloadedFileDir = dir;
+                  try {
+                    mkdirSync(dir, { recursive: true });
+                    const rawName = basename(content.fileName).replace(
+                      /\0/g,
+                      '',
+                    );
+                    const safeName =
+                      rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
+                      `feishu_file_${Date.now()}`;
+                    const filePath = join(dir, safeName);
+                    writeFileSync(filePath, media.buffer);
+                    downloadedFileDir = dir;
 
-                  envelope.attachments = [
-                    ...(envelope.attachments || []),
-                    {
-                      type: 'file',
-                      filePath,
-                      mimeType: media.mimeType,
-                      fileName: safeName,
-                    },
-                  ];
+                    envelope.attachments = [
+                      ...(envelope.attachments || []),
+                      {
+                        type: 'file',
+                        filePath,
+                        mimeType: media.mimeType,
+                        fileName: safeName,
+                      },
+                    ];
+                  } catch (error) {
+                    try {
+                      rmSync(dir, { recursive: true, force: true });
+                    } catch {
+                      /* best-effort cleanup */
+                    }
+                    process.stderr.write(
+                      `[Feishu:${this.name}] Cannot store file, delivering the text without it: ${sanitizeLogText(
+                        error instanceof Error ? error.message : String(error),
+                        300,
+                      )}\n`,
+                    );
+                  }
                 }
               }
             }
