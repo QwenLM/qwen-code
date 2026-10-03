@@ -265,15 +265,42 @@ describe('qwen sessions ps', () => {
     expect(stdout[0]).not.toContain('\n');
   });
 
-  it('keeps managed and registry records separate in JSON', async () => {
+  it('deduplicates a managed session its live worker also registers', async () => {
+    // The worker is an ordinary interactive session: it registers in the
+    // live registry under the same session id the roster row carries.
+    // Listing both rows double-counts one session and the two rows
+    // contradict each other on whether it has a process — the registry row
+    // (real pid, age) wins, on both output paths.
     const rec = record({ sessionId: 'managed-1' });
     listLiveSessions.mockResolvedValue([rec]);
     listAgentViewSessionStates.mockResolvedValue([managedState()]);
     await run({ json: true });
 
+    expect(stdout.map((line) => JSON.parse(line))).toEqual([rec]);
+  });
+
+  it('prints one table row for a session present in both sources', async () => {
+    const rec = record({ sessionId: 'managed-1' });
+    listLiveSessions.mockResolvedValue([rec]);
+    listAgentViewSessionStates.mockResolvedValue([managedState()]);
+    await run({ json: false });
+
+    // Header plus exactly one body row — the registry one, with its real
+    // pid; the managed row's `-` pid cell would contradict it.
+    expect(stdout.length).toBe(2);
+    expect(stdout[1]).toContain('app-ab');
+    expect(stdout[1]).not.toContain('managed');
+  });
+
+  it('keeps a managed row whose worker has no registry twin', async () => {
+    // The worker exited (or never spawned): the roster is then the only
+    // record of the session, so the row must survive the dedup join.
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionStates.mockResolvedValue([managedState()]);
+    await run({ json: true });
+
     expect(stdout.map((line) => JSON.parse(line))).toEqual([
       { sessionId: 'managed-1', cwd: '/w/svc', managed: true },
-      rec,
     ]);
   });
 

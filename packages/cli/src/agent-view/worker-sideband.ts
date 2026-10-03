@@ -18,12 +18,22 @@ export const QWEN_AGENT_VIEW_SIDEBAND = 'QWEN_AGENT_VIEW_SIDEBAND';
 export const QWEN_AGENT_VIEW_TOKEN = 'QWEN_AGENT_VIEW_TOKEN';
 export const QWEN_AGENT_VIEW_ACTIVE_CWD = 'QWEN_AGENT_VIEW_ACTIVE_CWD';
 
+/**
+ * The dispatched prompt, carried in the worker's environment rather than
+ * its argv: argv is world-readable via /proc/<pid>/cmdline for the whole
+ * worker lifetime, while /proc/<pid>/environ is owner-only. Listed in
+ * AGENT_VIEW_WORKER_ENV_KEYS so the PTY host strips it from any inherited
+ * environment — only the launch record may mint it.
+ */
+export const QWEN_AGENT_VIEW_INITIAL_PROMPT = 'QWEN_AGENT_VIEW_INITIAL_PROMPT';
+
 export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_WORKER,
   QWEN_AGENT_VIEW_SESSION_ID,
   QWEN_AGENT_VIEW_SIDEBAND,
   QWEN_AGENT_VIEW_TOKEN,
   QWEN_AGENT_VIEW_ACTIVE_CWD,
+  QWEN_AGENT_VIEW_INITIAL_PROMPT,
 ] as const;
 
 export type AgentViewWorkerEnvKey = (typeof AGENT_VIEW_WORKER_ENV_KEYS)[number];
@@ -64,7 +74,10 @@ const activePrompts = new Map<
 
 export function createAgentViewWorkerSidebandEnv(
   config: AgentViewWorkerSidebandEnv,
-): Record<AgentViewWorkerEnvKey, string> {
+): Record<
+  Exclude<AgentViewWorkerEnvKey, typeof QWEN_AGENT_VIEW_INITIAL_PROMPT>,
+  string
+> {
   return {
     [QWEN_AGENT_VIEW_WORKER]: '1',
     [QWEN_AGENT_VIEW_SESSION_ID]: config.sessionId,

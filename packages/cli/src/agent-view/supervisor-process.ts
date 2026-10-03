@@ -457,6 +457,14 @@ class AgentViewSupervisorProcessHandler
     if (!prompt.trim()) {
       throw new Error('Agent View dispatch prompt cannot be empty.');
     }
+    const envParam = params?.['env'];
+    const env: Record<string, string> = {};
+    if (envParam !== null && typeof envParam === 'object') {
+      // The wire carries JSON: non-string values are not an environment.
+      for (const [key, value] of Object.entries(envParam)) {
+        if (typeof value === 'string') env[key] = value;
+      }
+    }
     const store = {
       ...(this.options.globalDir ? { globalDir: this.options.globalDir } : {}),
     };
@@ -464,7 +472,7 @@ class AgentViewSupervisorProcessHandler
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
-      promptInArgv: !shouldWaitForWorkerReady(this.options),
+      env,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {

@@ -151,9 +151,19 @@ async function handlePs(argv: PsArgs): Promise<void> {
     listLiveSessions(),
     readManagedSessions(),
   ]);
+  // A managed session whose worker is alive registers itself in the live
+  // registry under the same session id; listing both rows double-counts
+  // one session and the two rows contradict each other on whether it has
+  // a process. The registry row is the richer one (real pid, age), so it
+  // wins the join. A managed row with no registry twin stays — its worker
+  // has exited or not spawned, and the roster is then the only record.
+  const liveIds = new Set(records.map((record) => record.sessionId));
+  const visibleManaged = managed.filter(
+    (session) => !liveIds.has(session.sessionId),
+  );
 
   if (argv.json) {
-    for (const session of managed) {
+    for (const session of visibleManaged) {
       writeStdoutLine(JSON.stringify({ ...session, managed: true }));
     }
     for (const record of records) {
@@ -170,14 +180,14 @@ async function handlePs(argv: PsArgs): Promise<void> {
     return;
   }
 
-  if (records.length === 0 && managed.length === 0) {
+  if (records.length === 0 && visibleManaged.length === 0) {
     writeStdoutLine(
       'No Qwen Code sessions are registered or managed right now.',
     );
     return;
   }
 
-  outputHuman(records, managed, Date.now());
+  outputHuman(records, visibleManaged, Date.now());
 }
 
 export const psCommand: CommandModule<unknown, PsArgs> = {

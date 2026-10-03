@@ -18,7 +18,11 @@ import {
   writeAgentViewSessionState,
   writeAgentViewWorker,
 } from './supervisor-store.js';
-import { createAgentViewWorkerSidebandEnv } from './worker-sideband.js';
+import {
+  AGENT_VIEW_WORKER_ENV_KEYS,
+  QWEN_AGENT_VIEW_INITIAL_PROMPT,
+  createAgentViewWorkerSidebandEnv,
+} from './worker-sideband.js';
 import {
   buildCurrentQwenCliArgv,
   getCurrentQwenCliEntrypoint,
@@ -29,13 +33,36 @@ interface DispatchOptions {
   sidebandEndpoint?: string;
   token?: string;
   publishRoster?: boolean;
-  promptInArgv?: boolean;
+  /**
+   * The dispatching client's environment, forwarded over the dispatch RPC:
+   * the supervisor is process-global and long-lived, so without this the
+   * worker inherits whichever shell first started the supervisor. Keys
+   * colliding with AGENT_VIEW_WORKER_ENV_KEYS are dropped — the sideband
+   * identity is minted here, never by the client.
+   */
+  env?: Record<string, string>;
 }
 
 // activity.json is re-read on every list() poll; keep the summary a
 // display-sized preview, matching the queued-prompt preview cap.
 const MAX_ACTIVITY_SUMMARY_CHARS = 500;
-const MAX_ARGV_PROMPT_BYTES = 16 * 1024;
+// The prompt travels in the worker's environment; the cap keeps the env
+// block bounded (env size is shared with everything else the OS allows).
+const MAX_LAUNCH_PROMPT_BYTES = 16 * 1024;
+
+function filterClientEnv(
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!env) return {};
+  const filtered: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if ((AGENT_VIEW_WORKER_ENV_KEYS as readonly string[]).includes(key)) {
+      continue;
+    }
+    filtered[key] = value;
+  }
+  return filtered;
+}
 
 export async function dispatchAgentViewSession(
   prompt: string,
@@ -46,12 +73,9 @@ export async function dispatchAgentViewSession(
   const token = options.token ?? randomUUID();
   const now = new Date().toISOString();
   const resolvedCwd = path.resolve(cwd);
-  if (
-    options.promptInArgv !== false &&
-    Buffer.byteLength(prompt, 'utf8') > MAX_ARGV_PROMPT_BYTES
-  ) {
+  if (Buffer.byteLength(prompt, 'utf8') > MAX_LAUNCH_PROMPT_BYTES) {
     throw new Error(
-      `Agent View prompt is too large for argv (${MAX_ARGV_PROMPT_BYTES} UTF-8 bytes maximum).`,
+      `Agent View prompt is too large to launch (${MAX_LAUNCH_PROMPT_BYTES} UTF-8 bytes maximum).`,
     );
   }
   const state = {
@@ -74,16 +98,22 @@ export async function dispatchAgentViewSession(
       {
         schemaVersion: 1,
         sessionId,
-        argv: buildNativeWorkerArgv(
-          sessionId,
-          options.promptInArgv === false ? undefined : prompt,
-        ),
-        env: createAgentViewWorkerSidebandEnv({
-          sessionId,
-          sidebandEndpoint: options.sidebandEndpoint ?? '',
-          token,
-          activeCwd: resolvedCwd,
-        }),
+        argv: buildNativeWorkerArgv(sessionId),
+        // The prompt and the launcher's environment travel here, not in
+        // argv: argv is world-readable via /proc/<pid>/cmdline for the
+        // whole worker lifetime, while /proc/<pid>/environ is owner-only.
+        // The sideband env and the prompt are minted here and win any
+        // collision with the client's set.
+        env: {
+          ...filterClientEnv(options.env),
+          ...createAgentViewWorkerSidebandEnv({
+            sessionId,
+            sidebandEndpoint: options.sidebandEndpoint ?? '',
+            token,
+            activeCwd: resolvedCwd,
+          }),
+          [QWEN_AGENT_VIEW_INITIAL_PROMPT]: prompt,
+        },
         entrypoint: getCurrentQwenCliEntrypoint(),
         projectCwd: resolvedCwd,
         activeCwd: resolvedCwd,
@@ -190,13 +220,9 @@ async function cleanupFailedDispatchCreation(
   }
 }
 
-function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
-  return buildCurrentQwenCliArgv([
-    '--session-id',
-    sessionId,
-    // Attached-value form: a bare token after the flag would be re-parsed
-    // by yargs when the prompt starts with '-', turning e.g. '-y' into
-    // flags instead of prompt text.
-    ...(prompt ? [`--prompt-interactive=${prompt}`] : []),
-  ]);
+function buildNativeWorkerArgv(sessionId: string): string[] {
+  // No prompt in argv: it is world-readable for the worker's whole life.
+  // The worker reads QWEN_AGENT_VIEW_INITIAL_PROMPT from its environment
+  // (owner-only) into the same --prompt-interactive handling.
+  return buildCurrentQwenCliArgv(['--session-id', sessionId]);
 }

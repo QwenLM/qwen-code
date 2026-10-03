@@ -970,6 +970,17 @@ export async function parseArguments(): Promise<CliArgs> {
     }
   }
 
+  // A background Agent View worker receives its prompt through its
+  // environment, not argv (argv is world-readable for the worker's whole
+  // life; environ is owner-only). Feed it into the same handling an
+  // explicit --prompt-interactive gets.
+  if (result['promptInteractive'] === undefined && !result['prompt'] && !q) {
+    const launchedPrompt = process.env['QWEN_AGENT_VIEW_INITIAL_PROMPT'];
+    if (launchedPrompt) {
+      result['promptInteractive'] = launchedPrompt;
+    }
+  }
+
   // Keep CliArgs.query as a string for downstream typing
   (result as Record<string, unknown>)['query'] = q || undefined;
 

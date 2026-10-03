@@ -512,6 +512,25 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('reads the Agent View worker prompt from the launch environment', async () => {
+    // The dispatcher never puts the prompt in the worker's argv — it is
+    // world-readable for the worker's whole life. The worker's own
+    // environment (owner-only) carries it into the same handling.
+    vi.stubEnv('QWEN_AGENT_VIEW_INITIAL_PROMPT', 'write tests');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    expect(argv.promptInteractive).toBe('write tests');
+    expect(argv.prompt).toBeUndefined();
+  });
+
+  it('lets an explicit prompt win over the launch environment', async () => {
+    vi.stubEnv('QWEN_AGENT_VIEW_INITIAL_PROMPT', 'write tests');
+    process.argv = ['node', 'script.js', '--prompt', 'typed'];
+    const argv = await parseArguments();
+    expect(argv.prompt).toBe('typed');
+    expect(argv.promptInteractive).toBeUndefined();
+  });
+
   it('parses --insecure as a boolean flag (default false)', async () => {
     process.argv = ['node', 'script.js'];
     const defaultArgv = await parseArguments();

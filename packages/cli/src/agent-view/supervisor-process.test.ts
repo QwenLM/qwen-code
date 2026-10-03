@@ -186,14 +186,18 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewLaunch(sessionId, { globalDir }),
     ).resolves.toMatchObject({
-      argv: expect.arrayContaining([
-        '--session-id',
-        sessionId,
-        // Attached-value form: a bare token would be re-parsed by yargs
-        // when the prompt starts with '-'.
-        '--prompt-interactive=write tests',
-      ]),
+      argv: expect.arrayContaining(['--session-id', sessionId]),
+      env: expect.objectContaining({
+        QWEN_AGENT_VIEW_INITIAL_PROMPT: 'write tests',
+      }),
     });
+    // The prompt never touches argv: a spawned worker's command line is
+    // world-readable via /proc/<pid>/cmdline for its whole life, so it
+    // rides the owner-only environment channel instead.
+    const launch = await readAgentViewLaunch(sessionId, { globalDir });
+    expect(launch?.argv.some((token) => token.includes('write tests'))).toBe(
+      false,
+    );
     await expect(readAgentViewRoster({ globalDir })).resolves.toMatchObject({
       sessions: [expect.objectContaining({ sessionId })],
     });
@@ -245,12 +249,13 @@ describe('Agent View supervisor process helpers', () => {
       state: expect.objectContaining({ sessionId }),
     });
     expect(launchedArgv).toEqual(
-      expect.arrayContaining([
-        '--session-id',
-        sessionId,
-        '--prompt-interactive=write tests',
-      ]),
+      expect.arrayContaining(['--session-id', sessionId]),
     );
+    expect(
+      (launchedArgv ?? []).some((token: string) =>
+        token.includes('write tests'),
+      ),
+    ).toBe(false);
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });

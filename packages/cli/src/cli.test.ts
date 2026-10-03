@@ -318,6 +318,13 @@ describe('resolveBootstrapRoute', () => {
     expect(
       resolveBootstrapRoute(['audit', 'this', BACKGROUND_FLAG, '-v']),
     ).toBe('default');
+    // The interior position of the same prompt region: a `-v` sitting
+    // before the `--bg` of a prompt-led launch is a prompt word too — the
+    // launch must still reach the gate and be declined loudly, not print
+    // the version with exit 0 (#10943 R10-3).
+    expect(
+      resolveBootstrapRoute(['audit', '-v', 'this', BACKGROUND_FLAG]),
+    ).toBe('default');
     // The subcommand-led sibling keeps the intercept: `mcp add` owns
     // that argv and the gate never sees it.
     expect(
@@ -1433,6 +1440,17 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('dispatches a prompt-led launch whose FIRST word is the English word help', async () => {
+      // yargs matches `help` on the last positional, not the first: the
+      // first-positional set carrying HELP_COMMAND misclassified
+      // `qwen help me fix the build --bg` as a parser-owned launch and the
+      // gate never dispatched it — a silent no-op for an ordinary prompt.
+      await runCliEntry(['help', 'me', 'fix', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('help me fix');
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
     it('dispatches a flag-led prompt ending in the word help', async () => {
       // The help-word bounce serves positional-led launches, where yargs
       // matches `help` as a command entrance. A flag-led launch has no
@@ -1605,6 +1623,21 @@ describe('runCliEntry', () => {
       expect(stderr.join('')).toContain('does not honor --version');
     });
 
+    it('declines a version token inside a prompt-led launch the same way', async () => {
+      // `qwen audit -v this --bg`: the version intercept read the interior
+      // `-v` as a version request, printed the version and exited 0 with no
+      // session and no diagnostic — the silent false-success the flag-led
+      // twin refuses loudly. The token is prompt data now, so the launch
+      // reaches the gate and is declined by name.
+      await runCliEntry(['audit', '-v', 'this', BACKGROUND_FLAG]);
+
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('does not honor -v');
+    });
+
     it('does not dispatch the launch the boolean off spelling turns off', async () => {
       // `bg` is declared `type: 'boolean'` in the help surface this PR
       // adds, so `--bg=false` / `--bg=0` is how a wrapper (`qwen
@@ -1736,8 +1769,11 @@ describe('runCliEntry', () => {
         expect(TOP_LEVEL_COMMAND_NAMES.has(name)).toBe(true);
       }
     }
-    // yargs' builtin help command is an entrance too.
-    expect(TOP_LEVEL_COMMAND_NAMES.has('help')).toBe(true);
+    // yargs' builtin help command is an entrance too, but it is matched on
+    // the LAST positional (the `lastPositionalArg(argv) === HELP_COMMAND`
+    // disjunct), not through this first-positional set — a leading `help`
+    // is an ordinary English prompt word.
+    expect(TOP_LEVEL_COMMAND_NAMES.has('help')).toBe(false);
   });
 
   it('loads gemini on the default path', async () => {

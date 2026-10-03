@@ -83,16 +83,18 @@ export const TOP_LEVEL_COMMANDS = [
 const HELP_COMMAND = 'help';
 
 // The entrances the parser honors for a positional-led launch: the command
-// names of TOP_LEVEL_COMMANDS without their yargs argument suffixes, the
-// aliases their command modules register with them in config.ts (hooks.tsx
-// registers `aliases: ['hook']`), and yargs' `help` builtin. A positional
-// the parser reads as one of these is a subcommand launch the `--bg`
-// intercept must not shadow. cli.test.ts pins this mirror to the command
-// modules so a new alias cannot slip past the gate.
+// names of TOP_LEVEL_COMMANDS without their yargs argument suffixes, and
+// the aliases their command modules register with them in config.ts
+// (hooks.tsx registers `aliases: ['hook']`). A positional the parser reads
+// as one of these is a subcommand launch the `--bg` intercept must not
+// shadow. cli.test.ts pins this mirror to the command modules so a new
+// alias cannot slip past the gate. yargs' `help` builtin is deliberately
+// NOT here: this set is consulted only against the FIRST positional, while
+// yargs matches `help` on the LAST one — admitting it misclassified a
+// prompt-led launch whose first word is the ordinary English word "help".
 export const TOP_LEVEL_COMMAND_NAMES = new Set([
   ...TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
   'hook',
-  HELP_COMMAND,
 ]);
 
 export const MCP_COMMANDS = [
@@ -493,7 +495,17 @@ export function resolveBootstrapRoute(
       (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositional]!) ||
         lastPositionalArg(argv) === HELP_COMMAND);
     const flagLedBackgroundLaunch = backgroundFlag !== -1 && !parserOwnsLaunch;
-    if (!flagLedBackgroundLaunch || versionToken < backgroundFlag) {
+    // A version token inside a prompt-led launch's prompt region (after its
+    // first positional, before `--bg`) is prompt data: intercepting it
+    // printed the version and cancelled the launch with exit 0 — the silent
+    // false-success the flag-led twin refuses loudly. A leading version
+    // token keeps base parity (`--version --bg` prints the version).
+    const versionIsPromptWord =
+      firstPositional !== -1 && versionToken > firstPositional;
+    if (
+      !flagLedBackgroundLaunch ||
+      (versionToken < backgroundFlag && !versionIsPromptWord)
+    ) {
       return 'version';
     }
   }
