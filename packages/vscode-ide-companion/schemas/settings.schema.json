@@ -1430,6 +1430,11 @@
           ],
           "default": "direct"
         },
+        "freeform": {
+          "description": "Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.mode is \"code_mode_only\" and the selected model uses wireApi \"responses\". Enable only for endpoints that support Responses Custom Tools.",
+          "type": "boolean",
+          "default": false
+        },
         "sandbox": {
           "anyOf": [
             {

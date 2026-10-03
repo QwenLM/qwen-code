@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { getCurrentCodeModeAllowedNames } from '../../utils/code-mode-allowed-names.js';
 import { getToolExposure, isCodeModeEnabled } from '../code-mode.js';
 import {
   buildInheritedForkExecutionToolNames,
@@ -1870,7 +1871,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const nestedExecutionAllowedTools =
       parentConfiguredToolAllowlist !== undefined &&
       isCodeModeEnabled(agentConfig.getToolMode?.())
-        ? buildParentBoundExecutionAllowlist(defaultExecutionToolNames, true)
+        ? buildParentBoundExecutionAllowlist(
+            getCurrentCodeModeAllowedNames() ?? defaultExecutionToolNames,
+            true,
+          )
         : undefined;
     const requestedExecutionAllowedTools =
       requestedTools === undefined && nestedExecutionAllowedTools === undefined

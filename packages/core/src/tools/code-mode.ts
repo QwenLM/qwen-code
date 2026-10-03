@@ -257,7 +257,7 @@ export function buildExecDescription(
     ({ name, jsName, description, deferred }) => ({
       name,
       jsName,
-      description,
+      ...(!deferred || !canSearchDeferredSchemas ? { description } : {}),
       deferred,
     }),
   );
@@ -299,7 +299,7 @@ ${searchAvailable ? '\nDeferred tool signatures and descriptions are omitted bel
 
 A denied or failed nested call rejects its promise; an uncaught rejection aborts the program. Catch expected failures if execution should continue. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output.
 
-Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata are also automatically retained; a result without content needs no image() call.
+Nested tool results stay in JavaScript values and are not automatically added to the exec response. Use text(value) to return text, image(value) or audio(value) to return media, and generatedImage(value) for the result of tools.image_gen(...). Only explicit helper calls are returned; bare return values and successful script completion produce no output. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata use the native media transport.
 
 Available globals:
 - tools: ${toolsDescription}

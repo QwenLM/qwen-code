@@ -107,6 +107,34 @@ public class WorkspaceStorageGuard {
                 + " registration=" + (valid ? "valid" : "invalid");
     }
 
+    public record RecoveryRegistration(String tenantId, String storageId, String registrationId,
+            long mountRevision, String fenceOperationId, String root, String hostId,
+            String device, String inode, String birthTime) {
+    }
+
+    public RecoveryRegistration recoveryRegistration(String tenantId, String storageId,
+            long revision, String operationId) {
+        if (!enabled || !validId(operationId)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Registration saved = row(key(tenantId, storageId), false);
+        if (saved == null || !"FENCED".equals(saved.state()) || saved.revision() != revision
+                || !operationId.equals(saved.operationId()) || !tenantId.equals(saved.tenantId())
+                || !storageId.equals(saved.storageId()) || saved.holderKey() != null
+                || saved.bindingId() != null || saved.runtimeGeneration() != null
+                || saved.runtimeSessionId() != null || !validId(saved.registrationId())
+                || saved.completedOperationId() != null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Path original = root(tenantId, storageId);
+        requireMatching(saved, identity(original), tenantId, storageId);
+        if (!marker(saved).equals(readMarker(original))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return new RecoveryRegistration(tenantId, storageId, saved.registrationId(), revision,
+                operationId, saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
+    }
+
     public void verify(ContextBinding binding) {
         if (!enabled) {
             return;

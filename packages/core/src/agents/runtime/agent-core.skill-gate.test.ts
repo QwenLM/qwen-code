@@ -337,6 +337,58 @@ describe('AgentCore skill-gate inputs', () => {
       expect(gate(core, declared)).toBe(true);
     });
 
+    it.each(
+      [ToolMode.CodeMode, ToolMode.CodeModeOnly].flatMap((mode) =>
+        [false, true].flatMap((warm) =>
+          ['hidden', 'visible', 'revealed'].map((visibility) => ({
+            mode,
+            warm,
+            visibility,
+          })),
+        ),
+      ),
+    )(
+      'matches the Skill route in $mode with warm=$warm and $visibility',
+      async ({ mode, warm, visibility }) => {
+        const config = makeFakeConfig({ toolMode: mode });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(config));
+        registry.registerPermissionDeferredFactory(
+          ToolNames.SKILL,
+          async () => new MockTool({ name: ToolNames.SKILL }),
+        );
+        if (warm || visibility === 'revealed') {
+          await registry.ensureTool(ToolNames.SKILL);
+        }
+        if (visibility === 'visible') {
+          vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+            new Set([ToolNames.SKILL]),
+          );
+        } else if (visibility === 'revealed') {
+          registry.revealDeferredTool(ToolNames.SKILL);
+        }
+        const core = new AgentCore(
+          'skill-route',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          { tools: [ToolNames.EXEC] },
+        );
+        const willHaveSkill = (
+          core as unknown as {
+            willHaveSkillTool: () => boolean;
+          }
+        ).willHaveSkillTool();
+        expect(willHaveSkill).toBe(
+          mode === ToolMode.CodeModeOnly || visibility !== 'hidden',
+        );
+        const declared = await declaredNames(core);
+        expect(gate(core, declared)).toBe(willHaveSkill);
+      },
+    );
+
     it('opens for a hybrid nested-only skill', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);

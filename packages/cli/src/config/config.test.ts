@@ -37,6 +37,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
   isCrossSessionMessagingActive,
@@ -336,17 +337,23 @@ describe('parseArguments', () => {
     'reports bwrap migration before prompt conflicts: %j',
     async (...flags) => {
       process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit called');
-      });
       mockWriteStderrLine.mockClear();
-      try {
-        await expect(parseArguments()).rejects.toThrow('process.exit called');
-        expect(mockWriteStderrLine).toHaveBeenCalledWith(
-          expect.stringContaining('Whole-CLI bwrap has been removed'),
-        );
-      } finally {
-        exit.mockRestore();
+      await expect(parseArguments()).rejects.toThrow(
+        'Whole-CLI bwrap has been removed',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['docker', 'podman', 'sandbox-exec'])(
+    'preserves named sandbox selection %s',
+    async (backend) => {
+      for (const flags of [[`--sandbox=${backend}`], ['-s', backend]]) {
+        process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+        expect(await parseArguments()).toMatchObject({
+          sandbox: backend,
+          prompt: 'query',
+        });
       }
     },
   );
@@ -364,6 +371,151 @@ describe('parseArguments', () => {
     });
     process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
     expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('keeps the MCP scope alias in its own command grammar', async () => {
+    const handler = vi
+      .spyOn(addCommand, 'handler')
+      .mockImplementation(() => {});
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'mcp',
+      'add',
+      '-s',
+      'project',
+      'myserver',
+      'npx',
+      '-y',
+      'foo',
+    ];
+    await expect(parseArguments()).rejects.toThrow(
+      'process.exit unexpectedly called with "0"',
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'project', name: 'myserver' }),
+    );
+    handler.mockRestore();
+  });
+
+  it.each([
+    ['--sandbox=docker', 'mcp', 'list'],
+    ['-s', 'docker', 'mcp', 'list'],
+    ['--sandbox=podman', 'extensions', 'list'],
+  ])(
+    'rejects session options on subcommands instead of starting a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown argument'),
+      );
+    },
+  );
+
+  it.each([
+    ['--sandbox=true', 'query'],
+    ['--sandbox', '-p', 'query'],
+  ])(
+    'supports explicit automatic selection with a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt: 'query',
+      });
+    },
+  );
+
+  it('keeps a positional query separate from explicit automatic sandbox selection', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', 'explain the parser'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'explain the parser',
+    });
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox=true',
+      'explain the parser',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      query: 'explain the parser',
+    });
+  });
+
+  it('uses one option grammar and stops parsing options after --', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'docker',
+      query: 'explain what does',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      'fix',
+      'the',
+      '--sandbox',
+      'false',
+      'bug',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'fix the bug',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect((await parseArguments())._).toEqual([
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ]);
+  });
+
+  it.each(['explain what -s docker does', 'fix the --sandbox false bug'])(
+    'keeps option-like text inside an explicit prompt: %s',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--sandbox=true', '-p', prompt];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt,
+      });
+    },
+  );
+
+  it('keeps last-wins selection without treating an absent option as false', async () => {
+    for (const flags of [
+      ['--sandbox=docker', '--no-sandbox'],
+      ['--sandbox=true', '--sandbox=false'],
+    ]) {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+      expect((await parseArguments()).sandbox).toBe(false);
+    }
+    process.argv = ['node', 'script.js', '-p', 'query'];
+    expect((await parseArguments()).sandbox).toBeUndefined();
   });
 
   it('includes every approval mode description in --help', async () => {
@@ -521,6 +673,30 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '--insecure'];
     const argv = await parseArguments();
     expect(argv.insecure).toBe(true);
+  });
+
+  it('parses the private ACP execution engine and refuses other engines', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'managed',
+    ];
+    expect((await parseArguments()).acpExecutionEngine).toBe('managed');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'legacy',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    mockExit.mockRestore();
   });
 
   it('rejects --json-schema combined with --acp', async () => {
@@ -4297,13 +4473,45 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolMode()).toBe('direct');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { mode: ToolMode.CodeModeOnly, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    const hybrid = await loadCliConfig(
+      { tools: { mode: ToolMode.CodeMode, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(hybrid.getFreeform()).toBe(false);
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
-    'should force direct mode for the legacy setting with %s',
+    'should force direct mode for the legacy setting and disable Freeform with %s',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } } as unknown as Settings,
+        {
+          tools: { codeModeOnly: true, freeform: true },
+        } as unknown as Settings,
         argv,
         undefined,
         [],
@@ -4311,6 +4519,7 @@ describe('mergeExcludeTools', () => {
 
       expect(config.getCodeModeOnly()).toBe(false);
       expect(config.getToolMode()).toBe(ToolMode.Direct);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 
@@ -5237,6 +5446,67 @@ describe('loadCliConfig with includeDirectories', () => {
         lsp: { enabled: false },
       }),
     );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  it('builds agent-host sessions with a read-only initialization profile', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: { ambient: { command: 'ambient-mcp' } },
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+      },
+      tools: { workflowsEnabled: true },
+      experimental: {
+        cron: true,
+        sessionWorkflow: true,
+        artifact: true,
+      },
+      omni: { enabled: true },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      ['ambient-extension'],
+      { userHooks: { PromptSubmit: [{ command: 'ambient-hook' }] } },
+      undefined,
+      { injected: new ServerConfig.MCPServerConfig('node', ['injected.js']) },
+      undefined,
+      false,
+      { agentHostReadOnly: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
+        includeDirectories: [],
+        lsp: { enabled: false },
+        disableAllHooks: true,
+        mcpServers: {},
+        topTierMcpServers: undefined,
+        pendingMcpServers: undefined,
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        sessionWorkflowEnabled: false,
+        fileCheckpointingEnabled: false,
+        cronEnabled: false,
+        artifactEnabled: false,
+        omniEnabled: false,
+      }),
+    );
+    expect(sshWorkspaceProbe).not.toHaveBeenCalled();
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 

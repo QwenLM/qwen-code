@@ -142,9 +142,11 @@ runs them through a sibling scheduler configured from the same `Config` and
 observers. This preserves the existing build/validation, permission,
 confirmation, hook, execution, truncation, telemetry, and concurrency path
 without direct `tool.execute()` calls. Sequential guest awaits produce
-sequential batches; `Promise.all` calls enter one batch, where the existing
-read-only concurrency classifier applies. Nested request ids include the parent
-id and carry `source: code_mode` plus `parentCallId`.
+sequential batches; calls submitted together enter one batch. Code Mode Bash
+calls bypass the read-only command classifier, with the model responsible for
+keeping dependent calls sequential. Other tools retain their existing concurrency
+classification. Nested request ids include the parent id and carry
+`source: code_mode` plus `parentCallId`.
 
 Nested scheduler updates are merged into the owning scheduler's visible calls,
 and confirmation responses for nested ids are delegated to it. The outer model

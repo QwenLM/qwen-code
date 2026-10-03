@@ -2919,6 +2919,16 @@ const SETTINGS_SCHEMA = {
           { value: ToolMode.CodeModeOnly, label: 'Code Mode Only' },
         ],
       },
+      freeform: {
+        type: 'boolean',
+        label: 'Freeform Tool Input (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.mode is "code_mode_only" and the selected model uses wireApi "responses". Enable only for endpoints that support Responses Custom Tools.',
+        showInDialog: false,
+      },
       sandbox: {
         type: 'object',
         label: 'Sandbox',

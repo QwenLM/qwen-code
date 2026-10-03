@@ -55,8 +55,9 @@ force `direct`. Container execution exposes direct tools only: selecting
 | Discovery bridge     | Existing direct behavior    | Direct where already applicable | Top-level search; tool_call hidden |
 
 In `code_mode`, ordinary visible tool descriptions gain an `exec` declaration
-for that tool. The `exec` description keeps the complete `ALL_TOOLS` metadata
-without duplicating every schema. With both bridge tools available, `tool_search`
+for that tool. The `exec` description keeps every `ALL_TOOLS` name, JavaScript name and
+deferral flag. On the session surface with both bridge tools available, deferred descriptions are
+omitted from this metadata, and `tool_search`
 returns deferred parameter schemas without changing the top-level declarations.
 Match each returned schema name exactly to `ALL_TOOLS.name`, then invoke
 `tools[entry.jsName]` with arguments shaped by that schema. If there is no entry,
@@ -84,7 +85,9 @@ list narrows its direct surface. Agent allowlists that do not grant `exec`
 narrow nested bindings. Inheriting or explicitly granting `exec` keeps all
 otherwise admitted ordinary code-mode-callable bindings. An execution
 allowlist that mentions any MCP tool additionally restricts MCP bindings to
-matching exact names or server patterns.
+matching exact names or server patterns. Forks inherit the parent's direct-call
+bound separately from its nested binding set; nested access never widens
+the child's direct-call grant. Both bounds persist through background resume.
 
 ## Constraints and risks
 

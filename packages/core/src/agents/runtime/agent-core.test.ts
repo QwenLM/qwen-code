@@ -82,6 +82,7 @@ import {
   type ToolCall,
   type WaitingToolCall,
 } from '../../core/coreToolScheduler.js';
+import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import {
   AgentEventType,
@@ -1438,6 +1439,88 @@ describe('AgentCore approval response deduplication', () => {
         expect(secondOnConfirm).toHaveBeenCalledOnce();
       },
     );
+  });
+});
+
+describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
+  it('forwards hadIncompleteArguments when the turn was not token-truncated', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('incomplete-args-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'incomplete-args-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+
+    const functionCall = {
+      id: 'call-incomplete',
+      name: 'write_file',
+      args: { file_path: 'a.txt', content: 'half-written' },
+    };
+    markToolCallArgumentsIncomplete([{ functionCall }]);
+    // Negative control: an unmarked sibling must reach the scheduler WITHOUT
+    // hadIncompleteArguments, or over-application of the marker (which would
+    // reject every subagent Edit call) is undetectable.
+    const cleanFunctionCall = {
+      id: 'call-clean',
+      name: 'write_file',
+      args: { file_path: 'b.txt', content: 'complete' },
+    };
+
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockResolvedValue(undefined);
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [functionCall, cleanFunctionCall],
+      abortController,
+      'prompt-incomplete',
+      1,
+      [{ name: 'write_file' } as FunctionDeclaration],
+      undefined,
+      // The subagent turn saw finishReason STOP (delayed usage disproved a
+      // token cut), so the marker is the only thing left that can arm the
+      // scheduler's data-loss guard here — a subagent has no approval prompt
+      // between the response and the write (#12970).
+      false,
+    );
+    try {
+      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+      const scheduledRequests = scheduleSpy.mock.calls[0]?.[0];
+      expect(scheduledRequests).toEqual([
+        expect.objectContaining({
+          callId: 'call-incomplete',
+          name: 'write_file',
+          wasOutputTruncated: false,
+          hadIncompleteArguments: true,
+        }),
+        expect.objectContaining({
+          callId: 'call-clean',
+          name: 'write_file',
+          wasOutputTruncated: false,
+        }),
+      ]);
+      expect(Array.isArray(scheduledRequests)).toBe(true);
+      expect((scheduledRequests as unknown[])[1]).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
   });
 });
 

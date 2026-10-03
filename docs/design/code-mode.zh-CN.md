@@ -53,8 +53,9 @@ CodeModeOnly。
 | 发现桥接工具 | 保持现有直接模式行为        | 在原本适用时直接调用 | 顶层搜索；隐藏 tool_call |
 
 在 `code_mode` 中，普通可见工具的描述会附加该工具的 `exec` 调用声明。
-`exec` 描述保留完整的 `ALL_TOOLS` 元数据，但不重复所有 schema。两个桥接工具
-都可用时，`tool_search` 返回延迟工具的参数 schema，不改变顶层声明列表。
+`exec` 描述保留每个 `ALL_TOOLS` 条目的工具名、JavaScript 名称和延迟标记。
+在会话调用面，两个桥接工具都可用时，元数据不包含延迟工具的完整描述；`tool_search` 按需返回
+其参数 schema，不改变顶层声明列表。
 用返回的 schema 名称精确匹配 `ALL_TOOLS.name`，再按该 schema 构造参数调用
 `tools[entry.jsName]`。没有匹配项时不能自行规范化或猜测绑定名称；应在 `exec`
 外使用 `tool_call`，或调用可用的直接工具，沿用正常的参数校验和审批。
@@ -75,6 +76,8 @@ Hybrid 的 AgentCore 调用面从嵌套绑定中排除被 `tools.eager` 隐藏�
 未授权 `exec` 的智能体 allowlist 会收窄嵌套绑定；继承或显式允许 `exec` 时，
 会保留所有通过其他准入检查的普通 code-mode-callable binding。若执行 allowlist
 包含任一 MCP 工具项，MCP 绑定还必须匹配其中的精确工具名或服务器模式。
+Fork 分别继承父级的直接调用边界与嵌套绑定集合；嵌套访问权限不会扩大子级
+的直接调用授权。后台恢复会保留这两个边界。
 
 ## 约束与风险
 

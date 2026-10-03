@@ -5,6 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import type { ToolConfig } from './agent-types.js';
@@ -87,6 +88,23 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
 ]);
+
+export function hasAgentSkillExecBinding(
+  context: Pick<Config, 'getToolMode' | 'getToolRegistry' | 'getVisibleTools'>,
+): boolean {
+  const mode = context.getToolMode?.();
+  const registry = context.getToolRegistry?.();
+  return (
+    mode === ToolMode.CodeModeOnly ||
+    (mode === ToolMode.CodeMode &&
+      !!registry?.getAllToolNames().includes(ToolNames.EXEC) &&
+      !(
+        registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
+        !registry?.isDeferredToolRevealed?.(ToolNames.SKILL) &&
+        !context.getVisibleTools?.().has(ToolNames.SKILL)
+      ))
+  );
+}
 
 /**
  * Whether an agent running with `toolConfig` is declared the Skill tool.

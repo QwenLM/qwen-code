@@ -1672,23 +1672,21 @@ export async function processSingleFileContent(
                 !zoomDeclared &&
                 !hasToolCallBridge);
             const ambientAllowedNames = getCurrentCodeModeAllowedNames();
-            const zoomAvailable = useNestedZoom
-              ? registry
-                  ?.getCodeModeBindingPlan(
-                    ambientAllowedNames === undefined
-                      ? undefined
-                      : new Set(ambientAllowedNames),
-                  )
-                  .bindings.some((binding) => binding.name === 'zoom_image')
-              : zoomDeclared ||
-                (hasToolCallBridge &&
-                  registry
-                    ?.getDeferredToolSummary()
-                    .some((tool) => tool.name === 'zoom_image'));
+            const zoomAvailable =
+              ambientAllowedNames === undefined &&
+              (useNestedZoom
+                ? registry
+                    ?.getCodeModeBindingPlan()
+                    .bindings.some((binding) => binding.name === 'zoom_image')
+                : zoomDeclared ||
+                  (hasToolCallBridge &&
+                    registry
+                      ?.getDeferredToolSummary()
+                      .some((tool) => tool.name === 'zoom_image')));
             let zoomHint = '';
             // An agent's target allowlist does not identify its declared
             // direct, bridge, or exec routes. Do not advertise session routes.
-            if (zoomAvailable && ambientAllowedNames === undefined) {
+            if (zoomAvailable) {
               const toolName = useNestedZoom
                 ? 'tools.zoom_image'
                 : 'zoom_image';

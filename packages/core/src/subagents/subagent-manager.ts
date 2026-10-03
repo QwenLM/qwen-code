@@ -88,8 +88,10 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
-import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
-import { ToolMode } from '../tools/code-mode.js';
+import {
+  hasAgentSkillExecBinding,
+  toolConfigAllowsSkill,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -1184,12 +1186,7 @@ export class SubagentManager {
 
       const skillsAvailable = toolConfigAllowsSkill(
         toolConfig,
-        runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly ||
-          (runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
-            !!runtimeContext
-              .getToolRegistry?.()
-              ?.getAllToolNames()
-              .includes(ToolNames.EXEC)),
+        hasAgentSkillExecBinding(runtimeContext),
       );
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(

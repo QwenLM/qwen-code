@@ -63,6 +63,45 @@ describe('fork MCP policy inheritance', () => {
     },
   );
 
+  it('keeps nested hybrid bindings separate from the inherited direct grant', async () => {
+    const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(new MockTool({ name: 'read_file' }));
+    registry.registerTool(new MockTool({ name: 'write_file' }));
+    let tools: ToolConfig = { tools: ['read_file', 'exec'] };
+    for (let generation = 0; generation < 3; generation++) {
+      const core = new AgentCore(
+        'fork',
+        config,
+        { systemPrompt: '' },
+        { model: 'test' },
+        { max_turns: 1 },
+        tools,
+      );
+      const declarations = await core.prepareTools();
+      expect(
+        declarations.find((d) => d.name === 'exec')!.description,
+      ).toContain('write_file');
+      let frame: readonly string[] | undefined;
+      await core.runInAgentFrames(async () => {
+        frame = getCurrentAgentConfiguredToolAllowlist();
+      });
+      const inherited = buildInheritedForkExecutionToolNames(
+        declarations.map((d) => d.name!),
+        registry.getAllToolNames(),
+        frame,
+      );
+      expect(inherited).toEqual(['read_file']);
+      tools = {
+        tools: declarations.map((d) => d.name!),
+        executionAllowedTools: inherited,
+        nestedExecutionAllowedTools: ['read_file', 'write_file'],
+      };
+    }
+  });
+
   it.each([
     [ToolMode.CodeMode, false],
     [ToolMode.CodeMode, true],

@@ -689,6 +689,7 @@ describe('Gemini Client (client.ts)', () => {
       | 'revealDeferredTool'
       | 'preloadDeferredToolsWithinBudget'
       | 'clearRevealedDeferredTools'
+      | 'clearReviewedDeclarations'
       | 'getFunctionDeclarations'
       | 'ensureTool',
       Mock
@@ -847,6 +848,8 @@ describe('Gemini Client (client.ts)', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
+      clearReviewedDeclarations: vi.fn(),
+      syncReviewedDeclarations: vi.fn(),
       revealDeferredTool: vi.fn(),
       preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
@@ -1192,6 +1195,9 @@ describe('Gemini Client (client.ts)', () => {
       const resumedClient = await initializedClient();
 
       expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
+      expect(
+        mockConfig.getToolRegistry().syncReviewedDeclarations,
+      ).toHaveBeenCalledWith(apiHistory);
       const { resetSession, addEvent } = uiTelemetryService;
       expect(resetSession).toHaveBeenCalledWith('test-session-id');
       expect(addEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
@@ -2267,6 +2273,21 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('preserves a budget opened before prompt Hooks when the UserQuery starts', async () => {
+      turns.beginTurn({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+      sessionTokens.mockReturnValue(150);
+      await send([{ text: 'Hook rewritten prompt +10k' }], 'p1');
+      expect(turns.current('test-session-id')).toMatchObject({
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+    });
+
     it('leaves the turn alone for a tool result and for a side question', async () => {
       await send([{ text: 'fan out +500k' }], 'p1');
       sessionTokens.mockReturnValue(9_999);
@@ -2373,6 +2394,25 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(getHistorySpy).not.toHaveBeenCalled();
       expect(reg.getDeferredToolSummary).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [[], []],
+      [
+        [{ name: 'read_file' }],
+        [{ functionDeclarations: [{ name: 'read_file' }] }],
+      ],
+    ])('declares %j to the chat as %j', async (declarations, tools) => {
+      const reg = registryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      reg.getFunctionDeclarations.mockReturnValue(declarations);
+      const setTools = vi
+        .spyOn(client.getChat(), 'setTools')
+        .mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(setTools).toHaveBeenCalledWith(tools);
     });
 
     it('carries active todos after tool results and clears them for new work', async () => {
@@ -3507,10 +3547,12 @@ describe('Gemini Client (client.ts)', () => {
       // as phantom declarations, defeating the "clean slate" of `/clear`.
       const reg = registryMock();
       reg.clearRevealedDeferredTools.mockClear();
+      reg.clearReviewedDeclarations.mockClear();
 
       await client.resetChat();
 
       expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
+      expect(reg.clearReviewedDeclarations).toHaveBeenCalledTimes(1);
     });
 
     it('fires SessionStart with Clear source when resetting chat', async () => {
@@ -9219,6 +9261,42 @@ Other open files:
 
       expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
       expect(mockTurnRunFn).toHaveBeenCalledTimes(MAX_SESSION_TURNS);
+    });
+
+    it('stamps a Notification entry the session-turn cap then refuses', async () => {
+      // Pins the accepted imprecision documented on `ChatRecord.deliveredTurn`:
+      // the stamp means the send path admitted the turn and recorded its user
+      // entry, not that the model accepted a request. The record cannot move
+      // below the cap without losing the resumed info item it exists to
+      // restore, so a refused turn is stamped too. Relocating the write under
+      // the gates turns this red.
+      const recordNotification = vi.fn();
+      vi.spyOn(client['config'], 'getMaxSessionTurns').mockReturnValue(1);
+      client['sessionTurnCount'] = 1; // already at limit; next call exceeds it
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      const events = await run(
+        [{ text: 'agent finished' }],
+        'prompt-id-capped-notification',
+        { type: SendMessageType.Notification },
+      );
+
+      expect(events).toEqual([{ type: LlmEventType.MaxSessionTurns }]);
+      // The cap returned before `turn.run`, so no request reached the model.
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: 'agent finished' }],
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
     });
 
     /** A recall that never settles; returns a spy on its abort listener. */

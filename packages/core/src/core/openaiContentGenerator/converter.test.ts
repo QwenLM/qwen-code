@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
+import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { RequestContext } from './types.js';
@@ -271,6 +272,34 @@ describe('OpenAIContentConverter', () => {
     message: { role: 'assistant', ...message },
     finish_reason,
     logprobs: null,
+  });
+
+  it('re-encodes Freeform exec history as Chat function messages', () => {
+    const source = String.raw`text("one\\ntwo");`;
+    const messages = toMessages(
+      ...exchange('call_exec', 'exec', { output: 'done' }, undefined, {
+        source,
+      }),
+    );
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_exec',
+            type: 'function',
+            function: { name: 'exec', arguments: JSON.stringify({ source }) },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_exec',
+        content: [{ type: 'text', text: 'done' }],
+      },
+    ]);
   });
 
   const withStreamParser = (
@@ -3512,6 +3541,91 @@ describe('Truncated tool call detection in streaming', () => {
       openAIStreamChunk({ tool_calls: [{ index: 0, ...toolCall }] }),
       ctx,
     );
+
+  /**
+   * Helper: feed streaming chunks then a final chunk with finish_reason,
+   * and return the Gemini response for the final chunk.
+   */
+  function feedToolCallChunks(
+    conv: typeof OpenAIContentConverter,
+    toolCallChunks: Array<{
+      index: number;
+      id?: string;
+      name?: string;
+      arguments: string;
+    }>,
+    finishReason: string,
+    options?: {
+      usage?: OpenAI.Chat.ChatCompletionChunk['usage'];
+      maxOutputTokens?: number;
+      /**
+       * Receives the live stream context so a test can inspect state the
+       * converter parks on it for the pipeline to settle later.
+       */
+      captureContext?: (ctx: RequestContext) => void;
+    },
+  ) {
+    // One stream-local context covers every chunk of this simulated stream.
+    const ctx = createStreamingRequestContext();
+    if (options?.maxOutputTokens !== undefined) {
+      ctx.maxOutputTokens = options.maxOutputTokens;
+    }
+    options?.captureContext?.(ctx);
+
+    // Feed argument chunks (no finish_reason yet)
+    for (const tc of toolCallChunks) {
+      conv.convertOpenAIChunkToLlm(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-stream',
+          created: 100,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: tc.index,
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: {
+                      name: tc.name,
+                      arguments: tc.arguments,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+    }
+
+    // Final chunk with finish_reason
+    return conv.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-final',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: finishReason,
+            logprobs: null,
+          },
+        ],
+        usage: options?.usage,
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
+  }
+
   const finish = (ctx: RequestContext, finishReason = 'tool_calls') =>
     converter.convertOpenAIChunkToLlm(openAIStreamChunk({}, finishReason), ctx);
 
@@ -3682,6 +3796,341 @@ describe('Truncated tool call detection in streaming', () => {
     const result = finish(ctx, 'stop');
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should not override finishReason when usage disproves truncation (fused tool-call arguments)', () => {
+    // Issue #12970: the provider fused two intended read_file calls into one
+    // argument bag and the streamed JSON is missing the final closing brace,
+    // so the parser flags the call incomplete. Usage (185 completion tokens
+    // against an 8192 output budget) proves the response was NOT cut by
+    // max_tokens, so the brace-depth heuristic must not rewrite the
+    // provider's finish_reason to "length" — downstream that misdiagnosis
+    // appends the truncation guidance to the schema-validation error and
+    // sends the model into futile identical retries.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+          // Fused second call's argument bag; missing the final closing brace.
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 252811,
+          completion_tokens: 185,
+          total_tokens: 252996,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    // The repaired call is still emitted so downstream schema validation can
+    // report the real parameter error...
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p: Part) => p.functionCall);
+    expect(fnCall?.functionCall?.name).toBe('read_file');
+    expect(fnCall?.functionCall?.args).toEqual({
+      file_path: '/tmp/ad01.yml',
+      limit: { file_path: '/tmp/node01.yml', limit: null },
+    });
+    // ...but without the truncation misdiagnosis: turn.ts only flags
+    // wasOutputTruncated on MAX_TOKENS, so STOP here is what keeps the
+    // scheduler from appending the max_tokens note to the validation error.
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    // Withdrawing the diagnosis must not withdraw the data-loss guard: the
+    // arguments really did arrive unterminated, so the call is still marked
+    // and the scheduler still refuses to let a repaired partial file write
+    // through (it just words the refusal by the real cause).
+    expect(toolCallArgumentsWereIncomplete(fnCall!.functionCall!)).toBe(true);
+  });
+
+  it('should still override finishReason to MAX_TOKENS when usage corroborates truncation', () => {
+    // Genuine truncation (#4964 must not regress): completion_tokens reached
+    // the output budget, so the incomplete JSON really was cut by the limit
+    // even though the provider reported "stop".
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 8192,
+          total_tokens: 8292,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should keep the legacy override when the output ceiling is unknown', () => {
+    // Without a known output budget the usage check is inconclusive; keep
+    // inferring truncation from brace depth as before.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should trust a provider-reported "length" even when usage is below the ceiling', () => {
+    // The usage guard only restrains the client-side inference; an explicit
+    // finish_reason from the provider is taken at face value.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'length',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should treat zero-filled usage on the finish chunk as inconclusive, not as a disproof', () => {
+    // ModelScope zero-fills usage on the finish chunk and sends the real
+    // totals on a trailing `choices: []` chunk (see pipeline.test.ts "should
+    // handle providers that send zero usage in finish chunk (like
+    // modelscope)"). Reading completion_tokens: 0 as proof against truncation
+    // would suppress the #4964 override and, with it, the scheduler's
+    // reject-file-writes-while-truncated guard — on a response whose tool-call
+    // JSON really was cut. Zero means "not counted", not "nothing generated":
+    // this branch is only reached when the parser found incomplete JSON.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should treat an explicit null completion_tokens as inconclusive, not as a disproof', () => {
+    // `null >= 8192 * 0.5` coerces null to 0 and reads as a disproof, which is
+    // the same failure mode as the zero-filled case above. Some OpenAI-compatible
+    // gateways type this field as `number | null` (see omni usage-log.ts).
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: null,
+          total_tokens: 0,
+        } as unknown as OpenAI.Chat.ChatCompletionChunk['usage'],
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should attribute consumption exactly at the 50% threshold to truncation', () => {
+    // Boundary pin for TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD: the
+    // comparison is `>=`, so exactly half the budget is still consistent with
+    // a real cut. Goes red if the ratio is raised (0.95) or `>=` becomes `>`.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 4096,
+          total_tokens: 4196,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should clear truncation for consumption just under the 50% threshold', () => {
+    // Other side of the same boundary: one token below half the budget is
+    // decisively not a token-limit cut. Goes red if the ratio is lowered
+    // (0.25), which would silently re-admit the #12970 misdiagnosis for
+    // responses that ended well below the ceiling.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 4095,
+          total_tokens: 4195,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+  });
+
+  it('should park the override for the pipeline to settle when the finish chunk carries no usage', () => {
+    // The shape the pipeline actually produces: it requests
+    // stream_options.include_usage, under which the finish_reason chunk
+    // reports no usage and the totals arrive on a later `choices: []` chunk
+    // that handleChunkMerging folds into the parked finish response. The
+    // converter must keep the conservative override *and* hand over the
+    // provider's own reason, or the delayed evidence has nothing to undo.
+    let ctx: RequestContext | undefined;
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        maxOutputTokens: 8192,
+        captureContext: (c) => {
+          ctx = c;
+        },
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+    expect(ctx?.pendingTruncationOverride).toEqual({
+      finishReason: FinishReason.STOP,
+    });
+  });
+
+  it('should not park an override that this chunk already decided', () => {
+    // Conclusive evidence — in either direction — settles the rewrite here, so
+    // nothing may be left for the pipeline to second-guess on a later chunk.
+    const corroborating: RequestContext[] = [];
+    feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 8192,
+          total_tokens: 8292,
+        },
+        maxOutputTokens: 8192,
+        captureContext: (c) => corroborating.push(c),
+      },
+    );
+    expect(corroborating[0]?.pendingTruncationOverride).toBeUndefined();
+
+    const disproving: RequestContext[] = [];
+    feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 252811,
+          completion_tokens: 185,
+          total_tokens: 252996,
+        },
+        maxOutputTokens: 8192,
+        captureContext: (c) => disproving.push(c),
+      },
+    );
+    expect(disproving[0]?.pendingTruncationOverride).toBeUndefined();
   });
 });
 

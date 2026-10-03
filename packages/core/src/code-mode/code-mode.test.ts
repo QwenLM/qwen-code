@@ -181,7 +181,13 @@ describe('CodeModeOnly exposure', () => {
     )?.description;
     for (const name of migratedTools)
       expect(description).toContain(`tools.${name}(args:`);
-    expect(description).toContain('automatically retained');
+    expect(description).toContain(
+      'are not automatically added to the exec response',
+    );
+    expect(description).toContain('Use text(value) to return text');
+    expect(description).toContain(
+      'bare return values and successful script completion produce no output',
+    );
     expect(description).toContain('terminal update_goal');
   });
 
@@ -651,6 +657,28 @@ describe('CodeModeOnly exposure', () => {
       'tools.mcp__server__fetch(args: { "depth"?: number; "url": string })',
     );
     expect(description).not.toContain('mcp__server__fetch(args: Record');
+    expect(description).toContain('"deferred":true');
+  });
+
+  it('defers hybrid descriptions while retaining exact nested binding names', () => {
+    const config = makeFakeConfig({ toolMode: 'code_mode' });
+    const registry = new ToolRegistry(config);
+    for (const name of ['exec', 'tool_search', 'tool_call', 'read_file']) {
+      registry.registerTool(new MockTool({ name }));
+    }
+    registry.registerTool(
+      new MockTool({
+        name: 'remote_lookup',
+        shouldDefer: true,
+        description: 'PRIVATE_DEFERRED_DESCRIPTION',
+      }),
+    );
+    const description = registry
+      .getFunctionDeclarations()
+      .find((d) => d.name === 'exec')!.description!;
+    expect(description).not.toContain('PRIVATE_DEFERRED_DESCRIPTION');
+    expect(description).toContain('"name":"remote_lookup"');
+    expect(description).toContain('"jsName":"remote_lookup"');
     expect(description).toContain('"deferred":true');
   });
 

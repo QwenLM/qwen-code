@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { runWithCodeModeAllowedNames } from '../../utils/code-mode-allowed-names.js';
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -3593,16 +3594,24 @@ describe('AgentTool', () => {
           });
           const result = await runWithAgentConfiguredToolAllowlist(
             ['read_file'],
-            () => invocation.execute(),
+            () =>
+              runWithCodeModeAllowedNames(['read_file', 'write_file'], () =>
+                invocation.execute(),
+              ),
           );
           expect(result.error).toBeUndefined();
           expect(
             vi.mocked(AgentHeadless.create).mock.calls[0]?.[5]
               ?.executionAllowedTools,
           ).toEqual(['read_file']);
+          expect(
+            vi.mocked(AgentHeadless.create).mock.calls[0]?.[5]
+              ?.nestedExecutionAllowedTools,
+          ).toEqual(['read_file', 'write_file']);
           if (background) {
             expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
               executionAllowedTools: ['read_file'],
+              nestedExecutionAllowedTools: ['read_file', 'write_file'],
             });
           } else {
             // Interactive forks return a placeholder and have no sidecar.

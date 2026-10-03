@@ -75,8 +75,10 @@ import {
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
 } from './runtime/agent-core.js';
-import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
-import { ToolMode } from '../tools/code-mode.js';
+import {
+  hasAgentSkillExecBinding,
+  toolConfigAllowsSkill,
+} from './runtime/subagent-plan-tool-policy.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -1014,12 +1016,7 @@ export class BackgroundAgentResumeService {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
-                  activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly ||
-                    (activeAgentConfig.getToolMode?.() === ToolMode.CodeMode &&
-                      !!activeAgentConfig
-                        .getToolRegistry?.()
-                        ?.getAllToolNames()
-                        .includes(ToolNames.EXEC)),
+                  hasAgentSkillExecBinding(activeAgentConfig),
                 ),
               })
             )[0],
