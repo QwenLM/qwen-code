@@ -29,6 +29,11 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import type {
+  AtReferenceDropReason,
+  DroppedAtReference,
+} from '../../utils/dropped-references.js';
+import { looksLikeFileReference } from '../../utils/dropped-references.js';
 import {
   parseExtensionRef,
   matchExtensionByRef,
@@ -64,6 +69,11 @@ export interface HandleAtCommandResult {
   shouldProceed: boolean;
   toolDisplays?: IndividualToolCallDisplay[];
   filesRead?: string[];
+  /**
+   * `@`-references that were dropped without producing content, so callers
+   * can tell the user instead of leaving the drop silent (#8226).
+   */
+  droppedReferences?: DroppedAtReference[];
 }
 
 export interface AtCommandRecording {
@@ -92,11 +102,16 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
   while (currentIndex < query.length) {
     let atIndex = -1;
     let nextSearchIndex = currentIndex;
-    // Find next unescaped '@'
+    // Find next unescaped '@' that starts a reference. A word character
+    // before it means the '@' belongs to the word, as in an email address or
+    // a handle, and the run is prose rather than a reference.
     while (nextSearchIndex < query.length) {
+      const previous =
+        nextSearchIndex > 0 ? query[nextSearchIndex - 1] : undefined;
       if (
         query[nextSearchIndex] === '@' &&
-        (nextSearchIndex === 0 || query[nextSearchIndex - 1] !== '\\')
+        previous !== '\\' &&
+        (previous === undefined || !/\w/.test(previous))
       ) {
         atIndex = nextSearchIndex;
         break;
@@ -250,6 +265,16 @@ export async function resolveAtCommandQuery({
   const contentLabelsForDisplay: string[] = [];
   const displayPaths = new Map<string, string>();
   const displayPathsByCanonicalPath = new Map<string, Set<string>>();
+  const droppedReferences: DroppedAtReference[] = [];
+  const dropReference = (path: string, reason: AtReferenceDropReason): void => {
+    if (
+      !droppedReferences.some(
+        (drop) => drop.path === path && drop.reason === reason,
+      )
+    ) {
+      droppedReferences.push({ path, reason });
+    }
+  };
   const ignoredByReason: Record<string, string[]> = {
     git: [],
     qwen: [],
@@ -332,6 +357,9 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+    // A URL is never a filesystem reference. Without omni delivery it stays
+    // verbatim text, so it must not be recorded as a miss either.
+    const isUrlToken = /^https?:\/\//i.test(pathName);
 
     // URL media reference (`@https://…`): detected BEFORE every other
     // parser — a URL can't be an extension/session/MCP ref, and without
@@ -369,6 +397,7 @@ export async function resolveAtCommandQuery({
         `Extension "${extRef.name}" not found among active extensions. ` +
           `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
       );
+      dropReference(pathName, 'not-found');
       continue;
     }
 
@@ -431,6 +460,7 @@ export async function resolveAtCommandQuery({
         `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
           `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
       );
+      dropReference(pathName, 'not-found');
       continue;
     }
 
@@ -450,6 +480,25 @@ export async function resolveAtCommandQuery({
       onDebugMessage(
         `Path ${pathName} is not in the workspace and will be skipped.`,
       );
+      // isPathWithinWorkspace also answers false when the path cannot be
+      // resolved (EACCES on a parent, ELOOP, ENAMETOOLONG). A token inside a
+      // root is still refused, but it was never shown to leave the workspace.
+      let unresolvedInside = false;
+      if (
+        workspaceContext
+          .getDirectories()
+          .some((root) => isSubpath(root, absolutePathName))
+      ) {
+        try {
+          await fs.realpath(absolutePathName);
+        } catch (error) {
+          unresolvedInside = !(isNodeError(error) && error.code === 'ENOENT');
+        }
+      }
+      dropReference(
+        pathName,
+        unresolvedInside ? 'unreadable' : 'outside-workspace',
+      );
       continue;
     }
 
@@ -464,12 +513,14 @@ export async function resolveAtCommandQuery({
             ? 'git-ignored'
             : 'qwen-ignored';
       onDebugMessage(`Path ${pathName} is ${reasonText} and will be skipped.`);
+      dropReference(pathName, 'ignored');
       continue;
     }
 
     let resolvedSuccessfully = false;
     let sawNotFound = false;
     let deferredIgnoreReason: string | undefined;
+    let deferredSkipReason: AtReferenceDropReason | undefined;
     for (const dir of config.getWorkspaceContext().getDirectories()) {
       try {
         const absolutePath = path.resolve(dir, pathName);
@@ -483,11 +534,13 @@ export async function resolveAtCommandQuery({
           onDebugMessage(
             `Path ${pathName} is not in the workspace and will be skipped.`,
           );
+          deferredSkipReason = 'outside-workspace';
           continue;
         }
         const canonicalIgnoreReason = getIgnoreReason(canonicalPath);
         if (canonicalIgnoreReason) {
           deferredIgnoreReason = canonicalIgnoreReason;
+          deferredSkipReason = 'ignored';
           const reasonText =
             canonicalIgnoreReason === 'both'
               ? 'ignored by both git and qwen'
@@ -518,6 +571,9 @@ export async function resolveAtCommandQuery({
           sawNotFound = true;
           continue;
         } else {
+          // Keep the first refusal: a later root's environmental failure must
+          // not overwrite an earlier root's security refusal.
+          if (!deferredSkipReason) deferredSkipReason = 'unreadable';
           onDebugMessage(
             `Error stating path ${pathName}: ${getErrorMessage(error)}. Path ${pathName} will be skipped.`,
           );
@@ -557,6 +613,7 @@ export async function resolveAtCommandQuery({
               `${anchor.resourceId} (bytes unavailable).`,
           );
           reanchored = true;
+          resolvedSuccessfully = true;
           break;
         }
       }
@@ -564,10 +621,23 @@ export async function resolveAtCommandQuery({
         onDebugMessage(
           `Path ${pathName} not found. Path ${pathName} will be skipped.`,
         );
+        // A multi-root workspace can see the same token ignored under one
+        // root and missing under another. It is one reference, so it gets
+        // one entry; the specific reason wins over the plain miss.
+        if (
+          !deferredSkipReason &&
+          !isUrlToken &&
+          looksLikeFileReference(pathName)
+        ) {
+          dropReference(pathName, 'not-found');
+        }
       }
     }
     if (!resolvedSuccessfully && deferredIgnoreReason) {
       ignoredByReason[deferredIgnoreReason].push(pathName);
+    }
+    if (!resolvedSuccessfully && deferredSkipReason) {
+      dropReference(pathName, deferredSkipReason);
     }
   }
 
@@ -688,6 +758,7 @@ export async function resolveAtCommandQuery({
           downloaded.partPath,
         );
         if (sniffedModality && !modalities[sniffedModality]) {
+          dropReference(ref.url, 'unreadable');
           urlMediaDisplays.push({
             callId,
             name: 'Fetch Media URL',
@@ -830,6 +901,7 @@ export async function resolveAtCommandQuery({
         }
         const reason = getErrorMessage(error);
         onDebugMessage(`Failed to localize media URL ${ref.url}: ${reason}`);
+        dropReference(ref.url, 'unreadable');
         urlMediaDisplays.push({
           callId,
           name: 'Fetch Media URL',
@@ -859,6 +931,16 @@ export async function resolveAtCommandQuery({
       onDebugMessage(
         `Failed to read MCP resource ${label}: ${getErrorMessage(outcome.reason)}`,
       );
+      // A cancelled turn reports nothing, matching the URL-media branch.
+      if (signal.aborted) {
+        return {
+          processedQuery: null,
+          shouldProceed: false,
+          toolDisplays: resourceDisplays,
+          filesRead: [],
+        };
+      }
+      dropReference(label, 'unreadable');
       resourceDisplays.push({
         callId,
         name: 'Read MCP Resource',
@@ -915,15 +997,24 @@ export async function resolveAtCommandQuery({
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
-      return { processedQuery: [{ text: query }], shouldProceed: true };
+      return {
+        processedQuery: [{ text: query }],
+        shouldProceed: true,
+        droppedReferences,
+      };
     } else if (!initialQueryText && query) {
       // If all @-commands were invalid and no surrounding text, pass original query
-      return { processedQuery: [{ text: query }], shouldProceed: true };
+      return {
+        processedQuery: [{ text: query }],
+        shouldProceed: true,
+        droppedReferences,
+      };
     }
     // Otherwise, proceed with the (potentially modified) query text that doesn't involve file reading
     return {
       processedQuery: [{ text: initialQueryText || query }],
       shouldProceed: true,
+      droppedReferences,
     };
   }
 
@@ -1003,10 +1094,12 @@ export async function resolveAtCommandQuery({
       } catch (error: unknown) {
         const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (${getErrorMessage(error)}); try a session id instead.`;
         onDebugMessage(reason);
+        dropReference(originalAtPath.substring(1), 'unreadable');
         scopedMentionEntries.push({
           originalAtPath,
           part: { text: '' },
-          label: buildSessionRef(ref.title ?? originalAtPath),
+          // Dropped, so the card renders but the label stays out of filesRead.
+          label: '',
           display: {
             callId,
             name: 'Referenced Session',
@@ -1026,10 +1119,14 @@ export async function resolveAtCommandQuery({
             ? `No session matches "@${originalAtPath.substring(1)}".`
             : `"@${originalAtPath.substring(1)}" is ambiguous (${matches.length} matches); use the picker or a session id.`;
         onDebugMessage(reason);
+        dropReference(
+          originalAtPath.substring(1),
+          matches.length === 0 ? 'not-found' : 'ambiguous',
+        );
         scopedMentionEntries.push({
           originalAtPath,
           part: { text: '' },
-          label: buildSessionRef(ref.title),
+          label: '',
           display: {
             callId,
             name: 'Referenced Session',
@@ -1046,10 +1143,11 @@ export async function resolveAtCommandQuery({
     if (!sessionId) {
       const reason = `Session reference "@${originalAtPath.substring(1)}" could not be resolved.`;
       onDebugMessage(reason);
+      dropReference(originalAtPath.substring(1), 'not-found');
       scopedMentionEntries.push({
         originalAtPath,
         part: { text: '' },
-        label: buildSessionRef(ref.title ?? ref.id ?? originalAtPath),
+        label: '',
         display: {
           callId,
           name: 'Referenced Session',
@@ -1080,10 +1178,11 @@ export async function resolveAtCommandQuery({
     } catch (error: unknown) {
       const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
       onDebugMessage(reason);
+      dropReference(originalAtPath.substring(1), 'unreadable');
       scopedMentionEntries.push({
         originalAtPath,
         part: { text: '' },
-        label: buildSessionRef(sessionId),
+        label: '',
         display: {
           callId,
           name: 'Referenced Session',
@@ -1099,10 +1198,11 @@ export async function resolveAtCommandQuery({
     if ('notFound' in resolved) {
       const reason = `Session "${sessionId}" not found in this project.`;
       onDebugMessage(reason);
+      dropReference(originalAtPath.substring(1), 'not-found');
       scopedMentionEntries.push({
         originalAtPath,
         part: { text: '' },
-        label: buildSessionRef(sessionId),
+        label: '',
         display: {
           callId,
           name: 'Referenced Session',
@@ -1141,7 +1241,10 @@ export async function resolveAtCommandQuery({
       (scopedMentionOrder.get(b.originalAtPath) ?? Number.MAX_SAFE_INTEGER),
   );
   const scopedMentionParts = scopedMentionEntries.map((entry) => entry.part);
-  const scopedMentionLabels = scopedMentionEntries.map((entry) => entry.label);
+  // A dropped reference renders its error card but must not claim to be read.
+  const scopedMentionLabels = scopedMentionEntries
+    .map((entry) => entry.label)
+    .filter(Boolean);
   const scopedMentionDisplays = scopedMentionEntries.map(
     (entry) => entry.display,
   );
@@ -1156,22 +1259,34 @@ export async function resolveAtCommandQuery({
     string,
     { dev: number; ino: number }
   >();
-  const pruneSkippedPath = (approvedPath: string) => {
+  /**
+   * Drops a canonical path from the content set and reports every typed label
+   * it removed. One file can be reached by several spellings, and each of
+   * them is a reference the user typed and will not get content for.
+   */
+  const pruneSkippedPath = (approvedPath: string): string[] => {
     const displayPath = displayPaths.get(approvedPath);
     const displayLabels =
       displayPathsByCanonicalPath.get(approvedPath) ??
       new Set(displayPath ? [displayPath] : []);
+    const removed = new Set<string>();
     for (const [originalAtPath, resolvedSpec] of atPathToResolvedSpecMap) {
       if (resolvedSpec === approvedPath || displayLabels.has(resolvedSpec)) {
         atPathToResolvedSpecMap.delete(originalAtPath);
+        removed.add(resolvedSpec);
       }
     }
     for (let index = contentLabelsForDisplay.length - 1; index >= 0; index--) {
       const label = contentLabelsForDisplay[index];
       if (label === approvedPath || displayLabels.has(label)) {
         contentLabelsForDisplay.splice(index, 1);
+        removed.add(label);
       }
     }
+    for (const label of displayLabels) {
+      removed.add(label);
+    }
+    return [...removed];
   };
   for (const approvedPath of pathSpecsToRead) {
     try {
@@ -1193,13 +1308,17 @@ export async function resolveAtCommandQuery({
           ino: stats.ino,
         });
       } else {
-        pruneSkippedPath(approvedPath);
+        for (const label of pruneSkippedPath(approvedPath)) {
+          dropReference(label, 'identity-changed');
+        }
         onDebugMessage(
           `Path ${approvedPath} failed revalidation and will be skipped.`,
         );
       }
     } catch {
-      pruneSkippedPath(approvedPath);
+      for (const label of pruneSkippedPath(approvedPath)) {
+        dropReference(label, 'identity-changed');
+      }
       onDebugMessage(
         `Path ${approvedPath} changed before it could be read and will be skipped.`,
       );
@@ -1215,6 +1334,13 @@ export async function resolveAtCommandQuery({
         validatedPathIdentities,
         displayPaths: revalidatedDisplayPaths,
       });
+
+      for (const drop of result.dropped) {
+        for (const label of pruneSkippedPath(drop.canonicalPath)) {
+          dropReference(label, drop.reason);
+        }
+        dropReference(drop.path, drop.reason);
+      }
 
       const parts = Array.isArray(result.contentParts)
         ? result.contentParts
@@ -1267,6 +1393,7 @@ export async function resolveAtCommandQuery({
           errorToolCallDisplay,
         ],
         filesRead: labelsOnError,
+        droppedReferences,
         recording: {
           filesRead: labelsOnError,
           status: 'error',
@@ -1317,6 +1444,7 @@ export async function resolveAtCommandQuery({
       ...urlMediaDisplays,
     ],
     filesRead: allLabels,
+    droppedReferences,
     recording: {
       filesRead: allLabels,
       status: 'success',
@@ -1354,5 +1482,6 @@ export async function handleAtCommand(
     shouldProceed: result.shouldProceed,
     toolDisplays: result.toolDisplays,
     filesRead: result.filesRead,
+    droppedReferences: result.droppedReferences,
   };
 }

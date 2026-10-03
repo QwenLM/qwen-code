@@ -62,6 +62,7 @@ import {
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
+import { formatDroppedReferencesNotice } from '../../utils/dropped-references.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 interface LooseCompletedCall {
@@ -300,6 +301,10 @@ async function expandAtMentions(
     signal,
   });
   const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  const droppedNotice = formatDroppedReferencesNotice(result.droppedReferences);
+  if (droppedNotice) {
+    events.unshift({ type: 'info', text: droppedNotice });
+  }
   if (!result.shouldProceed || result.processedQuery === null) {
     return { parts: query, events, declined: true };
   }
