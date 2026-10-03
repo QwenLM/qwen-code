@@ -163,6 +163,22 @@ rejection is completion evidence; an abort signal alone is not. A callback still
 pending after the grace period keeps its unknown outcome and original Runtime
 hold, with no replay. Native Legacy function-Hook cancellation remains unchanged.
 
+A trusted function handler module is itself evaluated with a bounded budget:
+`max(manifest function timeout in milliseconds, a 500 ms floor)`, the floor
+protecting cold-but-healthy evaluation from a budget declared for the callback.
+ESM evaluation cannot be cancelled, so an evaluation timeout or abort only
+abandons the wait: the operation settles at the Runtime — releasing its
+16-operation admission slot and unblocking Runtime `close()` — while keeping
+its hold until the module's top-level code actually finishes; a never-settling
+evaluation keeps the hold for the worker's lifetime. The Runtime reports an
+evaluation timeout with the dedicated code
+`managed_hook_module_evaluation_timeout`, and the Harness fences the execution
+as outcome_unknown rather than claiming not_started_proven for code that may
+have run; a genuinely failing import settles as
+`managed_hook_handler_unavailable` and keeps the original proof. An owner that
+hold-fences its release is skipped rather than retried once: a later acquire
+attempts the release again.
+
 Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
 owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks
 may coexist with history bind, prepare and snapshot; rewind and owner release still
@@ -218,8 +234,11 @@ An unknown SessionEnd or SessionDelete prevents DELETE from completing: it retur
 the same saved occurrence; they do not redispatch it. Detach also requires all
 Hook effects to settle. The retained owner can block tools in other Sessions in
 that Workspace; it does not block a different Workspace's Runtime worker.
-Unknown operations count toward the worker's 16-operation admission limit and
-retain their holds for its lifetime. All saved receipts, including settled ones,
+Unknown operations retain their holds for the worker's lifetime, and unknown
+operations that never settle at the Runtime also count toward the worker's
+16-operation admission limit; an operation whose module evaluation was
+abandoned is the exception to that pairing — settled at the Runtime, it has
+already released its slot and only the hold remains. All saved receipts, including settled ones,
 count toward the 4096 lifetime limit. Neither timeout, user cancellation, DELETE
 nor process replacement proves completion or permits replay. H2 provides no
 administrative abandonment route; receipt reconciliation or durable fenced

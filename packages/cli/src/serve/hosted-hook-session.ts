@@ -338,12 +338,21 @@ export class HostedHookSession {
       try {
         await broker.release();
       } catch (cause) {
-        if (
-          !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 404 ||
-          cause.code !== 'runtime_session_not_found'
-        )
-          throw cause;
+        const absent =
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 404 &&
+          cause.code === 'runtime_session_not_found';
+        // A hold-fenced owner (e.g. an operation whose module evaluation was
+        // abandoned while its receipt settled) refuses release with 409;
+        // leaving it unreleased is correct — a later acquire retries.
+        const holdFenced =
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 409 &&
+          (cause.code === 'managed_runtime_identity_conflict' ||
+            cause.code === 'managed_runtime_provider_operation_failed');
+        if (!absent && !holdFenced) throw cause;
+        this.recoveredBrokers.delete(id);
+        if (holdFenced) continue;
       }
       this.recoveredBrokers.delete(id);
       this.releasedOwners.add(id);

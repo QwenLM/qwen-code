@@ -123,6 +123,17 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
 原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
 
+可信函数 handler 模块本身的求值也有有界预算：`max(manifest function 超时（毫秒），500 ms 下限)`，
+下限避免冷启动但健康的求值被一份为 callback 声明的预算误判。ESM 求值无法取消，
+求值超时或 abort 只弃用等待：operation 在 Runtime 侧结算——释放其 16 个准入名额
+并解除 Runtime `close()` 挂起——但在模块顶层代码实际结束前持续保留 hold；
+永不 settle 的求值在 worker 生命周期内保留 hold。Runtime 以专用编码
+`managed_hook_module_evaluation_timeout` 报告求值超时，
+Harness 据此以 outcome_unknown 围闭该执行，而不是对可能已经运行过的代码出具
+not_started_proven；真正加载失败的 import 以
+`managed_hook_handler_unavailable` 结算并保留原证明。若释放被 hold 围闭的
+owner 被拒绝，则本次跳过该 owner 而不视为已释放；后续 acquire 会再次尝试释放它。
+
 Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
 快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
 及 snapshot 并行；撤销和释放 owner 仍要求全部 Hook 执行结束。撤销也排除 Hook
@@ -161,8 +172,10 @@ H2 明确接受真正 unknown 带来的无期限可用性损失。SessionEnd 或
 结果未知时，DELETE 返回 503，保留已 attach 的 Session 和原 Workspace owner。
 重试观察同一个已保存的 occurrence，不重新派发。Detach 也要求全部 Hook 副作用
 已结算。保留的 owner 可能阻塞同 Workspace 的其他 Session 的工具执行，不会阻塞
-不同 Workspace 的 Runtime worker。未知操作在 worker 生命周期内持续占用 16 个
-准入名额之一并保留 hold；包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
+不同 Workspace 的 Runtime worker。未知操作在 worker 生命周期内保留 hold；
+从未在 Runtime 侧结算的未知操作还持续占用 16 个准入名额之一，而 module 求值
+被弃用的 operation 是该配对关系的例外——它已在 Runtime 侧结算、名额已释放，
+仅保留 hold。包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
 上限。超时、用户取消、DELETE 或进程替换都不能证明完成或允许重放。H2 不提供运维
 放弃 unknown 的接口；回执对账和有持久化屏障的回收在
 [#13133](https://github.com/QwenLM/qwen-code/issues/13133) 跟踪。这是明确接受的恢复

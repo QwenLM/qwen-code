@@ -1178,8 +1178,14 @@ it.each([
   { status: 404, code: 'runtime_session_not_found', allowed: true },
   { status: 404, code: 'other_not_found', allowed: false },
   { status: 409, code: 'runtime_session_busy', allowed: false },
+  { status: 409, code: 'managed_runtime_identity_conflict', allowed: true },
+  {
+    status: 409,
+    code: 'managed_runtime_provider_operation_failed',
+    allowed: true,
+  },
 ])(
-  'reconciles only absent earlier owners ($code)',
+  'reconciles only absent or hold-fenced earlier owners ($code)',
   async ({ status, code, allowed }) => {
     await hooks.ensureReady();
     await hooks.close();
