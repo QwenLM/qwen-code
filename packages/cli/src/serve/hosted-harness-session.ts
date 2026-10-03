@@ -3064,9 +3064,10 @@ export function registerHostedHarnessSessionRoutes(
           // can ever match the recovery identity again. Finish the settle
           // idempotently first (the journaled set journals nothing twice),
           // because the terminal record must not land while a parked
-          // execution still lacks its functionResponse; then admit loudly
-          // instead of leaving the Session armed forever, keeping the
-          // admission and the owed file-history record for the retry sites.
+          // execution still lacks its functionResponse; the admission then
+          // stays replayable at its own watermark, louder than a permanent
+          // block. Only a settle that could not finish again leaves the
+          // Session recovery-blocked, since nothing else can clear it.
           const completed = await settleParkedTurnCancelled({
             session: session.managed,
             sessionId,
@@ -3076,7 +3077,9 @@ export function registerHostedHarnessSessionRoutes(
             () => true,
             () => false,
           );
-          if (completed) {
+          if (!completed) {
+            session.blocked = true;
+          } else {
             await session.managed.sink
               .write(
                 record(session, sessionId, 'system', null, {
@@ -3092,7 +3095,6 @@ export function registerHostedHarnessSessionRoutes(
               .catch(() => undefined);
           }
           session.fileHistoryOwed = promptId;
-          session.blocked = true;
           session.recoveredTurn = undefined;
         } else if (session.admissions.get(promptId)?.replayedInFlight) {
           // A replay already certified this cancellation as accepted to the

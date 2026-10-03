@@ -441,7 +441,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each([undefined, { state: 'unknown' }, { state: 'abandoned' }])(
+  it.each([undefined, { state: 'unknown' }])(
     'reports an execution the Broker cannot account for as unknown (%s)',
     async (status) => {
       await parkAtAwaitRuntime();
@@ -483,6 +483,40 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('keeps the terminal fence of an abandoned execution in the report', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      // A terminally fenced record keeps its distinction instead of
+      // folding away: the outcome reads known, so the coordinator can
+      // cancel over it, and the broker line itself stays acceptably
+      // cancelled by the stop step's stopComplete predicate.
+      expect(recovered!.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'abandoned' },
+        }),
+      ]);
+      expect(recovered!.drivable).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('refuses a turn whose checkpoint is not a Runtime wait', async () => {
     const session = await open('boot-1', true);
