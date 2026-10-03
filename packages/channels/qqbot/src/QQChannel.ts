@@ -1945,12 +1945,8 @@ export class QQChannel extends ChannelBase {
       state = undefined;
     }
     if (!state) {
-      // Reuse the session's reply anchor across buffer windows (a single
-      // response may flush several times, each creating a fresh state entry).
-      // The anchor was set deterministically by onPromptStart from the
-      // triggering message's id; drop it when stale (past the 5-minute TTL)
-      // so a long stream's later windows fall back to the active send path
-      // instead of sending chunks with an expired msg_id.
+      // createStreamState below reuses this session's reply anchor across
+      // buffer windows and drops it past its TTL — the rationale lives there.
       const held = this.streamOrphanBuffer.get(sessionId);
       let sealedPre: string | undefined;
       if (held !== undefined) {

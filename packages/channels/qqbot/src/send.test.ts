@@ -186,6 +186,33 @@ function deferredPromise() {
   return { promise, resolve };
 }
 
+/**
+ * Seed two sessions anchored to the same msgId with one msg_seq counter and
+ * no chat-level replyMsgId entry naming it. Both release tests share this:
+ * while one session still anchors msgId the counter must survive, and the
+ * release of the last anchor is what purges it.
+ */
+function anchorTwoSessionsToOneMsgId(
+  chp: Record<string, unknown>,
+  sessions: [string, string],
+  msgId: string,
+  seq: number,
+): {
+  sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+  seqMap: Map<string, number>;
+} {
+  const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+    string,
+    { msgId: string; timestamp: number }
+  >;
+  const seqMap = chp['msgSeqMap'] as Map<string, number>;
+  for (const sessionId of sessions) {
+    sessionAnchors.set(sessionId, { msgId, timestamp: Date.now() });
+  }
+  seqMap.set(msgId, seq);
+  return { sessionAnchors, seqMap };
+}
+
 describe('isValidChatId', () => {
   it('accepts alphanumeric IDs', () => {
     expect(isValidChatId('abc123')).toBe(true);
@@ -3332,25 +3359,21 @@ describe('lifecycle status hooks', () => {
   it('releaseSessionReplyAnchor keeps msg_seq while another session is anchored to the same msgId', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
-    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-      string,
-      { msgId: string; timestamp: number }
-    >;
-    const seqMap = chp['msgSeqMap'] as Map<string, number>;
     const release = (
       chp['releaseSessionReplyAnchor'] as (
         sessionId: string,
         expectedMsgId?: string,
       ) => void
     ).bind(ch);
+    const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+      chp,
+      ['sess-A', 'sess-B'],
+      'msg-X',
+      4,
+    );
 
-    // Two sessions are streaming under the same msg-X; no chat-level entry
-    // points at it. Releasing one must NOT purge the seq — the other session
-    // still needs it (isMsgIdAnchoredBySession guard).
-    sessionAnchors.set('sess-A', { msgId: 'msg-X', timestamp: Date.now() });
-    sessionAnchors.set('sess-B', { msgId: 'msg-X', timestamp: Date.now() });
-    seqMap.set('msg-X', 4);
-
+    // Releasing one must NOT purge the seq — the other session still needs it
+    // (isMsgIdAnchoredBySession guard).
     release('sess-A', 'msg-X');
     expect(sessionAnchors.has('sess-A')).toBe(false);
     expect(sessionAnchors.has('sess-B')).toBe(true);
@@ -4359,99 +4382,115 @@ describe('replyMsgId cleanup timer', () => {
     });
 
     describe('flushAndTrack permanent errors', () => {
-      function makeChannelForPerm(): QQChannelInstance {
-        const ch = new QQChannel(
-          'test-bot',
-          {
-            type: 'qq',
-            token: '',
-            senderPolicy: 'open' as const,
-            allowedUsers: [],
-            sessionScope: 'user' as const,
-            cwd: '/tmp',
-            groupPolicy: 'disabled' as const,
-            groups: {},
-            appID: 'test-app-id',
-            appSecret: 'test-secret',
-          },
-          {} as unknown as ChannelAgentBridge,
-        );
-        return ch;
-      }
+      type PermFailureState = {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn?: number;
+      };
 
-      it('deletes streamState and releases anchor on RETRY_EXHAUSTED', async () => {
-        vi.useFakeTimers();
-        const ch = makeChannelForPerm();
-        const chp = ch as unknown as Record<string, unknown>;
-
-        const state = {
+      /**
+       * Seed the streamState entry a terminal flush failure reads, plus the
+       * per-session reply anchor and msg_seq counter that name it — the anchor
+       * onPromptStart sets from the triggering message's id. `buffer` is
+       * pre-filled because chunks can accumulate between the caller's clear
+       * and the send's completion. No chat-level replyMsgId entry points at
+       * the anchor, so releasing the session must cascade: session anchor
+       * dropped + orphaned seq purged (persisted via saveQQState).
+       * `anchorMsgId` may differ from `msgId` to model a successor turn's
+       * anchor that a flush without its own anchor must keep.
+       */
+      function seedPermFailure(
+        chp: Record<string, unknown>,
+        opts: {
+          sessionId: string;
+          msgId?: string;
+          anchorMsgId?: string;
+          seq?: number;
+          turn?: number;
+        },
+      ): {
+        state: PermFailureState;
+        streamState: Map<string, PermFailureState>;
+        sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+        seqMap: Map<string, number>;
+      } {
+        const state: PermFailureState = {
           chatId: 'test-chat-id',
-          // Set buffer to simulate concurrent chunks arriving during the in-flight send.
-          // Production code clears state.buffer before calling flushAndTrack, but new chunks
-          // can accumulate in state.buffer between the clear and the send's completion.
           buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
+          timer: null,
           retryCount: 0,
-          // Per-session reply anchor this flush is sending under.
-          msgId: 'msg-X',
+          msgId: opts.msgId,
         };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-            msgId?: string;
-          }
-        >;
-        streamState.set('session-perm', state);
+        if (opts.turn !== undefined) state.turn = opts.turn;
+        const streamState = chp['streamState'] as Map<string, PermFailureState>;
+        streamState.set(opts.sessionId, state);
 
-        // Anchor the session to msg-X (as onPromptStart would) and seed a
-        // msg_seq counter for it. No chat-level replyMsgId entry points at
-        // msg-X, so a release must cascade: session anchor dropped + the
-        // orphaned seq purged — and the cascade persists via saveQQState
-        // (thread 52 gate: the release path must not silently skip saving).
         const sessionAnchors = chp['sessionReplyMsgId'] as Map<
           string,
           { msgId: string; timestamp: number }
         >;
         const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('session-perm', {
-          msgId: 'msg-X',
-          timestamp: Date.now(),
-        });
-        seqMap.set('msg-X', 4);
+        const anchorMsgId = opts.anchorMsgId ?? opts.msgId;
+        if (anchorMsgId !== undefined) {
+          sessionAnchors.set(opts.sessionId, {
+            msgId: anchorMsgId,
+            timestamp: Date.now(),
+          });
+          seqMap.set(anchorMsgId, opts.seq ?? 4);
+        }
+        return { state, streamState, sessionAnchors, seqMap };
+      }
+
+      /** Arm the flush's delivery to reject with `code` and no retry. */
+      function rejectFlush(code: string, message: string): void {
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(new DeliveryError(code, message));
+      }
+
+      /**
+       * Run `flushAndTrack` for a seeded session and drain the full microtask
+       * chain so the .catch() handler runs — a single await
+       * Promise.resolve() resumes the test before the catch executes.
+       */
+      async function runFlush(
+        chp: Record<string, unknown>,
+        sessionId: string,
+        state: PermFailureState,
+      ): Promise<void> {
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: PermFailureState,
+            logLabel: string,
+          ) => void
+        )(sessionId, 'test buffer', state, 'test');
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      it('deletes streamState and releases anchor on RETRY_EXHAUSTED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-perm', msgId: 'msg-X' },
+        );
 
         const saveSpy = vi.spyOn(
           chp as { saveQQState: () => void },
           'saveQQState',
         );
 
-        vi.spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessageWithReplyContext: () => Promise<void>;
-          },
-          'sendMessageWithReplyContext',
-        ).mockRejectedValue(
-          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-        );
-
-        (
-          chp['flushAndTrack'] as (
-            sessionId: string,
-            buffer: string,
-            state: typeof state,
-            logLabel: string,
-          ) => void
-        )('session-perm', 'test buffer', state, 'test');
-
-        // Drain the full microtask chain so the .catch() handler runs (a
-        // single await Promise.resolve() resumes the test before the catch
-        // executes — the previous version asserted on the pre-catch state and
-        // even contradicted the source: the permanent-failure branch DELETES
-        // the streamState entry).
-        await vi.advanceTimersByTimeAsync(0);
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-perm', state);
 
         // RETRY_EXHAUSTED is permanent: the entry is dropped and the reply
         // anchor released, cascading to the orphaned msg_seq counter — whose
@@ -4471,29 +4510,12 @@ describe('replyMsgId cleanup timer', () => {
         // would otherwise have cleaned these, but the permanent failure
         // settles the turn without them (thread 53).
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
-
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-          msgId: 'msg-P',
-          turn: 1,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-            msgId?: string;
-            turn: number;
-          }
-        >;
-        streamState.set('session-pc', state);
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-pc', msgId: 'msg-P', turn: 1 },
+        );
 
         const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
         const flushedSessions = chp['flushedSessions'] as Set<string>;
@@ -4502,36 +4524,8 @@ describe('replyMsgId cleanup timer', () => {
         flushedSessions.add('session-pc');
         turnCounter.set('session-pc', 1);
 
-        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-          string,
-          { msgId: string; timestamp: number }
-        >;
-        const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('session-pc', {
-          msgId: 'msg-P',
-          timestamp: Date.now(),
-        });
-        seqMap.set('msg-P', 4);
-
-        vi.spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessageWithReplyContext: () => Promise<void>;
-          },
-          'sendMessageWithReplyContext',
-        ).mockRejectedValue(
-          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-        );
-
-        (
-          chp['flushAndTrack'] as (
-            sessionId: string,
-            buffer: string,
-            state: typeof state,
-            logLabel: string,
-          ) => void
-        )('session-pc', 'test buffer', state, 'test');
-
-        await vi.advanceTimersByTimeAsync(0);
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-pc', state);
 
         // The permanent-catch branch deletes the stream entry, clears the
         // pending-delete flag, and drops the deferred turn's flushedSessions
@@ -4554,61 +4548,15 @@ describe('replyMsgId cleanup timer', () => {
         // unconditional release here would delete the successor turn's
         // anchor (thread 54).
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
-
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-          msgId: undefined,
-          turn: 1,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-            msgId?: string;
-            turn: number;
-          }
-        >;
-        streamState.set('session-guard', state);
-
-        // A successor turn holds the anchor (msg-B) with its seq counter.
-        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-          string,
-          { msgId: string; timestamp: number }
-        >;
-        const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('session-guard', {
-          msgId: 'msg-B',
-          timestamp: Date.now(),
-        });
-        seqMap.set('msg-B', 1);
-
-        vi.spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessageWithReplyContext: () => Promise<void>;
-          },
-          'sendMessageWithReplyContext',
-        ).mockRejectedValue(
-          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-guard', anchorMsgId: 'msg-B', seq: 1, turn: 1 },
         );
 
-        (
-          chp['flushAndTrack'] as (
-            sessionId: string,
-            buffer: string,
-            state: typeof state,
-            logLabel: string,
-          ) => void
-        )('session-guard', 'test buffer', state, 'test');
-
-        await vi.advanceTimersByTimeAsync(0);
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-guard', state);
 
         // The failed flush's stream entry is dropped...
         expect(streamState.has('session-guard')).toBe(false);
@@ -4621,63 +4569,15 @@ describe('replyMsgId cleanup timer', () => {
 
       it('deletes streamState and releases anchor on ACTIVE_MSG_DISABLED', async () => {
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
-
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-          // Per-session reply anchor this flush is sending under.
-          msgId: 'msg-Y',
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-            msgId?: string;
-          }
-        >;
-        streamState.set('session-ads', state);
-
-        // Anchor the session to msg-Y and seed its msg_seq counter, with no
-        // chat-level entry pointing at msg-Y — a release must cascade to the
-        // orphaned seq (same as the RETRY_EXHAUSTED case).
-        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-          string,
-          { msgId: string; timestamp: number }
-        >;
-        const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('session-ads', {
-          msgId: 'msg-Y',
-          timestamp: Date.now(),
-        });
-        seqMap.set('msg-Y', 4);
-
-        vi.spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessageWithReplyContext: () => Promise<void>;
-          },
-          'sendMessageWithReplyContext',
-        ).mockRejectedValue(
-          new DeliveryError('ACTIVE_MSG_DISABLED', 'active messages disabled'),
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-ads', msgId: 'msg-Y' },
         );
 
-        (
-          chp['flushAndTrack'] as (
-            sessionId: string,
-            buffer: string,
-            state: typeof state,
-            logLabel: string,
-          ) => void
-        )('session-ads', 'test buffer', state, 'test');
-
-        // Drain the full microtask chain so the .catch() handler runs.
-        await vi.advanceTimersByTimeAsync(0);
+        rejectFlush('ACTIVE_MSG_DISABLED', 'active messages disabled');
+        await runFlush(chp, 'session-ads', state);
 
         // ACTIVE_MSG_DISABLED is permanent: the entry is dropped and the
         // reply anchor released, cascading to the orphaned msg_seq counter.
@@ -4693,63 +4593,15 @@ describe('replyMsgId cleanup timer', () => {
         // exhaustion: permanent, same teardown as RETRY_EXHAUSTED (thread
         // 67 — this code path previously had zero coverage).
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
-
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-          // Per-session reply anchor this flush is sending under.
-          msgId: 'msg-Z',
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-            msgId?: string;
-          }
-        >;
-        streamState.set('session-fb', state);
-
-        // Anchor the session to msg-Z and seed its msg_seq counter, with no
-        // chat-level entry pointing at msg-Z — a release must cascade to the
-        // orphaned seq (same as the RETRY_EXHAUSTED case).
-        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-          string,
-          { msgId: string; timestamp: number }
-        >;
-        const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('session-fb', {
-          msgId: 'msg-Z',
-          timestamp: Date.now(),
-        });
-        seqMap.set('msg-Z', 4);
-
-        vi.spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessageWithReplyContext: () => Promise<void>;
-          },
-          'sendMessageWithReplyContext',
-        ).mockRejectedValue(
-          new DeliveryError('FALLBACK_FAILED', 'passive fallback failed'),
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-fb', msgId: 'msg-Z' },
         );
 
-        (
-          chp['flushAndTrack'] as (
-            sessionId: string,
-            buffer: string,
-            state: typeof state,
-            logLabel: string,
-          ) => void
-        )('session-fb', 'test buffer', state, 'test');
-
-        // Drain the full microtask chain so the .catch() handler runs.
-        await vi.advanceTimersByTimeAsync(0);
+        rejectFlush('FALLBACK_FAILED', 'passive fallback failed');
+        await runFlush(chp, 'session-fb', state);
 
         // FALLBACK_FAILED is permanent: the entry is dropped and the reply
         // anchor released, cascading to the orphaned msg_seq counter.
@@ -4764,16 +4616,14 @@ describe('replyMsgId cleanup timer', () => {
         // The release cascade is what persists (msgSeqMap.delete → saveQQState);
         // when a sibling session still anchors the same msgId the counter is
         // kept and nothing must be written (thread 52 keep-scenario gate).
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
-        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
-          string,
-          { msgId: string; timestamp: number }
-        >;
-        const seqMap = chp['msgSeqMap'] as Map<string, number>;
-        sessionAnchors.set('s-1', { msgId: 'msg-K', timestamp: Date.now() });
-        sessionAnchors.set('s-2', { msgId: 'msg-K', timestamp: Date.now() });
-        seqMap.set('msg-K', 3);
+        const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+          chp,
+          ['s-1', 's-2'],
+          'msg-K',
+          3,
+        );
 
         const saveSpy = vi.spyOn(
           chp as { saveQQState: () => void },
