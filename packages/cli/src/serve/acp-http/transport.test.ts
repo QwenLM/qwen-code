@@ -7876,9 +7876,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
     const grantSpy = vi
       .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
-      .mockImplementation(async () => {
+      .mockImplementation(async (ctx) => {
         generationGuard.close();
-        return grant();
+        return grant(ctx);
       });
     await restartServer({ generationGuard });
     const connId = await initialize();
