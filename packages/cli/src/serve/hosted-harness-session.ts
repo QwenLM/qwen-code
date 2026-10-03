@@ -10,6 +10,7 @@ import {
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
   canSettleHostedFileHistory,
+  dropPendingHostedFileHistoryTurn,
 } from './hosted-file-history.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -151,6 +152,9 @@ interface HostedSession {
    * fresh Turn until continue/cancel drives it to a terminal record. Never
    * alias this to active/blocked — both refuse the continue/cancel routes. */
   recoveredTurn?: string;
+  /** The settled Turn's file-history retirement failed after the terminal
+   * record landed; the next settled /prompt or close retires it. */
+  fileHistoryOwed?: string;
 }
 
 async function runHostedLifecycleHook(
@@ -1831,6 +1835,17 @@ export function registerHostedHarnessSessionRoutes(
       } else if (cause instanceof ManagedSessionNotFoundError) {
         error(res, 404, 'managed_session_not_found');
       } else {
+        // A recovery-blocked load answers a bare 503 whose root cause (file
+        // history drift, runnable-checkpoint classification) is otherwise
+        // invisible to anyone diagnosing why the restore was refused.
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness load of session ${sessionId} is recovery blocked: ` +
+            String(
+              cause instanceof Error && cause.cause !== undefined
+                ? cause.cause
+                : cause,
+            ),
+        );
         error(res, 503, 'managed_session_open_failed');
       }
     } finally {
@@ -2040,6 +2055,20 @@ export function registerHostedHarnessSessionRoutes(
         // terminal route owed the Broker — read the owed identity from the
         // flag only, never from this Turn's own broker.
         releaseRecoveredRuntime(session);
+        if (session.fileHistoryOwed !== undefined) {
+          const owed = session.fileHistoryOwed;
+          dropPendingHostedFileHistoryTurn(session.managed, owed).then(
+            () => {
+              if (session.fileHistoryOwed === owed)
+                session.fileHistoryOwed = undefined;
+            },
+            (cause: unknown) => {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness file-history retirement of settled Turn ${owed} failed; it stays owed: ${String(cause)}`,
+              );
+            },
+          );
+        }
       }
     })();
   });
@@ -2419,6 +2448,12 @@ export function registerHostedHarnessSessionRoutes(
     session.managed.activation.activationId === activationId &&
     unsettledPromptId(session) === promptId;
 
+  // A recovered Runtime Session the Broker already forgot is handed back
+  // by definition — treat its 404 as a completed release instead of
+  // retrying a doomed handback forever.
+  const releaseIsSatisfied = (cause: unknown): boolean =>
+    cause instanceof HostedWorkspaceBrokerRejection && cause.status === 404;
+
   // A recovery load may hold the Runtime Session; whichever terminal route
   // runs must release it, or the workspace lease stays pinned forever. The
   // flag clears only once the release is confirmed, so a failed handback
@@ -2438,6 +2473,11 @@ export function registerHostedHarnessSessionRoutes(
             session.runtimeLeaseHeld = undefined;
         },
         (cause: unknown) => {
+          if (releaseIsSatisfied(cause)) {
+            if (session.runtimeLeaseHeld === promptId)
+              session.runtimeLeaseHeld = undefined;
+            return;
+          }
           writeStderrLineSafe(
             `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
           );
@@ -2461,6 +2501,11 @@ export function registerHostedHarnessSessionRoutes(
           session.runtimeLeaseHeld = undefined;
       })
       .catch((cause: unknown) => {
+        if (releaseIsSatisfied(cause)) {
+          if (session.runtimeLeaseHeld === promptId)
+            session.runtimeLeaseHeld = undefined;
+          return;
+        }
         writeStderrLineSafe(
           `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
         );
@@ -2682,23 +2727,25 @@ export function registerHostedHarnessSessionRoutes(
             );
           }
         }
-        // A Turn settling here never resumes, so its pending file-history
-        // obligation dies with it — same invariant as the cancel route —
-        // or one transient failure wedges every later cold load.
-        {
-          const savedHistory = await readHostedFileHistory(session.managed);
-          if (savedHistory?.pendingTurn === promptId) {
-            await commitHostedFileHistory(session.managed, {
-              schemaVersion: 1,
-              state: savedHistory.state,
-              pendingTurn: null,
-              pendingUndo: null,
-            });
-          }
-        }
         await toolTurn.finish();
         await harness.settleConsumedRuntimeContinuation();
         await session.managed.sink.write(turnResultRecord(state));
+        // A Turn that never resumes never reconciles its pending file
+        // history either: retire the obligation after the terminal record
+        // landed, and owe it to the next settled /prompt or close when the
+        // retirement itself fails — completing here cannot be recorded as
+        // an error, and a marker owed by a settled Turn must still
+        // retire eventually, or every later cold load is refused.
+        if (state !== 'completed') {
+          try {
+            await dropPendingHostedFileHistoryTurn(session.managed, promptId);
+          } catch (cause) {
+            session.fileHistoryOwed = promptId;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness file-history retirement of settled Turn ${promptId} failed; it stays owed: ${String(cause)}`,
+            );
+          }
+        }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
           session.blocked = true;
@@ -2793,6 +2840,11 @@ export function registerHostedHarnessSessionRoutes(
     });
     session.active = { promptId, digest: '', abort: new AbortController() };
     void (async () => {
+      // The checkpoint moved the moment the parked executions journaled
+      // cancelled, so a failure anywhere after that point can no longer be
+      // re-driven against the same recovery identity — the failure handling
+      // below keys on it, not on the failing step.
+      let settledDurable = false;
       try {
         const broker = await stopParkedRuntimeExecutions({
           session: session.managed,
@@ -2808,18 +2860,11 @@ export function registerHostedHarnessSessionRoutes(
           cwd: session.cwd,
           promptId,
         });
+        settledDurable = true;
         // The cancelled Turn never continues, so its pending file-history
         // obligation dies with it — keep the snapshots, drop the marker, or
         // every later load stays refused.
-        const savedHistory = await readHostedFileHistory(session.managed);
-        if (savedHistory?.pendingTurn === promptId) {
-          await commitHostedFileHistory(session.managed, {
-            schemaVersion: 1,
-            state: savedHistory.state,
-            pendingTurn: null,
-            pendingUndo: null,
-          });
-        }
+        await dropPendingHostedFileHistoryTurn(session.managed, promptId);
         // The original owner's Runtime Session keeps the Workspace lease
         // pinned; a passive takeover never re-acquired it, so release it
         // here once the executions are confirmed stopped — including the
@@ -2831,11 +2876,7 @@ export function registerHostedHarnessSessionRoutes(
         const released = await broker.release().then(
           () => true,
           (cause: unknown) => {
-            if (
-              cause instanceof HostedWorkspaceBrokerRejection &&
-              cause.status === 404
-            )
-              return true;
+            if (releaseIsSatisfied(cause)) return true;
             writeStderrLineSafe(
               `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
             );
@@ -2875,6 +2916,26 @@ export function registerHostedHarnessSessionRoutes(
           // coordinator, so no retry or re-drive will ever come — admit the
           // failure loudly instead of leaving the Session armed-and-idle,
           // and keep the admission it certified on record.
+          session.blocked = true;
+          session.recoveredTurn = undefined;
+        } else if (settledDurable) {
+          // The checkpoint already moved, so no re-drive can ever match the
+          // recovery identity again: the Turn is cancelled wherever it is
+          // read, so admit it loudly instead of leaving the Session armed
+          // forever, and keep the admission it may have certified.
+          await session.managed.sink
+            .write(
+              record(session, sessionId, 'system', null, {
+                subtype: 'turn_result',
+                systemPayload: {
+                  promptId,
+                  state: 'cancelled',
+                  stopReason: 'cancelled',
+                  endedAt: Date.now(),
+                },
+              }),
+            )
+            .catch(() => undefined);
           session.blocked = true;
           session.recoveredTurn = undefined;
         } else {
@@ -3036,11 +3097,15 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/cancel', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    // A recovered-but-undriven Turn cannot be stopped from this route — only
-    // the coordinator's managed-runtime/cancel settles its parked executions
-    // — so refuse honestly instead of confirming a cancellation that never
-    // happened. An idle Session keeps the plain 204.
-    if (session.recoveredTurn !== undefined && !session.active)
+    // A recovered-but-undriven or recovery-blocked Turn cannot be stopped
+    // from this route — only the coordinator's managed-runtime/cancel
+    // settles its parked executions — so refuse honestly instead of
+    // confirming a cancellation that never happened. An idle Session keeps
+    // the plain 204, and a genuinely active one stays abortable.
+    if (
+      (session.recoveredTurn !== undefined || session.blocked) &&
+      !session.active
+    )
       return error(res, 409, 'hosted_turn_recovery_required');
     session.active?.abort.abort();
     res.sendStatus(204);
@@ -3091,7 +3156,10 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_file_history_unavailable');
     if (session.mcpBusy || session.mcpClosing || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.active) return error(res, 409, 'hosted_turn_active');
+    // A route that borrows `active` as its busy flag must not be admitted
+    // over an undriven recovered Turn, or it wedges the recovery it races.
+    if (session.active || session.recoveredTurn !== undefined)
+      return error(res, 409, 'hosted_turn_active');
     if (session.hooksBusy || session.hooks?.hasUnsettledExecutions)
       return error(res, 409, 'hosted_hook_operation_active');
     if (session.blocked)
@@ -3271,6 +3339,20 @@ export function registerHostedHarnessSessionRoutes(
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
+      // A settled Turn may still owe its file-history retirement; close it
+      // out best-effort here or the durable marker outlives the Session.
+      if (session.fileHistoryOwed !== undefined) {
+        const owed = session.fileHistoryOwed;
+        try {
+          await dropPendingHostedFileHistoryTurn(session.managed, owed);
+          if (session.fileHistoryOwed === owed)
+            session.fileHistoryOwed = undefined;
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness file-history retirement of settled Turn ${owed} failed at close: ${String(cause)}`,
+          );
+        }
+      }
       await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();
