@@ -42,6 +42,25 @@ export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
 
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 
+// Corrupt frames tolerated in a row before the stream resyncs past the
+// poisoned run. Only a decoded event resets the count: heartbeats must not
+// dilute a stream that serves nothing but corrupt frames.
+const MAX_CONSECUTIVE_CORRUPT_FRAMES = 3;
+// Skip warnings are rate-limited per connection: the first carries the frame
+// identity, and alternating corruption would otherwise log at stream rate.
+const SKIP_LOG_EVERY = 50;
+
+// The only corrupt frames a skip can survive: delta text the durable
+// snapshot re-assembles. Anything else resyncs — a lost approval update
+// leaves the Hosted approval unreachable, a lost turn terminal leaves the
+// last message streaming forever, a lost turn.accepted drops the user's own
+// prompt, a lost stream.reconciled keeps retracted text on screen, and an
+// unknown name is by definition one the panel has not budgeted for.
+export const SKIP_ON_CORRUPT: ReadonlySet<string> = new Set([
+  'item.output_text.delta',
+  'item.reasoning.delta',
+]);
+
 export function isJavaAgentResyncRequired(
   frame: JavaAgentEvent | JavaAgentResyncRequired,
 ): frame is JavaAgentResyncRequired {
@@ -360,6 +379,82 @@ export class JavaManagedAgentClient {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let consecutiveCorrupt = 0;
+    let skippedTotal = 0;
+    let yieldedAny = false;
+    // The fields are informational and never read, hence the placeholders.
+    const resyncFrame = (): JavaAgentResyncRequired => ({
+      type: RESYNC_REQUIRED,
+      sessionId: request.sessionId,
+      replayFloorSequence: 0,
+      snapshotThroughSequence: 0,
+      action: 'reload_snapshot',
+    });
+    const decodeFrame = (
+      frame: string,
+      trailing = false,
+    ): JavaAgentEvent | JavaAgentResyncRequired | undefined => {
+      let event: JavaAgentEvent | JavaAgentResyncRequired | undefined;
+      let failure: unknown;
+      try {
+        event = decodeEventFrame(frame);
+      } catch (error) {
+        failure = error;
+      }
+      if (event) {
+        consecutiveCorrupt = 0;
+        return event;
+      }
+      const { data, id, name } = parseEventFrameFields(frame);
+      if (data.length === 0) {
+        const hasContent = frame
+          .split(/\r?\n/)
+          .some((line) => line && !line.startsWith(':'));
+        if (!hasContent) return undefined; // heartbeat or comment
+        if (!trailing) {
+          // A mid-stream frame with id/event lines but no data line is
+          // malformed server output, not a heartbeat: count it as corrupt
+          // below instead of dropping it silently.
+          failure ??= new Error('frame has no data payload');
+        }
+      }
+      if (trailing) {
+        // A leftover buffer at end of stream is a mid-frame disconnect, not
+        // a corrupt persisted frame: log it as such and spare the budget.
+        console.warn(
+          `[web-shell] the Managed Agent event stream closed mid-frame; the frame at id ${id ?? 'none'} was discarded`,
+        );
+        return undefined;
+      }
+      // Corrupt frame: unparseable JSON, a payload that is not an event
+      // object, or a mid-stream frame with no data line. Skip it and let
+      // later frames move the consumer's cursor past it — except the shapes
+      // a skip cannot recover from, which resync.
+      consecutiveCorrupt += 1;
+      if (
+        // A run of corrupt frames means the log itself is poisoned: resync
+        // past the whole run instead of skipping forever. (The id-less
+        // resync marker is covered by the fail-closed rule too.)
+        consecutiveCorrupt > MAX_CONSECUTIVE_CORRUPT_FRAMES ||
+        // Fail closed: only delta text the snapshot re-assembles may skip.
+        !SKIP_ON_CORRUPT.has(name ?? '')
+      ) {
+        console.warn(
+          `[web-shell] resyncing on a corrupt Managed Agent frame (id: ${id ?? 'none'}, event: ${name ?? 'unknown'}):`,
+          failure ?? 'non-event payload',
+        );
+        consecutiveCorrupt = 0;
+        return resyncFrame();
+      }
+      skippedTotal += 1;
+      if (skippedTotal === 1 || skippedTotal % SKIP_LOG_EVERY === 0) {
+        console.warn(
+          `[web-shell] skipping a corrupt Managed Agent event frame (id: ${id ?? 'none'}, event: ${name ?? 'unknown'}):`,
+          failure ?? 'non-event payload',
+        );
+      }
+      return undefined;
+    };
     try {
       while (true) {
         const result = await reader.read();
@@ -368,14 +463,29 @@ export class JavaManagedAgentClient {
         while (boundary) {
           const frame = buffer.slice(0, boundary.index);
           buffer = buffer.slice(boundary.index + boundary.length);
-          const event = decodeEventFrame(frame);
-          if (event) yield event;
+          const event = decodeFrame(frame);
+          if (event) {
+            yieldedAny = true;
+            yield event;
+          }
           boundary = nextFrameBoundary(buffer);
         }
         if (result.done) break;
       }
-      const event = decodeEventFrame(buffer);
-      if (event) yield event;
+      const event = decodeFrame(buffer, true);
+      if (event) {
+        yieldedAny = true;
+        yield event;
+      }
+      // A connection that delivered nothing but skips means the rest of the
+      // replay log is undeliverable: end with a resync so the consumer
+      // reloads the durable transcript instead of retrying the same cursor.
+      if (!yieldedAny && skippedTotal > 0) {
+        console.warn(
+          `[web-shell] resyncing a Managed Agent stream that delivered only corrupt frames (${skippedTotal} skipped)`,
+        );
+        yield resyncFrame();
+      }
     } finally {
       await reader.cancel().catch(() => undefined);
     }
@@ -428,9 +538,11 @@ function nextFrameBoundary(
     : { index: match.index, length: match[0].length };
 }
 
-function decodeEventFrame(
-  frame: string,
-): JavaAgentEvent | JavaAgentResyncRequired | undefined {
+function parseEventFrameFields(frame: string): {
+  data: string[];
+  id?: number;
+  name?: string;
+} {
   const data: string[] = [];
   let id: number | undefined;
   let name: string | undefined;
@@ -444,9 +556,23 @@ function decodeEventFrame(
     if (field === 'id' && /^\d+$/.test(value)) id = Number(value);
     if (field === 'event') name = value;
   }
+  return { data, id, name };
+}
+
+function decodeEventFrame(
+  frame: string,
+): JavaAgentEvent | JavaAgentResyncRequired | undefined {
+  const { data, id, name } = parseEventFrameFields(frame);
   if (data.length === 0) return undefined;
   const parsed: unknown = JSON.parse(data.join('\n'));
-  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  // Both frame shapes this stream carries are objects with a string `type`
+  // (WebShellEvent and WebShellResyncRequired); anything else is corrupt.
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    typeof (parsed as { type?: unknown }).type !== 'string'
+  )
+    return undefined;
   // The server's only frame without an id: the cursor fell below the replay
   // floor, and the stream ends after it.
   if (name === RESYNC_REQUIRED && id === undefined) {

@@ -293,8 +293,8 @@ class ToolPublicationStoreTest {
                     : first.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null));
             try {
                 assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ? WHERE operation_id = 'original'",
-                        java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+                jdbc.update("UPDATE qwen_tool_publication_operation SET deadline ="
+                        + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = 'original'");
                 var originalDeadline = jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation"
                         + " WHERE operation_id = 'original'", java.sql.Timestamp.class);
                 var before = jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256, operation_id"
@@ -423,7 +423,7 @@ class ToolPublicationStoreTest {
                 assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 String column = expired ? "deadline" : "claim_until";
                 jdbc.update("UPDATE qwen_tool_publication_operation SET " + column
-                        + " = ? WHERE operation_id = 'held'", java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+                        + " = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = 'held'");
                 assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "held").path("state").asText())
                         .isEqualTo(expired ? "EXPIRED" : "RETRYABLE");
                 var candidate = jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256"
@@ -476,8 +476,8 @@ class ToolPublicationStoreTest {
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "candidate", "stdout", 0, new byte[] {1}, null)).hasMessageContaining("lost PUT reply");
         data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stderr");
-        jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?, state = 'PENDING'",
-                java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+        jdbc.update("UPDATE qwen_tool_publication_operation SET deadline ="
+                + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)), state = 'PENDING'");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "prefix"))
                 .hasMessageContaining("prefix cannot be recovered");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", "wrong-token", "candidate"))
@@ -856,7 +856,10 @@ class ToolPublicationStoreTest {
                 }
             })).hasMessage("revoked mid-range");
             // Restore the lease only for the existing private-reader corruption checks.
-            jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2099-01-01 00:00:00'");
+            // Keep the sentinel before 2038-01-19: databaseEpochMillis reads it back
+            // through UNIX_TIMESTAMP, which wraps on H2 and yields NULL on MariaDB past
+            // that bound, so a far-future literal here is engine-dependent.
+            jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2037-01-01 00:00:00'");
             if (keepApiFixture) {
                 apiPublications = data;
                 apiReader = publicReader;
@@ -1406,6 +1409,33 @@ class ToolPublicationStoreTest {
         assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
+    }
+
+    @Test
+    void activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch() {
+        reserve();
+        var execution = executions.findByExecutionCallId("execution-1");
+        assertThat(store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN)).isNotNull();
+        ObjectNode expired = activation("active").put("expiresAt", System.currentTimeMillis() - 1_000);
+        append("activation.expire", event(3, "activation.changed", expired) + "{}\n", 1,
+                List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
+        assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        assertThatThrownBy(() -> store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+    }
+
+    @Test
+    void expiredWriterLeaseAloneFencesDispatch() {
+        reserve();
+        var execution = executions.findByExecutionCallId("execution-1");
+        assertThat(store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN)).isNotNull();
+        // Expire the head lease only. acquireWriter would also rewrite writer identity and
+        // reinstate a live lease, so the fence would trip on identity, never on writer_live.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        assertThatThrownBy(() -> store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original Session owner is fenced");
     }
 
     @Test

@@ -68,6 +68,66 @@ describe('execution tool facade', () => {
       });
     });
 
+  it('runs the parameters a hook or plan mode changed after preparation', async () => {
+    const original = await writeWorkspaceFile('original.txt', 'original\n');
+    const updated = await writeWorkspaceFile('updated.txt', 'updated\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const release = vi.spyOn(environment, 'release');
+    const invocation = wrap().build({ file_path: original });
+    expect(await invocation.getDefaultPermission(signal)).toBe('allow');
+    const [[first]] = prepare.mock.calls;
+
+    // As Session applies a permission hook's updated input.
+    invocation.params = { file_path: updated };
+    const result = await invocation.execute(signal);
+
+    expect(result.llmContent).toContain('updated');
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare.mock.calls[1]![0]).toMatchObject({
+      params: { file_path: updated },
+    });
+    expect(prepare.mock.calls[1]![0].id).not.toBe(first.id);
+    expect(release).toHaveBeenCalledWith(first.id, expect.any(AbortSignal));
+  });
+
+  it('confirms the parameters that changed after preparation', async () => {
+    const original = await writeWorkspaceFile('original.txt', 'original\n');
+    const updated = await writeWorkspaceFile('updated.txt', 'updated\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const invocation = wrap().build({ file_path: original });
+    await invocation.getDefaultPermission(signal);
+    // As plan mode adds a directory before it asks.
+    invocation.params = { file_path: updated };
+    await invocation.getConfirmationDetails(signal);
+    expect(invocation.params).toMatchObject({ file_path: updated });
+    const result = await invocation.execute(signal);
+    expect(result.llmContent).toContain('updated');
+    expect(prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it('prepares once when the parameters did not change', async () => {
+    const file = await writeWorkspaceFile('same.txt', 'same\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const invocation = wrap().build({ file_path: file });
+    await invocation.getDefaultPermission(signal);
+    // The same parameters in another key order.
+    invocation.params = Object.fromEntries(
+      Object.entries(invocation.params).reverse(),
+    );
+    expect(Object.keys(invocation.params)[0]).not.toBe('file_path');
+    await invocation.execute(signal);
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it('prepares once for a call whose parameters never change', async () => {
+    const file = await writeWorkspaceFile('same.txt', 'same\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const invocation = wrap().build({ file_path: file });
+    await invocation.getDefaultPermission(signal);
+    await invocation.execute(signal);
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
   it.each([true, false])(
     'reports the container artifact limit without changing local registration (%s)',
     async (artifactEnabled) => {
@@ -288,6 +348,27 @@ describe('execution tool facade', () => {
     const release = vi.spyOn(environment, 'release');
     await updated.release?.();
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it('drops an editor modification once the parameters change again', async () => {
+    const file = path.join(workspace, 'modified.txt');
+    const facade = wrap(new WriteFileTool(config));
+    if (!isModifiableDeclarativeTool(facade)) throw new Error('not modifiable');
+    const proposed = { file_path: file, content: 'proposed' };
+    const first = facade.build(proposed) as ReturnType<typeof facade.build> & {
+      setCallId(id: string): void;
+    };
+    first.setCallId('modify-call');
+    const edited = facade
+      .getModifyContext(signal, 'modify-call')
+      .createUpdatedParams('', 'from editor', proposed);
+    const updated = facade.build(edited) as typeof first;
+    updated.setCallId('modify-call');
+    await updated.getDefaultPermission(signal);
+    // As a permission hook replaces the input after that.
+    updated.params = { file_path: file, content: 'from hook' };
+    expect((await updated.execute(signal)).error).toBeUndefined();
+    expect(await readFile(file, 'utf8')).toBe('from hook');
   });
 
   it('preserves output sizing while filtering worker paths and control metadata', async () => {

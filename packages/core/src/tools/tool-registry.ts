@@ -23,6 +23,10 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -452,6 +456,45 @@ export class ToolRegistry {
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  /**
+   * Registers one of the tools a Managed session runs in its Runtime worker.
+   * Only these pass the Managed refusal, and only as the tool built for the
+   * session's own environment: any other name, environment, or tool under the
+   * name, is refused.
+   */
+  registerRuntimeBackedFactory(
+    name: string,
+    factory: ToolFactory,
+    environment: ExecutionEnvironment,
+    deferred: boolean,
+  ): void {
+    if (
+      !this.refusesHostTools() ||
+      !MANAGED_RUNTIME_TOOL_NAMES.has(name) ||
+      environment !== this.config.getManagedRuntimeEnvironment?.()
+    ) {
+      debugLogger.info(`Tool "${name}" skipped: it is not Runtime-backed.`);
+      return;
+    }
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
+    this.factories.set(name, async () => {
+      const tool = await factory();
+      if (
+        tool.name !== name ||
+        (tool as { environment?: unknown }).environment !== environment
+      ) {
+        throw new Error(`Tool "${name}" is not Runtime-backed.`);
+      }
+      return tool;
+    });
+    if (deferred) this.permissionDeferred.add(name);
   }
 
   unregisterTool(name: string): void {
