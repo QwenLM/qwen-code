@@ -3,12 +3,14 @@ package com.alibaba.qwen.code.runtimebroker;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.net.URI;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
@@ -126,6 +128,93 @@ class DurableLocalProcessRuntimeProvisionerTest {
             assertEquals(initial.getBindingId(), ready.getBindingId());
             assertEquals(lease.getEndpoint(), ready.getLease().getEndpoint());
             assertEquals(seed.getToken(), ready.getLease().getToken());
+        }
+    }
+
+    @Test
+    void operatorStopRequiresTheExactWorkerToExitBeforeTombstoning() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", LocalProcessRuntimeProvisioner.KIND,
+                "storage:a");
+        var store = store();
+        try (var provisioner = provisioner(store)) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            Process worker = new ProcessBuilder("sh", "-c", "sleep 30").start();
+            workers.add(worker.toHandle());
+            var lease = new RuntimeLease(SEED.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    SEED.getToken(), SEED.getLeaseId(), SEED.getEpoch());
+            store.locked(request, SEED, handle, false, (resource, original) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.READY,
+                        worker.pid(), LocalRuntimeStore.startIdentity(worker.toHandle()), lease.getEndpoint()));
+                return null;
+            });
+            var binding = new RuntimeBindingRecord("binding", request, SEED, 1,
+                    RuntimeBindingRecord.State.READY, lease, handle, 1, false,
+                    null, null, 0, 0, Instant.now(), Instant.now(), Instant.now());
+            String recoveryId = "11111111-1111-1111-1111-111111111111";
+            provisioner.verifyOperatorRegistration(binding);
+            assertEquals(LocalRuntimeStore.State.READY, registration(store, request, handle).state());
+            assertThrows(RuntimeBrokerException.class,
+                    () -> provisioner.attestOperatorStop(binding, recoveryId));
+            assertEquals(LocalRuntimeStore.State.READY, registration(store, request, handle).state());
+            worker.destroyForcibly();
+            worker.onExit().get(5, TimeUnit.SECONDS);
+            RuntimeObservation stopped = provisioner.attestOperatorStop(binding, recoveryId);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND, stopped.getOutcome());
+            assertEquals("operator-attested:" + recoveryId, stopped.getStopEvidence().source());
+            assertTrue(stopped.getStopEvidence().matches(SEED, handle, lease));
+            assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            provisioner.verifyOperatorRegistration(binding);
+            assertEquals(stopped.getStopEvidence().evidenceId(),
+                    provisioner.attestOperatorStop(binding, recoveryId).getStopEvidence().evidenceId());
+            Files.delete(directory.resolve(handle.getValue().get("resourceId") + ".json"));
+            assertThrows(RuntimeBrokerException.class,
+                    () -> provisioner.verifyOperatorRegistration(binding));
+        }
+    }
+
+    @Test
+    void operatorStopCanCompleteAfterSameHostReboot() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", LocalProcessRuntimeProvisioner.KIND,
+                "storage:a");
+        var store = store();
+        try (var original = provisioner(store)) {
+            var handle = await(original.ensureResource(request, SEED, null));
+            var worker = new ProcessBuilder("sh", "-c", "sleep 30").start();
+            workers.add(worker.toHandle());
+            var lease = new RuntimeLease(SEED.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    SEED.getToken(), SEED.getLeaseId(), SEED.getEpoch());
+            store.locked(request, SEED, handle, false, (resource, registration) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.READY,
+                        worker.pid(), LocalRuntimeStore.startIdentity(worker.toHandle()),
+                        lease.getEndpoint()));
+                return null;
+            });
+            var binding = new RuntimeBindingRecord("binding", request, SEED, 1,
+                    RuntimeBindingRecord.State.OPERATOR_RECOVERY, lease, handle, 1, true,
+                    null, null, 0, 0, Instant.now(), Instant.now(), Instant.now());
+            var foreign = new LocalRuntimeStore.HostIdentity("b".repeat(32),
+                    "22222222-2222-2222-2222-222222222222", HOST.pidNamespace(), HOST.timeNamespace());
+            try (var unrelated = provisioner(new LocalRuntimeStore(directory.toRealPath(), foreign))) {
+                assertThrows(RuntimeBrokerException.class, () -> unrelated.verifyOperatorRegistration(binding));
+                assertThrows(RuntimeBrokerException.class, () -> unrelated.attestOperatorStop(binding,
+                        "11111111-1111-1111-1111-111111111111"));
+                assertEquals(LocalRuntimeStore.State.READY, registration(store, request, handle).state());
+            }
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", HOST.pidNamespace(), HOST.timeNamespace());
+            // The live PID models reuse after reboot; the saved boot identity is different.
+            try (var restored = provisioner(new LocalRuntimeStore(directory.toRealPath(), reboot))) {
+                restored.verifyOperatorRegistration(binding);
+                var stopped = restored.attestOperatorStop(binding,
+                        "11111111-1111-1111-1111-111111111111");
+                assertEquals(RuntimeObservation.Outcome.NOT_FOUND, stopped.getOutcome());
+                assertTrue(stopped.getStopEvidence().matches(SEED, handle, lease));
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            }
         }
     }
 
@@ -388,6 +477,219 @@ class DurableLocalProcessRuntimeProvisionerTest {
         assertTrue(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"));
     }
 
+    @Test
+    void anInvalidReadyRecordReapsTheWorkerAndRetiresTheBinding() throws Exception {
+        var request = request(false);
+        var store = store();
+        try (var provisioner = provisioner(store, "--ready-version=1.9")) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(provisioner.provision(request, SEED)));
+            var error = (RuntimeBrokerException) failure.getCause();
+            assertEquals(503, error.getStatusCode());
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertEquals("Managed Runtime ready record is invalid.",
+                    error.getMessage());
+            var record = registration(store, request, handle);
+            assertEquals(LocalRuntimeStore.State.RETIRED, record.state());
+            ProcessHandle worker = ProcessHandle.of(record.pid()).orElse(null);
+            assertTrue(worker == null || !worker.onExit()
+                    .get(10, TimeUnit.SECONDS).isAlive());
+            // A retry reads the tombstone instead of adopting again.
+            assertBlocked(provisioner.provision(request, SEED));
+        }
+    }
+
+    @Test
+    void aManagedContextReadyRejectionIsAProvisionFailureNotAStoreConflict() throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var provisioner = provisioner(store, "--ready-version=2.0000000000000001D")) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(provisioner.provision(request, SEED)));
+            var error = (RuntimeBrokerException) failure.getCause();
+            assertEquals(503, error.getStatusCode());
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertFalse(error.isRetryable());
+            assertEquals(LocalRuntimeStore.State.RETIRED,
+                    registration(store, request, handle).state());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void trustedSameHostRebootAddsStopProofWithoutRelaunch(boolean managed) throws Exception {
+        var request = request(managed);
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            var lease = launch(first, store, request);
+            workers.getFirst().destroyForcibly();
+            workers.getFirst().onExit().get(5, TimeUnit.SECONDS);
+            var loss = await(first.reconcile(request, SEED, handle, lease));
+            assertNotNull(loss.getLossEvidence());
+            assertNull(loss.getStopEvidence());
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+            try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                var stopped = await(second.reconcile(request, SEED, handle, lease));
+                assertEquals(RuntimeObservation.Outcome.NOT_FOUND, stopped.getOutcome());
+                assertTrue(stopped.getStopEvidence().matches(SEED, handle, lease));
+                assertEquals(loss.getLossEvidence().hostDomain(), stopped.getStopEvidence().hostDomain());
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+                assertBlocked(second.provision(request, SEED));
+                assertEquals(stopped.getStopEvidence().evidenceId(),
+                        await(second.reconcile(request, SEED, handle, lease)).getStopEvidence().evidenceId());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
+    void trustedRebootCanRecoverStartupWithoutInventingALease(String state) throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            if (state.equals("REGISTERED")) {
+                launch(first, store, request);
+                workers.getFirst().destroyForcibly();
+                workers.getFirst().onExit().get(5, TimeUnit.SECONDS);
+            }
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.valueOf(state),
+                        record.pid(), record.started(), null));
+                return null;
+            });
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", HOST.pidNamespace(), HOST.timeNamespace());
+            try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                var observed = await(second.reconcile(request, SEED, handle, null));
+                assertTrue(observed.getLossEvidence().matches(SEED, handle, null));
+                assertTrue(observed.getStopEvidence().matches(SEED, handle, null));
+                assertNull(observed.getEndpoint());
+                assertBlocked(second.provision(request, SEED));
+                Path record = directory.resolve(handle.getValue().get("resourceId") + ".json");
+                Files.delete(record);
+                assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                        await(second.reconcile(request, SEED, handle, null)).getOutcome());
+            }
+        }
+    }
+
+    @Test
+    void drainedStopTombstonesTheExactWorkerAndConfirmsItsExit() throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var lease = launch(provider, store, request);
+            var worker = registration(store, request, handle).process();
+            var binding = closeBinding(request, handle, lease);
+            var receipt = await(provider.stopDrained(binding));
+            assertTrue(receipt.matches(binding));
+            assertTrue(registration(store, request, handle).processAbsent());
+            assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            assertFalse(worker.isAlive());
+            assertTrue(await(provider.stopDrained(binding)).matches(binding));
+            assertThrows(Exception.class, () -> await(provider.provision(request, SEED)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
+    void drainedStopAcceptsOnlyTrustedSameHostRebootProof(String state) throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            var lease = state.equals("REGISTERED") ? launch(first, store, request) : null;
+            var originalWorker = registration(store, request, handle).process();
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.valueOf(state),
+                        record.pid(), record.started(), record.endpoint()));
+                return null;
+            });
+            var binding = closeBinding(request, handle, lease);
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+            var foreign = new LocalRuntimeStore.HostIdentity("b".repeat(32), reboot.bootId(),
+                    reboot.pidNamespace(), reboot.timeNamespace());
+            if (state.equals("LAUNCHING")) {
+                assertBlocked(first.stopDrained(binding));
+            }
+            for (var host : List.of(foreign, reboot)) {
+                try (var refused = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                        null, new LocalRuntimeStore(directory.toRealPath(), host), host == foreign)) {
+                    assertBlocked(refused.stopDrained(binding));
+                }
+            }
+            try (var recovered = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                assertTrue(await(recovered.stopDrained(binding)).matches(binding));
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+                assertTrue(await(recovered.stopDrained(binding)).matches(binding));
+                if (originalWorker != null) {
+                    assertTrue(originalWorker.isAlive(), "A PID in a different boot must not be signalled");
+                }
+                Files.delete(directory.resolve(handle.getValue().get("resourceId") + ".json"));
+                assertBlocked(recovered.stopDrained(binding));
+            }
+        }
+    }
+
+    @Test
+    void drainedIntentNeverLaunchesAndAmbiguousStartupStaysBlocked() throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var binding = closeBinding(request, handle, null);
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(record.withState(LocalRuntimeStore.State.LAUNCHING));
+                return null;
+            });
+            assertThrows(Exception.class, () -> await(provider.stopDrained(binding)));
+            assertEquals(LocalRuntimeStore.State.LAUNCHING, registration(store, request, handle).state());
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(record.withState(LocalRuntimeStore.State.INTENT));
+                return null;
+            });
+            assertTrue(await(provider.stopDrained(binding)).matches(binding));
+            assertNull(registration(store, request, handle).process());
+            assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+        }
+    }
+
+    @Test
+    void drainedStopDoesNotStopOtherProfilesOrSharedWorkers() throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var lease = launch(provider, store, request);
+            assertThrows(Exception.class, () -> await(provider.stopDrained(closeBinding(request, handle, lease))));
+            assertNotEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            assertNotNull(registration(store, request, handle).process());
+            assertFalse(registration(store, request, handle).processAbsent());
+        }
+    }
+
+    private RuntimeProvisionRequest closeRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1",
+                directory.toAbsolutePath().toString(), WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"),
+                "harness", LocalProcessRuntimeProvisioner.KIND, "storage:a");
+    }
+
+    private RuntimeBindingRecord closeBinding(RuntimeProvisionRequest request, RuntimeResourceHandle handle,
+            RuntimeLease lease) {
+        return new RuntimeBindingRecord("binding", request, SEED, 1, RuntimeBindingRecord.State.DRAINING,
+                lease, handle, lease == null ? 0 : 1, true, null, null, 0, 0, null, Instant.now(), Instant.now());
+    }
+
     private RuntimeProvisionRequest request(boolean managed) {
         return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1",
                 directory.toAbsolutePath().toString(), "sha256:" + "a".repeat(64), "workspace"),
@@ -398,10 +700,13 @@ class DurableLocalProcessRuntimeProvisionerTest {
         return new LocalRuntimeStore(directory.toRealPath(), HOST);
     }
 
-    private LocalProcessRuntimeProvisioner provisioner(LocalRuntimeStore store) {
-        return new LocalProcessRuntimeProvisioner(List.of("node", Path.of(
-                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()),
-                directory, TRANSPORT, ignored -> "storage:a", store);
+    private LocalProcessRuntimeProvisioner provisioner(LocalRuntimeStore store,
+            String... workerArgs) {
+        List<String> command = new ArrayList<>(List.of("node", Path.of(
+                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()));
+        command.addAll(List.of(workerArgs));
+        return new LocalProcessRuntimeProvisioner(command, directory,
+                TRANSPORT, ignored -> "storage:a", store);
     }
 
     private RuntimeLease launch(LocalProcessRuntimeProvisioner provisioner, LocalRuntimeStore store,

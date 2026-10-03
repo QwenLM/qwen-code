@@ -101,6 +101,7 @@ class HostedHarnessClientTest {
                     CreateHarnessSession.builder()
                             .harnessSessionId(SESSION_ID)
                             .approvalMode(DaemonApprovalMode.DEFAULT)
+                            .toolProfile("hosted-workspace-files/1")
                             .managedSessionStore(
                                     ManagedSessionStoreConnection.builder()
                                             .baseUri(URI.create(
@@ -125,6 +126,7 @@ class HostedHarnessClientTest {
         assertTrue(body.get().contains("\"sessionId\":\"" + SESSION_ID
                 + "\""));
         assertTrue(body.get().contains("\"sessionScope\":\"thread\""));
+        assertTrue(body.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(body.get().contains("\"managedSessionStore\":{"
                 + "\"baseUrl\":\"https://store.example\","));
         assertTrue(body.get().contains("\"tenantId\":\"tenant-a\""));
@@ -327,7 +329,7 @@ class HostedHarnessClientTest {
                                     .workspaceId("workspace-a")
                                     .writerId(BOOT_ID)
                                     .leaseDuration(Duration.ofSeconds(45))
-                                            .build(), true));
+                                            .build(), true, "hosted-workspace-files/1"));
             HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
             assertNotNull(recovery);
             assertEquals("await_runtime", recovery.getPhase());
@@ -358,6 +360,7 @@ class HostedHarnessClientTest {
         assertEquals(1, detached.get());
         assertEquals(1, deleted.get());
         assertTrue(loadBody.get().contains("\"managedSessionStore\":{"));
+        assertTrue(loadBody.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(loadBody.get().contains(
                 "\"baseUrl\":\"https://store.example\""));
         assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
@@ -679,6 +682,29 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(1, closes.get());
+    }
+
+    @Test
+    void actionResolutionCarriesOriginalRevisionsAndClientIdentity() {
+        String action = "tool_approval_" + "a".repeat(32);
+        AtomicReference<String> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200,
+                sessionJson().replace("\"workspaceCwd\"", "\"approvalMode\":\"default\",\"workspaceCwd\"")));
+        server.createContext("/session/" + SESSION_ID + "/actions/" + action + "/resolve", exchange -> {
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            assertEquals("Bearer harness-token", exchange.getRequestHeaders().getFirst("Authorization"));
+            payload.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"requestId\":\"" + action + "\",\"state\":\"decided\",\"optionId\":\"allow\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.createSession(CreateHarnessSession.builder()
+                    .harnessSessionId(SESSION_ID).approvalMode(DaemonApprovalMode.DEFAULT)
+                    .approvalTimeoutMs(2000).build());
+            assertEquals("default", session.getApprovalMode());
+            client.resolveAction(session, action, "allow", 1, "hosted-tool-approval/1");
+            assertEquals(Map.of("optionId", "allow", "inputRevision", 1, "policyRevision", "hosted-tool-approval/1"),
+                    JsonSupport.parseObject(payload.get(), "Action response"));
+        }
     }
 
     private HostedHarnessClient newClient() {

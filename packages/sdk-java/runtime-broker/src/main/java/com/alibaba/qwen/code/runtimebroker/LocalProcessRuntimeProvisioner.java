@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
     static final String KIND = "local-process";
-    private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
@@ -45,6 +45,7 @@ public final class LocalProcessRuntimeProvisioner
     private final HttpRuntimeTransport transport;
     private final Function<RuntimeScope, String> storageResolver;
     private final LocalRuntimeStore store;
+    private final boolean trustedRebootRecovery;
     private final ExecutorService executor = Executors.newCachedThreadPool(
             task -> {
                 Thread thread = new Thread(task, "runtime-provisioner");
@@ -69,12 +70,23 @@ public final class LocalProcessRuntimeProvisioner
 
     public static LocalProcessRuntimeProvisioner durable(List<String> command,
             Path stateDirectory, HttpRuntimeTransport transport) {
+        return durable(command, stateDirectory, transport, false);
+    }
+
+    public static LocalProcessRuntimeProvisioner durable(List<String> command,
+            Path stateDirectory, HttpRuntimeTransport transport, boolean trustedRebootRecovery) {
         return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
-                new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()));
+                new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()), trustedRebootRecovery);
     }
 
     LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
             HttpRuntimeTransport transport, Function<RuntimeScope, String> storageResolver, LocalRuntimeStore store) {
+        this(command, workingDirectory, transport, storageResolver, store, false);
+    }
+
+    LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
+            HttpRuntimeTransport transport, Function<RuntimeScope, String> storageResolver, LocalRuntimeStore store,
+            boolean trustedRebootRecovery) {
         if (command == null || command.isEmpty() || workingDirectory == null
                 || transport == null) {
             throw new IllegalArgumentException(
@@ -85,6 +97,7 @@ public final class LocalProcessRuntimeProvisioner
         this.transport = transport;
         this.storageResolver = storageResolver;
         this.store = store;
+        this.trustedRebootRecovery = trustedRebootRecovery;
     }
 
     @Override
@@ -148,6 +161,58 @@ public final class LocalProcessRuntimeProvisioner
         return store != null && LocalRuntimeStore.supported(handle);
     }
 
+    /** Local operator attestation requires the exact registered worker to be gone. */
+    public RuntimeObservation attestOperatorStop(RuntimeBindingRecord binding, String recoveryId) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null
+                || recoveryId == null || !recoveryId.matches("[0-9a-f-]{36}")) {
+            throw LocalRuntimeStore.blocked();
+        }
+        return store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    boolean sameBoot = store.sameBoot(registration);
+                    if ((!sameBoot && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)
+                            || (sameBoot && !registration.processAbsent())) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    if (registration.state() != LocalRuntimeStore.State.RETIRED) {
+                        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                    }
+                    RuntimeProvisionSeed seed = binding.getProvisionSeed();
+                    RuntimeResourceHandle handle = binding.getResourceHandle();
+                    return RuntimeObservation.notFound(
+                            binding.getLossEvidence() == null
+                                    ? localEvidence(seed, handle,
+                                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                                            "registered-process-exit")
+                                    : binding.getLossEvidence(),
+                            localEvidence(seed, handle,
+                                    RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                                    "operator-attested:" + recoveryId));
+                });
+    }
+
+    /** Read-only preflight of the original durable registration. */
+    public void verifyOperatorRegistration(RuntimeBindingRecord binding) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null) {
+            throw LocalRuntimeStore.blocked();
+        }
+        store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    if ((!store.sameBoot(registration) && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    return null;
+                });
+    }
+
     @Override
     public CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -175,6 +240,68 @@ public final class LocalProcessRuntimeProvisioner
             stop(lease);
         }
         return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public boolean supportsDrainedStop() {
+        return store != null;
+    }
+
+    @Override
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
+                || binding.getProvisionSeed() == null) {
+            return RuntimeProvisioner.super.stopDrained(binding);
+        }
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
+        return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
+                binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
+                boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
+                if (!originalBootStopped && (!store.sameBoot(registration)
+                        || registration.state() == LocalRuntimeStore.State.LAUNCHING
+                        || registration.pid() == 0 && registration.state() != LocalRuntimeStore.State.INTENT
+                                && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                boolean neverStarted = registration.pid() == 0;
+                var worker = originalBootStopped ? null : registration.process();
+                if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                if (worker != null) {
+                    worker.destroy();
+                    waitForStop(registration, 5);
+                    worker = registration.process();
+                    if (worker != null) {
+                        worker.destroyForcibly();
+                        waitForStop(registration, 5);
+                    }
+                }
+                if (!originalBootStopped && !neverStarted && !registration.processAbsent()) {
+                    throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                            "Original worker has not stopped.", true);
+                }
+                return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                        binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
+            }), executor);
+    }
+
+    private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
+        long until = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
+        while (!registration.processAbsent() && System.nanoTime() < until) {
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                        "Worker stop was interrupted.", true, error);
+            }
+        }
     }
 
     @Override
@@ -306,16 +433,26 @@ public final class LocalProcessRuntimeProvisioner
                     "Managed Runtime ready record");
         URI endpoint;
         if (request.isManagedContext()) {
-            endpoint = ManagedContextProtocol.ready(ready, document);
+            try {
+                endpoint = ManagedContextProtocol.ready(ready, document);
+            } catch (IllegalArgumentException exception) {
+                // A rejected record is a provision failure in both store
+                // modes; the durable store would retype it as a 409.
+                throw new RuntimeBrokerException(503, "runtime_provision_failed",
+                        "Managed context startup failed; recovery is blocked.",
+                        false, exception);
+            }
         } else {
             if (!"ready".equals(ready.get("type"))
-                    || !Long.valueOf(1L).equals(number(ready.get("version")))
+                    || !Long.valueOf(1L).equals(
+                        BrokerValues.exactLong(ready.get("version")))
                     || !seed.getProvisionalRuntimeId().equals(
                         ready.get("runtimeInstanceId"))
                     || !seed.getGatewayIncarnation().equals(
                         ready.get("runtimeIncarnation"))
                     || !seed.getLeaseId().equals(ready.get("leaseId"))
-                    || !Long.valueOf(seed.getEpoch()).equals(number(ready.get("epoch")))) {
+                    || !Long.valueOf(seed.getEpoch()).equals(
+                        BrokerValues.exactLong(ready.get("epoch")))) {
                 throw failed("Managed Runtime ready record is invalid.");
             }
             endpoint = URI.create(String.valueOf(ready.get("url")));
@@ -397,7 +534,20 @@ public final class LocalProcessRuntimeProvisioner
             if (ready == null) {
                 return null;
             }
-            lease = readyLease(request, seed, document, ready);
+            try {
+                lease = readyLease(request, seed, document, ready);
+            } catch (RuntimeException rejection) {
+                // A definitive rejection recurs on every retry and
+                // reconcile, so retire the binding and reap the worker
+                // instead of wedging both.
+                ProcessHandle worker = registration.process();
+                if (worker != null) {
+                    worker.destroyForcibly();
+                }
+                resource.save(registration.withState(
+                        LocalRuntimeStore.State.RETIRED));
+                throw rejection;
+            }
         } else {
             lease = new RuntimeLease(seed.getProvisionalRuntimeId(), registration.endpoint(),
                     seed.getToken(), seed.getLeaseId(), seed.getEpoch());
@@ -421,6 +571,13 @@ public final class LocalProcessRuntimeProvisioner
         }
         try {
             return store.locked(request, seed, handle, false, (resource, registration) -> {
+                if (trustedRebootRecovery && store.rebooted(registration)) {
+                    resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                    return RuntimeObservation.notFound(localEvidence(seed, handle,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "trusted-host-reboot"),
+                            localEvidence(seed, handle, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                                    "trusted-host-reboot"));
+                }
                 if (!store.sameBoot(registration)) {
                     return RuntimeObservation.unknown(handle);
                 }
@@ -431,13 +588,8 @@ public final class LocalProcessRuntimeProvisioner
                     if (lastLease == null) {
                         return RuntimeObservation.conflict(handle);
                     }
-                    String domain = handle.getValue().get("hostId") + ":" + handle.getValue().get("bootId")
-                            + ":" + handle.getValue().get("resourceId");
-                    return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
-                            seed.getProvisionRequestId() + ":journal-lost", RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
-                            "registered-process-exit", Instant.now(), domain, seed.getProvisionRequestId(),
-                            seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
-                            seed.getEpoch(), handle), null);
+                    return RuntimeObservation.notFound(localEvidence(seed, handle,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit"), null);
                 }
                 if (registration.state() == LocalRuntimeStore.State.INTENT
                         || registration.state() == LocalRuntimeStore.State.LAUNCHING) {
@@ -460,6 +612,16 @@ public final class LocalProcessRuntimeProvisioner
         } catch (RuntimeBrokerException error) {
             return error.isRetryable() ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
         }
+    }
+
+    private static RuntimeRecoveryEvidence localEvidence(RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            RuntimeRecoveryEvidence.Fact fact, String source) {
+        String domain = handle.getValue().get("hostId") + ":" + handle.getValue().get("bootId")
+                + ":" + handle.getValue().get("resourceId");
+        return new RuntimeRecoveryEvidence(seed.getProvisionRequestId() + (fact == RuntimeRecoveryEvidence.Fact.JOURNAL_LOST
+                ? ":journal-lost" : ":writers-stopped"), fact, source,
+                Instant.now(), domain, seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle);
     }
 
     private RuntimeObservation observe(RuntimeProvisionRequest request,
@@ -619,10 +781,6 @@ public final class LocalProcessRuntimeProvisioner
             }
             builder.append((char) value);
         }
-    }
-
-    private static Long number(Object value) {
-        return value instanceof Number number ? number.longValue() : null;
     }
 
     private static RuntimeBrokerException failed(String message) {

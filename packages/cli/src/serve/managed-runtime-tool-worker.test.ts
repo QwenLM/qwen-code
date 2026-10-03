@@ -301,6 +301,42 @@ describe('Managed Runtime tool worker', () => {
     expect(fs.existsSync(path.join(late, 'sub', 'probe.txt'))).toBe(false);
   });
 
+  it('keeps unapproved managed shells inside their workspace', async () => {
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-managed-outside-'),
+    );
+    try {
+      const origin = await start();
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            ...executeBody({
+              command: 'echo probe > probe.txt',
+              directory: outside,
+            }),
+            toolName: 'run_shell_command',
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'error' },
+      });
+      expect(JSON.stringify(settled)).toContain(
+        'not within any of the registered workspace directories',
+      );
+      expect(fs.existsSync(path.join(outside, 'probe.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("gives shells the Runtime's session and project directory, as before", async () => {
     const origin = await start();
 

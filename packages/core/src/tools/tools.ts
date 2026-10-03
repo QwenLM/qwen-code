@@ -1214,7 +1214,8 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_block'
     | 'consecutive_unavailable'
     | 'total_denial'
-    | 'external_write';
+    | 'external_write'
+    | 'external_directory';
   message: string;
 }
 

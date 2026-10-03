@@ -18,6 +18,16 @@ export function publicProviderBaseUrl(baseUrl: string): string | undefined {
   if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
   try {
     const url = new URL(baseUrl);
+    // Clearing the four fields below does not touch `pathname`, so a second
+    // authority folded into the path survives all of them and `url.href`
+    // re-emits it verbatim: `https://gw/v1/https://user:sk@other/v1` reads
+    // empty on username, password, search and hash while the credential is
+    // still in the returned string. Enumerating the join characters does not
+    // converge — a plain `/` needs no folding at all, and `;` and `{` behave
+    // differently only by accident of percent-encoding — so reject the shape
+    // rather than list it. A legitimate provider endpoint never carries a
+    // second scheme in its path.
+    if (/:\/\//.test(url.pathname)) return undefined;
     url.username = '';
     url.password = '';
     url.search = '';
@@ -150,6 +160,23 @@ export function resolveAcpModelOption(
       : {}),
     isRuntime: matched.model.isRuntimeModel === true,
   };
+}
+
+export function resolveAcpFastModelSelector(
+  input: string,
+  models: readonly AvailableModel[],
+): string | null {
+  const option = buildAcpModelOptions(models).find(
+    (candidate) => candidate.modelId === input.trim(),
+  );
+  if (!option || option.model.isRuntimeModel || option.model.visionOnly) {
+    return null;
+  }
+  const { model } = option;
+  const selector = `${model.authType}:${model.id}`;
+  return model.authType === AuthType.QWEN_OAUTH
+    ? selector
+    : `${selector}\0${model.registryBaseUrl ?? ''}`;
 }
 
 export function getCurrentAcpModelId(
