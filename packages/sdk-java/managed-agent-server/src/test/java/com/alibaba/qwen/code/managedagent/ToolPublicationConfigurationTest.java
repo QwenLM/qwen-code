@@ -65,6 +65,7 @@ class ToolPublicationConfigurationTest {
                 new com.aliyun.oss.common.auth.DefaultCredentials("test", "test"));
         var client = (com.aliyun.oss.OSSClient) ToolPublicationConfiguration.buildOss(properties, credentials);
         try {
+            assertThat(client.getCredentialsProvider()).isSameAs(credentials);
             assertThat(client.getClientConfiguration().getSignatureVersion())
                     .isEqualTo(com.aliyun.oss.common.comm.SignVersion.V4);
             assertThat(client.getClientConfiguration().getMaxErrorRetry()).isEqualTo(1);
