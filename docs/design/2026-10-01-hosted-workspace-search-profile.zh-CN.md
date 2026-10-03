@@ -105,4 +105,12 @@ worker。这是由运维执行的要求，并非协商能力或自动安全检�
 的启用仍单独处理。要支持版本混用，需先实现 worker 身份版本化或来自 worker
 的能力声明。
 
+**对已有 Session 的行为变化：** 因 glob 而引入的 realpath 边界检查作用于
+所有 Hosted profile（包括 `/1`）的 `read_file`、`write_file` 与 `edit`。
+在 Workspace-capability worker 上，只有 realpath 离开挂载点或落入另一个已安装
+Session 的目录时才会拒绝，因此挂载点内的链接依赖
+（`node_modules/@acme/ui -> ../../packages/ui`）仍可读取。boot-v1 worker 没有
+Workspace 挂载点和 Session 注册表，其边界就是 Session 目录本身：经符号链接
+解析到该目录之外的路径（包括链接依赖）会被拒绝，而此前可以读取。
+
 为只读、幂等工具提供更轻的派发路径不在范围内。
