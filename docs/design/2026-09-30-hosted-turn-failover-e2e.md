@@ -76,8 +76,11 @@ takeover is implemented for contract completeness but has no E2E mode.
   because a release persists RELEASED while a stranded READY identity is
   still usable — a redriven cancel is re-admitted against the current
   checkpoint (the daemon never re-loads an attached Session), and a
-  takeover after an owner change re-acquires idempotently. Only session
-  retirement discharges an abandonment.
+  takeover after an owner change re-acquires idempotently. A load refused
+  after adopting but before the Session registers records the owed adoption
+  and reports it by name, since no registered session exists to retire it;
+  the record drains on the next successful load of that Session, and only
+  session retirement discharges an abandonment otherwise.
   Executions the Broker cannot account for report `unknown`, the coordinator
   blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
 - **Continue runs the model from `results_ready`; cancel settles without new

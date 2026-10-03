@@ -57,7 +57,9 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   路由交还租约；失败时留作欠账——因为一次 release 会持久化为 RELEASED，而搁浅的
   READY 身份仍然可用：重驱动的 cancel 会按当前 checkpoint 被重新接纳（daemon
   不会对已 attach 的会话重新 load），owner 变更后的接管则幂等重 acquire。
-  只有会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  在已接管、但会话尚未注册成功就被拒绝的 load 上，欠账的接管会被按身份记录并报告——
+  因为不存在可供退役的已注册会话；该记录在下一次成功加载同一会话时清除，其余情形仍只有
+  会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
   `managed_runtime_recovery_blocked`，什么都不重放。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入

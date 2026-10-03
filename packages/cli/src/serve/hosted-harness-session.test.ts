@@ -7062,26 +7062,121 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'prepared',
     });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
     // The restore-stage write probe passes, so the passive takeover adopts
     // first; the post-recovery probe then rejects once.
     state.assertWritable
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('writer lost'));
-    const { loaded } = await loadReplacement(true);
+    const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
     expect(acquireSpy).toHaveBeenCalled();
     // The refusal invited a retried takeover load: the adopted lease must
-    // stay owed, or that retry re-acquires into a RELEASED record forever.
+    // stay owed — but never silently, since a Session closed before
+    // registration leaves no route to hand it back.
     expect(release).not.toHaveBeenCalled();
-    const { server: server2, loaded: reloaded } = await loadReplacement(true);
+    const owedLines = () =>
+      stderr.mock.calls.filter(
+        ([line]) =>
+          typeof line === 'string' &&
+          line.includes('stays owed') &&
+          line.includes(PROMPT_ID),
+      );
+    expect(owedLines()).toHaveLength(1);
+    // The retried takeover on the same daemon re-acquires the READY
+    // identity idempotently and reports.
+    const reloaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
     expect(reloaded.status).toBe(200);
     expect(
       reloaded.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
     ).toBeDefined();
+    expect(owedLines()).toHaveLength(1);
     await replacementHeaders(
-      supertest(server2).delete(`/session/${SESSION_ID}`),
+      supertest(server).delete(`/session/${SESSION_ID}`),
     );
+  });
+
+  it('records the owed adoption when every takeover load refuses the workspace writes', async () => {
+    await parkToolTurn();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const owedLines = () =>
+      stderr.mock.calls.filter(
+        ([line]) =>
+          typeof line === 'string' &&
+          line.includes('stays owed') &&
+          line.includes(PROMPT_ID),
+      );
+    // The probe rejects after every adoption, on every attempt: the refusal
+    // is persistent, so the same daemon keeps refusing.
+    let probeCalls = 0;
+    state.assertWritable.mockImplementation(async () => {
+      probeCalls += 1;
+      if (probeCalls % 2 === 0) throw new Error('writer lost');
+    });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(409);
+    const second = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(second.status).toBe(409);
+    // Every refused attempt re-adopts the same READY identity — never
+    // releasing it, or the wedge this PR removes would reopen — while the
+    // stranded adoption is reported exactly once per identity, by name.
+    expect(acquireSpy).toHaveBeenCalledTimes(2);
+    expect(release).not.toHaveBeenCalled();
+    expect(owedLines()).toHaveLength(1);
+    // The next successful load drains the record, so a later refusal must
+    // report again rather than stay silent on a stale one.
+    state.assertWritable.mockImplementation(async () => undefined);
+    probeCalls = 0;
+    const third = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(third.status).toBe(200);
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    state.assertWritable.mockImplementation(async () => {
+      probeCalls += 1;
+      if (probeCalls % 2 === 0) throw new Error('writer lost');
+    });
+    probeCalls = 0;
+    const fourth = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(fourth.status).toBe(409);
+    expect(owedLines()).toHaveLength(2);
+    // Only the successful Session's own teardown released anything.
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the lease owed when the cancel meets a blocked session', async () => {
@@ -7196,13 +7291,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
       ]),
     );
     // The admission survives the failed handback: a replay still replays at
-    // its watermark, and the owed lease is retried at session close.
+    // its watermark, and the replay discharges the owed lease — the failed
+    // handback (call 1) plus the replay's own (call 2).
     const replayed = await cancelTurn();
     expect(replayed.status).toBe(200);
     expect(replayed.body.lastEventId).toBe(cancelled.body.lastEventId);
+    expect(release).toHaveBeenCalledTimes(2);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
+    // The teardown must not re-release an already-discharged lease.
     expect(release).toHaveBeenCalledTimes(2);
   });
 
