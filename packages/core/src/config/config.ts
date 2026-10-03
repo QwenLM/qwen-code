@@ -80,7 +80,10 @@ import type {
   ExecutionEnvironment,
   ExecutionEnvironmentFactory,
 } from '../services/execution-environment.js';
-import { ExecutionCleanupError } from '../services/execution-environment.js';
+import {
+  ExecutionCleanupError,
+  MANAGED_RUNTIME_TOOL_NAMES,
+} from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -1094,6 +1097,13 @@ export interface ConfigParameters {
    * prove it, before hooks, MCP or tools start.
    */
   sessionExecutionEngine?: SessionExecutionEngine;
+  /**
+   * Builds the environment of a Managed session's Runtime-backed tools: each
+   * call is prepared and permission-checked in this process and executed in
+   * the session's Runtime worker. Ignored for any other engine. Without it a
+   * Managed session has no tools.
+   */
+  managedRuntimeEnvironment?: (config: Config) => ExecutionEnvironment;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2722,6 +2732,12 @@ export class Config {
     SessionRestoreProjection | undefined
   >;
   private readonly sessionExecutionEngine?: SessionExecutionEngine;
+  private readonly managedRuntimeEnvironmentFactory?: (
+    config: Config,
+  ) => ExecutionEnvironment;
+  private managedRuntimeEnvironment?: ExecutionEnvironment;
+  private managedRuntimeClosing?: Promise<void>;
+  private managedSessionBlock?: Error;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -3280,6 +3296,10 @@ export class Config {
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
     this.sessionExecutionEngine = params.sessionExecutionEngine;
+    this.managedRuntimeEnvironmentFactory =
+      params.sessionExecutionEngine === 'managed'
+        ? params.managedRuntimeEnvironment
+        : undefined;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3408,7 +3428,11 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
-    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
+    // A Managed session reads in its Runtime worker, so this process could
+    // neither elide a repeated read nor prove the read an edit requires.
+    this.fileReadCacheDisabled =
+      params.sessionExecutionEngine === 'managed' ||
+      (params.fileReadCacheDisabled ?? false);
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -5868,6 +5892,60 @@ export class Config {
     return this.sessionExecutionEngine;
   }
 
+  /**
+   * The environment this Managed session's Runtime-backed tools execute in,
+   * built on first use. A derived Config has none: its tools would need an
+   * execution scope of their own.
+   */
+  getManagedRuntimeEnvironment(): ExecutionEnvironment | undefined {
+    if (isDerivedConfig(this)) return undefined;
+    if (
+      !this.managedRuntimeEnvironment &&
+      !this.shutdownRequested &&
+      !this.managedRuntimeClosing
+    ) {
+      this.managedRuntimeEnvironment =
+        this.managedRuntimeEnvironmentFactory?.(this);
+    }
+    return this.managedRuntimeEnvironment;
+  }
+
+  /**
+   * Stops this Managed session's Runtime worker, once. It runs before the
+   * session's log is finished, so no call the worker runs outlives the log.
+   * Afterwards the session has no environment: none is handed out or built,
+   * so a registry made later has no Runtime-backed tools.
+   */
+  closeManagedRuntime(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).closeManagedRuntime();
+    }
+    if (!this.managedRuntimeClosing) {
+      const environment = this.managedRuntimeEnvironment;
+      this.managedRuntimeEnvironment = undefined;
+      this.managedRuntimeClosing = Promise.resolve(environment?.dispose());
+    }
+    return this.managedRuntimeClosing;
+  }
+
+  /**
+   * Blocks this Managed session after a Runtime tool call ended without a
+   * known outcome. The model is not asked again: it could repeat a call that
+   * already took effect. The first reason is kept.
+   */
+  blockManagedSession(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).blockManagedSession(reason);
+      return;
+    }
+    this.managedSessionBlock ??= reason;
+  }
+
+  /** Why this Managed session is blocked, or undefined while it is not. */
+  getManagedSessionBlock(): Error | undefined {
+    return this.managedSessionBlock;
+  }
+
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
     return this.sessionRestoreRuntime;
   }
@@ -7541,6 +7619,10 @@ export class Config {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
+    if (this.sessionExecutionEngine === 'managed') {
+      // Its Runtime worker is bound to the directory it was admitted in.
+      throw new Error('A Managed session cannot change its directory.');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -7699,6 +7781,20 @@ export class Config {
     this.shutdownRequested = true;
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
+    // Only a Config with a Runtime waits for it, so others close their
+    // writer as soon as they did.
+    if (this.managedRuntimeEnvironment || this.managedRuntimeClosing) {
+      try {
+        await this.closeManagedRuntime();
+      } catch (error) {
+        // A stop the registry cannot prove is reported, not fatal: M5c
+        // keeps the engine quarantined on it.
+        this.debugLogger.error(
+          'Failed to stop the Managed Runtime worker:',
+          error,
+        );
+      }
+    }
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
         this.debugLogger.error(
@@ -12047,6 +12143,49 @@ export class Config {
     }
   }
 
+  /**
+   * Registers a Managed session's tools: the first-phase tools, prepared and
+   * permission-checked here and executed in the session's Runtime worker. The
+   * permission manager decides their registration as it does for Legacy.
+   */
+  private async registerManagedRuntimeTools(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    const environment = this.getManagedRuntimeEnvironment();
+    if (!environment) return;
+    const [{ createExecutionTools }, { wrapExecutionTool }] = await Promise.all(
+      [
+        import('../services/local-execution-environment.js'),
+        import('../tools/execution-tool.js'),
+      ],
+    );
+    const tools = createExecutionTools(this);
+    for (const name of MANAGED_RUNTIME_TOOL_NAMES) {
+      const tool = tools.get(name);
+      if (!tool) continue;
+      let status: ToolRegistrationStatus;
+      try {
+        status =
+          (await this.getPermissionManager()?.getToolRegistrationStatus(
+            name as ToolName,
+          )) ?? 'registered';
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to check permissions for tool "${name}", skipping registration:`,
+          error,
+        );
+        continue;
+      }
+      if (status === 'disabled') continue;
+      registry.registerRuntimeBackedFactory(
+        name,
+        async () => wrapExecutionTool(tool, environment, this),
+        environment,
+        status === 'deferred',
+      );
+    }
+  }
+
   private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
     if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
     await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
@@ -12165,10 +12304,11 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
-    // The registry refuses every tool of a Managed session, but its manager
-    // still connects a runtime-added server.
+    // The registry refuses every other tool of a Managed session, but its
+    // manager still connects a runtime-added server.
     if (this.sessionExecutionEngine === 'managed') {
       this.applyPendingMcpBudgetCallback(registry);
+      await this.registerManagedRuntimeTools(registry);
       return registry;
     }
 

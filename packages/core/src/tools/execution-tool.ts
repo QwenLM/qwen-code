@@ -7,10 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import { ApprovalMode, type Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import type {
-  ExecutionEnvironment,
-  ExecutionModification,
-  PreparedExecution,
+import {
+  stableJson,
+  type ExecutionEnvironment,
+  type ExecutionModification,
+  type PreparedExecution,
 } from '../services/execution-environment.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { ToolNames } from './tool-names.js';
@@ -66,9 +67,11 @@ async function synchronizeReadCache(
 }
 
 class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
-  private readonly id = randomUUID();
+  private id = randomUUID();
   private prepared?: Promise<PreparedExecution>;
   private details?: PreparedExecution;
+  /** The parameters as last prepared, to notice a later change. */
+  private preparedParams?: string;
   private callId?: string;
   private released?: Promise<void>;
   private readonly preparationAbort = new AbortController();
@@ -130,6 +133,24 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
       this.abortListeners.set(signal, listener);
       signal.addEventListener('abort', listener, { once: true });
     }
+    // Parameters changed after they were prepared, as a permission hook's
+    // updated input or a plan-mode directory changes them, are prepared
+    // again, so what the environment confirms and runs is what the host
+    // approved.
+    if (
+      this.preparedParams !== undefined &&
+      stableJson(this.params) !== this.preparedParams
+    ) {
+      const previous = this.id;
+      this.id = randomUUID();
+      this.prepared = undefined;
+      this.preparedParams = undefined;
+      this.modification = undefined;
+      await this.owner.environment
+        .release(previous, AbortSignal.timeout(30_000))
+        .catch(() => undefined);
+    }
+    const fresh = this.prepared === undefined;
     this.prepared ??= this.owner.environment.prepare(
       {
         id: this.id,
@@ -148,8 +169,12 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
       },
       AbortSignal.any([signal, this.preparationAbort.signal]),
     );
-    this.details = await this.prepared;
-    Object.assign(this.params, this.details.params);
+    const details = await this.prepared;
+    if (fresh) {
+      this.details = details;
+      Object.assign(this.params, details.params);
+      this.preparedParams = stableJson(this.params);
+    }
   }
 
   override async getDefaultPermission(
@@ -247,7 +272,7 @@ class ExecutionTool extends DeclarativeTool<object, ToolResult> {
       original.name === ToolNames.WRITE_FILE
         ? original.description.replace(
             WRITE_FILE_ARTIFACT_DESCRIPTION,
-            'Automatic session artifact registration is unavailable in this container session, including when record_as_artifact is true. Written files remain in the workspace.',
+            'Automatic session artifact registration is unavailable in this session, including when record_as_artifact is true. Written files remain in the workspace.',
           )
         : original.description,
       original.kind,

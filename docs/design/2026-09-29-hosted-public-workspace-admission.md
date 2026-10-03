@@ -42,7 +42,10 @@ authority, including when physical recovery is disabled. Passive load of a
 resident Harness Session returns the original client identity after validating
 its tenant, Workspace, Session Store URL and frozen profile. It does not reopen
 the writer or drive work; an inactive parked Runtime Turn is reported again if
-a prior load reply was lost. This does not prove recovery after Broker/worker
+a prior load reply was lost. Passive recovery may adopt the original Runtime
+and query status, but does not prepare or execute work. On the cancellation
+path, the adopted lease stays owed through lost replies and retryable refusals
+until terminal success or teardown. This does not prove recovery after Broker/worker
 process death or resolve an original prompt admission whose reply was lost.
 A cancel the Harness did not take is re-sent while the Turn is still cancelling. After each
 successful lease renewal, the running owner observes cancellation requested
