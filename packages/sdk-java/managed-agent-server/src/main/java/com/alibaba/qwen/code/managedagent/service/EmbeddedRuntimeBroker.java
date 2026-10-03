@@ -50,6 +50,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
+    private final AgentStateStore store;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
@@ -78,6 +79,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
+        this.store = store;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -116,6 +118,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                                 "workspace_unavailable",
                                 "Hosted Workspace execution is not available.",
                                 false));
+            }
+            // The durable row is the fence for archived/deleted Sessions:
+            // unlike the in-process retired set it survives restarts and
+            // never accumulates in memory.
+            if ("ARCHIVED".equals(session.status())
+                    || "DELETED".equals(session.status())) {
+                return CompletableFuture.failedFuture(
+                        new RuntimeBrokerException(409,
+                                "runtime_broker_session_closed",
+                                "Harness Session is closed.", false));
             }
             return CompletableFuture.completedFuture(new RuntimeScope(
                     session.tenantId(), workspaceId,
@@ -195,7 +207,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
      */
     @Override
     public CompletionStage<Void> drain(String sessionId) {
-        retired.add(sessionId);
+        // Retire only the states the durable row cannot fence: the resolver
+        // already rejects ARCHIVED/DELETED, so keeping entries for those
+        // would grow this set for the life of the process.
+        SessionRecord row = store.findSessionById(sessionId).orElse(null);
+        if (row == null || "CLOSED".equals(row.status())) {
+            retired.add(sessionId);
+        }
         return CompletableFuture.completedFuture(null);
     }
 
@@ -290,7 +308,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         if ("kubernetes".equals(broker.getProvisioner())) {
             throw new IllegalStateException("Kubernetes Runtime provisioner"
-                    + " is outside this review slice");
+                    + " is not supported (supported: local-process, static)");
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
                 + " local-process or static");

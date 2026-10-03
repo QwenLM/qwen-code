@@ -182,6 +182,13 @@ public interface AgentStateStore {
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit);
 
+    /**
+     * Rotates a stale materialization target behind the fresher ones by
+     * touching only {@code updated_at} on its progress row — never
+     * {@code covered_sequence}, which the gap guard must freeze on failure.
+     */
+    void deferMaterializationTarget(String tenantId, String sessionId);
+
     List<DispatchTarget> findDispatchable(long now, int limit);
 
     Optional<TurnRecord> claimTurn(String tenantId, String sessionId,

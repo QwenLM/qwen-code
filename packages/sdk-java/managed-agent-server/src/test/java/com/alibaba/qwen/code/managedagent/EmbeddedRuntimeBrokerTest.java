@@ -200,6 +200,64 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
+    @Test
+    void unboundLifecycleClosedSessionsAreFencedByTheDurableRow()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // No in-process drain entry: the resolver must reject archived and
+        // deleted rows durably, so the retired set no longer grows on the
+        // delete path and the fence survives restarts.
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "ARCHIVED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainStillRetiresAClosedSessionInProcess() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            // CLOSED has no durable fence: only the in-process retirement
+            // blocks a re-warm.
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void namesTheSupportedProvisionersInTheKubernetesRejection()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setProvisioner("kubernetes");
+        // Blank derives the canonical workspace ID for the k8s/local path.
+        properties.getRuntimeBroker().setWorkspaceId("");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not supported")
+                .hasMessageContaining("local-process, static");
+    }
+
     private static ManagedAgentProperties properties() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setCapabilityDigest("sha256:"

@@ -416,6 +416,80 @@ class QwenHostedHarnessConnectorTest {
         return connector;
     }
 
+    @Test
+    void closesTheLazyClientAndRejectsLateUse() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.close();
+
+        verify(client).close();
+        assertThatThrownBy(() -> connector.closeSession("tenant-a",
+                SESSION_ID))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        verify(client, never()).closeSession(any(String.class));
+    }
+
+    @Test
+    void doesNotBuildAClientAfterClose() {
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+
+        connector.close();
+
+        // A late first call must fail before construction: building here
+        // would start executors and a heartbeat nothing ever closes.
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                "prompt", java.util.List.of(), "digest"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+    }
+
+    @Test
+    void rejectsSchemelessBaseUrlsAtStartup() {
+        ManagedAgentProperties schemeless = properties();
+        schemeless.getHarness().setBaseUrl("localhost:4170");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(schemeless,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties empty = properties();
+        empty.getHarness().setBaseUrl("");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(empty,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+    }
+
+    @Test
+    void loadsOnceAcrossConcurrentFreeAttachCalls() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        verify(client, times(1)).loadSession(any());
+    }
+
     private static ManagedAgentProperties properties() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setToken("token");
