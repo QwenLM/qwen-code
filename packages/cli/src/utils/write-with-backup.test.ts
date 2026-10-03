@@ -87,6 +87,66 @@ describe('writeWithBackup', () => {
 
   describe.skipIf(process.platform === 'win32')('POSIX permissions', () => {
     it.each([
+      [null, 0o022],
+      [null, 0o077],
+      [0o644, 0o022],
+      [0o644, 0o077],
+      [0o777, 0o022],
+      [0o777, 0o077],
+    ] as const)(
+      'uses default permissions when replacing a symlink to mode %s under umask %o',
+      (sourceMode, mask) => {
+        const referent =
+          sourceMode === null ? '/dev/null' : path.join(tempDir, 'referent');
+        if (sourceMode !== null) {
+          nativeFs.writeFileSync(referent, 'original');
+          nativeFs.chmodSync(referent, sourceMode);
+        }
+        fs.symlinkSync(referent, targetPath);
+        const previousMask = process.umask(mask);
+        try {
+          vi.mocked(fs.renameSync).mockImplementation((...args) => {
+            expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(0o666 & ~mask);
+            expect(nativeFs.lstatSync(targetPath).isSymbolicLink()).toBe(true);
+            nativeFs.renameSync(...args);
+          });
+
+          writeWithBackupSync(targetPath, 'new');
+
+          expect(fs.lstatSync(targetPath).isFile()).toBe(true);
+          expect(fs.statSync(targetPath).mode & 0o777).toBe(0o666 & ~mask);
+          expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+          expect(fs.chmodSync).not.toHaveBeenCalled();
+          if (sourceMode !== null) {
+            expect(fs.readFileSync(referent, 'utf8')).toBe('original');
+            expect(fs.statSync(referent).mode & 0o777).toBe(sourceMode);
+          }
+          expect(fs.readdirSync(tempDir)).toEqual(
+            sourceMode === null
+              ? ['settings.json']
+              : ['referent', 'settings.json'],
+          );
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it('rejects a symlink to a directory without leaving artifacts', () => {
+      const directory = path.join(tempDir, 'directory');
+      fs.mkdirSync(directory);
+      fs.symlinkSync(directory, targetPath);
+
+      expect(() => writeWithBackupSync(targetPath, 'new')).toThrow('directory');
+
+      expect(fs.lstatSync(targetPath).isSymbolicLink()).toBe(true);
+      expect(fs.statSync(directory).isDirectory()).toBe(true);
+      expect(fs.readdirSync(tempDir)).toEqual(['directory', 'settings.json']);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      expect(fs.renameSync).not.toHaveBeenCalled();
+    });
+
+    it.each([
       ['ENOSYS', 0o022],
       ['ENOTSUP', 0o022],
       ['ENOSYS', 0o077],

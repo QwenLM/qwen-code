@@ -77,7 +77,10 @@ export function writeWithBackupSync(
   let backupCreated = false;
 
   try {
-    const mode = existing ? existing.mode & 0o777 : undefined;
+    const mode =
+      existing && fs.lstatSync(targetPath).isFile()
+        ? existing.mode & 0o777
+        : undefined;
     fs.writeFileSync(tempPath, content, {
       encoding,
       flag: 'wx',
