@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_EXTENSION_DELIVERY_TARGETS,
+  MANAGED_EXTENSION_STATE_LINES,
   isExtensionRunStart,
   isExtensionRunSuccessor,
   isMonitorRunStart,
@@ -17,6 +18,8 @@ import {
 } from './managed-extension-record.js';
 import {
   MANAGED_EXTENSION_RECORD_BODIES,
+  MANAGED_TASK_KINDS,
+  MANAGED_TASK_RUNTIME_STATES,
   MANAGED_TASK_STATES,
   extensionExecutionOf,
   isExtensionDeliveryPending,
@@ -40,6 +43,8 @@ interface FixtureSuite {
   readonly recordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
+  readonly runtimeStates: readonly string[];
+  readonly taskKinds: readonly string[];
   readonly taskIdCases: ReadonlyArray<{
     readonly id: string;
     readonly sessionId: string;
@@ -65,7 +70,6 @@ interface FixtureSuite {
   >;
   readonly historyCases: ReadonlyArray<{
     readonly id: string;
-    readonly kind: string;
     readonly revisions: readonly Revision[];
   }>;
   readonly brokerExecutionCases: ReadonlyArray<{
@@ -73,11 +77,6 @@ interface FixtureSuite {
     readonly execution: string;
     readonly inspection: ManagedRuntimeExecutionView;
     readonly harnessExecution: string;
-  }>;
-  readonly inspectionExecutionCases: ReadonlyArray<{
-    readonly id: string;
-    readonly inspection: ManagedRuntimeExecutionView;
-    readonly execution: string;
   }>;
 }
 
@@ -103,6 +102,10 @@ describe('managed-extension-projection/1 fixtures', () => {
       ),
     ).toEqual(fixtures.recordBodies);
     expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
+    expect([...MANAGED_TASK_RUNTIME_STATES].sort()).toEqual(
+      fixtures.runtimeStates,
+    );
+    expect([...MANAGED_TASK_KINDS].sort()).toEqual(fixtures.taskKinds);
     const pending = new Set<string>();
     for (const [target, states] of Object.entries(
       MANAGED_EXTENSION_DELIVERY_TARGETS,
@@ -130,11 +133,23 @@ describe('managed-extension-projection/1 fixtures', () => {
     const lists = Object.entries(fixtures).filter(([name]) =>
       name.endsWith('Cases'),
     );
-    expect(lists).toHaveLength(9);
+    // The name set pins the lists the fixture must carry, so deleting one
+    // or adding another is loud, and no replayed list may be empty (an
+    // it.each over an empty list registers zero tests).
+    expect(lists.map(([name]) => name).sort()).toEqual([
+      'brokerExecutionCases',
+      'historyCases',
+      'monitorChainCases',
+      'monitorChainRejectCases',
+      'monitorRunStartCases',
+      'runStartCases',
+      'taskIdCases',
+      'viewCases',
+    ]);
     for (const [, list] of lists) {
-      const ids = (list as ReadonlyArray<{ readonly id: string }>).map(
-        (each) => each.id,
-      );
+      const cases = list as ReadonlyArray<{ readonly id: string }>;
+      expect(cases.length).toBeGreaterThan(0);
+      const ids = cases.map((each) => each.id);
       expect(new Set(ids).size).toBe(ids.length);
     }
   });
@@ -169,9 +184,43 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
   });
 
+  it('settles and unbinds every run state whose line ends', () => {
+    // The projection's terminal set is the run line's own: a run state
+    // whose successors are empty must stamp `settledAt` and no runtime.
+    for (const [state, successors] of Object.entries(
+      MANAGED_EXTENSION_STATE_LINES.run.transitions,
+    )) {
+      if (successors.length > 0) continue;
+      const run = parseExtensionRun({
+        state,
+        reason: null,
+        definition: null,
+        executionCallId: null,
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: null,
+        runtime: null,
+        delivery: null,
+      });
+      const view = projectManagedTask(null, run, 1_000);
+      expect(view.settledAt).not.toBeNull();
+      expect(view.runtimeState).toBeNull();
+    }
+  });
+
   it.each(fixtures.historyCases)('projects a history: $id', (each) => {
     const [first, ...later] = each.revisions;
     expect(isExtensionRunStart(first.run)).toBe(true);
+    // The projection adds or drops no field: its own record components.
+    const VIEW_KEYS = [
+      'createdAt',
+      'definitionRevision',
+      'runtimeState',
+      'settledAt',
+      'startedAt',
+      'state',
+    ] as const;
     let previous: ManagedTaskProjection | null = null;
     let previousRun: unknown = null;
     for (const revision of [first, ...later]) {
@@ -179,6 +228,7 @@ describe('managed-extension-projection/1 fixtures', () => {
         expect(isExtensionRunSuccessor(previousRun, revision.run)).toBe(true);
       }
       const run = parseExtensionRun(revision.run);
+      expect(Object.keys(revision.view).sort()).toEqual([...VIEW_KEYS]);
       const view = projectManagedTask(previous, run, revision.occurredAt);
       expect(view).toEqual(revision.view);
       expect(isExtensionDeliveryPending(run)).toBe(revision.deliveryPending);
@@ -186,13 +236,6 @@ describe('managed-extension-projection/1 fixtures', () => {
       previousRun = revision.run;
     }
   });
-
-  it.each(fixtures.inspectionExecutionCases)(
-    'reads a Broker report: $id',
-    (each) => {
-      expect(extensionExecutionOf(each.inspection)).toBe(each.execution);
-    },
-  );
 
   // Java maps the Broker state; the Harness sees only what the Broker's HTTP
   // API reports for it, which the Broker's own contract test pins to these

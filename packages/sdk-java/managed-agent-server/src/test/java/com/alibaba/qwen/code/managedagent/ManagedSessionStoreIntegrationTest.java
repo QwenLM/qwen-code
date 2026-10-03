@@ -76,6 +76,8 @@ class ManagedSessionStoreIntegrationTest {
         // pinned by http-managed-session-store.test.ts.
         JsonNode written = ManagedExtensionProjectionContractTest.contract(
                 "managed-extension-journal-v1.fixtures.json");
+        assertThat(written.required("contractVersion").intValue())
+                .isEqualTo(1);
         JsonNode key = written.required("sessionKey");
         String tenant = key.required("tenantId").textValue();
         String session = key.required("sessionId").textValue();
@@ -108,8 +110,12 @@ class ManagedSessionStoreIntegrationTest {
                     task.required("taskId").textValue()).orElseThrow();
             assertThat(row.kind()).isEqualTo(task.required("kind")
                     .textValue());
+            ObjectNode projectionOnly = ((ObjectNode) task).deepCopy()
+                    .retain("state", "runtimeState", "definitionRevision",
+                            "createdAt", "startedAt", "settledAt");
             assertThat(row.projection()).isEqualTo(
-                    ManagedExtensionProjectionContractTest.view(task));
+                    ManagedExtensionProjectionContractTest.view(
+                            projectionOnly));
         }
         assertThat(records.listTasks(tenant, session, null, null, 100)
                 .tasks()).hasSize(tasks.size());
