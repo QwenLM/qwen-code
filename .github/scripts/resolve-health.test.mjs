@@ -1259,10 +1259,12 @@ describe('resolve-health: assessment', () => {
     // accepted-but-unacknowledged request the owed gate excludes must still
     // stop a recovery close, because the barrier cannot tell "accepted,
     // ack lost" from "refused, will never run". Here the request is
-    // unacknowledged and hours old on a PR the lane never served, so
-    // neither the roster nor the veto claims it — only the barrier does,
-    // and the predating push must not close over it. Inserting the owed
-    // gate into newestRequest drops that floor and closes.
+    // unacknowledged on a PR the lane never served, and aged past the
+    // close gate's in-flight bound as well, so neither the roster nor the
+    // veto claims it — only the barrier does, and the predating push must
+    // not close over it. Inserting the owed gate into newestRequest drops
+    // that floor and closes. (A request still inside the in-flight bound is
+    // the veto's case, not the barrier's — see the in-flight test below.)
     const existing = { number: 42, createdAt: FILED_AT, texts: [] };
     const lane = assess(
       [
@@ -1271,7 +1273,7 @@ describe('resolve-health: assessment', () => {
           state: 'open',
           comments: [
             request(
-              '2026-08-27T05:00:00Z',
+              '2026-08-27T00:00:00Z',
               81,
               'maintainer',
               undefined,
@@ -1283,13 +1285,13 @@ describe('resolve-health: assessment', () => {
         {
           number: 90,
           state: 'open',
-          comments: [result('2026-08-27T04:30:00Z', PUSHED, 90)],
+          comments: [result('2026-08-26T23:30:00Z', PUSHED, 90)],
         },
       ],
       { now },
     );
     assert.equal(lane.unserved, null);
-    assert.equal(lane.newestRequest, '2026-08-27T05:00:00Z');
+    assert.equal(lane.newestRequest, '2026-08-27T00:00:00Z');
     assert.deepEqual(
       decide(lane, existing).map((a) => a.type),
       ['comment'],
@@ -2280,6 +2282,145 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(decide(tick3, { number: 47, texts }), []);
   });
 
+  it('persists a below-threshold deficit that forms while the alarm is quiet', () => {
+    // The quiet branch keyed its writes on a barrier rise and a record gain,
+    // so a request sighted young (writing `unanswered: []` with its id in
+    // the record) and going stale on a later tick moved NEITHER: the barrier
+    // was already carried and the sighting already recorded. The deficit was
+    // then nowhere persisted, and the heal tick — which judges by the live
+    // rules, and reads an unacknowledged request on a result-less PR as a
+    // refusal — closed the tracker over a request this watch had itself
+    // counted unanswered. The gain key writes it; this harness feeds each
+    // tick the record the last one wrote, as production's main() does.
+    const carry = (texts) => {
+      const s = readState(texts) ?? {};
+      return {
+        recorded: s.requests,
+        recordedResults: s.resultsSeen,
+        deficit: s.unanswered,
+      };
+    };
+    // Filed on three unanswered requests with no result anywhere, so the
+    // record it carries gives the lane no life: the ticks below are the
+    // mute-lane case the roster's `laneMute` arm exists for.
+    const filed = '2026-08-20T00:00:00Z';
+    const founding = assess(
+      [70, 71, 72].map((pr) => ({
+        number: pr,
+        state: 'open',
+        comments: [
+          request(
+            '2026-08-19T00:00:00Z',
+            pr,
+            'maintainer',
+            undefined,
+            'COLLABORATOR',
+            0,
+          ),
+        ],
+      })),
+      { now: new Date(filed) },
+    );
+    assert.equal(founding.alarm, true);
+    const texts = [decide(founding, null)[0].body];
+    const existing = { number: 80, createdAt: filed, texts };
+
+    // Eight days on, the founding requests are out of the window and a new
+    // one arrives too young for the roster: recorded, with an empty deficit.
+    const asked = request(
+      '2026-08-27T23:30:00Z',
+      60,
+      'maintainer',
+      undefined,
+      'COLLABORATOR',
+      0,
+    );
+    const world = (extra = []) => [
+      { number: 60, state: 'open', comments: [asked] },
+      ...extra,
+    ];
+    const tick1 = assess(world(), {
+      now: new Date('2026-08-28T00:00:00Z'),
+      ...carry(texts),
+    });
+    assert.equal(tick1.alarm, false);
+    assert.equal(tick1.unanswered.length, 0, 'not stale yet');
+    const wrote1 = decide(tick1, existing);
+    assert.deepEqual(
+      wrote1.map((a) => a.type),
+      ['comment'],
+    );
+    assert.deepEqual(readState([wrote1[0].body]).unanswered, []);
+    texts.push(wrote1[0].body);
+
+    // Six hours later the same request is stale and the lane has produced
+    // nothing anywhere, so the roster admits it — one request, below the
+    // threshold of three, alarm quiet. This is the tick that must write the
+    // deficit: nothing else about the picture moved.
+    const tick2 = assess(world(), {
+      now: new Date('2026-08-28T06:00:00Z'),
+      ...carry(texts),
+    });
+    assert.equal(tick2.alarm, false, 'one request is below the threshold');
+    assert.deepEqual(
+      tick2.unanswered.map((u) => u.id),
+      [asked.id],
+    );
+    const wrote2 = decide(tick2, existing);
+    assert.deepEqual(
+      wrote2.map((a) => a.type),
+      ['comment'],
+    );
+    assert.deepEqual(
+      readState([wrote2[0].body]).unanswered,
+      [asked.id],
+      'the deficit the watch counted is the deficit it persists',
+    );
+    texts.push(wrote2[0].body);
+
+    // The heal tick judges by the live rules: no ack ever landed, PR 60 shows
+    // no result, and the lane is alive again — so the live arm reads `asked`
+    // as a refusal and the push lands on ANOTHER PR. Only the carry knows the
+    // watch counted it unanswered, and only that carry refuses the close.
+    const healed = [
+      {
+        number: 61,
+        state: 'open',
+        comments: [
+          request('2026-08-28T10:00:00Z', 61),
+          result('2026-08-28T11:00:00Z', PUSHED, 61),
+        ],
+      },
+    ];
+    const tick3 = assess(world(healed), {
+      now: new Date('2026-08-28T12:00:00Z'),
+      ...carry(texts),
+    });
+    assert.equal(tick3.alarm, false);
+    assert.equal(tick3.unserved, asked.created_at);
+    assert.deepEqual(
+      decide(tick3, existing).map((a) => a.type),
+      ['comment'],
+      'no close over a request the watch itself counted unanswered',
+    );
+
+    // The counterfactual, in-suite: the same heal tick with the deficit write
+    // missing from the record and no carry — the shape before the gain key —
+    // certifies the recovery and closes.
+    const amnesiac = assess(world(healed), {
+      now: new Date('2026-08-28T12:00:00Z'),
+    });
+    assert.equal(amnesiac.unserved, null);
+    assert.deepEqual(
+      decide(amnesiac, {
+        number: 80,
+        createdAt: filed,
+        texts: texts.slice(0, 2),
+      }).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
   it('records a request that arrives while the alarm holds its picture', () => {
     // A request below `staleHours` joins no roster, moves no streak and is not
     // the latest attempt, so `sameState` is true and the alarm branch would
@@ -3040,6 +3181,66 @@ describe('resolve-health: decisions', () => {
       decide(answered, existing).map((a) => a.type),
       ['comment', 'close'],
     );
+  });
+
+  it('refuses to certify while an accepted request is still queued for a run', () => {
+    // The producer accepted the request — authorize said yes — but its 👀 has
+    // not landed, because the run is queued behind a slot the shared
+    // `qwen-pr-head-write-<pr>` group can hold for 345 minutes, and this PR
+    // has no result of its own. So `isOwed` is false past `ackHours` and the
+    // gate's result arm is empty: without an in-flight arm the request is
+    // invisible to the roster AND to the veto, and a push on another PR
+    // clears the barrier and closes the tracker over a run still in flight.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const queued = request(
+      '2026-08-27T10:00:00Z',
+      101,
+      'maintainer',
+      undefined,
+      'COLLABORATOR',
+      0,
+    );
+    const world = [
+      { number: 101, state: 'open', comments: [queued] },
+      {
+        number: 102,
+        state: 'open',
+        comments: [
+          request('2026-08-27T09:00:00Z', 102),
+          result('2026-08-27T11:30:00Z', PUSHED, 102),
+        ],
+      },
+    ];
+    const lane = assess(world, { now });
+    assert.equal(
+      lane.unanswered.length,
+      0,
+      'the roster still needs an ack; the in-flight arm belongs to the gate',
+    );
+    assert.equal(lane.unserved, queued.created_at);
+    assert.deepEqual(
+      decide(lane, existing).map((a) => a.type),
+      ['comment'],
+      'a queued run is not a served one',
+    );
+    // The bound is the producer's own budget, not forever: past it the arm
+    // expires and the veto lets go, which is the safe direction for a bound
+    // whose only job is to refuse a close.
+    const expired = assess(world, {
+      now: new Date('2026-08-27T18:00:00Z'),
+    });
+    assert.equal(expired.unserved, null);
+    assert.deepEqual(
+      decide(expired, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+    // The value itself, pinned to the producer's budgets: the shared
+    // concurrency slot an autofix round can hold (345 minutes) plus
+    // resolve-pr's own timeout (120). A smaller bound re-opens the hole this
+    // test exists for; the suite greens at anything above it.
+    assert.ok(DEFAULTS.inFlightMinutes >= 345 + 120);
   });
 
   it('holds for a request its author edited after posting', () => {

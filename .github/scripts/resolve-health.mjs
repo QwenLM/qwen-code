@@ -35,6 +35,16 @@ export const DEFAULTS = Object.freeze({
   unansweredThreshold: 3,
   staleHours: 3,
   ackHours: 1,
+  // The close gate's in-flight bound, and nothing else's: how long a
+  // request may still be waiting for a run the producer has accepted but
+  // not acknowledged. The producer serialises a PR's runs under
+  // `qwen-pr-head-write-<pr>`, a group `qwen-autofix.yml`'s
+  // review-address shares and can hold for its whole 345-minute timeout,
+  // and resolve-pr's own budget is 120 minutes — so an accepted request
+  // can legitimately show no 👀 for 465 minutes. Past that the gate stops
+  // treating it as in flight; the bound exists to refuse a close, never to
+  // alarm, so letting it expire is the safe direction.
+  inFlightMinutes: 465,
   windowDays: 7,
   bot: 'qwen-code-dev-bot',
   label: 'scope/ci-cd',
@@ -351,6 +361,29 @@ export function assess(prs, options = {}) {
   const isOwed = (c) =>
     (c.eyes ?? 0) > 0 ||
     now.getTime() - Date.parse(c.created_at) < opts.ackHours * 3_600_000;
+  // The close gate's own in-flight arm, and ONLY the close gate's — the
+  // roster must not read it. Widening `isOwed` instead would re-admit
+  // silently-refused requests to the roster once they pass `staleHours`,
+  // the false alarm the short grace above exists to prevent. What this
+  // covers is the gap `isOwed` cannot: the producer accepted the request
+  // (authorize said yes) but its 👀 has not landed because the run is
+  // still queued behind a slot the shared concurrency group can hold for
+  // 345 minutes, plus resolve-pr's own 120. On a PR with no in-window
+  // result at all, such a request reaches neither the roster (`isOwed`
+  // false past `ackHours`, `laneMute` false while any result exists
+  // anywhere) nor the gate's `gateResults.length > 0` arm — so a push on
+  // ANOTHER PR clears the barrier and closes the tracker over a run still
+  // in flight, which is what decide() says it refuses. Bounded on purpose:
+  // the veto only ever refuses a close, so expiring it is the safe
+  // direction, and an unedited check keeps a comment edited into request
+  // shape out of it. The price is that a request the producer REFUSED in
+  // silence holds the veto for this long too — the two are not tellable
+  // apart while no ack has landed — so a legitimate close can be delayed by
+  // up to `inFlightMinutes` after such a request. Delayed, never lost: the
+  // bound expires on its own.
+  const isInFlight = (c) =>
+    c.updated_at === c.created_at &&
+    now.getTime() - Date.parse(c.created_at) < opts.inFlightMinutes * 60_000;
   // The per-request signal goes blind exactly where the watch needs it
   // most: a lane that never ran produces no acknowledgements either, so the
   // owed gate reads the outage this file exists for (the thirteen days in
@@ -588,11 +621,16 @@ export function assess(prs, options = {}) {
     // id leaves when the request is edited, deleted, aged out or
     // answered), so an edited-away, retracted request does not keep the
     // veto armed for the rest of the window.
+    // The third live arm is isInFlight: a request the producer accepted but
+    // has not acknowledged yet, on a PR with no in-window result — the
+    // queued-run case neither isOwed nor the result arm can see (see
+    // isInFlight above).
     const gateRequests = [
       ...comments.filter(
         (c) =>
           carriedDeficit.has(c.id) ||
-          (isRequestShaped(c) && (isOwed(c) || gateResults.length > 0)),
+          (isRequestShaped(c) &&
+            (isOwed(c) || isInFlight(c) || gateResults.length > 0)),
       ),
       ...vanished,
     ].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
@@ -1290,6 +1328,24 @@ export function decide(assessment, existing, options = {}, borrowed = null) {
     //     sound on its own terms: the issue exists because the lane was
     //     failing then, so an earlier push cannot show it recovered.
     const carried = stateOf(assessment, previous);
+    // The deficit's write key for the quiet branch, keyed on a GAIN and not
+    // on any change. A gain must be written: a request sighted below
+    // `staleHours` records `unanswered: []`, and the tick that later sees it
+    // go stale moves the roster while moving neither the barrier (already
+    // carried) nor a record id (the sighting was written then) — so without
+    // this key a below-threshold deficit formed while the alarm is quiet is
+    // persisted nowhere, the heal tick's carry is empty, and the close gate
+    // certifies a recovery over requests this watch itself counted as
+    // unanswered. A SHRINK needs no write: the carry is re-derived from the
+    // live comments on every tick, so an id whose request aged out, was
+    // deleted or was answered can never come back from the marker — a stale
+    // entry is inert, and dropping it is what the next write of any kind
+    // does anyway. Not writing it is also what keeps a quiet lane quiet:
+    // an incident's requests ageing out of the window posts nothing.
+    const knownDeficit = new Set(previous?.unanswered ?? []);
+    const deficitGained = carried.unanswered.some(
+      (id) => !knownDeficit.has(id),
+    );
     const barrier = [carried.newestRequest, existing.createdAt]
       .filter((t) => typeof t === 'string' && t)
       .reduce((a, b) => (a > b ? a : b), '');
@@ -1328,6 +1384,7 @@ export function decide(assessment, existing, options = {}, borrowed = null) {
       actions.push({ type: 'close', number: existing.number });
     } else if (
       !previous ||
+      deficitGained ||
       (carried.newestRequest ?? '') > (previous.newestRequest ?? '') ||
       recordGained(previous?.requests, carried.requests) ||
       recordGained(previous?.resultsSeen, carried.resultsSeen)
@@ -1346,6 +1403,9 @@ export function decide(assessment, existing, options = {}, borrowed = null) {
       // chatters — and the result key is what keeps an edit after the fact
       // from un-answering the request the result served before any writing
       // tick saw it.
+      //
+      // The deficit key is the same persistence for the roster; see
+      // `deficitGained` above for why it fires on a gain only.
       actions.push({
         type: 'comment',
         number: existing.number,
