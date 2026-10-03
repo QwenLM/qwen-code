@@ -268,24 +268,46 @@ const PLAIN_TEXT_CONTEXT_EVENTS: ReadonlySet<HookEventName> = new Set([
 /**
  * Top-level {@link HookOutput} field names. Used only to decide, for a
  * `failMode: "closed"` command hook, whether stdout/stderr that DID parse
- * as JSON is a genuine (if minimal) HookOutput or just noise indistinguishable
- * from a transport failure — typically `{}`, or an object with unrelated
- * keys (qwen-code#12457 follow-up). Not used for `"open"`/absent, which
- * accepts any parsed object exactly as before.
+ * as JSON actually carries a VERDICT, or is noise indistinguishable from a
+ * transport failure — `{}`, an object with unrelated keys, or an object
+ * carrying only `reason`/`systemMessage` and no decision at all
+ * (qwen-code#12457 follow-up; narrowed from key-presence to an explicit
+ * verdict in the #12875 review, which found that `{"reason": ...}` read as
+ * a decision and silently allowed the guarded call). This matches the
+ * contract stated in types.ts: `"closed"` steps in when the hook produced
+ * no explicit decision. Not used for `"open"`/absent, which accepts any
+ * parsed object exactly as before.
  */
-const HOOK_OUTPUT_FIELDS: ReadonlySet<string> = new Set([
-  'continue',
-  'stopReason',
-  'suppressOutput',
-  'systemMessage',
-  'terminalSequence',
-  'decision',
-  'reason',
-  'hookSpecificOutput',
-]);
+function hasExplicitVerdict(output: HookOutput): boolean {
+  const fields = output as Record<string, unknown>;
 
-function hasRecognizedHookOutputField(output: HookOutput): boolean {
-  return Object.keys(output).some((key) => HOOK_OUTPUT_FIELDS.has(key));
+  const decision = fields['decision'];
+  if (typeof decision === 'string' && decision !== '') {
+    return true;
+  }
+
+  // Must be an OBJECT: a truthy primitive here (e.g. `"deny"`) is not a
+  // verdict, and reading it as one makes consumer frames throw on `in`.
+  const hookSpecificOutput = fields['hookSpecificOutput'];
+  if (
+    hookSpecificOutput !== null &&
+    typeof hookSpecificOutput === 'object' &&
+    !Array.isArray(hookSpecificOutput)
+  ) {
+    const permissionDecision = (hookSpecificOutput as Record<string, unknown>)[
+      'permissionDecision'
+    ];
+    if (typeof permissionDecision === 'string' && permissionDecision !== '') {
+      return true;
+    }
+  }
+
+  // `continue: false` is an explicit stop, read by shouldStopExecution().
+  if (fields['continue'] === false) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -1630,14 +1652,10 @@ export class HookRunner {
             // or a stray object with unrelated keys — is indistinguishable
             // from a hook that failed to produce a real answer. `"open"`
             // keeps accepting it exactly as before (allow-by-omission).
-            if (
-              isClosed &&
-              !isBlockingError &&
-              !hasRecognizedHookOutputField(output)
-            ) {
+            if (isClosed && !isBlockingError && !hasExplicitVerdict(output)) {
               output = this.buildFailClosedDenial(
                 hookConfig,
-                'printed a JSON object with no recognisable HookOutput field (e.g. "decision")',
+                'printed a JSON object carrying no verdict (no "decision", no hookSpecificOutput.permissionDecision, no "continue": false)',
                 eventName,
               );
             }
@@ -1705,6 +1723,7 @@ export class HookRunner {
                     ? 'null'
                     : typeof parsed
               })`,
+              eventName,
             );
           } else {
             output = this.convertPlainTextToHookOutput(
