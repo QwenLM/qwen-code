@@ -31,7 +31,7 @@ public final class JdbcRuntimeBindingRepository
             "attestation_generation", "drain_requested", "operation_owner",
             "operation_lease_until", "operation_generation",
             "record_version", "last_health_at", "last_reconciled_at",
-            "last_active_at", "storage_id", "loss_evidence_json", "stop_evidence_json");
+            "last_active_at", "storage_id", "loss_evidence_json", "stop_evidence_json", "drain_receipt_json");
 
     private final DataSource dataSource;
     private final SecretProtector secretProtector;
@@ -74,6 +74,17 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());
+    }
+
+    @Override
+    public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, true);
+    }
+
+    private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)
                 || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
@@ -104,7 +115,7 @@ public final class JdbcRuntimeBindingRepository
             List<RuntimeSessionRecord> batch = JdbcRuntimeSessionRepository.lockActiveSessions(
                     connection, current);
             JdbcToolExecutionRepository.abandonByBinding(connection, current);
-            if (!current.hasStoppedWriters()
+            if (!holdersCleared || !current.hasStoppedWriters()
                     || JdbcToolExecutionRepository.hasActiveByBinding(connection,
                             current.getBindingId(), current.getGeneration())) {
                 return current;
@@ -143,8 +154,12 @@ public final class JdbcRuntimeBindingRepository
         }
         JdbcRuntimeSessionRepository.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, candidate.getSession().getScope().getTenantId());
             RuntimeBindingRecord binding = selectById(connection,
                     candidate.getBindingId(), true);
+            if (binding != null) {
+                requireHarnessAdmission(connection, binding.getRequest());
+            }
             RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
             RuntimeScope scope = candidate.getSession().getScope();
             if (!binding.getRequest().getScope().equals(scope)) {
@@ -179,9 +194,17 @@ public final class JdbcRuntimeBindingRepository
             return existing;
         }
         try {
+            RuntimeBindingRecord original = findById(candidate.getBindingId());
+            if (original == null) {
+                throw new IllegalArgumentException("Binding is unavailable");
+            }
             return JdbcRepositorySupport.transaction(dataSource, connection -> {
+                lockPlacementDomain(connection, original.getRequest().getScope().getTenantId());
                 RuntimeBindingRecord binding = selectById(connection,
                         candidate.getBindingId(), true);
+                if (binding != null) {
+                    requireHarnessAdmission(connection, binding.getRequest());
+                }
                 RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
                 RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(
                         connection, binding.getRequest().getScope(),
@@ -207,11 +230,92 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public void requestHarnessDrain(String tenantId, String harnessSessionId) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, tenantId);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO qwen_runtime_harness_drain (tenant_key, harness_key, tenant_id, harness_session_id) VALUES (?, ?, ?, ?)"
+                    + " ON DUPLICATE KEY UPDATE harness_session_id = harness_session_id")) {
+                statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
+                statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
+                statement.setString(3, tenantId);
+                statement.setString(4, harnessSessionId);
+                statement.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public boolean isHarnessDraining(String tenantId, String harnessSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> hasHarnessDrain(connection, tenantId, harnessSessionId));
+    }
+
+    private static boolean hasHarnessDrain(Connection connection, String tenantId, String harnessSessionId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT tenant_id, harness_session_id"
+                + " FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
+            statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return false;
+                }
+                if (!tenantId.equals(result.getString("tenant_id"))
+                        || !harnessSessionId.equals(result.getString("harness_session_id"))) {
+                    throw new IllegalStateException("Harness drain hash collision");
+                }
+                return true;
+            }
+        }
+    }
+
+    private static void requireHarnessAdmission(Connection connection, RuntimeProvisionRequest request)
+            throws SQLException {
+        if ("session".equals(request.getScope().getIsolationClass())
+                && hasHarnessDrain(connection, request.getScope().getTenantId(), request.getIsolationKey())) {
+            throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session is draining.", false);
+        }
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
+            String afterBindingId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 bindings");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeBindingRecord> result = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + BINDING_COLUMNS
+                    + " FROM qwen_runtime_binding WHERE tenant_id = ? AND isolation_class = 'session'"
+                    + " AND isolation_key = ? AND CAST(tenant_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                    + " AND CAST(isolation_key AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                    + " AND binding_id > ? ORDER BY binding_id LIMIT ?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, harnessSessionId);
+                statement.setString(3, tenantId);
+                statement.setString(4, harnessSessionId);
+                statement.setString(5, afterBindingId == null ? "" : afterBindingId);
+                statement.setInt(6, limit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(mapBinding(rows));
+                    }
+                }
+            }
+            return List.copyOf(result);
+        });
+    }
+
+    @Override
     public RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
         requireRequest(request);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, request.getScope().getTenantId());
+            requireHarnessAdmission(connection, request);
             String key = JdbcRepositorySupport.requestKey(request);
             ensureSlot(connection, key, request);
             Slot slot = selectSlot(connection, key, true);
@@ -306,6 +410,40 @@ public final class JdbcRuntimeBindingRepository
                                         .getIsolationKey())) {
                             throw new IllegalStateException(
                                     "Runtime binding scope hash collision");
+                        }
+                        records.add(record);
+                    }
+                }
+            }
+            return List.copyOf(records);
+        });
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
+        BrokerValues.requireId(kind, "provisionerKind");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Recovery batch must contain 1-100 bindings");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeBindingRecord> records = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + BINDING_COLUMNS
+                    + " FROM qwen_runtime_binding WHERE provisioner_kind = ? AND binding_id > ?"
+                    + " AND resource_handle_version = 2"
+                    + " AND binding_state IN ('PROVISIONING', 'READY', 'DRAINING', 'RECOVERY_BLOCKED', 'LOST')"
+                    + " AND NOT EXISTS (SELECT 1 FROM managed_workspace_operator_recovery recovery"
+                    + " WHERE recovery.binding_id = qwen_runtime_binding.binding_id"
+                    + " AND recovery.runtime_generation = qwen_runtime_binding.runtime_generation"
+                    + " AND recovery.completed_at IS NULL)"
+                    + " ORDER BY binding_id LIMIT ?")) {
+                statement.setString(1, kind);
+                statement.setString(2, afterBindingId == null ? "" : afterBindingId);
+                statement.setInt(3, limit);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        RuntimeBindingRecord record = mapBinding(result);
+                        if (!kind.equals(record.getRequest().getProvisionerKind())) {
+                            throw new IllegalStateException("Recovery provisioner identity differs");
                         }
                         records.add(record);
                     }
@@ -531,7 +669,7 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static void lockPlacementDomain(Connection connection, String tenantId)
+    public static void lockPlacementDomain(Connection connection, String tenantId)
             throws SQLException {
         String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(
@@ -556,7 +694,7 @@ public final class JdbcRuntimeBindingRepository
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + BINDING_COLUMNS + " FROM qwen_runtime_binding WHERE tenant_id = ? "
-                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'FAILED')")) {
+                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED', 'DRAINING')")) {
             statement.setString(1, request.getScope().getTenantId());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
@@ -572,8 +710,7 @@ public final class JdbcRuntimeBindingRepository
     private void insertBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
         String sql = "INSERT INTO qwen_runtime_binding (" + BINDING_COLUMNS
-                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + ") VALUES (" + String.join(", ", java.util.Collections.nCopies(37, "?")) + ")";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             setBinding(statement, record);
             statement.executeUpdate();
@@ -595,7 +732,7 @@ public final class JdbcRuntimeBindingRepository
                 + "operation_owner = ?, operation_lease_until = ?, "
                 + "operation_generation = ?, record_version = ?, "
                 + "last_health_at = ?, last_reconciled_at = ?, "
-                + "last_active_at = ?, loss_evidence_json = ?, stop_evidence_json = ? "
+                + "last_active_at = ?, loss_evidence_json = ?, stop_evidence_json = ?, drain_receipt_json = ? "
                 + "WHERE binding_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, record.getState().name());
@@ -632,7 +769,8 @@ public final class JdbcRuntimeBindingRepository
                     record.getLastActiveAt());
             statement.setString(19, evidenceJson(record.getLossEvidence()));
             statement.setString(20, evidenceJson(record.getStopEvidence()));
-            statement.setString(21, record.getBindingId());
+            statement.setString(21, record.getDrainReceipt() == null ? null : record.getDrainReceipt().toJson());
+            statement.setString(22, record.getBindingId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Runtime binding update failed");
             }
@@ -685,6 +823,7 @@ public final class JdbcRuntimeBindingRepository
         statement.setString(34, request.getStorageId());
         statement.setString(35, evidenceJson(record.getLossEvidence()));
         statement.setString(36, evidenceJson(record.getStopEvidence()));
+        statement.setString(37, record.getDrainReceipt() == null ? null : record.getDrainReceipt().toJson());
     }
 
     private void setSeedColumns(PreparedStatement statement, int start,
@@ -766,7 +905,8 @@ public final class JdbcRuntimeBindingRepository
                         "last_reconciled_at"),
                 JdbcRepositorySupport.getInstant(result, "last_active_at"),
                 RuntimeRecoveryEvidence.fromJson(result.getString("loss_evidence_json")),
-                RuntimeRecoveryEvidence.fromJson(result.getString("stop_evidence_json")));
+                RuntimeRecoveryEvidence.fromJson(result.getString("stop_evidence_json")),
+                RuntimeDrainReceipt.fromJson(result.getString("drain_receipt_json")));
     }
 
     private static String evidenceJson(RuntimeRecoveryEvidence evidence) {

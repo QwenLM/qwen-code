@@ -23,17 +23,23 @@ import {
 } from './managed-context-envelope.js';
 import {
   MANAGED_CONTEXT_WORKER_ROUTES,
+  ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
 import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   ManagedShellPublisherRegistry,
   MANAGED_SHELL_PUBLISHER_ROUTE,
 } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -165,19 +171,32 @@ export async function startManagedRuntimeAttestationWorker(
       boot.runtimeInstanceId,
     );
     registerManagedRuntimeToolRoutes(app, boot, executor);
+    const mount = new ManagedContextMount(boot.workspaceCwd);
+    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+      const directory = await mount.resolve('');
+      return directory === undefined
+        ? undefined
+        : { directory, workspaceRoot: directory, preapproved: false };
+    });
   }
   const server = createServer(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? capturePublisher || remotePublishers
+        ? capturePublisher ||
+          remotePublishers ||
+          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
               ...MANAGED_TOOL_RESULT_ROUTES,
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+              ...(!capturePublisher &&
+              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+                ? [PUBLICATION_INSTALL_ROUTE]
+                : []),
             ]
           : MANAGED_CONTEXT_WORKER_ROUTES
-        : OWNED_MANAGED_RUNTIME_ROUTES,
+        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
     ),
   );
   server.maxHeadersCount = 32;
@@ -234,11 +253,23 @@ export async function startManagedRuntimeAttestationWorker(
 }
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
+  // A Managed session's host starts its worker over an IPC channel, with the
+  // loader vars that only boot this process; the commands it runs must not
+  // inherit them. Other launchers choose the worker's environment themselves.
+  if (typeof process.send === 'function') {
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'Managed Runtime worker',
+    );
+  }
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,
-    boot.version === 2 ? new ManagedShellPublisherRegistry() : undefined,
+    boot.version === 2 && boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+      ? new ManagedShellPublisherRegistry()
+      : undefined,
   );
 
   await new Promise<void>((resolve, reject) => {
@@ -246,7 +277,11 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
     const close = () => {
       if (closing) return;
       closing = true;
-      void worker.close().then(resolve, reject);
+      void worker.close().then(() => {
+        // The parent's channel would otherwise keep this process alive.
+        if (process.connected) process.disconnect();
+        resolve();
+      }, reject);
     };
     const closeAfterOutputFailure = () => {
       process.exitCode = 1;
@@ -254,6 +289,14 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
     };
     process.once('SIGINT', close);
     process.once('SIGTERM', close);
+    // A parent that starts the worker with an IPC channel, such as a Managed
+    // session's host, owns its lifetime: however the parent ends, the channel
+    // closes and the worker stops its calls and exits.
+    if (typeof process.send === 'function') {
+      process.channel?.unref();
+      process.once('disconnect', close);
+      if (!process.connected) close();
+    }
     process.stdout.once('error', closeAfterOutputFailure);
     process.stdout.write(`${JSON.stringify(worker.ready)}\n`, (error) => {
       if (error) closeAfterOutputFailure();

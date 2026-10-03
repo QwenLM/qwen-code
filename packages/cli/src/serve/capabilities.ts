@@ -60,6 +60,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_chunk_upload: { since: 'v1' },
   session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
@@ -123,6 +124,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents collaborating on shared task threads
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
+  // is settled at daemon startup, but the tag is recomputed per response, so a
+  // workspace opting in or out afterwards is seen on the next request. A client
+  // that sees it absent must not render the collaboration surface rather than
+  // render it and let the calls 404. Distinct from `workspace_agents` above,
+  // which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -412,6 +422,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   channel_control: { since: 'v1' },
   // Sanitized workspace Channel configuration, lifecycle, and pairing.
   channel_management: { since: 'v1' },
+  // `DELETE /workspaces/:workspace/channels/:name` converges a Channel whose
+  // configuration is gone from the merged settings view the Worker resolves
+  // (system + user + workspace scopes): the runtime must be silent about the
+  // Channel or confirm exactly one committed Worker owner in that workspace,
+  // which is stopped before the persisted startup selection held in that
+  // scope is removed, instead of reporting `channel_instance_not_found`.
+  channel_delete_config_loss_convergence: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -471,6 +488,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_list_details: { since: 'v1' },
   extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
@@ -565,6 +583,16 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   hostedHarness?: boolean;
   requireAuth?: boolean;
+  /**
+   * Whether the daemon is serving the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`) for this response. Resolved from
+   * `experimental.agentCollaboration` at call time rather than snapshotted at
+   * boot: which routes exist at all is settled at startup, but a workspace
+   * opting in or out afterwards is seen on the next request. Left unset by the
+   * pre-runtime bootstrap envelope, which reads no workspace settings and so
+   * omits the tag even when the runtime envelope will advertise it.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -662,6 +690,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
+  [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
@@ -729,6 +761,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
+  [
+    'channel_delete_config_loss_convergence',
     (toggles) => toggles.channelManagementAvailable === true,
   ],
   [

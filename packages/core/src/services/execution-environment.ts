@@ -28,6 +28,48 @@ export const EXECUTION_TOOL_NAMES = new Set<string>([
   ToolNames.TASK_STOP,
 ]);
 
+/**
+ * The first-phase tools a Managed session runs in its Runtime worker, the
+ * set that worker admits.
+ */
+export const MANAGED_RUNTIME_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+  ToolNames.SHELL,
+]);
+
+/** JSON with sorted object keys, so equal parameters compare equal. */
+export function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested: unknown) =>
+    nested && typeof nested === 'object' && !Array.isArray(nested)
+      ? Object.fromEntries(
+          Object.entries(nested).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        )
+      : nested,
+  );
+}
+
+/** The error kind a turn fails with when a Runtime call outcome is unknown. */
+export const MANAGED_RUNTIME_OUTCOME_UNKNOWN =
+  'managed_runtime_outcome_unknown';
+
+/**
+ * A Runtime tool call ended without an outcome the host could learn: the
+ * call may or may not have taken effect, so it must neither be reported as
+ * failed nor run again.
+ */
+export class ManagedRuntimeOutcomeUnknownError extends Error {
+  readonly errorKind = MANAGED_RUNTIME_OUTCOME_UNKNOWN;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ManagedRuntimeOutcomeUnknownError';
+  }
+}
+
 export class ExecutionCleanupError extends Error {
   readonly retryCleanup?: () => Promise<void>;
 

@@ -4,6 +4,15 @@
 
 ## Status
 
+**Priority update (2026-09-28):** keep the merged B2d foundation. The remaining
+ordinary-host Managed engine work (M2, M4–M6) is deferred behind the first
+deliverable Hosted Managed slice and is not its prerequisite. M1 and M3 remain
+implemented; M4 and M2 have since landed without registering the engine, and
+the local engine stays unregistered. See the
+[engine status](./2026-09-27-ordinary-host-managed-engine.md#status) and #12737
+for the schedule and the on-demand child-host decision. Hosted Runtime/Broker
+work and recovery validation are not deferred by this decision.
+
 Design for slice B2d of #12737, the Stage B host integration for #12380, based
 on upstream `663d98eac5`. Implemented in #12828 behind
 `--experimental-paired-engines`, with no Managed engine registered. It records

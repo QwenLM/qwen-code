@@ -20,11 +20,11 @@ const scriptPath = path.join(
  * Returns { status, stdout, stderr }. Never throws on a non-zero exit so the
  * caller can assert on the exit code.
  */
-function runSandboxCommand(sandboxValue) {
+function runSandboxCommand(sandboxValue, inherited = '') {
   try {
     const stdout = execFileSync(process.execPath, [scriptPath, '-q'], {
       encoding: 'utf8',
-      env: { ...process.env, QWEN_SANDBOX: sandboxValue },
+      env: { ...process.env, QWEN_SANDBOX: sandboxValue, SANDBOX: inherited },
     });
     return { status: 0, stdout, stderr: '' };
   } catch (err) {
@@ -70,3 +70,21 @@ describe('sandbox_command.js QWEN_SANDBOX handling', () => {
     expect(stderr).toContain(`missing sandbox command '${payload}'`);
   });
 });
+
+it.each(['bwrap', 'BWRAP', ' BWRAP '])(
+  'normalizes inherited bwrap marker %j',
+  (marker) => {
+    const { status, stderr } = runSandboxCommand('false', marker);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain('Whole-CLI bwrap has been removed');
+  },
+);
+
+it.each(['bwrap', 'BWRAP', ' BWRAP '])(
+  'rejects the legacy QWEN_SANDBOX bwrap selection %j',
+  (marker) => {
+    const { status, stderr } = runSandboxCommand(marker);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain('Whole-CLI bwrap has been removed');
+  },
+);

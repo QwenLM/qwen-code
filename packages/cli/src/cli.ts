@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
+import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   DEFAULT_COMMAND,
   DEFAULT_COMMAND_DESC,
@@ -490,26 +491,43 @@ async function parseYargsCommand(
   parser: Argv,
   argv: readonly string[],
 ): Promise<void> {
-  await new Promise<void>((resolve) => {
-    parser.parse(
-      argv,
-      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
-        if (output) {
-          writeStdoutLine(output);
-        }
-        if (error) {
-          writeStderrLine(error.message);
-          process.exitCode = 1;
-        }
-        resolve();
-      },
-    );
+  await new Promise<void>((resolve, reject) => {
+    void Promise.resolve(
+      parser.parse(
+        argv,
+        (
+          error: Error | undefined,
+          _argv: ArgumentsCamelCase,
+          output: string,
+        ) => {
+          if (error instanceof FatalError) {
+            reject(error);
+            return;
+          }
+          if (output) writeStdoutLine(output);
+          if (error) {
+            writeStderrLine(error.message);
+            process.exitCode = 1;
+          }
+          resolve();
+        },
+      ),
+    ).catch(reject);
   });
 }
 
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
+  if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
+    const { runWorkspaceRecoveryWorker } = await import(
+      './serve/workspace-recovery-worker.js'
+    );
+    await runWorkspaceRecoveryWorker();
+    return;
+  }
+
   // Before ANY route can start a child: an inherited messaging pair names
   // an ancestor session's inbox plus a token that authenticates to it, and
   // no route here consumes it — a session that binds its own inbox

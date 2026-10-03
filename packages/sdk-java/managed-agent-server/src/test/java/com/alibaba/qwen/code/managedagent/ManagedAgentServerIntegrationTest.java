@@ -54,6 +54,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -79,6 +80,7 @@ import org.springframework.transaction.support.TransactionTemplate;
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.runtime-broker.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -109,6 +111,32 @@ class ManagedAgentServerIntegrationTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @AfterEach
+    void restoreHarnessAvailability() {
+        harness.setAvailable(true);
+    }
+
+    // This context pins the Runtime Broker off (which is also its shipped
+    // default), so the dedicated recovery scheduler must not exist: a
+    // deployment that never runs the tick should not pay for an idle
+    // scheduler thread. The enabled side is pinned by
+    // RuntimeBrokerConfigurationIntegrationTest.
+    @Test
+    void disabledBrokerDoesNotCreateTheRecoveryScheduler() {
+        // The ungated sibling proves this context really loads the
+        // configuration that declares both schedulers, so the absence below
+        // cannot pass for the wrong reason.
+        assertThat(applicationContext.containsBean("managedArtifactScheduler")).isTrue();
+        assertThat(applicationContext.containsBean("runtimeRecoveryScheduler")).isFalse();
+    }
+
+    // Keeps the dispatch recovery scanner from claiming a Turn that the
+    // test drives directly through the store: the scanner backs off while
+    // the Harness is unavailable.
+    private void pauseRecoveryScanning() {
+        harness.setAvailable(false);
+    }
 
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
@@ -627,7 +655,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAPendingRenameWithTheSameIdempotencyKey() throws Exception {
+    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -648,15 +676,17 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("hosted_harness_unavailable"));
 
+        // The answered failure retired its command row, so a different key
+        // is admitted instead of wedging on session_operation_active.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("session_operation_active"));
+                .andExpect(status().isOk());
 
+        // The retained failed receipt replays the same content and retries
+        // the Harness mutation without duplicating the requested event.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
@@ -672,7 +702,7 @@ class ManagedAgentServerIntegrationTest {
                 .getResponse().getContentAsString()).get("data");
         assertThat(events).filteredOn(event -> "session.updated".equals(
                         event.get("type").asText()))
-                .hasSize(1);
+                .hasSize(2);
     }
 
     @Test
@@ -1110,6 +1140,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-identity-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-identity-create",
@@ -1195,6 +1226,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
+        pauseRecoveryScanning();
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "environment-create",
@@ -1231,6 +1263,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void persistsRetryBackoffAcrossClaims() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retry-create",
@@ -1265,6 +1298,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "takeover-create",
@@ -1302,6 +1336,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "recovery-create",
@@ -1366,6 +1401,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retractsOnlyTheIncompleteContinuationEpoch() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-create",
@@ -1512,11 +1548,18 @@ class ManagedAgentServerIntegrationTest {
                                  "sessionId":"%s","turnId":"%s"}
                                 """.formatted(sessionId, turnId)))
                 .andExpect(status().isAccepted());
+        // Nothing may cancel the Turn while its submit is unresolved.
+        await().during(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(harness.cancelCount())
+                        .isEqualTo(cancellations));
         harness.releaseUncertainRetries();
 
+        // Once the Turn is admitted, the dispatch that resolved the submit
+        // and the queued cancellation can each deliver the cancel; the
+        // Hosted Harness treats a repeat as a no-op.
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 assertThat(harness.cancelCount())
-                        .isEqualTo(cancellations + 1));
+                        .isGreaterThan(cancellations));
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
@@ -1609,6 +1652,12 @@ class ManagedAgentServerIntegrationTest {
             HarnessRuntimeRecovery recovery = runtimeRecovery;
             runtimeRecovery = null;
             return new Attachment(BOOT_ID, recovery);
+        }
+
+        @Override
+        public Attachment recoverManagedRuntime(String tenantId,
+                String sessionId, boolean cancellation) {
+            return createOrLoad(tenantId, sessionId, true);
         }
 
         @Override

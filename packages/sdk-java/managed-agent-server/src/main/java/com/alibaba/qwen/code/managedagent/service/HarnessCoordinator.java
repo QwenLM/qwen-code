@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -154,6 +155,9 @@ public class HarnessCoordinator {
                         if (!store.renewTurn(tenantId, sessionId, turnId,
                                 owner, leaseDuration)) {
                             leaseLost.set(true);
+                        } else if (!leaseLost.get()) {
+                            executor.execute(() -> cancelAdmittedTurn(
+                                    tenantId, sessionId, turnId));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -190,6 +194,10 @@ public class HarnessCoordinator {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error);
             }
+        } catch (RuntimeBrokerException error) {
+            terminal = !submissionAttempted.get() && !error.isRetryable()
+                    ? fail(claimed, error.getCode(), error.getMessage())
+                    : transientFailure(claimed, submissionAttempted.get(), error);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error);
@@ -205,7 +213,7 @@ public class HarnessCoordinator {
             AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -222,11 +230,16 @@ public class HarnessCoordinator {
             warmRuntime(session, claimed);
         }
         requireLease(leaseLost);
-        Attachment attachment = recoveringCancellation
-                ? harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null, true)
-                : harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null);
+        Attachment attachment;
+        if (session.harnessBootId() != null) {
+            // A previously attached Session may hold a parked Turn; the
+            // takeover load settles or reports it. Plain loads stay inert.
+            attachment = harness.recoverManagedRuntime(session.tenantId(),
+                    session.sessionId(), recoveringCancellation);
+        } else {
+            attachment = harness.createOrLoad(session.tenantId(),
+                    session.sessionId(), false);
+        }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {
@@ -537,18 +550,22 @@ public class HarnessCoordinator {
             }
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
-            if (session.workspace() != null) {
+            // A bound Session's Turn is cancelled like any other once
+            // Workspace files are enabled: the Hosted Harness aborts the
+            // Turn and settles its Runtime calls through their original
+            // identities. Without the opt-in nothing may reach it.
+            if (session.workspace() != null
+                    && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            Attachment attachment = harness.createOrLoad(
-                    session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null);
-            if (store.bindHarness(tenantId, sessionId,
-                    turnId, owner, attachment.bootId())) {
+            // Reuse the admitted attachment: attaching would recheck grants
+            // needed for new work and could replace the running attachment.
+            if (session.harnessBootId() != null && store.bindHarness(tenantId,
+                    sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
-            LOG.warn("Managed Turn cancellation will recover tenant={}"
+            LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"
                             + " session={} turn={} failure={}",
                     tenantId, sessionId, turnId,
                     error.getClass().getSimpleName());

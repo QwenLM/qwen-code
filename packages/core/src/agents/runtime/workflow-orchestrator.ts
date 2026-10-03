@@ -22,6 +22,8 @@ import {
 import {
   createWorkflowSandbox,
   debugLogger,
+  describeOversizedBatch,
+  WORKFLOW_BATCH_LIMIT,
   type WorkflowSandbox,
 } from './workflow-sandbox.js';
 import type {
@@ -39,6 +41,11 @@ import {
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
+import {
+  prepareWorkflowSchema,
+  validateStructuredResult,
+  type WorkflowSchemaValidate,
+} from './workflow-schema.js';
 import {
   DISPATCH_AFFECTING_AGENT_OPTS,
   deriveAgentKey,
@@ -842,7 +849,9 @@ async function runSingleDispatch(
       // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
       // so plan lifecycle tools remain blocked if tool filtering changes.
       await runWithAgentContext(workflowAgentId, () =>
-        subagent.execute(ctx, attemptSignal),
+        subagent.execute(ctx, attemptSignal, {
+          enforceTimeLimitDuringRetryWait: true,
+        }),
       );
     } finally {
       reportTokens(subagent, opts, onTokens);
@@ -1041,6 +1050,20 @@ async function runOverridePath(
     );
   }
 
+  // The dispatch layer already refused a schema that cannot be prepared, but
+  // this path is also reached directly. Prepare it again before anything is
+  // provisioned, and keep the validator: the structured_output tool below
+  // must use it rather than the shared validator, which skips schemas it
+  // cannot compile.
+  let schemaValidate: WorkflowSchemaValidate | undefined;
+  if (opts.schema !== undefined) {
+    const prepared = prepareWorkflowSchema(opts.schema);
+    if (!prepared.ok) {
+      throw new Error(prepared.error);
+    }
+    schemaValidate = prepared.validate;
+  }
+
   const effort = resolveDispatchEffort(opts.effort);
   const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
   const requestedAllows = resolveDispatchAllows(opts.tools);
@@ -1088,7 +1111,7 @@ async function runOverridePath(
   // inherit the resolved agentType's `tools` allowlist verbatim — so
   // `structured_output` was present in the per-call ToolRegistry but
   // filtered OUT by prepareTools when the agentType allowlist didn't
-  // include it, producing the silent "after 2 nudges" dead-end with no
+  // include it, producing a silent structured-output dead-end with no
   // hint that the tool was invisible; and (b) replace the resolved
   // agentType's systemPrompt outright with WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
   // silently dropping the agentType's persona (e.g. Explore's
@@ -1340,16 +1363,17 @@ async function runOverridePath(
     // and its own registry, so concurrent calls under parallel()/pipeline()
     // do not share state.
     let schemaState: SchemaModeState | null = null;
-    if (opts.schema !== undefined) {
+    if (schemaValidate !== undefined) {
       effectiveContext = await createSchemaConfigOverride(
         effectiveContext,
         opts.schema as Record<string, unknown>,
+        schemaValidate,
       );
-      schemaState = createSchemaModeState();
+      schemaState = createSchemaModeState(schemaValidate);
     }
 
     // Schema mode chains a child AbortController so the dispatch can stop
-    // the subagent after the 3rd validation failure (or as soon as a valid
+    // the subagent after the 3rd failed submission (or as soon as a valid
     // `structured_output` call is captured). Outside the schema path, the
     // caller's signal is passed through unchanged.
     let dispatchSignal: AbortSignal | undefined = signal;
@@ -1415,7 +1439,9 @@ async function runOverridePath(
         // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
         // so plan lifecycle tools remain blocked if tool filtering changes.
         await runWithAgentContext(workflowAgentId, () =>
-          subagent.execute(ctx, dispatchSignal),
+          subagent.execute(ctx, dispatchSignal, {
+            enforceTimeLimitDuringRetryWait: true,
+          }),
         );
       } finally {
         reportTokens(subagent, opts, onTokens);
@@ -1450,13 +1476,13 @@ async function runOverridePath(
         if (signal?.aborted) {
           throw new DOMException('Workflow aborted.', 'AbortError');
         }
-        // R3 review (wenshao M2): the schema path used to throw the
-        // "after 2 in-conversation nudges" terminal for EVERY non-result
-        // outcome — including TIMEOUT (10 min cap), MAX_TURNS (50 cap),
-        // and ERROR (model client crash). Those aren't content failures
-        // and aren't nudge exhaustion; they're the same terminate-mode
-        // outcomes the non-schema branch below already distinguishes.
-        // Match that shape here BEFORE attributing the failure to schema.
+        // R3 review (wenshao M2): the schema path used to throw its
+        // structured-output terminal for EVERY non-result outcome —
+        // including TIMEOUT (10 min cap), MAX_TURNS (50 cap), and ERROR
+        // (model client crash). Those aren't content failures; they're the
+        // same terminate-mode outcomes the non-schema branch below already
+        // distinguishes. Match that shape here BEFORE attributing the
+        // failure to schema.
         const mode = subagent.getTerminateMode();
         if (
           mode !== AgentTerminateMode.GOAL &&
@@ -1465,27 +1491,17 @@ async function runOverridePath(
           throw terminalDispatchError(workflowAgentId, mode);
         }
         // The dispatch aborts via schemaState.abortController on the
-        // 3rd validation failure (attempts > 2) AND on success capture.
-        // The success path returns above, so reaching here means either
-        // (a) the model never called structured_output at all — answered
-        // in plain text — or (b) the 3-failure abort fired. Distinguish
-        // the messages so an operator sees what actually happened:
-        // upstream's verbatim "after 2 in-conversation nudges" wording is
-        // factually correct only for (b).
+        // 3rd failed submission AND on success capture. The success path
+        // returns above, so reaching here means the model ended without a
+        // valid result after 0, 1 or 2 failed submissions, or the 3rd
+        // failed submission stopped it. Nothing between submissions nudges
+        // the model, so the message reports only what it submitted.
         //
-        // Both are the agent's own content failure, not the run's: it
+        // All are the agent's own content failure, not the run's: it
         // answered, just not under the contract. The script sees `null` for
         // that slot and decides what a missing structured result means.
-        if (schemaState.attempts > 2) {
-          // Error message verbatim from upstream Claude Code 2.1.168 strings.
-          throw new WorkflowAgentFailedError(
-            'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
-            'no_structured_output',
-          );
-        }
         throw new WorkflowAgentFailedError(
-          'subagent completed without calling structured_output ' +
-            '(no validation attempt — model produced plain-text content).',
+          describeMissingStructuredOutput(schemaState),
           'no_structured_output',
         );
       }
@@ -1782,32 +1798,102 @@ function appendWorktreePreservedSuffix(
 }
 
 /**
+ * Failed `structured_output` submissions after which the dispatch stops the
+ * subagent. A submission can fail validation or any other gate the tool call
+ * passes through, so the count is of failed submissions, not of schema
+ * validation failures.
+ */
+const MAX_FAILED_STRUCTURED_OUTPUT_SUBMISSIONS = 3;
+const MAX_STRUCTURED_OUTPUT_ERROR_LENGTH = 500;
+
+/**
  * Per-call schema-mode state. The dispatch listens to TOOL_CALL/TOOL_RESULT
  * events from the subagent and updates this object: failed
- * `structured_output` calls increment `attempts` (and abort the dispatch
- * after the third failure — "after 2 in-conversation nudges" in upstream
- * parlance), and a successful call captures the validated args as
- * `result` and aborts the dispatch so the subagent stops generating
- * additional tokens.
+ * `structured_output` submissions increment `attempts` and record their
+ * error (the dispatch aborts after the third), and a successful call
+ * captures the validated args as `result` and aborts the dispatch so the
+ * subagent stops generating additional tokens.
  *
  * Per-element isolation: each agent({schema}) call gets its own
  * SchemaModeState. Concurrent calls under parallel()/pipeline() do not
- * share counters or results.
+ * share counters, errors or results.
  */
 interface SchemaModeState {
   result: unknown | null;
   attempts: number;
+  /** The most recent failed submission's error, when one carried an error. */
+  lastError: string | undefined;
+  /** Which submission (1-based) `lastError` came from. */
+  lastErrorAttempt: number;
   pendingArgs: Map<string, Record<string, unknown>>;
   abortController: AbortController;
+  /** This call's own validator; the captured result is what it accepted. */
+  validate: WorkflowSchemaValidate;
 }
 
-function createSchemaModeState(): SchemaModeState {
+function createSchemaModeState(
+  validate: WorkflowSchemaValidate,
+): SchemaModeState {
   return {
     result: null,
     attempts: 0,
+    lastError: undefined,
+    lastErrorAttempt: 0,
     pendingArgs: new Map(),
     abortController: new AbortController(),
+    validate,
   };
+}
+
+function recordFailedSubmission(
+  state: SchemaModeState,
+  error: string | undefined,
+): void {
+  state.attempts += 1;
+  if (typeof error === 'string' && error.trim().length > 0) {
+    const clean = sanitizeForErrorMessage(error).trim();
+    state.lastError =
+      clean.length > MAX_STRUCTURED_OUTPUT_ERROR_LENGTH
+        ? `${clean.slice(0, MAX_STRUCTURED_OUTPUT_ERROR_LENGTH)}…`
+        : clean;
+    state.lastErrorAttempt = state.attempts;
+  }
+  if (
+    state.attempts >= MAX_FAILED_STRUCTURED_OUTPUT_SUBMISSIONS &&
+    state.result === null
+  ) {
+    state.abortController.abort();
+  }
+}
+
+/**
+ * The terminal message for a schema dispatch that ended without a valid
+ * result. It states how many submissions failed and the last error one of
+ * them carried, and claims nothing the dispatch did not do.
+ */
+function describeMissingStructuredOutput(state: SchemaModeState): string {
+  const attempts = state.attempts;
+  if (attempts === 0) {
+    return (
+      'subagent completed without calling structured_output ' +
+      '(no validation attempt — model produced plain-text content).'
+    );
+  }
+  const submissions = `${attempts} failed structured_output submission${attempts === 1 ? '' : 's'}`;
+  const head =
+    attempts >= MAX_FAILED_STRUCTURED_OUTPUT_SUBMISSIONS
+      ? `subagent stopped after ${submissions} without a valid result.`
+      : `subagent completed after ${submissions} without a valid result.`;
+  if (state.lastError === undefined) {
+    return `${head} The failed submissions reported no error detail.`;
+  }
+  if (state.lastErrorAttempt === attempts) {
+    return `${head} Last error: ${state.lastError}`;
+  }
+  return (
+    `${head} Submission ${attempts} reported no error detail; the last ` +
+    `error (submission ${state.lastErrorAttempt}): ${state.lastError}`
+  );
 }
 
 /**
@@ -1816,23 +1902,22 @@ function createSchemaModeState(): SchemaModeState {
  * provided schema state, and ignores every other event type.
  *
  * Why TOOL_CALL captures `args` and TOOL_RESULT decides success: the
- * TOOL_RESULT event in agent-core (line 1194-1205) carries `success` and
- * `responseParts` but not the original arguments, so we snapshot args at
- * TOOL_CALL time keyed by `callId` and look them up when TOOL_RESULT
- * fires. A successful call's args ARE the validated structured payload
- * (AJV validation runs inside `BaseDeclarativeTool.validateToolParams`
- * before `execute()` is invoked).
+ * TOOL_RESULT event in agent-core carries `success` and `error` but not the
+ * original arguments, so we snapshot args at TOOL_CALL time keyed by
+ * `callId` and look them up when TOOL_RESULT fires. The scheduler validated
+ * (and may have coerced) its own clone of those args, so a successful call's
+ * args are validated again here, on a copy, with this call's validator: the
+ * captured result is the object the validator accepted. A success with no
+ * paired call, or whose args do not pass, counts as a failed submission.
  *
  * Abort semantics:
  *   - On successful capture: abort the dispatch signal so the subagent
  *     loop stops emitting tokens. `SyntheticOutputTool.execute()` already
  *     instructs the model to stop, but abort makes termination
  *     deterministic.
- *   - On the third failure (attempts > 2 after increment): abort the
- *     dispatch signal so the subagent stops retrying. The post-execute
- *     check in `runOverridePath` then throws the upstream-aligned
- *     "completed without calling StructuredOutput (after 2 in-conversation
- *     nudges)" error.
+ *   - On the third failed submission: abort the dispatch signal so the
+ *     subagent stops retrying. The post-execute check in `runOverridePath`
+ *     then throws a terminal naming the count and the last error.
  *   - Caller abort: outer code in `runOverridePath` forwards the caller's
  *     signal into this state's controller, so a caller cancellation
  *     propagates straight to the subagent.
@@ -1853,17 +1938,28 @@ function attachSchemaListeners(
     if (evt.name !== targetTool) return;
     const args = state.pendingArgs.get(evt.callId);
     state.pendingArgs.delete(evt.callId);
-    if (evt.success) {
-      if (args !== undefined && state.result === null) {
-        state.result = args;
-        state.abortController.abort();
-      }
+    if (state.result !== null) return;
+    if (!evt.success) {
+      recordFailedSubmission(state, evt.error);
       return;
     }
-    state.attempts += 1;
-    if (state.attempts > 2 && state.result === null) {
-      state.abortController.abort();
+    if (args === undefined) {
+      recordFailedSubmission(
+        state,
+        'structured_output reported success for a call whose arguments were not observed.',
+      );
+      return;
     }
+    const checked = validateStructuredResult(args, state.validate);
+    if ('error' in checked) {
+      recordFailedSubmission(
+        state,
+        `structured_output arguments did not pass validation: ${checked.error}`,
+      );
+      return;
+    }
+    state.result = checked.value;
+    state.abortController.abort();
   });
 }
 
@@ -1892,6 +1988,7 @@ function attachSchemaListeners(
 async function createSchemaConfigOverride(
   base: Config,
   schema: Record<string, unknown>,
+  validate: WorkflowSchemaValidate,
 ): Promise<Config> {
   const override = deriveConfig(base);
   // Same session-global revision contract as the dir-scoped dispatch
@@ -1902,7 +1999,7 @@ async function createSchemaConfigOverride(
   installSessionWorkflowRevisionWriteThrough(override, base);
   await rebuildToolRegistryOnOverride(override, base);
   const registry = override.getToolRegistry();
-  registry.registerTool(new SyntheticOutputTool(schema));
+  registry.registerTool(new SyntheticOutputTool(schema, validate));
   return override;
 }
 
@@ -2037,6 +2134,20 @@ export class WorkflowOrchestrator {
           new Error('agent() requires a non-empty string prompt.'),
         );
       }
+      // A schema is prepared before the cache is consulted, synchronously so
+      // the key chain below keeps its call order. A schema that cannot be
+      // prepared is held as data rather than thrown: the call still takes its
+      // key, still misses the cache (a result journaled under a broken schema
+      // is not trusted) and still passes the replay barrier and admission,
+      // then settles as this agent's own failure before anything dispatches.
+      const schemaPreparation =
+        opts.schema === undefined
+          ? undefined
+          : prepareWorkflowSchema(opts.schema);
+      const schemaError =
+        schemaPreparation !== undefined && !schemaPreparation.ok
+          ? schemaPreparation.error
+          : undefined;
       // P6: journal cache lookup — runs BEFORE the budget gate + agent
       // counter so a cached result is free (no token spend, no agent-cap
       // slot, no live dispatch). The key is computed SYNCHRONOUSLY here so
@@ -2051,9 +2162,33 @@ export class WorkflowOrchestrator {
       if (journal) {
         journalKey = deriveAgentKey(prefixHash, prompt, opts);
         prefixHash = journalKey;
-        if (!hadMiss && replay) {
+        if (!hadMiss && replay && schemaError === undefined) {
           const cached = replay.results.get(journalKey);
-          if (cached !== undefined) {
+          // A journaled structured result is served only if it passes this
+          // call's validator: an older runtime could journal one its shared
+          // validator skipped. The copy it validated (and may have coerced)
+          // is what the script gets; the journal and replay map are
+          // untouched. One that fails is a miss and re-runs live.
+          let cachedResult = cached?.result;
+          let cacheUsable = cached !== undefined;
+          if (cached !== undefined && schemaPreparation?.ok) {
+            const checked = validateStructuredResult(
+              cached.result,
+              schemaPreparation.validate,
+            );
+            if ('error' in checked) {
+              debugLogger.info(
+                `[Workflow] resume cache entry no longer satisfies its ` +
+                  `schema for runId=${runId}; re-running live: ` +
+                  sanitizeForErrorMessage(checked.error),
+              );
+              cacheUsable = false;
+            } else {
+              cachedResult = checked.value;
+            }
+          }
+          if (cacheUsable) {
+            const replayed = cachedResult;
             replayPrefix.add(journalKey);
             // Cache hit: surface dispatch + completion to the registry so
             // the UI counters advance, then return the cached result. A
@@ -2093,8 +2228,8 @@ export class WorkflowOrchestrator {
             // result at teardown would surface an unobserved rejection for
             // fire-and-forget calls on a correctly-cancelled run.
             return scheduler.waitUntilRunning().then(
-              () => cached.result as WorkflowAgentResult,
-              () => cached.result as WorkflowAgentResult,
+              () => replayed as WorkflowAgentResult,
+              () => replayed as WorkflowAgentResult,
             );
           }
         }
@@ -2270,6 +2405,9 @@ export class WorkflowOrchestrator {
               } catch (e) {
                 debugLogger.warn('emitter.resumeRespawn threw:', e);
               }
+            }
+            if (schemaError !== undefined) {
+              throw new Error(schemaError);
             }
             const result = await this.dispatch(prompt, opts, dispatchId);
             emitCompletion();
@@ -2621,8 +2759,9 @@ async function settleToNullArray(
  * function whose agent() calls throttle through the per-run concurrency window
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
- * itself rejects when given invalid arguments (non-array / non-function
- * element), when the run is aborted, or when a token/agent-cap or container
+ * itself rejects when given invalid arguments (non-array, more than
+ * `WORKFLOW_BATCH_LIMIT` thunks, non-function element) before any thunk
+ * runs, when the run is aborted, or when a token/agent-cap or container
  * policy gate refuses a dispatch. The sandbox wrapper revives the result array
  * into the vm realm (per-element JSON round-trip) — this host array never
  * reaches the script directly.
@@ -2639,8 +2778,14 @@ function makeParallelImpl(
         ),
       );
     }
-    for (const t of thunks) {
-      if (typeof t !== 'function') {
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('parallel() thunks', thunks);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    for (let i = 0; i < batch.length; i++) {
+      if (typeof batch[i] !== 'function') {
         return Promise.reject(
           new Error(
             'parallel() expects an array of functions, not values — wrap each ' +
@@ -2651,7 +2796,7 @@ function makeParallelImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = thunks.map((thunk) => {
+    const branches = (batch as Array<() => Promise<unknown>>).map((thunk) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2683,8 +2828,10 @@ function makeParallelImpl(
  * stage's `prev` is the item itself. An ordinary stage error, a `null`, or a
  * non-JSON-serializable value drops that item to `null` and skips its remaining
  * stages, leaving other items unaffected. A token/agent-cap refusal rejects
- * the batch. Concurrency is bounded at the dispatch layer, and the result array
- * shares parallel()'s per-element vm-realm revival.
+ * the batch. Items and stages are each bounded by `WORKFLOW_BATCH_LIMIT`; a
+ * longer list rejects the call before any stage runs. Concurrency is bounded
+ * at the dispatch layer, and the result array shares parallel()'s
+ * per-element vm-realm revival.
  */
 function makePipelineImpl(
   signal: AbortSignal | undefined,
@@ -2703,6 +2850,13 @@ function makePipelineImpl(
         ),
       );
     }
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('pipeline() items', items);
+      snapshotBatch('pipeline() stages', stages);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     for (const s of stages) {
       if (typeof s !== 'function') {
         return Promise.reject(
@@ -2715,7 +2869,7 @@ function makePipelineImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = items.map((item, idx) => {
+    const branches = batch.map((item, idx) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2739,6 +2893,37 @@ function makePipelineImpl(
       return result;
     });
   };
+}
+
+/**
+ * Copy one `parallel()` / `pipeline()` list into a host array after checking
+ * its length against the batch limit. The length is read once and every later
+ * loop runs over the copy, so a Proxy whose length changes, or a custom
+ * iterator or `map`, cannot stretch the batch past the check. Holes stay
+ * holes: the copy is shallow and keeps the input's sparse positions.
+ */
+function snapshotBatch(list: string, input: ArrayLike<unknown>): unknown[] {
+  let length: unknown;
+  try {
+    length = input.length;
+  } catch {
+    length = undefined;
+  }
+  if (
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < 0
+  ) {
+    throw new Error(`${list} must be an array with a readable length.`);
+  }
+  if (length > WORKFLOW_BATCH_LIMIT) {
+    throw new Error(describeOversizedBatch(list, length));
+  }
+  const batch: unknown[] = new Array(length);
+  for (let i = 0; i < length; i++) {
+    if (i in input) batch[i] = input[i];
+  }
+  return batch;
 }
 
 function mergeFanoutTails(

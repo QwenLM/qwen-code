@@ -12,15 +12,14 @@ it. That ingress must authenticate the tenant before setting the header.
 
 ## Integration status
 
-This split is not yet a complete Hosted Harness / Runtime deployment. The
-embedded HTTP transport returns 501 for acquire/control/release. Prepare/start
-and operator resolution also return 501 because the merged Broker lacks their
-durable service APIs.
-Harness-level drain does not tear down workers. The copied real-process E2E
-script requires TypeScript integrations absent from this PR. See the
+The Hosted path supports durable no-tool Sessions and private Workspace tool
+profiles. G0 adds opt-in public creation with an initial file-tool Turn through
+the production Broker. This is not complete Workspace lifecycle, in-flight
+recovery or distributed provisioning support. See the G0 section below for its
+exact deployment and admission boundary, and the historical
 [review corrections](../../../docs/design/2026-09-25-managed-agent-review-corrections.md)
-for the remaining merge gates; earlier preview timing and recovery results
-below are not evidence for this split.
+for the original split's merge gates; earlier preview timing and recovery
+results below do not establish completion of later slices.
 
 ## API contract
 
@@ -31,10 +30,15 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. Every response carries `X-Request-Id`, which error
+`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+`POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
+revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
-projection versions and the Item and Part identity they were accepted with,
-except that a `stream.reconciled` event announces retracted deltas. A
+projection versions they were accepted with. They keep their Item and Part
+identity too, except after Harness recovery retracts output: the retracted
+deltas lose their text and identity, later deltas may name other Parts, and a
+`stream.reconciled` event announces it. A client that sees one reloads the
+Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
@@ -48,16 +52,55 @@ Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-repl
 Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
-[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
+Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
+AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-agent-definitions.md) |
+[简体中文](../../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
+
+## Managed tool results (O3)
+
+O3 publishes durable Hosted foreground Shell outcomes to Items, events and
+Managed WebShell. Downloads read immutable stdout/stderr after the writer is
+sealed, without reviving a Harness. The API requires a trusted actor and a
+current Workspace read grant; a tenant header alone cannot authorize it.
+
+O3 requires O2 publication to be configured, including
+`qwen.managed-agent.tool-publication.verification-bytes-per-second` and
+`qwen.managed-agent.tool-publication.max-verification-timeout`. These required
+O2 verification settings are separate from the O3 content-read timeout below.
+
+All settings below use the `qwen.managed-agent.artifacts` prefix:
+
+| Setting                | Default | Meaning                                                                                                                                                       |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                    |
+| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                                                        |
+| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                       |
+| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                                                    |
+| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts. |
+
+A product can replace `ManagedArtifactPolicy` for narrower publication or
+actor rules. Published previews persist in shared events. Policy changes do
+not automatically reproject historical results; content requests always use
+the current read policy. Configure the policy before enabling projection.
+Original reads are capped at 1 MiB per Range request; full downloads use
+bounded segment buffers and stream with backpressure. Deployments must retain
+O2 roots and validate real OSS and slow-reader limits before enabling this
+feature. O3 does not enable public Shell execution or garbage collection.
+
+Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-projection.md) |
+[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md).
 
 ## Prerequisites
 
 - Java 21
+- Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
-The `qwen serve --profile hosted-harness` option on current main is reserved
-and rejects startup. The configuration below supports control-plane development,
-but a successful Hosted Harness turn is not available in this split.
+Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
+process. It supports durable no-tool Sessions and the opt-in Workspace file
+Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -148,9 +191,16 @@ never means that tools stopped. After the Hosted Harness restarts, its calls fai
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`, and a failed rename leaves a `PENDING` command that the
-same idempotency key can safely resume. One lifecycle change runs at a time. A
-retry with the same key from the same actor returns the original operation.
+`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
+while retaining its receipt and request digest. The same
+key retries the same content with the replay flag set; changed content or a
+different Session conflicts. A successful concurrent request can still complete
+the receipt, and a failing sibling cannot overwrite that completed outcome.
+Retries do not re-append the original `requested` event. If the command store
+is unavailable during cleanup, the original API failure is preserved and the
+same key can resume its receipt when storage returns. Only an in-flight
+lifecycle change blocks another one. A retry with the same key from the same
+actor returns the original operation once it has completed.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -161,9 +211,11 @@ tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
 Delete writes a public tombstone: get and list stop returning the Session,
-while its operations stay readable. It does not physically erase the private
-journal, events or resources, and it does not mark the journal deleted;
-retention and garbage collection remain future work.
+while its operations stay readable. Completed deletion permanently marks an existing
+private journal `DELETED`, clears its writer and recovery references, and fences
+new writes and recovery. Close and archive keep output pinned. Deletion does
+not physically erase the journal, events or resources; output collection stays
+disabled by default and requires the retention deployment gates.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -204,11 +256,12 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
-HTTP adapter and generates its own writer secret. The Store scope reuses
-`QWEN_MANAGED_AGENT_WORKSPACE_ID`, so the public Session, private journal, and
-Runtime binding have one `(tenantId, workspaceId, sessionId)` identity. Set
-that ID explicitly when enabling the Session Store; if the Runtime Broker also
-has an explicit ID, startup rejects a mismatch.
+HTTP adapter and generates its own writer secret. Workspace-bound Sessions use
+their persisted Workspace ID for the Store scope; unbound Sessions use
+`QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
+binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
+must still be set explicitly when enabling the Session Store; if the Runtime
+Broker also has an explicit ID, startup rejects a mismatch.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
@@ -268,6 +321,57 @@ Harness or Runtime Broker credentials.
 
 ## Embedded Runtime Broker
 
+### Initial Workspace file Turn (G0)
+
+`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
+Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
+adapter uses the same admission. This requires the Hosted Harness and HTTP
+Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
+Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
+use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
+tenant/storage identity must have a deployment mount. The trusted ingress must
+provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
+header alone does not authenticate an actor. For local runs and the
+packaged-stack E2E, which have no ingress,
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` names a request header whose value is
+then trusted as the actor for the request's tenant. It is disabled by default;
+never enable it where untrusted clients can reach the server.
+
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
+`auto-edit`, the Session creator can list, inspect and answer pending permission
+Actions through the public API or WebShell. Responses are durable, idempotent
+operations; their final result follows the committed Harness decision.
+`QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
+The approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load.
+
+Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
+through `POST /v1/agents/sessions`. The server chooses the fixed
+`hosted-workspace-files/1` private profile and uses the persisted Workspace ID
+for the Session Store. Public callers cannot choose the profile. Configure the
+Harness's deployment-owned `--managed-runtime-broker-url` and
+`--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
+the original Session/Turn; changed input conflicts. Disabling the opt-in refuses
+creation with input, including replays, while empty bound creation remains
+available. The directory mounted for a Workspace is trusted deployment data,
+not a filesystem sandbox.
+
+Later Turns may be submitted by the Session's creator under the
+same opt-in while they can still read and create in the Workspace (the
+per-caller `workspaceTurns` capability flag reflects the caller's current
+grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
+the Session's running Turns and rename the Session. Workspace close follows
+its separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable Workspace
+close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
+The existing `EmbeddedRuntimeBroker` is used through production configuration;
+no direct store admission or test Broker replacement is needed.
+
+Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admission.md)
+| [简体中文](../../../docs/design/2026-09-29-hosted-public-workspace-admission.zh-CN.md).
+
+### Broker deployment
+
 The Broker starts before the first Hosted Harness connection, so the supported
 startup order is Spring/Broker first, Hosted Harness second, traffic last. The
 Harness SDK handshake is lazy and occurs on the first admitted Turn.
@@ -291,14 +395,65 @@ When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
-The reserved Hosted Harness profile cannot yet connect to the Broker at
-`http://127.0.0.1:4182`. When enabled, the embedded
+The Hosted file profile connects through the private Broker endpoint, which
+defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. The local-process adapter can recover the same
-worker after a Java restart on the same host; multi-host scheduling and the
-Kubernetes adapter's real-cluster fault matrix remain production gates. This
+credentials with AES-256-GCM. By default, local worker ownership is durable:
+the Broker registers every launch and a restarted Broker adopts the same live
+worker. This requires Linux and fails startup elsewhere; on such hosts set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
+worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
+must be persistent local storage, owned by the Broker user with mode `0700`,
+without symlinks, outside every configured Workspace root. The expected
+owner is resolved from the process UID, so a numeric UID without a passwd
+entry is fine. Workers and tools
+must be trusted; same-UID hostile tools and multi-host or remote storage are
+unsupported. Keep the host machine ID, SQL credential key, placement mapping,
+state directory and worker command stable across Broker restarts. Shutdown and
+late lease discard detach from registered workers instead of killing them.
+`/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
+and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). An empty or malformed
+identity fails startup the same way as an absent one, naming both opt-out
+switches. The service
+manager must let workers survive a Broker exit: systemd's default
+`KillMode=control-group` kills them, as does restarting a container whose main
+process is the Broker. Configure the service to leave child workers running
+(for example, systemd `KillMode=process`) and use an init that reaps orphaned
+processes. The Broker recognizes `Z`/`X` workers as exited even before they are
+reaped.
+Missing or damaged records and worker death do not authorize replacement;
+worker death does not prove escaped writers stopped. No host reboot reclamation
+is enabled by this option alone. Old v1 handles cannot be upgraded by guessing identity.
+This option does not retire idle workers or prune their registration and lock
+files. With session isolation, each Hosted Session can retain a separate idle
+worker across Broker restarts; budget process, memory and state-directory growth
+for it. Physical cleanup needs an evidence-preserving lifecycle;
+do not delete records to reclaim capacity.
+See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
+
+Trusted same-host Linux reboot recovery is also on by default. It requires
+durable local mode with the `local-process` provisioner, so a deployment that
+opts out of durable local workers or uses another provisioner must set
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed kernel boot ID on the original machine can prove
+that original local writers stopped; worker-only death still cannot. The
+service scans eight saved bindings every five seconds, independently of current
+Session grants, and clears only the original SQL holder after all execution
+receipts become terminal. Recovery never starts a replacement worker or replays
+an unknown execution. A later authorized request may create a new generation.
+Keep the same Broker user, local disks, machine identity and SQL keys; remote
+writers, restored/cloned snapshots and external jobs that recreate writers are
+outside this contract. Where a matching boot identity cannot be trusted as stop
+evidence, set the option to `false`. The
+[reboot recovery design](../../../docs/design/2026-09-28-local-reboot-recovery.md)
+distinguishes portable test evidence from the dedicated Linux reboot acceptance
+gate completed at W0e-3 head `8c2b626c`. A systemd soft reboot is not stop
+proof because it does not change the kernel boot ID.
+
+The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
@@ -341,10 +496,103 @@ responses retain the SQL holder; there is no timeout-based takeover. The
 provider and file tools do not confine access to the mount root: Read/Write/Edit
 and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
-local workloads until physical isolation and W0e cleanup are implemented.
-Public bound Turn/lifecycle gates and the full Hosted tool loop remain closed.
+local workloads. The W0e recovery above handles trusted host reboot; it
+does not provide physical isolation or recovery after worker-only death.
+Public bound Turn admission is limited to the opt-in initial file Turn described
+in G0 above and to later Turns submitted by the Session's creator under the same
+opt-in while they can still read and create in the Workspace (the per-caller
+`workspaceTurns` capability flag reflects the caller's current grants and the
+registry's `ACTIVE` state); the creator may also cancel the Session's running
+Turns and rename the Session. Later Turns run
+under the creator's Workspace grants, so any other actor keeps the existing
+refusal: `workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. Public close follows its separate close
+capability and lifecycle admission. Archive, delete and unarchive follow their
+separate retention capabilities after reliable Workspace close;
+the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
+
+Hosted files/Shell file history additionally requires persistent worker backup
+storage. Configure an absolute `QWEN_HOME` in the Broker/worker environment and
+mount it as durable storage writable by the worker OS user. Backups are stored
+at `$QWEN_HOME/file-history/<Harness Session ID>/`; without the override they
+use the worker user's `~/.qwen/file-history/`. Preserve this directory alongside
+the Workspace and SQL database. A Workspace mount alone does not preserve these
+backup bytes, and referenced backups must survive worker/container restarts.
+The stock image runs as UID 10001; derived images must provision appropriate
+write access for their worker user.
+
+Roll out the Broker and worker bundle before the Hosted Harness. An older
+Broker rejects raw-history control, including the bind before a read-only tool
+turn. The Harness releases a definite rejected bind and ends the turn with an
+error; it does not run unbacked writes. Missing backups also refuse tool turns
+until the original backup data is restored. Unknown or partial effects still
+require operator recovery. See the bilingual
+[file-history design](../../../docs/design/2026-09-30-hosted-file-history.md)
+for record capacity and rewind semantics.
+
+### Verified original-mount recovery (W1a)
+
+W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
+V25 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
+upgrading every Broker and Harness instance. An unregistered mount is refused
+once the option is enabled; it is never registered from the directory found at
+startup.
+
+Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
+
+Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
+
+Prerelease W1 V21/V24 databases and marker v1 cannot be directly upgraded to V25/v2. Experimental W1 V24 conflicts with main’s Actions V24; renaming the migration does not upgrade an existing database. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+
+Stop all processes and external jobs that can write the storage, account for
+old Runtime holders and verify the original root before registration. Apply
+Flyway migrations, then run the private maintenance entry from this module on
+the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
+crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
+`W1_JDBC_PASSWORD` environment variables:
+
+```bash
+mvn -q -DskipTests compile exec:java \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
+```
+
+The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+
+```bash
+java -cp /path/to/app.jar \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  org.springframework.boot.loader.launch.PropertiesLauncher \
+  register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
+```
+
+`inspect <tenant> <storage> <canonical-root>` is read-only. The same entry also
+accepts `fence` or `restore-original` with a mount revision and the exact
+operation UUID; both require `--offline-confirmed`. A fence has no timeout and requires every holder field to be clear after exact-owner cleanup. Entering a new fence and restoring both require the intact registered root identity and marker. W1 cannot force-fence, re-register or repair a changed identity or missing marker; admission stays closed until the verified original mapping is re-presented, or a separately designed offline repair is performed. Stop new admissions, settle or cancel original executions, prove writers stopped, release holders and stop service/external writer processes before fencing.
+`restore-original` only reopens the still-verified original mapping after its
+holder is clear. Both commands accept retries with the same operation UUID;
+restoring increments the mount revision, so a delayed old fence cannot reopen
+maintenance. Completed registration and restore retries revalidate identity and marker; concurrent same-operation retries do not advance the revision twice. Inspect reports state, revision, active/completed operation, holder and independent identity/marker status, including while fenced. The flag records the operator's offline check; the program
+cannot stop arbitrary processes or external writers itself. Do not use it on
+a live shared storage.
+
+After registration, enable
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
+whole upgraded deployment. On each new attachment, model submission, Runtime
+claim and execute, the server compares the configured canonical root against
+the SQL registration, Linux host/device/inode/birth-time identity and the root marker.
+A missing or conflicting marker, replacement root, missing saved cwd or fenced
+storage blocks new work; original execution status/cancel and authorized
+history remain on their saved identities. The marker is a continuity check,
+not a backup or protection against a malicious same-UID writer. See the
+[W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
+Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
+Workspace next-turn admission for the Session's creator under the G0 opt-in
+described above has landed; public Workspace resume still requires product-route
+integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:
 
@@ -358,10 +606,17 @@ artifacts, before enabling the local-process provisioner in a container.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. The optional
-real-MySQL profile also verifies schema upgrade, exact bytes, public
-Item/Snapshot projection, and the independent-JVM Managed Session Store
-crash/takeover path:
+Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
+warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To run the static
+gates without the test suite, use `mvn verify -DskipTests` — it also runs
+Checkstyle and the Spring Boot repackage, and the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
+optional real-MySQL profile also verifies schema upgrade,
+exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+Session Store crash/takeover path:
 
 ```bash
 mvn -Pmysql-integration \
@@ -376,12 +631,26 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes copied full-chain scripts for a future integration.
-They cannot run against this split: the Hosted Harness profile rejects startup
-and `dist/managed-runtime-worker.js` is not built. The commands below describe
-the intended verification, not passing evidence for this PR.
+The full-chain script starts Spring with its embedded Runtime Broker and runs
+both the Hosted Harness and the worker from the packaged `dist/cli.js`: the
+Harness as `node dist/cli.js serve --profile hosted-harness`, and each worker,
+launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
+separate worker bundle exists. The G0 integration test
+(`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
 
-Build the required artifacts first, then run:
+The real-model run below creates its Session through the public route as a
+Workspace-bound G0 Session, and proves the physical tool execution through
+the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
+than a public `item.tool_call.*` event — Broker-worker tool calls are not
+published without O2 tool publication. The run needs live model credentials,
+so no CI job executes it; it has been run locally as evidence (macOS,
+qwen3.8-max), and a green CI run therefore says nothing about this mode. The
+script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
+starts its own temporary MySQL server and exits before starting anything else
+when a command or a required file is missing.
+
+Build the required artifacts first, then run (the Maven steps need Maven
+3.8.9+ — the SpotBugs gate rides the `verify` phase that `install` traverses):
 
 ```bash
 npm run build && npm run bundle
@@ -403,27 +672,40 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-The in-flight and continuation variants are not yet runnable. Both drive their
-assertion through a physical tool execution, and the Hosted Harness no-tool
-slice refuses every tool call by design, so the modes exit immediately with a
-not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
-lands:
+The in-flight and continuation variants run the same replacement-owner proof
+through a physical Workspace file tool execution. The runner configures the
+G0 public Workspace admission for every mode — it seeds the Workspace
+registry and access grant as deployment data, enables the G0 file admission,
+and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local actor — and
+the real-model check and both tool-driven variants create their Sessions
+through the public route as Workspace-bound Sessions, while
+`--session-failover` deliberately stays unbound to exercise the plain
+durable-owner takeover:
 
 ```bash
-npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
-npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
+npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-continuation-failover
 ```
 
-Once enabled, the in-flight mode holds the first Broker `:start` request after
-the Harness has durably committed its `await_runtime` checkpoint, kills the
-original Spring and Hosted Harness process trees, deletes their homes, and
-starts replacement owners. It requires the replacement Harness to use the
-original `executionCallId`, execute the physical tool exactly once, continue
-the original Prompt without replay, and commit one public terminal event.
+Both modes require Linux: the replacement owner retires the dead worker's
+Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
+runs on Linux only. The runner enables `durable-local-process` for these modes
+and refuses other platforms with an explicit error; the Hosted MySQL CI job
+runs both.
 
-Once the missing integration lands, a zero-delay run can check the real-model
-path. A controlled cold-start delay can then test output before Runtime
-readiness:
+The in-flight mode holds the first Broker `:start` request after the Harness
+has durably committed its `await_runtime` checkpoint, kills the original
+Spring and Hosted Harness process trees, deletes their homes, and starts
+replacement owners. It requires the replacement Harness to use the original
+`executionCallId`, execute the physical tool exactly once, continue the
+original Prompt without replay, and commit one public terminal event. The
+continuation mode kills the Harness after the first published text chunk and
+requires one tool execution, one further continuation, only the replacement's
+answer in the public transcript, and one terminal event. Both modes run in the
+Hosted MySQL CI job.
+
+A zero-delay run checks the real-model path as shown above; a controlled
+cold-start delay additionally tests output before Runtime readiness:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \
@@ -432,9 +714,9 @@ npm run test:e2e:managed-agent-server -- \
 ```
 
 That run additionally requires the first model event to precede Runtime
-readiness. Real provider TTFT varies, so the deterministic CI proof of the same
-ordering remains `npx tsx scripts/run-managed-hosted-runtime-e2e.ts`, which
-uses a controlled model server and a 15-second Runtime delay.
+readiness whenever the delay reaches the 15 seconds the acceptance criterion
+names. A deterministic controlled-model proof of the same ordering is tracked
+in #12941.
 
 The real-model check extracts only the selected model provider, its referenced
 environment credential, the selected model, and the authentication policy
