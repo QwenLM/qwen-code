@@ -76,6 +76,7 @@ import {
   describeWorkflowCompileError,
   type WorkflowMeta,
 } from './workflow-sandbox.js';
+import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
 import {
   resolveReviewWorkflowLimits,
   type ReviewWorkflowLimits,
@@ -196,11 +197,13 @@ export class WorkflowRunHandle {
 const WORKFLOW_SCRIPT_SYNTAX_HINT =
   'Workflow scripts must be plain JavaScript — the usual causes are ' +
   'TypeScript syntax (type annotations, interfaces, generics) and ' +
-  'broken string quoting or escaping. Metadata must use literal values.';
+  'broken string quoting or escaping. Metadata must be the first ' +
+  'non-comment statement and use literal values.';
 
 /**
- * The script was refused before a run was created: it did not compile, or it
- * calls something a resumable workflow cannot replay.
+ * The script was refused before a run was created: it did not compile, it
+ * uses syntax a workflow cannot run, or it calls something a resumable
+ * workflow cannot replay.
  *
  * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
  * that existed and failed, and callers report it as such. This one means there
@@ -392,6 +395,9 @@ export class WorkflowRunner {
       try {
         scriptMeta = compileWorkflowScript(script).meta;
       } catch (error) {
+        if (error instanceof WorkflowUnsupportedSyntaxError) {
+          throw new WorkflowScriptNotLaunchedError(error.message, '');
+        }
         throw new WorkflowScriptNotLaunchedError(
           describeWorkflowCompileError(
             error,
@@ -885,13 +891,13 @@ export class WorkflowRunner {
               // deletion must win over the stale in-memory copy.
               registry?.notifySnapshotPersisted(entry.runId);
             }
-            await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {
               // Telemetry must not affect workflow execution.
             }
           }
+          await journal?.drain();
           // The run settled, so nothing is left for a later process to
           // claim — even when the snapshot write failed, since a claim would
           // then call a run interrupted that was not.

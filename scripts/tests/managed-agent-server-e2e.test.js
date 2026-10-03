@@ -1,0 +1,154 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import {
+  createSourceFile,
+  isFunctionDeclaration,
+  isVariableStatement,
+  ScriptTarget,
+  transpileModule,
+} from 'typescript';
+import { describe, expect, it } from 'vitest';
+
+const read = (file) =>
+  readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+
+// Repo-root script mentions, bare or ./-prefixed. A package-relative tail such
+// as packages/foo/scripts/bar.js is not a root mention, so the lookbehind
+// still rejects a `scripts/` preceded by a path character.
+const namedScripts = (text) => [
+  ...new Set(
+    [...text.matchAll(/(?<![\w./-])(?:\.\/)?scripts\/[\w./-]*[\w-]/g)].map(
+      (match) => match[0].replace(/^\.\//, ''),
+    ),
+  ),
+];
+
+describe('managed-agent-server e2e runner', () => {
+  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
+    const source = createSourceFile(
+      'runner.ts',
+      read('scripts/run-managed-agent-server-e2e.ts'),
+      ScriptTarget.Latest,
+      true,
+    );
+    const allocation = source.statements
+      .filter(
+        (node) =>
+          (isFunctionDeclaration(node) &&
+            ['freePort', 'startHeldExecutionStartProxy'].includes(
+              node.name?.text,
+            )) ||
+          (isVariableStatement(node) &&
+            node.declarationList.declarations.some(
+              (declaration) =>
+                declaration.name.getText(source) === 'allocatedPorts',
+            )),
+      )
+      .map((node) => node.getText(source))
+      .join('\n');
+    const { outputText } = transpileModule(allocation, {
+      compilerOptions: { target: ScriptTarget.ES2022 },
+    });
+    const sequence = [
+      33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
+      36417, 36418, 36419,
+    ];
+    const createServer = () => ({
+      once() {},
+      off() {},
+      closeAllConnections() {},
+      listen(port, _host, ready) {
+        this.port = port || sequence.shift();
+        expect(this.port).toBeDefined();
+        ready();
+      },
+      address() {
+        return { port: this.port };
+      },
+      close(done) {
+        done?.();
+      },
+    });
+    const { freePort, startHeldExecutionStartProxy } = new Function(
+      'createServer',
+      `${outputText}\nreturn { freePort, startHeldExecutionStartProxy };`,
+    )(createServer);
+    const ports = [];
+    for (const count of [4, 3]) {
+      for (let index = 0; index < count; index++) ports.push(await freePort());
+      const proxy = await startHeldExecutionStartProxy('http://127.0.0.1:1');
+      ports.push(Number(new URL(proxy.baseUrl).port));
+      await proxy.close();
+    }
+    expect(new Set(ports).size).toBe(9);
+  });
+
+  // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
+  // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
+  // run silently skipped it. Pin the threshold to the criterion's delay and
+  // the README's statement of the arming delay to the threshold.
+  it('arms the model-before-Runtime assertion at the criterion delay', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain('modelBeforeRuntimeAssertionDelayMs = 15_000');
+    expect(source).toContain(
+      'runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs',
+    );
+    const delaySeconds =
+      Number(
+        source
+          .match(/modelBeforeRuntimeAssertionDelayMs = (\d[\d_]*)/)[1]
+          .replace(/_/g, ''),
+      ) / 1000;
+    expect(read('packages/sdk-java/managed-agent-server/README.md')).toContain(
+      `the ${delaySeconds} seconds the acceptance criterion`,
+    );
+  });
+
+  // When the assertion fires the operator must tell an ordering defect from
+  // provider latency, so the thrown message must carry the deciding sequence
+  // operands alongside the in-scope timings (observedAt is a poll-batch stamp,
+  // so the timings alone can be identical or argue against the verdict).
+  it('reports the ordering timings when the assertion fires', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain('firstModelSequence=${firstModel.event.sequence}');
+    expect(source).toContain(
+      'runtimeReadySequence=${runtimeReady.event.sequence}',
+    );
+    expect(source).toContain(
+      'firstModelEventMs=${firstModel.observedAt - requestStartedAt}',
+    );
+    expect(source).toContain(
+      'runtimeReadyMs=${runtimeReady.observedAt - requestStartedAt}',
+    );
+    expect(source).toContain('runtimeDelayMs=${runtimeDelayMs}');
+  });
+
+  // #12941: the README named scripts/run-managed-hosted-runtime-e2e.ts as the
+  // deterministic CI proof, a file that has never existed. Any script the
+  // README names must be real.
+  it('names only scripts that exist', () => {
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    expect(readme).not.toContain('run-managed-hosted-runtime-e2e');
+    for (const script of namedScripts(readme)) {
+      expect(
+        existsSync(new URL(`../../${script}`, import.meta.url)),
+        `${script} named in the managed-agent README does not exist`,
+      ).toBe(true);
+    }
+  });
+
+  // The README currently names no script, so only a fixture can pin the
+  // extractor itself: an extractor that stops matching must fail, not pass.
+  it('extracts the script spellings the README could use', () => {
+    expect(namedScripts('npx tsx ./scripts/nope.ts')).toEqual([
+      'scripts/nope.ts',
+    ]);
+    expect(namedScripts('see `scripts/nope.ts`')).toEqual(['scripts/nope.ts']);
+    expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
+  });
+});

@@ -60,6 +60,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'config.bound',
   'lifecycle.changed',
   'domain.committed',
+  'message.delta',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -91,6 +92,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'child_run',
   'child_acceptance',
   'memory_job',
+  'monitor_run',
   'goal_state',
   'todo_state',
   'plan_mode',
@@ -112,7 +114,16 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  * implemented or admitted, so submission is gated separately.
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'goal_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+    'mcp_configuration',
+    'mcp_operation',
+    'hook_registration',
+    'hook_execution',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
@@ -569,6 +580,7 @@ type FieldKind =
   | 'refs'
   | 'text'
   | 'textOrNull'
+  | 'rawText'
   | 'subject'
   | 'json';
 
@@ -640,6 +652,14 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         toolDefinitionRef: 'ref',
         argsRef: 'ref',
         outcomeSource: 'text',
+      },
+    },
+    'message.delta': {
+      fields: {
+        messageId: 'id',
+        turnId: 'id',
+        role: 'text',
+        text: 'rawText',
       },
     },
     'action.changed': {
@@ -739,6 +759,7 @@ const EVENT_ACTORS: Readonly<
   'model.attempt': ['harness'],
   'message.committed': ['harness', 'trusted_entry'],
   'tool.intent': ['harness'],
+  'message.delta': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -759,6 +780,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'model.attempt': true,
   'message.committed': false,
   'tool.intent': true,
+  'message.delta': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -818,6 +840,20 @@ function assertField(
     case 'textOrNull':
       if (value !== null) {
         boundedString(value, at, MANAGED_SESSION_LIMITS.maxTextBytes);
+      }
+      return;
+    case 'rawText':
+      // Free-form model output (e.g. streamed deltas) carries newlines and
+      // tabs legitimately; only shape and size are bounded here.
+      if (typeof value !== 'string' || value.length === 0) {
+        fail(`${at} must be a non-empty string.`);
+      }
+      if (
+        Buffer.byteLength(value, 'utf8') > MANAGED_SESSION_LIMITS.maxTextBytes
+      ) {
+        fail(
+          `${at} exceeds ${MANAGED_SESSION_LIMITS.maxTextBytes} UTF-8 bytes.`,
+        );
       }
       return;
     case 'subject':
@@ -974,6 +1010,7 @@ function assertPayloadRules(
     case 'input.accepted':
     case 'message.committed':
     case 'tool.intent':
+    case 'message.delta':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':

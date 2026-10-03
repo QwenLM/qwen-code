@@ -5,7 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  activationAlreadyInstalledError,
+} from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -17,6 +20,7 @@ import type {
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
+  ManagedSessionSubject,
 } from './managed-session-records.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -69,6 +73,11 @@ export interface OpenManagedSessionOptions {
   /** Create requests fail when the durable authority already exists. */
   readonly requireNew?: boolean;
   /**
+   * Keeps the Stage H resources that opening verified for the caller to take;
+   * see `LocalManagedSessionAuthority.takeVerifiedExtensionResources`.
+   */
+  readonly retainVerifiedResources?: boolean;
+  /**
    * Identifies the worker advancing the session. Opening installs an activation
    * under this identity, because a writer that opens the log is by definition
    * the party advancing it, and only an activation lets a Harness append.
@@ -114,8 +123,16 @@ export interface ManagedSession {
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
+   * The successor's ID is random unless `activationId` names it. Hosted Hook
+   * release reads a random successor as a load that may own a Hook Runtime,
+   * so a successor that never acquires one carries a `hook_operation` subject
+   * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
+   * to the log; a repeat is refused before the current activation is released.
    */
-  replaceActivation(): Promise<{
+  replaceActivation(
+    subject?: ManagedSessionSubject,
+    activationId?: string,
+  ): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
@@ -166,6 +183,9 @@ export async function openManagedSession(
       resources,
       ...(options.create === undefined ? {} : { create: options.create }),
       ...(options.requireNew === true ? { requireNew: true } : {}),
+      ...(options.retainVerifiedResources === true
+        ? { retainVerifiedResources: true }
+        : {}),
       // A takeover proves the sealed writer's commit position before this
       // authority may advance the log.
       ...(journal.takeoverCommitProof === undefined
@@ -214,12 +234,21 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation() {
+    async replaceActivation(subject, activationId) {
+      // Refuse before the release, or the current activation would be left
+      // released with no successor.
+      if (
+        activationId !== undefined &&
+        authority.hasInstalledActivation(activationId)
+      ) {
+        throw activationAlreadyInstalledError(activationId);
+      }
       await authority.releaseActivation();
       activation = await authority.installActivation({
-        activationId: randomUUID(),
+        activationId: activationId ?? randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
+        subject,
       });
       return activation;
     },

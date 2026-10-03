@@ -39,8 +39,10 @@ real HTTP, a real database and real process deaths.
 Out of scope: Hosted Harness session and SSE gates, output capture and
 delivery gates (after O1b–O3), the managed agent server's W0c-3 storage
 ownership row and grant rechecks (unit-tested in `WorkspaceRuntimeTest`),
-Kubernetes provisioning, and Stage G failover. The failover modes of
-`scripts/run-managed-agent-server-e2e.ts` stay outside CI.
+Kubernetes provisioning, and Stage G failover. The `--session-failover`
+mode of `scripts/run-managed-agent-server-e2e.ts` stays outside CI; the
+in-flight and continuation modes run in the `hosted-harness-mysql` job (see
+[Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
 
 ## 3. Design
 
@@ -61,7 +63,8 @@ Kubernetes provisioning, and Stage G failover. The failover modes of
 - `FaultGateBroker` runs the production `RuntimeBrokerService` with
   `JdbcRuntimeBindingRepository`, `JdbcRuntimeSessionRepository` and
   `JdbcToolExecutionRepository` in its own JVM. A gate starts it as a
-  subprocess (`BrokerProcess`) and drives `warm`, `acquire`, `create`, `get`,
+  subprocess (`BrokerProcess`) and drives `warm`, `acquire`, `create` (reserve
+  and start), `createImmediate` (the immediate `POST /executions` route), `get`,
   `cancel`, `reconcile` and `release` over standard input. A Broker can be
   SIGKILLed alone, which leaves its worker running as a crashed JVM does, or
   frozen and thawed with SIGSTOP and SIGCONT. A command pending on a Broker
@@ -85,13 +88,12 @@ Kubernetes provisioning, and Stage G failover. The failover modes of
 
 Two test adapters close gaps in production code:
 
-- `FaultGateTransport`. The v2 worker contract has no Session verbs, and
-  `HttpRuntimeTransport` fails `acquire` and `release` with 501
-  (`runtime_session_verb_unsupported`), so the service cannot reach dispatch
-  with the production transport alone. The adapter passes attest, execute,
-  status and cancel to `HttpRuntimeTransport` and, except under the
-  `MANAGED` placement below, answers those two verbs locally. The tool contract design lists the Session verbs as
-  follow-up work.
+- `FaultGateTransport`. `HttpRuntimeTransport` implements the Session verbs
+  (acquire answers Broker-local; release goes through the provider control
+  route), so the adapter delegates both to the production transport. Under
+  the `MANAGED` placement below its acquire additionally performs the
+  W0c-3-style context installation and activation through
+  `HttpRuntimeTransport`.
 - `RecoverableProcessProvisioner`. `LocalProcessRuntimeProvisioner` keeps
   worker ownership in memory, so a Broker in another process can never
   observe a worker. The adapter wraps the production provisioner, which still
@@ -162,7 +164,7 @@ FG5 adds, for W0c context installation:
 | Gate                                 | Fault                                                                                                                                                                                                   | Asserted outcome                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | FG1 control                          | none                                                                                                                                                                                                    | Warm attests twice (provisioner, then service), acquire re-attests once, the call settles `success`, the marker has one line, the proxy saw one execute, and `status` by reference returns the stored result.                                                                                                                                                                                                                                                          |
-| FG2 execute lost                     | `DROP`, `RESET`, or `DELAY` past the 10 s request timeout, after the worker ran the call                                                                                                                | The row goes `UNKNOWN`. A same-key retry returns that row and dispatches nothing. An execute of the same reference sent straight to the worker joins the original call. `status` returns the settled result, and `reconcileExecution` resolves the row to it. One marker line, one execute.                                                                                                                                                                            |
+| FG2 execute lost                     | `DROP`, `RESET`, or `DELAY` past the 10 s request timeout, after the worker ran the call                                                                                                                | The row goes `UNKNOWN`. A same-key retry returns that row and dispatches nothing. An execute of the same reference sent straight to the worker joins the original call. `status` returns the settled result, and `reconcileExecution` resolves the row to it. One marker line, one execute. The deferred and the immediate route both run it.                                                                                                                          |
 | FG2 status lost                      | `DROP`, then `RESET`, of the reconcile lookup                                                                                                                                                           | Each reconcile fails retryably with `managed_runtime_unavailable` and the row stays `UNKNOWN` without a result. The next lookup resolves it.                                                                                                                                                                                                                                                                                                                           |
 | FG2 cancel lost                      | `DROP` of the cancel answer during a `sleep 5` command                                                                                                                                                  | The cancel call fails. The worker did abort the command, so the row settles `cancelled` from the execute answer. The command's tail never runs, and `status` returns the same result.                                                                                                                                                                                                                                                                                  |
 | FG2 attestation lost                 | `DROP` of the provisioner's attestation, or of the service's                                                                                                                                            | Warm fails retryably. The binding stays `PROVISIONING` without a lease, and the unattested worker is reaped. The next warm reaches `READY` on the same binding.                                                                                                                                                                                                                                                                                                        |
@@ -236,7 +238,7 @@ With the bundle built at the repository root (`npm run build && npm run
 bundle`), run in `packages/sdk-java/runtime-broker`:
 
 ```bash
-mvn -Pfault-gates test   # the 28 gates, about 2 minutes
+mvn -Pfault-gates test   # every fault gate (44 today), about 4 minutes
 mvn test                 # the default suite, gates excluded
 mvn checkstyle:check
 ```
@@ -278,8 +280,8 @@ patched the bundled worker instead of the Java code:
   window. FG4 covers the process-level takeover around it.
 - The gates need POSIX signals and run on Linux in CI.
 - Loss of the attestation answer during adoption is not covered. The Session
-  verbs have no worker routes yet; FG5 covers only what a managed acquire
-  does, installation and activation.
+  verbs run through the provider control route; FG5 covers only what a
+  managed acquire does, installation and activation.
 - FG5 exercises the Broker's W0c-2 path and the worker, not the managed agent
   server. `FaultGateTransport` mirrors only W0c-3's installation and
   activation calls; its storage ownership, grant rechecks and directory
@@ -295,7 +297,10 @@ patched the bundled worker instead of the Java code:
 - A call waiting at the activation gate when the worker closes stays
   deferred, as the worker design records.
 - Follow-up: run the crash and takeover gates on MySQL, flip the two pins
-  when durable local adoption and #12670 land, and drop
-  `FaultGateTransport` once `HttpRuntimeTransport` implements the Session
-  verbs. Flip the context-directory pin when the Broker closes the Session
-  on a context refusal, or settles the refusal as `not_started`.
+  when durable local adoption and #12670 land. `FaultGateTransport` now
+  delegates both Session verbs to `HttpRuntimeTransport` (its remaining role
+  is the MANAGED placement's install/activate), so the earlier "drop it once
+  the transport implements the Session verbs" precondition is met; the
+  adapter stays only for that placement. Flip the context-directory pin when
+  the Broker closes the Session on a context refusal, or settles the refusal
+  as `not_started`.
