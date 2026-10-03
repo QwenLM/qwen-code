@@ -765,7 +765,12 @@ describe('GlobTool', () => {
       '{**/*.ts,peek/*}',
     ])('never walks or reports outside the root: %s', async (pattern) => {
       const result = await run({ pattern, path: session }, contained());
-      expect(String(result.llmContent)).not.toContain('secret.txt');
+      // The no-match message quotes the caller's own pattern back, so a leak
+      // has to be judged by the paths a walk would have reported — matching on
+      // the pattern's spelling of them fails on the pattern itself.
+      const reported = String(result.llmContent);
+      expect(reported).not.toContain(path.join(tempRootDir, 'web'));
+      expect(reported).not.toContain(path.join(session, 'peek', 'secret.txt'));
     });
 
     it('answers an existing and a missing outside file alike', async () => {
