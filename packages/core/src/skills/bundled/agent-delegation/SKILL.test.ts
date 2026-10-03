@@ -91,6 +91,9 @@ async function agentDescription({
   } as unknown as SubagentManager;
   const config = {
     getSubagentManager: () => subagentManager,
+    getWorkspaceContext: () => ({
+      onDirectoriesChanged: () => () => {},
+    }),
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => false,
     isTodoWriteEnabled: () => true,

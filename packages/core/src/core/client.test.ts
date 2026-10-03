@@ -8810,7 +8810,10 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(forSubagent);
+        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+          forSubagent,
+          mockConfig,
+        );
       },
     );
 
@@ -11787,6 +11790,7 @@ Other open files:
         undefined,
         mode,
         outputStyle,
+        mockConfig,
         false,
         codeModeOnly,
         { declaredTools: undefined },

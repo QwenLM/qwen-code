@@ -254,6 +254,10 @@ async function withTempDir(
 
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 // Spies on the subagent-span layer to assert its status taxonomy; the real
 // runInSubagentSpanContext only sets up OTel context, so the body just runs
@@ -286,6 +290,7 @@ describe('AgentTool', () => {
   let agentTool: AgentTool;
   let mockSubagentManager: SubagentManager;
   let changeListeners: Array<() => void>;
+  let workspaceChangeListeners: Array<() => void>;
 
   const mockSubagents: SubagentConfig[] = [
     {
@@ -305,6 +310,7 @@ describe('AgentTool', () => {
   ];
 
   beforeEach(async () => {
+    mockIsBashSearchAvailable.mockReturnValue(false);
     vi.useFakeTimers();
 
     // Foreground runs register too, so the stub must cover every `registry.*`
@@ -334,11 +340,21 @@ describe('AgentTool', () => {
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
     };
+    workspaceChangeListeners = [];
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getCwd: vi.fn().mockReturnValue('/test/project'),
       getWorkingDir: vi.fn().mockReturnValue('/test/project'),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        onDirectoriesChanged: vi.fn((listener: () => void) => {
+          workspaceChangeListeners.push(listener);
+          return () => {
+            const index = workspaceChangeListeners.indexOf(listener);
+            if (index >= 0) workspaceChangeListeners.splice(index, 1);
+          };
+        }),
+      }),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
@@ -1039,6 +1055,35 @@ describe('AgentTool', () => {
         'code-review',
         'Agent for reviewing code quality and best practices',
       ]);
+    });
+
+    it('uses Shell for direct search when Bash search is available', async () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+
+      const bashAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(bashAgentTool.description).toContain('`rg --files`');
+      expect(bashAgentTool.description).toContain('grep_search or glob');
+      expect(bashAgentTool.description).not.toContain(
+        'use the glob tool instead',
+      );
+    });
+
+    it('refreshes direct search guidance when workspace directories change', async () => {
+      mockIsBashSearchAvailable.mockReturnValue(true);
+
+      const bashAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+      expect(bashAgentTool.description).toContain('`rg --files`');
+
+      mockIsBashSearchAvailable.mockReturnValue(false);
+      workspaceChangeListeners.at(-1)?.();
+
+      expect(bashAgentTool.description).toContain('grep_search');
+      expect(bashAgentTool.description).toContain('glob');
+      expect(bashAgentTool.description).not.toContain('`rg --files`');
+      bashAgentTool.dispose();
     });
 
     it('should handle empty subagents list gracefully', async () => {
