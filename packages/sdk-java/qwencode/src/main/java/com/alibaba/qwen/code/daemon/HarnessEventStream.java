@@ -2,6 +2,10 @@ package com.alibaba.qwen.code.daemon;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** One generation- and epoch-fenced Hosted Harness SSE stream. */
 public final class HarnessEventStream implements AutoCloseable {
@@ -10,8 +14,15 @@ public final class HarnessEventStream implements AutoCloseable {
     private final InputStream input;
     private final SseReader reader;
     private final String eventEpoch;
-    private long lastEventId;
-    private boolean closed;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean idleTimedOut = new AtomicBoolean();
+    private final AtomicLong lastActivity =
+            new AtomicLong(System.nanoTime());
+    // Serializes concurrent next() callers so frames cannot interleave;
+    // close() never takes this lock, so a blocked read stays abortable.
+    private final Object cursorLock = new Object();
+    private volatile ScheduledFuture<?> idleWatchdog;
+    private volatile long lastEventId;
 
     HarnessEventStream(HostedHarnessClient client, HarnessSessionRef session,
             InputStream input, int maximumFrameBytes, long lastEventId,
@@ -19,9 +30,8 @@ public final class HarnessEventStream implements AutoCloseable {
         this.client = client;
         this.session = session;
         this.input = input;
-        this.reader = new SseReader(input, maximumFrameBytes, () -> {
-            // This transport does not own an idle watchdog.
-        });
+        this.reader = new SseReader(input, maximumFrameBytes,
+                () -> lastActivity.set(System.nanoTime()));
         this.lastEventId = lastEventId;
         this.eventEpoch = eventEpoch;
     }
@@ -30,57 +40,70 @@ public final class HarnessEventStream implements AutoCloseable {
         return eventEpoch;
     }
 
-    public synchronized long getLastEventId() {
+    public long getLastEventId() {
         return lastEventId;
     }
 
-    public synchronized DaemonEvent next() {
-        ensureOpen();
-        try {
-            SseReader.Frame frame = reader.next();
-            if (frame == null) {
-                close();
-                return null;
-            }
-            DaemonEvent event = DaemonSessionClient.parseEvent(frame);
-            Long eventId = event.getId();
-            if (eventId != null) {
-                if (eventId <= lastEventId) {
-                    throw new DaemonProtocolException(
-                            "Hosted Harness SSE event ID moved backward or repeated");
+    public DaemonEvent next() {
+        if (closed.get()) {
+            throw new IllegalStateException(
+                    "HarnessEventStream is closed");
+        }
+        synchronized (cursorLock) {
+            try {
+                SseReader.Frame frame = reader.next();
+                if (frame == null) {
+                    close();
+                    return null;
                 }
-                if (eventId != lastEventId + 1) {
-                    throw new DaemonProtocolException(
-                            "Hosted Harness SSE event ID gap: expected "
-                                    + (lastEventId + 1) + " but received "
-                                    + eventId);
+                DaemonEvent event = DaemonSessionClient.parseEvent(frame);
+                Long eventId = event.getId();
+                if (eventId != null) {
+                    if (eventId <= lastEventId) {
+                        throw new DaemonProtocolException(
+                                "Hosted Harness SSE event ID moved backward or repeated");
+                    }
+                    if (eventId != lastEventId + 1) {
+                        throw new DaemonProtocolException(
+                                "Hosted Harness SSE event ID gap: expected "
+                                        + (lastEventId + 1) + " but received "
+                                        + eventId);
+                    }
+                    lastEventId = eventId;
                 }
-                lastEventId = eventId;
+                client.observeEvent(session, event);
+                return event;
+            } catch (IOException e) {
+                closeQuietly();
+                if (idleTimedOut.get()) {
+                    throw new DaemonTransportException(
+                            "Hosted Harness SSE idle timeout", e);
+                }
+                throw new DaemonTransportException(
+                        "Hosted Harness SSE stream failed", e);
+            } catch (RuntimeException e) {
+                closeQuietly();
+                throw e;
             }
-            client.observeEvent(session, event);
-            return event;
-        } catch (IOException e) {
-            closeQuietly();
-            throw new DaemonTransportException(
-                    "Hosted Harness SSE stream failed", e);
-        } catch (RuntimeException e) {
-            closeQuietly();
-            throw e;
         }
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
             return;
         }
-        closed = true;
-        client.unregisterStream(this);
+        ScheduledFuture<?> watchdog = idleWatchdog;
+        if (watchdog != null) {
+            watchdog.cancel(false);
+        }
         try {
             input.close();
         } catch (IOException e) {
             throw new DaemonTransportException(
                     "Hosted Harness SSE stream could not be closed", e);
+        } finally {
+            client.unregisterStream(this);
         }
     }
 
@@ -92,10 +115,25 @@ public final class HarnessEventStream implements AutoCloseable {
         }
     }
 
-    private void ensureOpen() {
-        if (closed) {
-            throw new IllegalStateException(
-                    "HarnessEventStream is closed");
-        }
+    void startIdleWatchdog() {
+        long idleMillis = HostedHarnessClient.saturatedMillis(
+                client.sseIdleTimeout());
+        long intervalMillis = Math.max(100L, idleMillis / 2L);
+        long idleNanos = TimeUnit.MILLISECONDS.toNanos(idleMillis);
+        idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {
+            if (closed.get()) {
+                ScheduledFuture<?> watchdog = idleWatchdog;
+                if (watchdog != null) {
+                    watchdog.cancel(false);
+                }
+                return;
+            }
+            if (System.nanoTime() - lastActivity.get() >= idleNanos
+                    && idleTimedOut.compareAndSet(false, true)) {
+                // Closes the raw input without any stream monitor, so the
+                // single-thread scheduler never blocks behind the reader.
+                closeQuietly();
+            }
+        }, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
     }
 }
