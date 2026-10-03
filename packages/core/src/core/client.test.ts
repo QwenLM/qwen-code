@@ -980,6 +980,7 @@ describe('Gemini Client (client.ts)', () => {
       getFileReadCache: vi.fn().mockReturnValue({
         clear: vi.fn(),
       }),
+      getConditionalRulesRegistry: vi.fn().mockReturnValue(undefined),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
@@ -3583,6 +3584,40 @@ describe('Gemini Client (client.ts)', () => {
       // the "## Complete memory tree" router prompt; a stale revision would
       // suppress its re-delivery for the rest of the session.
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+    });
+
+    it('setHistory resets the conditional rule injection markers', () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      client['chat'] = {
+        setHistory: vi.fn(),
+      } as unknown as LlmChat;
+
+      client.setHistory([{ role: 'user', parts: [{ text: 'replaced' }] }]);
+
+      // A rule reminder rides a tool result; replacing history wholesale can
+      // drop that result, so the consumed marker must not survive it.
+      expect(resetInjected).toHaveBeenCalledTimes(1);
+    });
+
+    it('truncateHistory resets the conditional rule injection markers only when entries are removed', () => {
+      const resetInjected = vi.fn();
+      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+        resetInjected,
+      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+
+      client['chat'] = mockChatWithLengths(3, 2);
+      client.truncateHistory(2);
+      expect(resetInjected).toHaveBeenCalled();
+
+      // A no-op truncate leaves every carrier in place, so the markers stay
+      // valid and must not be reset.
+      resetInjected.mockClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(99);
+      expect(resetInjected).not.toHaveBeenCalled();
     });
 
     it('truncateHistory clears the delivered memory-tree revision only when entries are removed', () => {
@@ -12906,6 +12941,7 @@ function makeMockConfigForShutdown(
     getFileReadCache: vi.fn().mockReturnValue({
       clear: vi.fn(),
     }),
+    getConditionalRulesRegistry: vi.fn().mockReturnValue(undefined),
     getExtensionLoader: vi.fn().mockReturnValue(undefined),
     getWorkspaceContext: vi.fn().mockReturnValue(undefined),
     getDebugMode: vi.fn().mockReturnValue(false),
