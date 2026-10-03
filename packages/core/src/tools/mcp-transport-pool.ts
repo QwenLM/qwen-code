@@ -8,6 +8,7 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   MCPServerStatus,
+  MCP_TEARDOWN_TIMEOUT_MS,
   McpClient,
   type SendSdkMcpMessage,
 } from './mcp-client.js';
@@ -104,10 +105,19 @@ export interface McpTransportPoolOptions {
  */
 export class McpTransportPool {
   private readonly entries = new Map<ConnectionId, PoolEntry>();
-  private readonly unpooledIds = new Set<ConnectionId>();
+  private readonly unpooledSessions = new Map<ConnectionId, string>();
   private readonly spawnInFlight = new Map<ConnectionId, Promise<PoolEntry>>();
-  /** Reverse index for O(refs) `releaseSession`. */
-  private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
+  private readonly retiringEntries = new Map<
+    ConnectionId,
+    { cleanup: Promise<void>; transportId: ConnectionId; sessionId?: string }
+  >();
+  /** Logical session → registry seat → connections, including pending acquires. */
+  private readonly sessionToEntries = new Map<
+    string,
+    Map<string, Set<ConnectionId>>
+  >();
+  private readonly registryIds = new WeakMap<ToolRegistry, number>();
+  private nextRegistryId = 0;
   /**
    * Drain mutex: when `drainAll` is in progress, new
    * acquires reject so they don't latch onto entries that are about
@@ -225,7 +235,36 @@ export class McpTransportPool {
     // — that entry's prior reservation already covers the slot, no
     // new tryReserve needed.
     const poolable = isPoolable(cfg, this.opts.pooledTransports);
-    const id = poolable ? connectionIdOf(serverName, cfg) : undefined;
+    const seatId = this.registrySeatId(sessionId, sessionToolRegistry);
+    const transportId = connectionIdOf(serverName, cfg);
+    const id = poolable ? transportId : undefined;
+    // Wait before reserving a slot or creating a client. Unpooled cleanup is
+    // scoped to its session, so another session can still use the same server.
+    const completedCleanups = new Set<Promise<void>>();
+    // The barrier must outlast the teardown it is waiting on, or a bounded
+    // teardown would routinely time it out. Slack absorbs the descendant pid
+    // sweep that runs before the bounded disconnect.
+    const cleanupDeadline = Date.now() + MCP_TEARDOWN_TIMEOUT_MS + 2_000;
+    while (true) {
+      const cleanups = this.getPendingCleanups(
+        transportId,
+        poolable ? undefined : sessionId,
+      ).filter((cleanup) => !completedCleanups.has(cleanup));
+      if (cleanups.length === 0) break;
+      // A deadline bounds this caller, not the old transport's lifetime.
+      // Keep the barrier on timeout so a later acquire cannot spawn over it.
+      await runWithTimeout(
+        Promise.all(cleanups),
+        Math.max(0, cleanupDeadline - Date.now()),
+        `MCP cleanup for '${serverName}'`,
+      );
+      for (const cleanup of cleanups) completedCleanups.add(cleanup);
+      if (this.draining) {
+        throw new Error(
+          `McpTransportPool is draining; refusing acquire for ${serverName}`,
+        );
+      }
+    }
     if (id !== undefined) {
       const existing = this.entries.get(id);
       // defense-in-depth
@@ -262,7 +301,7 @@ export class McpTransportPool {
             sessionPromptRegistry,
             sessionResourceRegistry,
           );
-          this.indexAttach(sessionId, id);
+          this.indexAttach(sessionId, id, seatId);
           return conn;
         } catch (err) {
           // A race transitioned the entry to terminal between
@@ -424,7 +463,7 @@ export class McpTransportPool {
     // index has the id but `entries.get(id)` is `undefined` so
     // `releaseSession`'s loop skips. Closing that window requires
     // per-session cancellation plumbing (tracked as a follow-up).
-    this.indexAttach(sessionId, id);
+    this.indexAttach(sessionId, id, seatId);
 
     let entry: PoolEntry;
     try {
@@ -433,7 +472,7 @@ export class McpTransportPool {
       // Roll back the early index on spawn failure so a later
       // `releaseSession(sessionId)` doesn't iterate a stale id with
       // no matching entry.
-      this.indexDetach(sessionId, id);
+      this.indexDetach(sessionId, id, seatId);
       throw err;
     }
 
@@ -444,7 +483,7 @@ export class McpTransportPool {
     // state closed" error; we surface a clearer message and clean up
     // the reverse index.
     if (!this.entries.has(id) || entry.isTerminated()) {
-      this.indexDetach(sessionId, id);
+      this.indexDetach(sessionId, id, seatId);
       throw new Error(
         `PoolEntry ${id} torn down before attach (concurrent release)`,
       );
@@ -483,32 +522,43 @@ export class McpTransportPool {
       // the top stays — it's load-bearing for the `isTerminated()`
       // guard to actually find an entry to forceShutdown if a
       // releaseSession DOES race AFTER `entries.set` runs.
-      this.indexAttach(sessionId, id);
+      this.indexAttach(sessionId, id, seatId);
       return conn;
     } catch (err) {
       // Defensive: if `attach` throws between the `isTerminated` check
       // and this line (narrow but possible race window), clean up the
       // early index. Without this, `releaseSession` would later
       // iterate the stale id.
-      this.indexDetach(sessionId, id);
+      this.indexDetach(sessionId, id, seatId);
       throw err;
     }
   }
 
   /**
-   * Drop one session's reference to a connection. Starts the drain
-   * grace timer if this was the last reference.
+   * Release a logical session's seats on a connection. A supplied handle
+   * targets its own registry seat. Starts the grace timer at the last ref.
    *
    * Idempotent on unknown id (e.g. entry already closed via restart
    * or shutdown).
    */
-  release(id: ConnectionId, sessionId: string): void {
+  release(
+    id: ConnectionId,
+    sessionId: string,
+    expectedHandle?: PooledConnection,
+  ): void {
     const entry = this.entries.get(id);
     if (!entry) return;
-    entry.detach(sessionId);
-    this.indexDetach(sessionId, id);
+    const seats = this.sessionToEntries.get(sessionId);
+    if (!seats) return;
+    let detached = false;
+    for (const [seatId, ids] of [...seats]) {
+      if (!ids.has(id) || !entry.detach(seatId, expectedHandle)) continue;
+      this.indexDetach(sessionId, id, seatId);
+      detached = true;
+    }
+    if (!detached) return;
     if (entry.refs.size === 0) {
-      if (this.unpooledIds.has(id)) {
+      if (this.unpooledSessions.has(id)) {
         void entry.forceShutdown('manual');
         return;
       }
@@ -522,20 +572,21 @@ export class McpTransportPool {
    * `acpAgent.killSession` to ensure no leaked refs.
    */
   releaseSession(sessionId: string): void {
-    const ids = this.sessionToEntries.get(sessionId);
-    if (!ids) return;
-    // Snapshot the set since detach mutates state.
-    const idList = [...ids];
-    for (const id of idList) {
-      const entry = this.entries.get(id);
-      if (!entry) continue;
-      entry.detach(sessionId);
-      if (entry.refs.size === 0) {
-        if (this.unpooledIds.has(id)) {
-          void entry.forceShutdown('manual');
-          continue;
+    const seats = this.sessionToEntries.get(sessionId);
+    if (!seats) return;
+    // One ACP session can own both the parent registry and derived agents.
+    for (const [seatId, ids] of [...seats]) {
+      for (const id of [...ids]) {
+        const entry = this.entries.get(id);
+        if (!entry) continue;
+        entry.detach(seatId);
+        if (entry.refs.size === 0) {
+          if (this.unpooledSessions.has(id)) {
+            void entry.forceShutdown('manual');
+            continue;
+          }
+          entry.startDrainTimer(this.opts.drainDelayMs);
         }
-        entry.startDrainTimer(this.opts.drainDelayMs);
       }
     }
     this.sessionToEntries.delete(sessionId);
@@ -595,7 +646,7 @@ export class McpTransportPool {
           // configured pool `drainDelayMs` is used instead of
           // `PoolEntry.opts.drainDelayMs` (which defaults to 30s and
           // is independent of the pool's setting).
-          if (entry.refs.size === 0 && !this.unpooledIds.has(entry.id)) {
+          if (entry.refs.size === 0 && !this.unpooledSessions.has(entry.id)) {
             entry.startDrainTimer(this.opts.drainDelayMs);
           }
           return {
@@ -668,7 +719,11 @@ export class McpTransportPool {
       row.entryCount += 1;
       row.entrySummary.push({
         entryIndex: entry.entryIndex,
-        refs: entry.refs.size,
+        refs: [...this.sessionToEntries.values()].filter((seats) =>
+          [...seats].some(
+            ([seatId, ids]) => ids.has(entry.id) && entry.refs.has(seatId),
+          ),
+        ).length,
         status,
       });
       byName.set(entry.serverName, row);
@@ -769,6 +824,17 @@ export class McpTransportPool {
     // entry that just got `entries.set` from a completing spawn is
     // in the list.
     const entries = [...this.entries.values()];
+    const retiring = [...this.retiringEntries].filter(
+      ([id]) => !this.entries.has(id),
+    );
+    let retiredCount = 0;
+    const retirementWait = Promise.allSettled(
+      retiring.map(([, { cleanup }]) =>
+        cleanup.then(() => {
+          retiredCount++;
+        }),
+      ),
+    );
     const drained: number[] = [];
     const errors: Array<{
       entryIndex: number;
@@ -801,7 +867,7 @@ export class McpTransportPool {
     let drainTimer: ReturnType<typeof setTimeout> | undefined;
     const remaining = Math.max(0, deadline - Date.now());
     await Promise.race([
-      Promise.all(shutdownPromises).then(() => {
+      Promise.all([...shutdownPromises, retirementWait]).then(() => {
         if (drainTimer) clearTimeout(drainTimer);
       }),
       new Promise<void>((resolve) => {
@@ -809,12 +875,16 @@ export class McpTransportPool {
         drainTimer.unref?.();
       }),
     ]);
-    const drainedCount = drained.length;
+    const drainedCount = drained.length + retiredCount;
     const errorsCount = errors.length;
-    const forced = Math.max(0, entries.length - drainedCount - errorsCount);
+    const forced = Math.max(
+      0,
+      entries.length + retiring.length - drainedCount - errorsCount,
+    );
     const errorsCopy = [...errors];
     this.entries.clear();
-    this.unpooledIds.clear();
+    this.retiringEntries.clear();
+    this.unpooledSessions.clear();
     this.sessionToEntries.clear();
     this.spawnInFlight.clear();
     return {
@@ -825,6 +895,48 @@ export class McpTransportPool {
   }
 
   // ---------- internals ----------
+
+  private getPendingCleanups(
+    transportId: ConnectionId,
+    sessionId?: string,
+  ): Array<Promise<void>> {
+    const cleanups: Array<Promise<void>> = [];
+    for (const retiring of this.retiringEntries.values()) {
+      if (
+        retiring.transportId === transportId &&
+        retiring.sessionId === sessionId
+      ) {
+        cleanups.push(retiring.cleanup);
+      }
+    }
+    // A force-close publishes its barrier before onClosed evicts the entry.
+    // The unpooled owner survives detach/releaseSession until that eviction.
+    if (sessionId === undefined) {
+      const cleanup = this.entries.get(transportId)?.waitForCleanup();
+      if (cleanup) cleanups.push(cleanup);
+    } else {
+      for (const [id, owner] of this.unpooledSessions) {
+        const entry = this.entries.get(id);
+        if (owner !== sessionId || entry?.transportId !== transportId) continue;
+        const cleanup = entry.waitForCleanup();
+        if (cleanup) cleanups.push(cleanup);
+      }
+    }
+    return cleanups;
+  }
+
+  private trackRetiringEntry(entry: PoolEntry, sessionId?: string): void {
+    const cleanup = entry.waitForCleanup();
+    if (!cleanup) return;
+    const retiring = { cleanup, transportId: entry.transportId, sessionId };
+    this.retiringEntries.set(entry.id, retiring);
+    const forget = () => {
+      if (this.retiringEntries.get(entry.id) === retiring) {
+        this.retiringEntries.delete(entry.id);
+      }
+    };
+    void cleanup.then(forget, forget);
+  }
 
   /**
    * shared
@@ -868,9 +980,13 @@ export class McpTransportPool {
       serverName,
       cfg,
     );
-    return entry.attach(sessionId, view, {
-      release: () => this.release(id, sessionId),
-    });
+    return entry.attach(
+      this.registrySeatId(sessionId, sessionToolRegistry),
+      view,
+      {
+        release: (handle) => this.release(id, sessionId, handle),
+      },
+    );
   }
 
   /**
@@ -933,6 +1049,13 @@ export class McpTransportPool {
     const current = this.entries.get(id);
     if (current !== entry) return;
     this.entries.delete(id);
+    // Terminal entries have detached their views; discard the corresponding
+    // seat indices so finished subagents do not accumulate under a long session.
+    for (const [sessionId, seats] of this.sessionToEntries) {
+      for (const seatId of seats.keys()) {
+        this.indexDetach(sessionId, id, seatId);
+      }
+    }
     if (this.opts.budget !== undefined) {
       if (!this.hasNameSibling(entry.serverName)) {
         this.opts.budget.release(entry.serverName);
@@ -961,6 +1084,7 @@ export class McpTransportPool {
       this.opts.workspaceContext,
       this.opts.debugMode,
       this.opts.sendSdkMcpMessage,
+      { trackTransportClose: true },
     );
 
     //
@@ -986,6 +1110,9 @@ export class McpTransportPool {
       current: undefined,
     };
     const onClosedForThisEntry = (closedId: ConnectionId) => {
+      if (entryRef.current) {
+        this.trackRetiringEntry(entryRef.current);
+      }
       this.evictEntry(closedId, entryRef.current);
     };
     const entry = new PoolEntry(
@@ -1118,20 +1245,46 @@ export class McpTransportPool {
     return next;
   }
 
-  private indexAttach(sessionId: string, id: ConnectionId): void {
-    let ids = this.sessionToEntries.get(sessionId);
+  private registrySeatId(sessionId: string, registry: ToolRegistry): string {
+    let registryId = this.registryIds.get(registry);
+    if (registryId === undefined) {
+      registryId = this.nextRegistryId++;
+      this.registryIds.set(registry, registryId);
+    }
+    // JSON tuple encoding keeps arbitrary logical IDs separate from seat IDs.
+    return JSON.stringify([sessionId, registryId]);
+  }
+
+  private indexAttach(
+    sessionId: string,
+    id: ConnectionId,
+    seatId: string,
+  ): void {
+    let seats = this.sessionToEntries.get(sessionId);
+    if (!seats) {
+      seats = new Map();
+      this.sessionToEntries.set(sessionId, seats);
+    }
+    let ids = seats.get(seatId);
     if (!ids) {
       ids = new Set();
-      this.sessionToEntries.set(sessionId, ids);
+      seats.set(seatId, ids);
     }
     ids.add(id);
   }
 
-  private indexDetach(sessionId: string, id: ConnectionId): void {
-    const ids = this.sessionToEntries.get(sessionId);
+  private indexDetach(
+    sessionId: string,
+    id: ConnectionId,
+    seatId: string,
+  ): void {
+    const seats = this.sessionToEntries.get(sessionId);
+    if (!seats) return;
+    const ids = seats.get(seatId);
     if (!ids) return;
     ids.delete(id);
-    if (ids.size === 0) this.sessionToEntries.delete(sessionId);
+    if (ids.size === 0) seats.delete(seatId);
+    if (seats.size === 0) this.sessionToEntries.delete(sessionId);
   }
 
   /**
@@ -1153,6 +1306,7 @@ export class McpTransportPool {
     sessionPromptRegistry: PromptRegistry,
     sessionResourceRegistry: ResourceRegistry,
   ): Promise<PooledConnection> {
+    const seatId = this.registrySeatId(sessionId, sessionToolRegistry);
     const entryIndex = this.allocateEntryIndex(serverName);
     const id: ConnectionId =
       `${serverName}::unpooled-${entryIndex}` as ConnectionId;
@@ -1166,6 +1320,7 @@ export class McpTransportPool {
       this.opts.workspaceContext,
       this.opts.debugMode,
       this.opts.sendSdkMcpMessage,
+      { trackTransportClose: true },
     );
 
     // Build a SessionMcpView that wraps this session's registries.
@@ -1206,8 +1361,10 @@ export class McpTransportPool {
       // `hasNameSibling` keeps the slot reserved if any pooled
       // entry or in-flight spawn shares the name.
       (closedId) => {
+        this.trackRetiringEntry(entry, sessionId);
         this.entries.delete(closedId);
-        this.unpooledIds.delete(closedId);
+        this.unpooledSessions.delete(closedId);
+        this.indexDetach(sessionId, closedId, seatId);
         if (this.opts.budget !== undefined) {
           if (!this.hasNameSibling(serverName)) {
             this.opts.budget.release(serverName);
@@ -1226,7 +1383,7 @@ export class McpTransportPool {
 
     try {
       this.entries.set(id, entry);
-      this.unpooledIds.add(id);
+      this.unpooledSessions.set(id, sessionId);
       // populate the
       // reverse index synchronously, BEFORE the connect/discover
       // await. Pre-fix, `releaseSession(sessionId)` fired during this
@@ -1240,7 +1397,7 @@ export class McpTransportPool {
       // `isTerminated()` guard below catches it. Every error/discard
       // path now mirrors this with `indexDetach` to keep the index
       // consistent.
-      this.indexAttach(sessionId, id);
+      this.indexAttach(sessionId, id, seatId);
       // bound the
       // unpooled connect+discover with the same `runWithTimeout`
       // wrapper `spawnEntry` and `doRestart` use. Pre-
@@ -1300,7 +1457,7 @@ export class McpTransportPool {
         } catch {
           /* best effort — pool is already draining */
         }
-        this.indexDetach(sessionId, id);
+        this.indexDetach(sessionId, id, seatId);
         throw new Error(
           `McpTransportPool is draining or unpooled ${id} was cancelled`,
         );
@@ -1311,9 +1468,9 @@ export class McpTransportPool {
       // filtering and the per-session trust copy (fix). Release
       // callback runs `forceShutdown` directly — no pool refcount
       // accounting for unpooled entries since they're per-session.
-      const conn = entry.attach(sessionId, view, {
+      const conn = entry.attach(seatId, view, {
         release: () => {
-          this.indexDetach(sessionId, id);
+          this.indexDetach(sessionId, id, seatId);
           void entry.forceShutdown('manual');
         },
       });
@@ -1331,14 +1488,14 @@ export class McpTransportPool {
         /* best effort — entry never reached active state */
       }
       this.entries.delete(id);
-      this.unpooledIds.delete(id);
+      this.unpooledSessions.delete(id);
       // Roll back the early reverse-index insertion above so
       // `sessionToEntries[sessionId]` does not accumulate stale ids
       // pointing at deleted entries. `indexDetach` is a no-op if the
       // failure happened before we ever indexed (e.g. an error in
       // `entries.set` itself, which is impossible today but defends
       // against future restructuring).
-      this.indexDetach(sessionId, id);
+      this.indexDetach(sessionId, id, seatId);
       try {
         await client.disconnect();
       } catch {
