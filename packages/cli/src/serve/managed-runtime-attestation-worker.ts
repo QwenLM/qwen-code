@@ -37,6 +37,7 @@ import {
   MANAGED_SHELL_PUBLISHER_ROUTE,
 } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
 import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 
@@ -252,6 +253,16 @@ export async function startManagedRuntimeAttestationWorker(
 }
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
+  // A Managed session's host starts its worker over an IPC channel, with the
+  // loader vars that only boot this process; the commands it runs must not
+  // inherit them. Other launchers choose the worker's environment themselves.
+  if (typeof process.send === 'function') {
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'Managed Runtime worker',
+    );
+  }
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
@@ -266,7 +277,11 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
     const close = () => {
       if (closing) return;
       closing = true;
-      void worker.close().then(resolve, reject);
+      void worker.close().then(() => {
+        // The parent's channel would otherwise keep this process alive.
+        if (process.connected) process.disconnect();
+        resolve();
+      }, reject);
     };
     const closeAfterOutputFailure = () => {
       process.exitCode = 1;
@@ -274,6 +289,14 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
     };
     process.once('SIGINT', close);
     process.once('SIGTERM', close);
+    // A parent that starts the worker with an IPC channel, such as a Managed
+    // session's host, owns its lifetime: however the parent ends, the channel
+    // closes and the worker stops its calls and exits.
+    if (typeof process.send === 'function') {
+      process.channel?.unref();
+      process.once('disconnect', close);
+      if (!process.connected) close();
+    }
     process.stdout.once('error', closeAfterOutputFailure);
     process.stdout.write(`${JSON.stringify(worker.ready)}\n`, (error) => {
       if (error) closeAfterOutputFailure();

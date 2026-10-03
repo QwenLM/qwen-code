@@ -39,10 +39,11 @@ real HTTP, a real database and real process deaths.
 Out of scope: Hosted Harness session and SSE gates, output capture and
 delivery gates (after O1b–O3), the managed agent server's W0c-3 storage
 ownership row and grant rechecks (unit-tested in `WorkspaceRuntimeTest`),
-Kubernetes provisioning, and Stage G failover. The `--session-failover`
-mode of `scripts/run-managed-agent-server-e2e.ts` stays outside CI; the
-in-flight and continuation modes run in the `hosted-harness-mysql` job (see
-[Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
+Kubernetes provisioning, and Stage G failover. All three failover modes of
+`scripts/run-managed-agent-server-e2e.ts` (`--session-failover`,
+`--inflight-failover`, `--continuation-failover`) run in the
+`hosted-harness-mysql` job (#13258); only the real-model check stays outside
+CI (see [Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
 
 ## 3. Design
 

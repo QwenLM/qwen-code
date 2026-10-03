@@ -16,15 +16,15 @@ Session 是保留根。close、archive、Runtime 排空、ACK 和事件过期后
 
 新增独立生命周期 `PINNED → RETIRING → DELETING → COLLECTED`，不改写 execution、capture、delivery 和 producer phase。删除按 tenant → 私有 journal head → publication → 公共 Session 加锁，在同一事务复核 writer 并完成公共删除；即使从未建立私有 head，也保留永久 Session 墓碑。拒绝新 acquisition、恢复、publication 修改和投影。回填跳过退役 head，待处理投影被抑制。
 
-每个 Artifact 下载请求只持有一个数据库读租约，覆盖元数据解析和对象分段；内层读取借用原租约，不延长预算。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。每次租约检查在一条查询中读取身份、退役标记与数据库时间。退役后仍允许增加隔离保护标记，因此并发发现的损坏对象继续被保留。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
+每个 Artifact 下载请求只持有一个数据库读租约，覆盖元数据解析和对象分段；内层读取借用原租约，不延长预算。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。每次租约检查在一条查询中读取身份、退役标记与数据库时间。内部完整性验证将网络短读取聚合成最多 1 MiB 的批次，批次前后仍检查；公共完整流输出每次最多返回或写出 64 KiB，并继续逐次检查。引用验证在新鲜的 receipt 查询内检查退役标记，删除重复的退役查询，不缓存授权结果。退役后仍允许增加隔离保护标记，因此并发发现的损坏对象继续被保留。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
 
-每次物理 PUT 在网络请求之前独立持久登记 attempt。确定成功只闭合该 attempt；异常或进程死亡保留 unknown/outstanding，直到外部处置前阻止自动清理。后续重试成功不能闭合前驱。禁用 OSS SDK 隐式重试，现有显式写重试创建新 attempt。OSS adapter 仅重试明确的瞬时对象或桶元数据 GET 错误，最多三次，退避为 100/200/400 ms。每次受保护的读尝试在网络 I/O 前检查原租约，公共读取还复核当前授权；中断、守卫失败、永久错误和响应体失败均不重试。纯 inline publication 也有新协议证据，历史行默认缺失证据。
+每次物理 PUT 在网络请求之前独立持久登记 attempt。确定成功只闭合该 attempt；异常或进程死亡保留 unknown/outstanding，直到外部处置前阻止自动清理。后续重试成功不能闭合前驱。OSS SDK 策略始终拒绝原生重放，非零重试上限仅用于将失败 GET 的 HTTP 状态交给适配器；现有显式写重试创建新 attempt。OSS adapter 重试瞬时对象或桶元数据 GET 错误，包括除 `InvalidResponse` 外的 HTTP 500/502/503，最多三次，退避为 100/200/400 ms。每次受保护的读尝试在网络 I/O 前检查原租约，公共读取还复核当前授权；中断、守卫失败、永久错误和响应体失败均不重试。耗尽后保留原 SDK 异常。纯 inline publication 也有新协议证据，历史行默认缺失证据。
 
 ## 清理与配额
 
-默认关闭自动删除，先观察候选。持锁重新检查候选：Session 永久退役、宽限期到期、完整 committed 且已接纳的 publication、无活跃读租约、无未结束或未知 PUT、无 candidate 对象、未完成 operation、隔离或恢复保护，并具备升级后的写入证据。持久 claim generation 和游标支持重启及多实例竞争；每实例仅一个调度清理器。
+默认关闭自动删除，先观察候选。持锁重新检查候选：Session 永久退役、宽限期到期、完整 committed 且已接纳的 publication、无活跃读租约、无未结束或未知 PUT、无 candidate 对象、未完成 operation、隔离或恢复保护，并具备升级后的写入证据。持久 claim generation 和游标支持重启及多实例竞争；每实例仅一个调度清理器，和候选观察共用独立单线程输出调度器，避免存储 I/O 阻塞活跃 Session 调度。每个 tick 在独立事务中最多检查 32 个到期候选，并最多回收一页。宽限期阻塞的候选等待至原始退役时间加配置宽限期；其他阻塞一分钟后重试。每页确认通过主键存在性查询检查剩余 catalog 项，并在 Session 自身的主键前缀内仅清理属于该 publication catalog 的资源。
 
-SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精确 key，再在原 claim 下确认。幂等 `deleteIfPresent` 处理不存在对象和应答丢失；异常保留待重试页，不按前缀扫删。旧清理器不能推进新 claim 或释放配额。退役和 `DELETING` 关闭接纳，阻止新读者和 PUT 重新创建已删对象。
+SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精确 key，再在原 claim 下确认。每次 claim 最多检查 32 个到期候选，避免被阻塞的 publication 独占 worker；宽限期内的行等到原始退役时间加宽限期再检查。过期 claim 只通过原 owner/generation fence 延后。纯 inline 页不需要 OSS versioning 探针，物理 key 继续要求未启用版本控制。幂等 `deleteIfPresent` 处理不存在对象和应答丢失；异常保留待重试页，不按前缀扫删。旧清理器不能推进新 claim 或释放配额。退役和 `DELETING` 关闭接纳，阻止新读者和 PUT 重新创建已删对象。Collection 使用接在 recovery V31、close V32、AgentDefinition V33 后的 V34；合入前以 V28 或 V33 记录 collection 的历史需要显式核对，不自动执行 Flyway repair。
 
 最后一页确认后，SQL 清除 publication inline 副本及对应 Session resource 副本，保留身份、digest、长度、receipt 指针和审计时间，置为 `COLLECTED`，一次性清零 held/used 记账。部分成功仍保留全部占额。原 journal 及公共预览/历史遵循各自已有保留策略。
 

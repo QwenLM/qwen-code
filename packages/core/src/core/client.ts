@@ -275,6 +275,13 @@ export interface SendMessageOptions {
   }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts
+   * (the Hosted Harness, whose streamed text is published durably). Forwarded
+   * to `LlmChat` so a post-delivery cut replays instead of continuing
+   * (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 export interface SteerInput {
@@ -423,6 +430,7 @@ export function getMainSessionBaseSystemPrompt(
             config.getShellExecutionSandbox?.()?.filesystem,
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
+          executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
         },
       );
 }
@@ -4037,6 +4045,17 @@ export class LlmClient {
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
       // interaction missing from chat recording entirely.
+      //
+      // `deliveredTurn: true` because this record IS the turn's user entry,
+      // written once the send path has admitted the turn: that is what
+      // separates it from a cold notification record the daemon persisted
+      // before any turn ran, which no other persisted field can tell apart
+      // (`backgroundTurn` vanishes on the `channelTask` admission branch).
+      // The stamp does not claim the model accepted a request — the pre-send
+      // refusal gates below all return after this write — and it cannot move
+      // under them without losing the resumed info item this record exists to
+      // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
+      // and the test pinning it.
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -4044,6 +4063,7 @@ export class LlmClient {
           options?.notificationDisplayText,
           undefined,
           goalPermit,
+          /* deliveredTurn */ true,
         );
     }
 
@@ -4444,6 +4464,7 @@ export class LlmClient {
         // Only a first-party user prompt opens a rewindable identity. Re-entry
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        options?.retractDeliveredOutputOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
