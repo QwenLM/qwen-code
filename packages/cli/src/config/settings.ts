@@ -67,7 +67,7 @@ import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
-  readEnvironmentVariable,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
 
@@ -657,6 +657,49 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const operatorMem0 = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['memory']>['mem0'] | null
+  >(
+    (selected, scope) =>
+      scope.memory === null
+        ? null
+        : scope.memory?.mem0 !== undefined
+          ? scope.memory.mem0
+          : selected,
+    undefined,
+  );
+  if (operatorMem0 === null) {
+    if (merged.memory && typeof merged.memory === 'object') {
+      delete merged.memory.mem0;
+    }
+  } else if (operatorMem0 !== undefined) {
+    const memory = merged.memory;
+    const operatorMemory = customDeepMerge(
+      getMergeStrategyForPath,
+      ...[systemDefaults, user, system]
+        .filter((scope) => scope.memory !== undefined)
+        .map((scope) => ({ memory: scope.memory })),
+    )['memory'] as Settings['memory'];
+    merged.memory = {
+      ...(operatorMemory && typeof operatorMemory === 'object'
+        ? operatorMemory
+        : {}),
+      ...(memory && typeof memory === 'object' && !Array.isArray(memory)
+        ? memory
+        : {}),
+      mem0: operatorMem0,
+    };
+    const operatorExternalContext =
+      tagMcpServerScope(system, 'system').mcpServers?.['external-context'] ??
+      user.mcpServers?.['external-context'] ??
+      systemDefaults.mcpServers?.['external-context'];
+    if (operatorExternalContext) {
+      merged.mcpServers = {
+        ...merged.mcpServers,
+        'external-context': operatorExternalContext,
+      };
+    }
+  }
   const executionSandbox = selectOperatorExecutionSandbox(
     systemDefaults,
     user,
@@ -1036,6 +1079,12 @@ export interface LoadSettingsOptions {
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
+  /**
+   * Throw on invalid workspace-scope JSON instead of recovering it. Recovery
+   * rewrites the file to `{}`, which a caller polling a setting would read as
+   * the user having turned it off — and the rewrite makes that permanent.
+   */
+  preserveInvalidWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -1056,7 +1105,9 @@ export function loadSettings(
  * that cannot be read whole, is not a JSON object or carries a version this
  * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
  * some of these. `environment` locates the user and system files and is the
- * only source for `${VAR}` placeholders; without one, nothing is read.
+ * only source for `${VAR}` placeholders; without one, nothing is read. It is
+ * read as a spawned session host receives it, and one that the host would not
+ * receive as it is throws.
  */
 export function readSettingsSnapshot(
   workspaceDir: string,
@@ -1082,19 +1133,12 @@ export function readSettingsSnapshot(
 }
 
 /**
- * The variables a session host spawned with `environment` sees, for
- * placeholders, when the environment holds string values: on Windows, names
- * are case-insensitive and only one spelling of each is passed on.
+ * The real path of the home directory, as settings loading resolves it to tell
+ * whether the workspace is the home directory. Throws when it cannot be
+ * resolved, for example because it does not exist.
  */
-function spawnedEnvironmentView(
-  environment: Readonly<NodeJS.ProcessEnv>,
-): Record<string, string> {
-  return new Proxy({} as Record<string, string>, {
-    get: (_target, name) =>
-      typeof name === 'string'
-        ? readEnvironmentVariable(environment, name)
-        : undefined,
-  });
+export function resolveHomeDirectory(home: string = homedir()): string {
+  return fs.realpathSync(path.resolve(home));
 }
 
 function readSettingsLayers(
@@ -1135,7 +1179,6 @@ function readSettingsLayers(
 
   // Resolve paths to their canonical representation to handle symlinks
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
@@ -1146,7 +1189,7 @@ function readSettingsLayers(
   }
 
   // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  const realHomeDir = resolveHomeDirectory();
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1179,16 +1222,19 @@ function readSettingsLayers(
         try {
           rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
-          if (snapshot || scope !== SettingScope.Workspace || operatorSandbox)
+          if (
+            snapshot ||
+            scope !== SettingScope.Workspace ||
+            operatorSandbox ||
+            opts.preserveInvalidWorkspaceSettings
+          )
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
           //
-          // Note: there is no on-disk `.orig` backup to recover from. Writes go
-          // through `writeWithBackupSync`, which uses `.orig` only as an
-          // in-flight safety net and removes it on success — so it never
-          // lingers in the user's directory (see writeWithBackup.ts).
+          // Failed saves may retain private recovery copies, but those can
+          // predate another writer's save and must not be restored automatically.
 
           // Step 1: copy corrupted file to .corrupted for reference
           // MUST guarantee .corrupted exists so onExit can restore it.
@@ -1310,7 +1356,7 @@ function readSettingsLayers(
 
         // Execute migrations even on recovered settings — the migrated data
         // must persist. The disk-write branches below (version normalization)
-        // are guarded by !corruptedSaved to avoid creating .orig backups
+        // are guarded by !corruptedSaved to avoid creating recovery copies
         // of freshly-reset settings.
         if (needsMigration(settingsObject)) {
           const migrationResult = runMigrations(settingsObject, scope);
@@ -1341,7 +1387,7 @@ function readSettingsLayers(
           // Normalize it to current version to avoid repeated startup work.
           // Skip if we just recovered from corruption — the next startup will
           // handle normalization, avoiding an unnecessary writeWithBackupSync
-          // that would create a .orig file from the freshly reset settings.
+          // that would back up the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }

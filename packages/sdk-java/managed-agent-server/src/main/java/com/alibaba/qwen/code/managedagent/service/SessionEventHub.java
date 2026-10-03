@@ -13,7 +13,8 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class SessionEventHub implements CommittedEventPublisher {
-    private static final int CAPACITY = 512;
+    // Events kept per Session; a subscriber further behind reads the store.
+    static final int CAPACITY = 512;
     private final Map<SessionKey, SessionBuffer> buffers =
             new ConcurrentHashMap<>();
 

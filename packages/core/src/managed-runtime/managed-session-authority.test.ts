@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertSessionExecutionEngine } from '../services/session-execution-engine.js';
 import { readSessionTranscriptSnapshot } from '../services/session-transcript-reader.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -774,6 +774,73 @@ describe('managed session authority activation fences', () => {
       await reopened.release();
     });
 
+    it('refuses to install an activation ID the log already holds', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      const install = () =>
+        opened.authority.installActivation({
+          activationId: 'act-once',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+      const installed = await install();
+      await opened.authority.releaseActivation();
+      const committed = opened.authority.committedSequence;
+      const publish = vi.spyOn(
+        LocalManagedSessionResourceStore.prototype,
+        'publish',
+      );
+
+      await expect(install()).rejects.toThrow(
+        new ManagedSessionConflictError(
+          'activation act-once was already installed.',
+        ),
+      );
+      expect(publish).not.toHaveBeenCalled();
+      publish.mockRestore();
+      expect(opened.authority.committedSequence).toBe(committed);
+      expect(opened.authority.currentActivation).toMatchObject({
+        activationId: 'act-once',
+        epoch: installed.epoch,
+        phase: 'released',
+      });
+      await opened.release();
+    });
+
+    it('refuses one of two concurrent installs of one activation ID', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      const install = () =>
+        opened.authority.installActivation({
+          activationId: 'act-twice',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+      // Whichever install commits first wins; the order depends on when each
+      // publishes its body.
+      const results = await Promise.allSettled([install(), install()]);
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toEqual(
+        new ManagedSessionConflictError(
+          'activation act-twice was already installed.',
+        ),
+      );
+      expect(
+        opened.authority
+          .readEvents()
+          .filter((event) => event.kind === 'activation.changed'),
+      ).toHaveLength(1);
+      await opened.release();
+    });
+
     it('does not renew a released activation', async () => {
       const fixture = await createFixture();
       const opened = await openRenewable(fixture, () => 1_000_000);
@@ -867,15 +934,41 @@ describe('managed session authority activation fences', () => {
       ),
     ).toEqual(requested);
 
+    const sequence = opened.authority.committedSequence;
+    await expect(
+      opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-refused',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+        () => false,
+      ),
+    ).rejects.toThrow(/was not admitted/);
+    expect(opened.authority.action('req-1')?.state).toBe('requested');
+    expect(opened.authority.committedSequence).toBe(sequence);
+
     const decided = await opened.authority.resolveAction(
       inputCommand(fixture, {
         operation: 'resolveAction',
         commandId: 'cmd-action-decide',
       }),
       { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+      () => true,
     );
     expect(decided.state).toBe('decided');
     expect(decided.decisionRef).toEqual(ref());
+    // A recorded outcome is answered without asking again.
+    expect(
+      await opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-decide-replay',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+        () => false,
+      ),
+    ).toEqual(decided);
     expect(
       await opened.authority.resolveAction(
         inputCommand(fixture, {
@@ -1080,10 +1173,12 @@ describe('managed session authority log integrity', () => {
 
     // Releasing the lease under the authority makes the next append fail for
     // real rather than through an injected stub.
+    expect(authority.writesStopped).toBe(false);
     await lease.release();
     await expect(
       authority.submitInput(inputCommand(fixture), inputRequest),
     ).rejects.toThrow();
+    expect(authority.writesStopped).toBe(true);
 
     await expect(
       authority.submitInput(

@@ -33,14 +33,13 @@ public record RuntimeRecoveryEvidence(String evidenceId, Fact fact,
 
     boolean matches(RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
             RuntimeLease lease) {
-        return seed != null && lease != null
+        return seed != null
                 && provisionRequestId.equals(seed.getProvisionRequestId())
                 && runtimeInstanceId.equals(seed.getProvisionalRuntimeId())
-                && runtimeInstanceId.equals(lease.getRuntimeInstanceId())
                 && runtimeIncarnation.equals(seed.getGatewayIncarnation())
                 && leaseId.equals(seed.getLeaseId())
-                && leaseId.equals(lease.getLeaseId())
-                && epoch == seed.getEpoch() && epoch == lease.getEpoch()
+                && epoch == seed.getEpoch()
+                && (lease == null || seed.matches(lease))
                 && resourceHandle.equals(handle);
     }
 
