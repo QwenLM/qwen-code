@@ -131,7 +131,16 @@ After fixes, re-run unit tests and a quick E2E sanity check.
 
 Output: clean implementation with valid review findings addressed.
 
-## Phase 8: Wrap Up
+## Phase 8: Knowledge Closeout
+
+Run `/knowledge-lifecycle` before declaring the feature complete. Route only
+facts introduced or changed by this work, update repository files that are in
+scope, and leave GitHub mutations as proposals unless they are explicitly
+authorized. Do not create a closeout artifact when no knowledge should persist.
+
+Output: canonical sources updated, or an explicit no-persistence result.
+
+## Phase 9: Wrap Up
 
 Skip unless the user asks. Create the branch, commit with Conventional Commits,
 push, and create a draft PR using the project PR template. Post E2E results as a
