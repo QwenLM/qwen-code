@@ -12,7 +12,7 @@ Web Shell already uses HTML file inputs for attachments, workspace uploads and e
 
 Handle `onShowFileChooser` only for the current attached WebView at its configured daemon origin. Support single and multiple open modes. Use `ACTION_OPEN_DOCUMENT` with `CATEGORY_OPENABLE`, read access and the requested MIME hints, falling back to a general file picker when a hint is unknown. The Web Shell's existing unrestricted inputs must remain able to choose source files and text, not only images. Capture hints use the document picker; unsupported save/directory modes cancel.
 
-Keep one outstanding OS picker at a time. Each callback belongs to the requesting WebView/document. Profile switch, main-document navigation, connection errors and Activity destruction cancel that callback exactly once. Cancellation does not release the in-flight slot until the old OS result arrives: otherwise a late result could be delivered to a newer request. On recreation save only the in-flight flag, never the callback, URI or file contents; discard the orphan result before accepting another request.
+Keep one outstanding OS picker at a time. Each callback belongs to the requesting WebView/document. Profile switch, main-document navigation, connection errors and Activity destruction cancel that callback exactly once. The [microphone preflight](mobile-microphone-permission.md) also cancels an Open request before launching the picker when the connection has been granted microphone access; reconnect explicitly and retry to use files. Cancellation does not release the in-flight slot until the old OS result arrives: otherwise a late result could be delivered to a newer request. On recreation save only the in-flight flag, never the callback, URI or file contents; discard the orphan result before accepting another request.
 
 Treat picker output as untrusted. Accept only content URIs with a read grant, from a resolvable provider outside the application's own UID; reject file/network URIs, inaccessible providers and mixed unsafe selections. Enforce single-selection cardinality when requested and a maximum of 100 files, matching the H5 workspace upload batch limit. Never expose app-private files to the WebView. Do not persist URI permissions, copy files, log selected URIs or request broad storage/media permissions. Browser content/file access settings remain disabled; selected input files are delivered through the callback.
 
@@ -33,8 +33,8 @@ provider or permission is introduced. Rotate alone does not recreate this
 Activity because it handles configuration changes; use explicit Activity
 recreation when validating restored in-flight picker ownership.
 
-1. Existing single/multiple HTML file inputs open a system document chooser and receive only explicitly selected readable documents.
-2. Cancel, missing picker, malformed result, unsafe URI and unsupported mode produce one cancellation, without a crash or stuck callback.
+1. On connections without a prior microphone grant, existing single/multiple HTML file inputs open a system document chooser and receive only explicitly selected readable documents. Microphone-authorized connections receive the preflight cancellation and reconnect choice instead.
+2. Cancel, microphone preflight, missing picker, malformed result, unsafe URI and unsupported mode produce one cancellation, without a crash or stuck callback.
 3. Profile/document changes discard old results; a second request cannot take over an outstanding picker's callback. Recreation never sends an old file to a new page.
 4. Generic files and archive filters work, with no broad storage permission, camera permission or persistent grant.
 5. Web Shell upload routing and existing origin isolation remain unchanged. Verify actual Android runtime behavior separately from compilation; report real-daemon/TLS and physical-device coverage honestly.

@@ -84,6 +84,7 @@ function projectedItemEvent(
     sessionId: item.sessionId,
     turnId: item.turnId,
     data,
+    assembledFromItem: true,
   };
 }
 
