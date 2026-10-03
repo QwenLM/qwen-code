@@ -128,6 +128,17 @@ final class ExtensionRecordJournal {
                 event -> { }, records -> records, 0, domain, resources);
     }
 
+    /**
+     * An ordinary body-less domain commit, open to the same edits as a
+     * Stage H one, as a writer that does not follow the contract would.
+     */
+    CommitTransactionRequest requestOrdinary(String commandId, String domain,
+            JsonNode body, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents) {
+        return request("commitDomainRecord", commandId, bytes(body), 1_000,
+                editEvent, editRecords, extraEvents, domain, List.of());
+    }
+
     private CommitTransactionRequest request(String operation, String commandId,
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords, int extraEvents, String domain,

@@ -1839,9 +1839,8 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public void appendLiveSessionEventIfAbsent(String tenantId,
-            String sessionId, String type, Map<String, Object> data,
-            String sourceKey) {
+    public void appendLiveSessionTaskEvent(String tenantId, String sessionId,
+            String taskId, String state, long revision, String sourceKey) {
         // A locking read sees the latest committed status, where a plain one
         // could still see the snapshot taken before a deletion committed.
         Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
@@ -1855,10 +1854,18 @@ public class ManagedAgentStore implements AgentStateStore {
                 || "DELETED".equals(session.get().status())) {
             return;
         }
-        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
-            appendEvent(tenantId, sessionId, null, type, data, false,
-                    sourceKey, clock.millis());
-        }
+        // The lock above serializes the writers of this outbox, so the next
+        // sequence is the one after the highest committed.
+        Long current = jdbc.queryForObject("SELECT MAX(sequence_id) FROM"
+                        + " managed_agent_task_event WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                Long.class, tenantId, sessionId);
+        jdbc.update("INSERT INTO managed_agent_task_event"
+                        + " (tenant_id, session_id, sequence_id, task_id,"
+                        + " task_state, revision, source_key, created_at)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                tenantId, sessionId, (current == null ? 0 : current) + 1,
+                taskId, state, revision, sourceKey, clock.millis());
     }
 
     public SessionRecord requireSession(String tenantId, String sessionId) {

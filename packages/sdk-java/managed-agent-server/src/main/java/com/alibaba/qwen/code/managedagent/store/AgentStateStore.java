@@ -236,13 +236,15 @@ public interface AgentStateStore {
             boolean terminal, String sourceKey);
 
     /**
-     * Appends a Session event unless one with the source key exists, when
-     * the tenant's Session exists and is neither deleted nor being deleted.
-     * The Session is locked before its status is read, so a deletion that
-     * commits first is always seen.
+     * Appends a changed task view to the Session's task-event outbox when
+     * the tenant's Session exists and is neither deleted nor being
+     * deleted. The Session is locked before its status is read, so a
+     * deletion that commits first is always seen. The outbox stays out of
+     * the Session event stream, which turn and lifecycle events share with
+     * the message projection's sequence.
      */
-    void appendLiveSessionEventIfAbsent(String tenantId, String sessionId,
-            String type, Map<String, Object> data, String sourceKey);
+    void appendLiveSessionTaskEvent(String tenantId, String sessionId,
+            String taskId, String state, long revision, String sourceKey);
 
     SessionRecord requireSession(String tenantId, String sessionId);
 }

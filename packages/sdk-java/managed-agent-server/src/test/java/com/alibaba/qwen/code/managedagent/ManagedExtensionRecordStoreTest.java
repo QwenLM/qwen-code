@@ -210,15 +210,17 @@ class ManagedExtensionRecordStoreTest {
                 + " JSON object the Session authority can read", trailing,
                 event -> {
                 }, records -> records);
-        refuse("no commit marker", "holds only its events, then its commit"
-                + " marker", start, event -> {
+        refuse("no commit marker", "has the unknown subtype"
+                + " managed_session_note after the Managed header", start,
+                event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         assertRefused("a line among the events that is not one", sessionId,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "holds only its events, then its commit marker",
+                "has the unknown subtype managed_session_note after the"
+                        + " Managed header",
                 () -> journal.commit(journal.request(
                         ExtensionRecordJournal.OPERATION, "refused", start,
                         1_000, event -> {
@@ -268,6 +270,159 @@ class ManagedExtensionRecordStoreTest {
     /** A value holding {@code depth} nested arrays. */
     private static String nested(int depth) {
         return "[".repeat(depth) + "]".repeat(depth);
+    }
+
+    /** A well-formed record line carrying an ordinary event. */
+    private static String ordinaryEventLine(String sessionId, long sequence,
+            String eventId, String kind) {
+        ObjectNode event = JsonNodeFactory.instance.objectNode()
+                .put("v", 1).put("sequence", sequence)
+                .put("eventId", eventId);
+        event.putObject("sessionKey").put("tenantId", TENANT)
+                .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
+        event.put("kind", kind).put("occurredAt", 1_000);
+        event.putObject("payload");
+        ObjectNode record = JsonNodeFactory.instance.objectNode()
+                .put("uuid", UUID.randomUUID().toString())
+                .putNull("parentUuid").put("sessionId", sessionId)
+                .put("timestamp", "2026-09-27T00:00:00.000Z")
+                .put("type", "system")
+                .put("subtype", "managed_session_event_v1")
+                .put("cwd", "/workspace").put("version", "test");
+        record.set("managedSession", event);
+        return record + "\n";
+    }
+
+    /**
+     * Every line below answers 200 to an ordinary commit today and bricks
+     * the authority's reader at the next open; the store must refuse it
+     * with a 409 instead, as the class's invariant promises.
+     */
+    @Test
+    void refusesEventLinesTheAuthorityWouldRefuseAtReopen() throws Exception {
+        ObjectNode goal = JsonNodeFactory.instance.objectNode()
+                .put("goal", "live");
+        // The control: a faithful body-less domain.committed commits. The
+        // pass-through branch keeps every live managed Session working.
+        String accepted = UUID.randomUUID().toString();
+        ExtensionRecordJournal live = journal(accepted);
+        live.commit(live.requestOrdinary("ordinary", "goal_state", goal,
+                event -> {
+                }, records -> records, 0));
+
+        refuseOrdinary("an event line without its body", goal,
+                "event must be an object with exactly", event -> {
+                }, records -> records.replaceFirst(
+                        "\\{\"uuid\"[^\\n]*\n",
+                        "{\"subtype\":\"managed_session_event_v1\"}\n"), 0);
+        refuseOrdinary("a second event line out of sequence", goal,
+                "event.sequence is out of range", event -> {
+                }, records -> records, 5);
+        refuseOrdinary("a second event line with a reserved event id", goal,
+                "event id monitor_run:1 is reserved for Stage H records",
+                event -> {
+                }, records -> records, -1);
+        refuseOrdinary("a second event line of an unknown kind", goal,
+                "event.kind must be one of", event -> {
+                }, records -> records, -2);
+        refuseOrdinary("a second event line for another Session", goal,
+                "The event names another Session", event -> {
+                }, records -> records, -3);
+        refuseOrdinary("a line of an unknown subtype after a Managed line",
+                goal, "has the unknown subtype not_a_subtype after the"
+                        + " Managed header", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"not_a_subtype\"}\n"), 1);
+        refuseOrdinary("a body-less domain.committed with a fifth payload"
+                        + " field", goal,
+                "event.payload must be an object with exactly",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("extra", true), records -> records, 0);
+        refuseOrdinary("a body-less domain.committed of record version 2",
+                goal, "event.payload.version is out of range",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("version", 2), records -> records, 0);
+        refuseOrdinary("a domain.committed naming a domain without an index"
+                        + " entry", goal, "event.payload.domain must be one"
+                        + " of", event -> {
+                }, records -> records, 0, "not_a_domain", 0);
+        String marker = "{\"subtype\":\"managed_session_commit_v1\","
+                + "\"managedSession\":{\"commandId\":\"big\","
+                + "\"padding\":\"" + "x".repeat(100_000) + "\"}}\n";
+        refuseOrdinary("a commit marker past its byte cap", goal,
+                "exceeds 65536 UTF-8 bytes", event -> {
+                }, records -> records.substring(0, records.indexOf('\n')
+                        + 1) + marker, 0);
+
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        byte[] start = ExtensionRecordJournal.bytes(
+                chain().get(0).required("monitorRun"));
+        long sequence = journal.committedSequence() + 1;
+        assertRefused("two Stage H events in one transaction", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "A transaction carries at most one Stage H record",
+                () -> journal.commit(journal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000, event -> {
+                        }, records -> {
+                            String first = records.substring(0,
+                                    records.indexOf('\n'));
+                            String second = first.replaceFirst(
+                                    "\\\"sequence\\\":" + sequence,
+                                    "\\\"sequence\\\":" + (sequence + 1));
+                            return first + "\n" + second + records.substring(
+                                    records.indexOf('\n'));
+                        }, 1)));
+    }
+
+    /** A refused ordinary body-less domain commit. The {@code inject} of 5
+     * inserts a second event line five sequences past its place, of -1 one
+     * carrying the reserved id {@code monitor_run:1}, of -2 one of a kind
+     * the journal does not know, of -3 one naming another Session; any
+     * other value declares it as the {@code extraEvents} of the request. */
+    private void refuseOrdinary(String label, JsonNode goal, String message,
+            Consumer<ObjectNode> editEvent, UnaryOperator<String> editRecords,
+            int inject) {
+        refuseOrdinary(label, goal, message, editEvent, editRecords, inject,
+                "goal_state", 1);
+    }
+
+    private void refuseOrdinary(String label, JsonNode goal, String message,
+            Consumer<ObjectNode> editEvent, UnaryOperator<String> editRecords,
+            int inject, String domain, int defaultExtra) {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        long firstSequence = journal.committedSequence() + 1;
+        UnaryOperator<String> records = editRecords;
+        int extra = defaultExtra;
+        if (inject == 5) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 5,
+                            "input-1:accepted", "input.accepted"));
+        } else if (inject == -1) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "monitor_run:1", "input.accepted"));
+        } else if (inject == -2) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "event-1", "not_a_kind"));
+        } else if (inject == -3) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "event-1", "input.accepted")
+                            .replace("\"workspaceId\":\"" + WORKSPACE + "\"",
+                                    "\"workspaceId\":\"other\""));
+        } else {
+            extra = inject;
+        }
+        UnaryOperator<String> edit = records;
+        int extraEvents = extra;
+        assertRefused(label, sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED, message,
+                () -> journal.commit(journal.requestOrdinary("refused",
+                        domain, goal, editEvent, edit, extraEvents)));
     }
 
     @Test
@@ -355,18 +510,57 @@ class ManagedExtensionRecordStoreTest {
             }
             previous = view;
         }
-        List<EventRecord> announced = state.findEvents(TENANT, sessionId, 0,
-                100).stream()
-                .filter(event -> "task.updated".equals(event.type()))
-                .toList();
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId,
                         "monitor_run", "monitor-1"));
-        assertThat(announced).extracting(event -> event.data().get("state"))
+        // The announcement rides the task-event outbox, written in the same
+        // transaction, not the Session event stream.
+        List<Map<String, Object>> announced = jdbc.queryForList(
+                "SELECT task_id, task_state FROM managed_agent_task_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " ORDER BY sequence_id",
+                TENANT, sessionId);
+        assertThat(announced).extracting(row -> row.get("task_state"))
                 .containsExactlyElementsOf(expected);
-        assertThat(announced).allSatisfy(event ->
-                assertThat(event.data().get("taskId")).isEqualTo(taskId));
+        assertThat(announced).allSatisfy(row ->
+                assertThat(row.get("task_id")).isEqualTo(taskId));
         assertThat(expected.size()).isLessThan(chain().size());
+        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
+                .extracting(EventRecord::type)
+                .doesNotContain("task.updated");
+    }
+
+    @Test
+    void keepsOneTextPartAcrossATaskAnnouncement() throws Exception {
+        String sessionId = agents.createSession(TENANT, "split-"
+                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                List.of()).sessionId();
+        String turnId = "turn-" + UUID.randomUUID();
+        state.appendPublicEventIfAbsent(TENANT, sessionId, turnId,
+                "item.output_text.delta", Map.of("text", "one"), false,
+                "delta-1");
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode revision = chain().get(0);
+        journal.commitMonitor("split-0", revision.required("monitorRun"),
+                revision.required("occurredAt").longValue());
+        state.appendPublicEventIfAbsent(TENANT, sessionId, turnId,
+                "item.output_text.delta", Map.of("text", "two"), false,
+                "delta-2");
+        state.materializeNextBatch(TENANT, sessionId, 100);
+        // The announcement leaves the message projection's sequence, so the
+        // two deltas keep one Part instead of splitting into two.
+        List<String> partIds = jdbc.queryForList("SELECT content_part_id"
+                        + " FROM managed_agent_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type ="
+                        + " 'item.output_text.delta' ORDER BY sequence_id",
+                String.class, TENANT, sessionId);
+        assertThat(partIds).hasSize(2);
+        assertThat(partIds.get(0)).isEqualTo(partIds.get(1));
+        List<String> parts = jdbc.queryForList("SELECT part_text FROM"
+                        + " managed_agent_item_part WHERE tenant_id = ?"
+                        + " AND session_id = ? AND part_type = 'output_text'",
+                String.class, TENANT, sessionId);
+        assertThat(parts).containsExactly("onetwo");
     }
 
     @Test
@@ -396,8 +590,16 @@ class ManagedExtensionRecordStoreTest {
         List<EventRecord> events = state.findEvents(TENANT, sessionId, 0,
                 100);
         assertThat(events).extracting(EventRecord::type)
-                .containsOnlyOnce("task.updated")
+                .doesNotContain("task.updated")
                 .endsWith("session.delete.requested");
+        // Only the revision committed before the deletion began announced,
+        // and its outbox row survives with the Session's tombstone.
+        assertThat(jdbc.queryForList("SELECT task_state FROM"
+                        + " managed_agent_task_event WHERE tenant_id = ?"
+                        + " AND session_id = ? ORDER BY sequence_id",
+                String.class, TENANT, sessionId))
+                .containsExactly(ManagedExtensionProjectionContractTest.view(
+                        chain.get(0).required("view")).state());
         assertThat(revisions(sessionId)).isEqualTo(2);
     }
 

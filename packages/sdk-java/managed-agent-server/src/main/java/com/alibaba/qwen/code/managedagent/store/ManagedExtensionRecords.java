@@ -33,6 +33,13 @@ public final class ManagedExtensionRecords {
             "plan_mode", "team_state", "team_task", "team_message",
             "team_plan", "session_message", "session_metadata",
             "file_history", "session_source");
+    /** The event kinds of managed-session/1, as the authority writes them. */
+    public static final List<String> EVENT_KINDS = List.of("input.accepted",
+            "wake.requested", "activation.changed", "model.attempt",
+            "message.committed", "tool.intent", "action.changed",
+            "tool.receipt", "checkpoint.committed", "context.compacted",
+            "cancel.requested", "turn.settled", "config.bound",
+            "lifecycle.changed", "domain.committed", "message.delta");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
@@ -706,7 +713,7 @@ public final class ManagedExtensionRecords {
         digest(node.get("digest"), label + ".digest");
     }
 
-    private static String oneOf(JsonNode node, List<String> allowed,
+    static String oneOf(JsonNode node, List<String> allowed,
             String label) {
         require(node != null && node.isTextual()
                 && allowed.contains(node.textValue()),

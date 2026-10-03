@@ -331,7 +331,15 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_writer_conflict"));
 
-        String turnBytes = "{\"subtype\":\"managed_session_event_v1\"}\n"
+        String event = "{\"v\":1,\"sequence\":1,"
+                + "\"eventId\":\"turn-1:accepted\","
+                + "\"sessionKey\":{\"tenantId\":\"" + TENANT
+                + "\",\"workspaceId\":\"" + WORKSPACE
+                + "\",\"sessionId\":\"" + SESSION + "\"},"
+                + "\"kind\":\"input.accepted\",\"occurredAt\":1000,"
+                + "\"payload\":{}}";
+        String turnBytes = "{\"subtype\":\"managed_session_event_v1\","
+                + "\"managedSession\":" + event + "}\n"
                 + "{\"subtype\":\"managed_session_commit_v1\"}\n";
         ObjectNode turn = transactionRequest(turnBytes, WRITER_A, 1);
         byte[] checkpointBytes = "checkpoint-state"

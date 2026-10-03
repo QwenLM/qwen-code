@@ -741,7 +741,7 @@ class ManagedAgentMySqlIT {
                 AgentStateStore.class.getClassLoader(),
                 new Class<?>[] {AgentStateStore.class},
                 (proxy, method, arguments) -> {
-                    if ("appendLiveSessionEventIfAbsent".equals(
+                    if ("appendLiveSessionTaskEvent".equals(
                             method.getName())) {
                         CompletableFuture.runAsync(() -> {
                             String operation = inTransaction(transactions,

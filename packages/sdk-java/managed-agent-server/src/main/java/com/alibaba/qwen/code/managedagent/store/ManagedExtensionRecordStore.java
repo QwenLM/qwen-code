@@ -20,8 +20,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -50,9 +50,18 @@ public class ManagedExtensionRecordStore {
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
+    private static final String HEADER_SUBTYPE = "managed_session_header_v1";
     private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
     private static final Set<String> EVENT_FIELDS = Set.of("v", "sequence",
             "eventId", "sessionKey", "kind", "occurredAt", "payload");
+    private static final Set<String> EVENT_FIELDS_WITH_SUBJECT = Set.of("v",
+            "sequence", "eventId", "sessionKey", "kind", "occurredAt",
+            "subject", "payload");
+    /** The event ids commitExtensionRecord assigns, {@code <domain>:<n>}. */
+    private static final Pattern RESERVED_EVENT_ID = Pattern.compile("^(?:"
+            + String.join("|", ManagedExtensionProjection.RECORD_BODIES
+                    .keySet().stream().sorted().toList())
+            + "):[0-9]+$");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
     private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
@@ -163,11 +172,13 @@ public class ManagedExtensionRecordStore {
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
-     * Every record line must be one the authority's reader can parse,
-     * whether or not the transaction carries a Stage H record. A Stage H
-     * event must hold its declared place among the transaction's
-     * {@code eventCount} events, and its transaction must hold only those
-     * events and then its commit marker, as the authority writes it.
+     * Every record line must be one the authority's reader can parse, and
+     * every event line one its reader can read back: a line the authority
+     * would refuse at the next open is refused here, so no commit can
+     * brick the Session it writes. A Stage H event must hold its declared
+     * place among the transaction's {@code eventCount} events, and its
+     * transaction must hold only those events and then its commit marker,
+     * as the authority writes it.
      */
     List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
@@ -175,8 +186,9 @@ public class ManagedExtensionRecordStore {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
-        boolean applied = false;
+        int applied = 0;
         boolean shaped = true;
+        boolean managed = false;
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
@@ -186,37 +198,66 @@ public class ManagedExtensionRecordStore {
                         "Record line " + (index + 1) + " is not a JSON object"
                                 + " the Session authority can read.");
             }
-            lastSubtype = record.path("subtype").textValue();
-            if (!EVENT_SUBTYPE.equals(lastSubtype)) {
+            String subtype = record.path("subtype").textValue();
+            lastSubtype = subtype;
+            if (!EVENT_SUBTYPE.equals(subtype)) {
+                if (HEADER_SUBTYPE.equals(subtype)
+                        || COMMIT_SUBTYPE.equals(subtype)) {
+                    managed = true;
+                } else {
+                    // The authority's reader tolerates a line of a subtype
+                    // it does not know only before the Managed header.
+                    require(!managed, "Record line " + (index + 1)
+                            + " has the unknown subtype " + subtype
+                            + " after the Managed header.");
+                }
                 shaped &= index >= eventCount;
+                requireLineBytes(lines[index], index,
+                        COMMIT_SUBTYPE.equals(subtype)
+                                ? ManagedSessionStoreModels
+                                        .MAX_COMMIT_MARKER_BYTES
+                                : ManagedSessionStoreModels.MAX_EVENT_BYTES);
                 continue;
             }
+            managed = true;
+            requireLineBytes(lines[index], index,
+                    ManagedSessionStoreModels.MAX_EVENT_BYTES);
+            require(index < eventCount, "The event of record line "
+                    + (index + 1) + " is not one of the transaction's"
+                    + " events.");
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
-            if ("tool.receipt".equals(event.path("kind").asText())) {
-                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
-                        "Tool receipt has an invalid journal position");
-                receipts.add(event);
-            }
-            if (!"domain.committed".equals(event.path("kind").textValue())) {
-                continue;
-            }
-            String domain = payload.path("domain").textValue();
+            String kind = event.path("kind").textValue();
+            String domain = "domain.committed".equals(kind)
+                    ? payload.path("domain").textValue() : null;
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
+            long occurredAt = requireEvent(event, tenantId, workspaceId,
+                    sessionId, firstSequence + index, body == null);
+            if (body == null) {
+                String eventId = event.path("eventId").textValue();
+                require(!RESERVED_EVENT_ID.matcher(eventId).matches(),
+                        "event id " + eventId
+                                + " is reserved for Stage H records.");
+            }
+            if ("tool.receipt".equals(kind)) {
+                receipts.add(event);
+            }
+            if (domain == null) {
+                continue;
+            }
+            requireDomainCommitted(payload, domain, body != null);
             if (body != null) {
-                require(index < eventCount, "The Stage H record event is not"
-                        + " one of the transaction's events.");
-                long occurredAt = requireEnvelope(event, domain, tenantId,
-                        workspaceId, sessionId, firstSequence + index);
+                require(applied == 0, "A transaction carries at most one"
+                        + " Stage H record.");
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
                         firstSequence + index, occurredAt, resources);
-                applied = true;
+                applied++;
             }
         }
-        require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
+        require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
         return receipts;
@@ -261,18 +302,35 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Checks the domain.committed event of a Stage H record as the Session
-     * authority's reader does: a closed event at its sequence, its version,
-     * its time, its Session, and a closed payload whose reference names a
-     * version 1 record of the domain. The authority never gives such an
-     * event a subject. Returns the time the revision occurred.
+     * The event-level checks the Session authority's reader runs on every
+     * event line: a closed envelope with an optional subject, version 1,
+     * the sequence of the line's place among the transaction's events, a
+     * well-formed id, this Session's closed key, and a valid time and
+     * kind. The authority never gives a Stage H record event a subject, so
+     * only the other event lines may carry one. Returns the event's time.
      */
-    private static long requireEnvelope(JsonNode event, String domain,
-            String tenantId, String workspaceId, String sessionId,
-            long sequence) {
+    private static long requireEvent(JsonNode event, String tenantId,
+            String workspaceId, String sessionId, long sequence,
+            boolean allowSubject) {
+        Set<String> allowed = allowSubject
+                ? EVENT_FIELDS_WITH_SUBJECT : EVENT_FIELDS;
+        boolean closed = event != null && event.isObject()
+                && EVENT_FIELDS.stream().allMatch(event::has)
+                && event.size() <= allowed.size();
+        if (closed) {
+            for (Iterator<String> names = event.fieldNames();
+                    names.hasNext();) {
+                if (!allowed.contains(names.next())) {
+                    closed = false;
+                    break;
+                }
+            }
+        }
+        require(closed, "event must be an object with exactly "
+                + EVENT_FIELDS
+                + (allowSubject ? " and an optional subject" : ""));
         long occurredAt;
         try {
-            ManagedExtensionRecords.closed(event, EVENT_FIELDS, "event");
             ManagedExtensionRecords.count(event.get("v"), 1, 1, "event.v");
             ManagedExtensionRecords.count(event.get("sequence"), sequence,
                     sequence, "event.sequence");
@@ -282,9 +340,33 @@ public class ManagedExtensionRecordStore {
                     "event.occurredAt");
             ManagedExtensionRecords.closed(event.get("sessionKey"),
                     SESSION_KEY_FIELDS, "event.sessionKey");
-            JsonNode payload = event.get("payload");
+            ManagedExtensionRecords.oneOf(event.get("kind"),
+                    ManagedExtensionRecords.EVENT_KINDS, "event.kind");
+        } catch (InvalidRecordException error) {
+            throw rejected(error.getMessage());
+        }
+        JsonNode key = event.get("sessionKey");
+        require(tenantId.equals(key.get("tenantId").textValue())
+                && workspaceId.equals(key.get("workspaceId").textValue())
+                && sessionId.equals(key.get("sessionId").textValue()),
+                "The event names another Session.");
+        return occurredAt;
+    }
+
+    /**
+     * The payload checks the Session authority's reader runs on every
+     * domain.committed event: a closed payload whose domain is in the v1
+     * index, of version 1, whose operation is an id and whose reference
+     * names a version 1 record of the domain, whether or not the domain
+     * has a record body here.
+     */
+    private static void requireDomainCommitted(JsonNode payload,
+            String domain, boolean stageH) {
+        try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
                     "event.payload");
+            ManagedExtensionRecords.oneOf(payload.get("domain"),
+                    ManagedExtensionRecords.DOMAINS, "event.payload.domain");
             ManagedExtensionRecords.count(payload.get("version"), 1, 1,
                     "event.payload.version");
             ManagedExtensionRecords.id(payload.get("operationId"),
@@ -294,18 +376,21 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
-        JsonNode key = event.get("sessionKey");
-        JsonNode recordRef = event.get("payload").get("recordRef");
-        require(tenantId.equals(key.get("tenantId").textValue())
-                && workspaceId.equals(key.get("workspaceId").textValue())
-                && sessionId.equals(key.get("sessionId").textValue()),
-                "The Stage H record names another Session.");
+        JsonNode recordRef = payload.get("recordRef");
         require(("managed-" + domain).equals(recordRef.get("kind")
                 .textValue()) && recordRef.get("schemaVersion")
                         .longValue() == 1,
-                "The Stage H record must reference managed-" + domain
-                        + " version 1.");
-        return occurredAt;
+                (stageH ? "The Stage H record" : "The record event")
+                        + " must reference managed-" + domain + " version"
+                        + " 1.");
+    }
+
+    private static void requireLineBytes(String line, int index,
+            int maximum) {
+        require(line.getBytes(StandardCharsets.UTF_8).length <= maximum,
+                "Record line " + (index + 1) + " exceeds " + maximum
+                        + " UTF-8 bytes, which the Session authority cannot"
+                        + " read back.");
     }
 
     /**
@@ -548,19 +633,21 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Announces a changed task view on the Session event stream, in the same
+     * Announces a changed task view on the task-event outbox, in the same
      * transaction, when the Session has a public resource that is not
-     * deleted or being deleted, so a deleted Session's terminal event stays
-     * its last one.
+     * deleted or being deleted, so a deleted Session's outbox says nothing
+     * more. The outbox stays out of the Session event stream, whose
+     * sequence the message projection reads, so an announcement between
+     * two streamed text deltas cannot split their part; the task-events
+     * route drains it when H3 serves it.
      */
     private void announce(String tenantId, String sessionId, String taskId,
             String state, long revision) {
         if (sessions == null) {
             return;
         }
-        sessions.appendLiveSessionEventIfAbsent(tenantId, sessionId,
-                "task.updated", Map.of("taskId", taskId, "state", state),
-                "task:" + taskId + ":" + revision);
+        sessions.appendLiveSessionTaskEvent(tenantId, sessionId, taskId,
+                state, revision, "task:" + taskId + ":" + revision);
     }
 
     private static TaskRow taskRow(ResultSet result, String tenantId,

@@ -152,7 +152,7 @@ class ToolPublicationStoreTest {
         ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-1").put("outcomeSource", "runtime");
         intent.set("argsRef", binding.get("argsRef"));
         append("tool.dispatch", event(1, "activation.changed", activation("active"))
-                + event(2, "tool.intent", intent) + "{}\n", 2,
+                + event(2, "tool.intent", intent) + MARKER, 2,
                 List.of(resource(binding.get("argsRef"), args), resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
     }
@@ -534,7 +534,7 @@ class ToolPublicationStoreTest {
                 .put("historyRevision", sequence + 1).putNull("resultRef");
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.putArray("resources");
-        String records = event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        String records = event(sequence + 1, "tool.receipt", receiptPayload) + MARKER;
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-large", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
@@ -742,7 +742,7 @@ class ToolPublicationStoreTest {
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.set("resultRef", partial ? JSON.nullNode() : manifestRef);
         receiptPayload.putArray("resources").add(manifestRef);
-        String recordBytes = event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        String recordBytes = event(sequence + 1, "tool.receipt", receiptPayload) + MARKER;
         long receiptSequence = sequence + 1;
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-receipt", "recordToolResult", "execution-1",
@@ -1404,7 +1404,7 @@ class ToolPublicationStoreTest {
     @Test
     void sameEpochReleasePreventsReserveAndRenew() {
         reserve();
-        append("activation.release", event(3, "activation.changed", activation("released")) + "{}\n", 1,
+        append("activation.release", event(3, "activation.changed", activation("released")) + MARKER, 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
         assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1417,7 +1417,7 @@ class ToolPublicationStoreTest {
         var execution = executions.findByExecutionCallId("execution-1");
         assertThat(store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN)).isNotNull();
         ObjectNode expired = activation("active").put("expiresAt", System.currentTimeMillis() - 1_000);
-        append("activation.expire", event(3, "activation.changed", expired) + "{}\n", 1,
+        append("activation.expire", event(3, "activation.changed", expired) + MARKER, 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
         assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1555,7 +1555,7 @@ class ToolPublicationStoreTest {
         ObjectNode next = checkpoint.deepCopy();
         ((ObjectNode) next.path("tools").path("items").get(0)).put("state", "settled");
         JsonNode nextRef = ref("checkpoint-3", "managed-checkpoint", next);
-        append("tool.wait", event(4, "checkpoint.saved", JSON.createObjectNode()) + "{}\n", 1,
+        append("tool.wait", event(4, "checkpoint.committed", JSON.createObjectNode()) + MARKER, 1,
                 List.of(resource(nextRef, next)), "checkpoint-3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Checkpoint execution");
@@ -1627,7 +1627,7 @@ class ToolPublicationStoreTest {
         second.set("checkpointRef", binding.get("checkpointRef"));
         ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2").put("outcomeSource", "runtime");
         intent.set("argsRef", binding.get("argsRef"));
-        append("tool.dispatch", event(3, "tool.intent", intent) + "{}\n", 1,
+        append("tool.dispatch", event(3, "tool.intent", intent) + MARKER, 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-2");
         String digest = binding.path("requestDigest").asText();
         executions.findOrCreate(ToolExecutionRecord.prepared("execution-2", "idempotency-2", "binding-1", 1,
@@ -1670,9 +1670,15 @@ class ToolPublicationStoreTest {
         ObjectNode event = JSON.createObjectNode().put("v", 1).put("sequence", number).put("kind", kind);
         event.set("sessionKey", binding.get("sessionKey"));
         event.set("payload", payload);
+        event.put("eventId", "event-" + number);
+        event.put("occurredAt", 1_000L * number);
         event.set("subject", JSON.createObjectNode().put("type", "activation").put("activationId", "activation-1").put("epoch", 1));
         return JSON.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event) + "\n";
     }
+
+    /** A commit-marker's line, closing each transaction's events. */
+    private static final String MARKER =
+            "{\"subtype\":\"managed_session_commit_v1\"}\n";
 
     record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
             ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,
@@ -1929,7 +1935,7 @@ class ToolPublicationStoreTest {
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.set("resultRef", manifestRef);
         receiptPayload.putArray("resources").add(manifestRef);
-        String recordBytes = fixture.event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        String recordBytes = fixture.event(sequence + 1, "tool.receipt", receiptPayload) + MARKER;
         long receiptSequence = sequence + 1;
         var commit =
                 new ManagedSessionStoreModels.CommitTransactionRequest(
@@ -2209,7 +2215,7 @@ class ToolPublicationStoreTest {
         var receipt = JSON.createObjectNode().put("executionCallId", "execution-2").putNull("resultRef");
         receipt.set("toolOutcomeRef", outcome);
         receipt.putArray("resources");
-        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1, List.of(), null);
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + MARKER, 1, List.of(), null);
         jdbc.update("DELETE FROM managed_agent_tool_result");
         jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision=0, o3_backfill_pending=TRUE, o3_backfill_through=NULL");
     }
@@ -2302,7 +2308,7 @@ class ToolPublicationStoreTest {
         receipt.set("toolOutcomeRef", ref);
         receipt.putArray("resources");
         new TransactionTemplate(manager).executeWithoutResult(status -> {
-            append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1,
+            append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + MARKER, 1,
                     List.of(resource(ref, JSON.createObjectNode())), null);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(1);
             status.setRollbackOnly();
@@ -2398,7 +2404,7 @@ class ToolPublicationStoreTest {
                 .put("historyRevision", sequence + 1).putNull("resultRef");
         receipt.set("toolOutcomeRef", ref);
         receipt.putArray("resources");
-        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1,
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + MARKER, 1,
                 List.of(resource(ref, outcome)), null);
     }
 
