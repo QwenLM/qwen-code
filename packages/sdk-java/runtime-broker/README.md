@@ -61,6 +61,20 @@ material must come from the embedding service's own durable secret store and
 stay stable across restarts and instances.
 Tool execution rows preserve idempotency identity, dispatch ownership and
 lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+
+New dispatch authorization uses `RuntimeBindingRepository.authorizeDispatch`:
+the binding must be READY without a drain request and the original Session
+must be READY, under the same parent lock and transaction as the execution's
+DISPATCHING-to-EXECUTING CAS. Taking a coordinator claim grants no execution
+permission. Original authorized calls may still settle after draining.
+
+`ToolExecutionRepository.findByBinding` provides bounded inventory for the exact
+binding/generation across Sessions, including every execution state. Its hash
+cursor does not skip records when they settle; custom repositories default to
+refusal. Inventory is not a snapshot, a normal-stop receipt or permission to
+release storage. The durable CSI retirement coordinator remains unimplemented.
+Custom binding repositories must implement this atomic operation; the default
+refuses dispatch rather than falling back to a separate readiness read.
 Tool execution identifiers are globally unique repository keys. The embedding
 service must derive them from authenticated tenant, workspace, and session
 context because this repository interface does not carry separate scope
@@ -145,6 +159,32 @@ file tools, deduplication and live-worker adoption. It does not qualify scheduli
 container isolation, NetworkPolicy or CSI. The default suite skips this opt-in
 test; provider and API-client tests run without a cluster. Historical cloud smoke
 results in the design concern an earlier snapshot, not this PR's requalification.
+
+## Private CSI evidence components
+
+The managed-server private CSI adapter and evidence commands are described in
+[the CSI design](../../../docs/design/2026-10-01-managed-kubernetes-k2.md) and
+[the durable worker ACK design](../../../docs/design/2026-10-03-csi-durable-worker-ack.md).
+They reserve storage before creation, persist API-observed original Pod identity,
+seal dispatch and retain original publication/checkpoint/ACK evidence. Public
+Hosted CSI selection and physical holder release remain disabled. ACK success
+keeps the holder DRAINING and does not prove worker stop or NodeUnpublish.
+The K1 scratch adapter above retains its separate no-PVC contract.
+
+The private `KubernetesCsiLogReader` provides bounded native log segments for ACK
+qualification. It corroborates the expected plugin Pod/DaemonSet/Node/container/image
+API identity before and after a current-segment read and refuses changed log
+prefixes, incomplete lines and invalid timestamps. The HTTP client requests
+timestamps without `tailLines` or `limitBytes`, uses strict UTF-8 and rejects
+responses above one MiB. These are qualification inputs only: the durable
+pre-create collector, image-specific publication/unpublish parser and physical
+retirement coordinator remain gated. Log disappearance, a fresh baseline or a
+diagnostic snapshot never releases a Workspace holder.
+Kubernetes omits rotated log files and may skip malformed CRI records. Kubelet
+chooses the log container from local status asynchronously synchronized to the
+API server; these observations cannot bind log bytes to an exact container ID.
+That additional source-binding contract remains required. RFC3339 offsets are
+accepted without altering the bytes used for prefix and digest verification.
 
 ## Trusted local recovery
 

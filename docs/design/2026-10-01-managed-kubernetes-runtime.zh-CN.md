@@ -2,11 +2,12 @@
 
 [English](2026-10-01-managed-kubernetes-runtime.md) | [简体中文](2026-10-01-managed-kubernetes-runtime.zh-CN.md)
 
-状态：首个限定范围 K1 PR 的 draft，基于 upstream
-`576689d07342dd2ba80d60ec00df23ea53251945`，2026-10-03。关联 #12380。
-本 PR 仅包含实验性 SDK/container scratch Runtime。公开 Hosted Workspace 开放、
-CSI 存储和目标集群生产资格验证仍属于后续 K2/K3。早期本地及 ACK 开发集群结果描述的是
-旧实现快照，不能作为此次 rebase 后 PR 的验收；本次验证以本 PR 的测试报告和审查为准。
+状态：draft PR #13289 的完整 K1/CSI 增量整合，基于 upstream
+`691a374d2a8f2def439d6aba52a592a7bbc06fb0`，2026-10-03；关联 #12380。
+包含实验性 SDK/container scratch Runtime，以及私有 CSI reservation、原 Pod 身份、
+封口、原结果结算、checkpoint 证据和持久 ACK 组件。公开 Hosted CSI 选择、完整物理
+退役和卷交接仍未开放。早期本地及 ACK 开发集群结果，包括整合前八组持久 ACK 验证，
+属于各自源快照，不能代替本次主线整合后验证。最终整合测试与审查进行中。
 
 ## 问题与现状
 
@@ -16,8 +17,8 @@ worker，不承接模型循环、模型凭据、Session 权威或工具执行账
 已合入的 Broker 持久保存 provision seed 和 resource handle，先完成 attestation
 再开放本进程 gate，并在结果不确定时查询原工具身份。`RuntimeProvisioner` 是部署
 接缝。Spring 目前拒绝 `provisioner=kubernetes`。Workspace resolver 和公开文件
-profile 准入要求 `local-process`，resolver 在 Java 主机验证目录。K1 之前，worker
-从 stdin 读取封闭 boot envelope，只监听 loopback 随机端口。
+profile 准入要求 `local-process`，resolver 在 Java 主机验证目录。worker 从 stdin
+读取封闭 boot envelope，只监听 loopback 随机端口。
 
 参考提交 `34ea187c` 中的历史 Kubernetes adapter 可供设计参考，不代表当前实现。
 其 request/release 接口与 main 不同。尤其当前 `release(request, lease)` 也会在
@@ -30,9 +31,8 @@ Java 负责准入、Workspace 授权、Broker SQL 记录和资源部署。TypeSc
 负责模型上下文、工具编排和 checkpoint。Session 独占 Runtime Pod 承担已准入的
 工具副作用。Kubernetes 负责 Pod 调度和观测，不决定执行结算或重放。
 
-目标 Hosted 拓扑为一个 Java 服务及其 Hosted Harness sidecar，加按需 Runtime Pod。
-K1 仅提供私有 SDK 部署接缝，不接入 Spring 或 sidecar 部署。Broker 调用 Kubernetes
-API 和 worker 私有 HTTP 协议。Pod 启动期间模型继续推理。
+初始拓扑为一个 Java 服务及其 Hosted Harness sidecar，加按需 Runtime Pod。
+Broker 调用 Kubernetes API 和 worker 私有 HTTP 协议。Pod 启动期间模型继续推理。
 无工具 Turn 不需要 Pod 或卷。Runtime Pod 不持模型凭据、不挂 Kubernetes
 service-account token。Harness 不持 Kubernetes 管理凭据，不挂载或旁读 Workspace。
 
@@ -93,10 +93,11 @@ Kubernetes API 客户端使用 HTTPS、配置的 CA 信任、每次请求重读 
 物理停止或输出交付。K1 因而不自动回收 idle 资源，运维须考虑保留资源的容量。
 保留证据的删除需要后续显式 retirement 操作，携带原 UID、结算屏障及 UID 条件删除。
 
-## 后续 K2 Workspace 存储与交接
+## K2 Workspace 存储与交接
 
-本节记录后续要求，不代表此 K1 PR 的实现。Workspace 存储须经独立设计审查、目标
-预检，以及挂载来源和 retirement 资格验证后才能开放公共准入。
+[K2 详细设计](2026-10-01-managed-kubernetes-k2.zh-CN.md)记录目标预检、实施顺序、
+平台验证及未定的挂载来源/retirement 契约。其只读和 MySQL 基线结果不会升级 K2/K3
+验收状态。
 
 持久保存可信 tenant/storage ID 到 cluster、namespace、PVC UID、PV UID、CSI
 driver、backend domain 和不透明 volumeHandle 的映射。在目标 CSI 部署核验
@@ -134,50 +135,38 @@ G1/G3 接管、O3/O4 和 H 扩展继续遵循已有 tracker 归属与验收门�
 
 ## 验证与验收
 
-实现前 baseline 使用全局 `qwen` worker 命令，以拒绝容器参数证明原缺口。Rebase 后
-须以本 PR 自身构建的 bundle 和 Maven tests 验证，执行根目录 build/typecheck/bundle、
-CLI worker focused tests、Broker tests、Checkstyle，以及 runtime-broker README
-规定的当前 Maven SpotBugs gate。在 PR 测试报告中记录实际命令、退出码及未满足的环境
-要求。详细输出和 hash 保留在本地验证材料（不提交到仓库）中。
+baseline dry-run 使用全局 `qwen` worker 命令；拒绝容器参数是预期缺口。本地验证使用
+构建后的 bundle 和 Maven tests。fake Kubernetes client 启动真实 worker，完成私有
+read/write/edit、重复调用和原 status 闭环；这是协议集成证据，不是调度器/CSI 证据。
+本地测试证明存活 worker 接管和已结算调用去重，不证明 Broker UNKNOWN 恢复、
+Pod 丢失后的持久账本恢复或 JVM 崩溃恢复。
 
-Fake Kubernetes client 启动真实 worker，完成私有 read/write/edit、重复调用和原 status
-闭环。该测试覆盖协议集成、存活 worker 接管和已结算调用去重，不验证调度器、CSI、
-Broker UNKNOWN 恢复、Pod 丢失后的持久账本恢复或 JVM 崩溃恢复。
-
-K1 验收测试须覆盖确定性创建/复用、应答丢失、Pod/Secret UID 和 boot 冲突、镜像/placement 变化、
+K1 覆盖确定性创建/复用、应答丢失、Pod/Secret UID 和 boot 冲突、镜像/placement 变化、
 启动时限、API 拒绝/超限/重定向、token 轮换、容器重启和删除观测、迟到 release、
 lease 缓存失效、
-缺少本地 handle，以及 loopback/stdin 回归。须证明 reconcile 不创建资源，不确定丢失
+缺少本地 handle，以及 loopback/stdin 回归。证明 reconcile 不创建资源，不确定丢失
 不重建，release 不删除。
 
-### 历史开发集群快照
-
-2026-10-01，通过已认证的 Workbench kubectl，早期 K1 实现快照在 Kubernetes
-1.36.2-aliyun.1 的 ACK 托管开发集群完成 smoke。该实验早于本 PR 的
-`576689d07342dd2ba80d60ec00df23ea53251945` 基线，尚未针对本 PR 重跑；它仅是历史
-设计证据，不是当前 PR 的目标集群验收。
-
-生产 HTTPS Kubernetes 客户端、provisioner、
+2026-10-01，通过已认证的 Workbench kubectl，在 Kubernetes 1.36.2-aliyun.1
+的 ACK 托管开发集群完成 K1 smoke。生产 HTTPS Kubernetes 客户端、provisioner、
 Broker 和完整打包 worker 创建了一个 Pod 与一个 boot Secret，完成 READY attestation
 及远端 write/edit/read。Broker 和 worker 两条重复调用路径均保留编辑后的文件。
 两个独立 JVM 顺序执行，在同一 runner Pod 内共享 file-backed H2 状态；第二进程
 恢复相同 binding/generation、Pod/Secret UID、endpoint、execution ID 与结果，
 且没有新建资源。匿名 401、错误 lease 409、篡改保存 UID 后拒绝，以及 Broker close
 后保留资源均通过。两个阶段最终输出均为 `pass`，runner 以 `Succeeded`、退出码 0
-结束。测试工程师独立对照该快照的 runner 和验收包核验了终端结果。详细结果保留为
-本地验证材料（不提交到仓库）。
+结束。测试工程师独立对照 runner 和验收包核验了终端结果。证据记录在
+本地验证制品（不提交）。
 
-该历史 smoke 使用 digest 固定的 ECR 官方 Node/Java 基础镜像和 SHA-256 校验的临时
+本次 smoke 使用 digest 固定的 ECR 官方 Node/Java 基础镜像和 SHA-256 校验的临时
 程序配送，不是生产 worker 镜像验收。Docker Hub 拉取超时，官方 ECR 分发成功。
 原节点存在未容忍的 taint，ACK 因而自动扩容了工作节点。冷容量与镜像启动仍是部署
-约束，namespace quota 不代表测试零费用。该结果不证明 MySQL 验收、JVM 强杀
+约束，namespace quota 不代表测试零费用。本次结果不证明 MySQL 验收、JVM 强杀
 崩溃恢复、Pod/PVC 恢复、物理 Pod 替换、网络拒绝实际生效或生产 worker TLS。
 
-该历史实验结束后已撤销获准的 namespace Broker RBAC。核对资源身份后删除测试 namespace
+验收后已撤销获准的 namespace Broker RBAC。核对资源身份后删除测试 namespace
 及 Workbench 文件，真实 API 返回 namespace NotFound 且测试资源列表为空。最终
 检查时 ACK 自动扩出的工作节点仍为 Ready，其回收尚未验证。
-
-### 后续 Workspace 与部署资格验证
 
 K2/K3 还须在真实 MySQL 和目标 Kubernetes/CNI/CSI 验收：两个独立卷、两个 Session
 共享一卷、alias、旧/迟到 grant、Java 重启、Pod 替换、延迟 readiness、API 中断、
@@ -188,11 +177,10 @@ K2/K3 还须在真实 MySQL 和目标 Kubernetes/CNI/CSI 验收：两个独立�
 
 ## 待决事项与证据
 
-早期 smoke 仅验证其记录的 ACK 开发目标和程序快照。本 PR 仍须验证当前源码；历史
-结果不能验证新镜像或部署。K2/K3 开放前须选定并验证 CSI、生产 worker 镜像/仓库、
-Runtime workload identity，以及可信停止/卸载证据来源。相关决定未完成时按可移植
-Kubernetes 契约开发。历史集群实验因本地环境缺少 Docker、kubectl 和 kind 而使用已
-认证的 Workbench；当前验证必须独立记录自己的环境、实际结果和未执行门禁。
+ACK 开发目标及官方基础镜像 digest 已通过 K1 验证。K2/K3 开放前仍须选定 CSI、
+生产 worker 镜像/仓库、Runtime workload identity，以及可信停止/卸载证据来源。
+在此期间默认按可移植 Kubernetes 契约开发。真实集群通过已认证的 Workbench 访问；
+本机仍缺少 Docker、kubectl 和 kind。测试结果和未执行门禁必须分别记录。
 
 来源：[proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380)、
 [参考 Hosted 物理卷设计](https://github.com/doudouOUC/qwen-code/blob/c7abb13f79f35b7bd2dfbca277624cbf36054616/docs/design/2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md#hosted-runtime-profile)、

@@ -5,6 +5,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
@@ -44,12 +47,29 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
 
     @Override
     public CompletionStage<Map<String, Object>> get(String resource, String namespace, String name) {
-        if (!Set.of("pods", "secrets").contains(resource)) {
+        if (!Set.of("pods", "secrets", "configmaps", "persistentvolumeclaims").contains(resource)) {
             throw new IllegalArgumentException("Unsupported Kubernetes resource");
         }
         dnsLabel(namespace);
         dnsSubdomain(name);
         return exchange("/api/v1/namespaces/" + namespace + "/" + resource + "/" + name, null);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> getCluster(String resource, String name) {
+        dnsSubdomain(name);
+        String prefix;
+        if (Set.of("persistentvolumes", "namespaces", "nodes").contains(resource)) {
+            if (resource.equals("namespaces")) {
+                dnsLabel(name);
+            }
+            prefix = "/api/v1/";
+        } else if (Set.of("validatingadmissionpolicies", "validatingadmissionpolicybindings").contains(resource)) {
+            prefix = "/apis/admissionregistration.k8s.io/v1/";
+        } else {
+            throw new IllegalArgumentException("Unsupported Kubernetes cluster resource");
+        }
+        return exchange(prefix + resource + "/" + name, null);
     }
 
     @Override
@@ -62,6 +82,23 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
         }
         dnsLabel(namespace);
         return exchange("/api/v1/namespaces/" + namespace + "/" + resource, body);
+    }
+
+    @Override
+    public CompletionStage<String> readCsiPodLog(String podName) {
+        dnsSubdomain(podName);
+        return exchangeBytes("/api/v1/namespaces/kube-system/pods/" + podName
+                + "/log?container=csi-plugin&timestamps=true&previous=false&follow=false", null).thenApply(bytes -> {
+                    if (bytes == null) {
+                        throw failure(404, false);
+                    }
+                    try {
+                        return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
+                    } catch (CharacterCodingException invalid) {
+                        throw failure(502, false);
+                    }
+                });
     }
 
     private CompletionStage<Map<String, Object>> exchange(String path, Map<String, Object> body) {

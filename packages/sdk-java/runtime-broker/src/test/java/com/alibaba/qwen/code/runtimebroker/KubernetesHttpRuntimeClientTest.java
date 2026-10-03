@@ -85,6 +85,15 @@ class KubernetesHttpRuntimeClientTest {
     }
 
     @Test
+    void readsImmutableWorkerArtifactsWithoutAddingConfigMapWriteSupport() {
+        client.get("configmaps", "runtimes", "worker-000").toCompletableFuture().join();
+        assertEquals("/api/v1/namespaces/runtimes/configmaps/worker-000", path.get());
+        assertEquals("GET", method.get());
+        assertThrows(IllegalArgumentException.class, () -> client.create("configmaps", "runtimes", Map.of()));
+        assertEquals(1, calls.get());
+    }
+
+    @Test
     void readsRotatedTokenForEachNamespacedCall() throws Exception {
         assertEquals(Map.of("kind", "Pod"), client.get("pods", "runtimes", "pod-one").toCompletableFuture().join());
         assertEquals("Bearer token-one", authorization.get());
@@ -97,6 +106,65 @@ class KubernetesHttpRuntimeClientTest {
         assertEquals("/api/v1/namespaces/runtimes/secrets", path.get());
         assertEquals("POST", method.get());
         assertEquals("{\"kind\":\"Secret\"}", requestBody.get());
+    }
+
+    @Test
+    void readsOnlyExplicitStorageAndProtectionResourcesWithoutClusterWrites() {
+        client.get("persistentvolumeclaims", "runtimes", "workspace.claim").toCompletableFuture().join();
+        assertEquals("/api/v1/namespaces/runtimes/persistentvolumeclaims/workspace.claim", path.get());
+        for (String resource : new String[] {"persistentvolumes", "namespaces", "nodes"}) {
+            String name = resource.equals("namespaces") ? "runtimes" : "object.one";
+            client.getCluster(resource, name).toCompletableFuture().join();
+            assertEquals("/api/v1/" + resource + "/" + name, path.get());
+            assertEquals("GET", method.get());
+        }
+        for (String resource : new String[] {"validatingadmissionpolicies", "validatingadmissionpolicybindings"}) {
+            client.getCluster(resource, "workspace.one").toCompletableFuture().join();
+            assertEquals("/apis/admissionregistration.k8s.io/v1/" + resource + "/workspace.one", path.get());
+            assertEquals("GET", method.get());
+        }
+        status.set(404);
+        assertNull(client.getCluster("persistentvolumes", "absent").toCompletableFuture().join());
+        int original = calls.get();
+        for (String name : new String[] {"../pv", ".", "pv..name", "pv?name", "pv/name", "x".repeat(254)}) {
+            assertThrows(IllegalArgumentException.class, () -> client.getCluster("persistentvolumes", name));
+        }
+        assertThrows(IllegalArgumentException.class, () -> client.getCluster("namespaces", "namespace.with.dots"));
+        assertThrows(IllegalArgumentException.class, () -> client.getCluster("clusterroles", "admin"));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.create("persistentvolumeclaims", "runtimes", Map.of("kind", "PersistentVolumeClaim")));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.create("validatingadmissionpolicies", "runtimes", Map.of("kind", "ValidatingAdmissionPolicy")));
+        assertEquals(original, calls.get());
+    }
+
+    @Test
+    void readsCompleteCurrentCsiLogsWithNativeTimestampsAndNoServerTruncation() throws Exception {
+        String logs = "2026-10-01T16:40:42.007Z original CSI line\n";
+        response.set(logs.getBytes(StandardCharsets.UTF_8));
+        assertEquals(logs, client.readCsiPodLog("csi-plugin-one").toCompletableFuture().join());
+        assertEquals("/api/v1/namespaces/kube-system/pods/csi-plugin-one/log"
+                + "?container=csi-plugin&timestamps=true&previous=false&follow=false", path.get());
+        assertEquals("GET", method.get());
+        Files.writeString(token, "rotated-log-token");
+        client.readCsiPodLog("csi-plugin-one").toCompletableFuture().join();
+        assertEquals("Bearer rotated-log-token", authorization.get());
+        int original = calls.get();
+        assertThrows(IllegalArgumentException.class, () -> client.readCsiPodLog("../foreign/log"));
+        assertEquals(original, calls.get());
+    }
+
+    @Test
+    void rejectsAbsentRedirectedMalformedAndOversizedNativeLogs() {
+        for (int code : new int[] {404, 302, 403}) {
+            status.set(code);
+            assertFalse(failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).isRetryable());
+        }
+        status.set(200);
+        response.set(new byte[] {(byte) 0xc3, (byte) 0x28});
+        assertEquals(502, failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).getStatusCode());
+        response.set(new byte[1024 * 1024 + 1]);
+        assertEquals(502, failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).getStatusCode());
     }
 
     @Test
@@ -139,8 +207,6 @@ class KubernetesHttpRuntimeClientTest {
         assertThrows(IllegalArgumentException.class, () -> client.get("pods", "runtimes", "../pod"));
         assertThrows(IllegalArgumentException.class, () -> client.get("pods", "runtimes", null));
         assertThrows(IllegalArgumentException.class, () -> client.get("nodes", "runtimes", "node"));
-        assertThrows(IllegalArgumentException.class,
-                () -> client.get("persistentvolumeclaims", "runtimes", "claim"));
         Files.writeString(token, "injected\r\nheader");
         assertTrue(failure(client.get("pods", "runtimes", "pod-one").toCompletableFuture()).isRetryable());
         Files.writeString(token, "x".repeat(16 * 1024 + 1));

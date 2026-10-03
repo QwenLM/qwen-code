@@ -389,6 +389,9 @@ export class ManagedHookRuntime {
   private readonly gates = new ManagedOperationGrantGate();
   private readonly shutdown = createAbortController();
   private closing = false;
+  private admissionSealed = false;
+  private lifecycleStarted = false;
+  private pendingStarts = 0;
 
   constructor(
     private readonly workspace: {
@@ -404,7 +407,42 @@ export class ManagedHookRuntime {
     this.manifest = parseManifest(manifest);
   }
 
+  sealAdmission(): void {
+    this.admissionSealed = true;
+  }
+
+  getDrainInspection(): {
+    hasActivity: boolean;
+    pendingStarts: number;
+    pendingInvocations: number;
+  } {
+    return {
+      hasActivity: this.lifecycleStarted,
+      pendingStarts: this.pendingStarts,
+      pendingInvocations: [...this.operations.values()].filter(
+        (entry) => entry.view.state !== 'settled',
+      ).length,
+    };
+  }
+
+  private requireAdmission(): void {
+    if (this.closing || this.admissionSealed)
+      throw new ManagedHookError('managed_hook_closed');
+  }
+
   async control(
+    runtimeSessionId: string,
+    value: unknown,
+  ): Promise<ManagedHookOperationView> {
+    this.pendingStarts++;
+    try {
+      return await this.controlAdmitted(runtimeSessionId, value);
+    } finally {
+      this.pendingStarts--;
+    }
+  }
+
+  private async controlAdmitted(
     runtimeSessionId: string,
     value: unknown,
   ): Promise<ManagedHookOperationView> {
@@ -452,8 +490,10 @@ export class ManagedHookRuntime {
         throw new ManagedHookError('managed_hook_operation_conflict');
       return structuredClone(existing.view);
     }
-    if (this.closing) throw new ManagedHookError('managed_hook_closed');
+    this.requireAdmission();
+    this.lifecycleStarted = true;
     const directory = await this.sessionDirectory(runtimeSessionId);
+    this.requireAdmission();
     if (!directory)
       throw new ManagedHookError('managed_hook_session_unavailable');
     if (control.kind === 'hook-catalog') {
@@ -461,6 +501,7 @@ export class ManagedHookRuntime {
         ...expected,
         hooks: await this.descriptors(catalog.hooks),
       };
+      this.requireAdmission();
       if (Buffer.byteLength(JSON.stringify(exposed)) > MAX_BYTES)
         throw new ManagedHookError('managed_hook_catalog_limit');
       return {
@@ -495,7 +536,7 @@ export class ManagedHookRuntime {
       throw new ManagedHookError('managed_hook_grant_invalid');
     if (this.operations.has(key))
       return this.control(runtimeSessionId, control);
-    if (this.closing) throw new ManagedHookError('managed_hook_closed');
+    this.requireAdmission();
     if (this.operations.size >= MAX_OPERATIONS)
       return {
         operationId: control.operationId,
@@ -722,9 +763,10 @@ export class ManagedHookRuntime {
           type: HookType.Function,
           id: handler.handlerId,
           callback: (input, context) => {
-            const pending = Promise.resolve().then(() =>
-              callback(input, context),
-            );
+            const pending = Promise.resolve().then(() => {
+              this.requireAdmission();
+              return callback(input, context);
+            });
             functionCompletion = pending.then(
               () => true,
               () => true,
@@ -748,6 +790,7 @@ export class ManagedHookRuntime {
       const currentDirectory = await this.sessionDirectory(
         entry.runtimeSessionId,
       );
+      this.requireAdmission();
       if (
         !this.gates.admits(
           control.sessionKey,

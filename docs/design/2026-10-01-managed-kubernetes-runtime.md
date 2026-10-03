@@ -2,13 +2,15 @@
 
 [English](2026-10-01-managed-kubernetes-runtime.md) | [简体中文](2026-10-01-managed-kubernetes-runtime.zh-CN.md)
 
-Status: draft for the first scoped K1 PR, based on upstream
-`576689d07342dd2ba80d60ec00df23ea53251945`, 2026-10-03. Tracks #12380.
-This PR contains the experimental SDK/container scratch Runtime only. Public
-Hosted Workspace enablement, CSI storage and target-cluster production
-qualification remain future K2/K3 work. Earlier local and ACK development-cluster
-results describe an older implementation snapshot; they do not qualify this
-rebased PR. Current verification belongs to this PR's test report and review.
+Status: full K1/CSI integration for draft PR #13289, based on upstream
+`691a374d2a8f2def439d6aba52a592a7bbc06fb0`, 2026-10-03; tracks #12380.
+Includes the experimental SDK/container scratch Runtime and private CSI
+reservation, original Pod identity, sealing, original-result settlement,
+checkpoint evidence and durable ACK components. Public Hosted CSI selection,
+complete physical retirement and volume handoff remain closed. Earlier local
+and ACK development-cluster results, including the eight pre-integration durable
+ACK groups, qualify their own source snapshots only. Final integration tests
+and review remain in progress.
 
 ## Problem and current state
 
@@ -21,8 +23,8 @@ performs attestation before opening its local gate, and queries original tool
 identities after ambiguous outcomes. `RuntimeProvisioner` supplies the placement
 seam. Spring currently rejects `provisioner=kubernetes`. Its Workspace resolver
 and public file-profile admission require `local-process`; the resolver verifies
-directories on the Java host. Before K1, the worker reads a closed boot envelope
-from stdin and listens on a loopback ephemeral port.
+directories on the Java host. The worker reads a closed boot envelope from stdin
+and listens on a loopback ephemeral port.
 
 The historical Kubernetes adapter at reference commit `34ea187c` is useful design
 evidence, not current implementation. Its request/release interfaces differ from
@@ -37,11 +39,10 @@ The TypeScript Harness owns model context, tools orchestration and checkpoints.
 A Session-exclusive Runtime Pod owns admitted tool-side effects. Kubernetes owns
 Pod scheduling and observations, not execution settlement or replay decisions.
 
-The intended Hosted topology is one Java service with a Hosted Harness sidecar
-and on-demand Runtime Pods. K1 supplies the private SDK placement seam, not
-Spring or sidecar deployment wiring. The Broker calls the Kubernetes API and the
-worker's private HTTP protocol. Model inference proceeds while the Pod starts.
-A no-tool Turn does not need a Pod or volume. Runtime Pods receive no model credentials or
+The initial topology is one Java service with a Hosted Harness sidecar and
+on-demand Runtime Pods. The Broker calls the Kubernetes API and the worker's
+private HTTP protocol. Model inference proceeds while the Pod starts. A no-tool
+Turn does not need a Pod or volume. Runtime Pods receive no model credentials or
 Kubernetes service-account token. The Harness receives no Kubernetes management
 credentials and must not mount or inspect the Workspace.
 
@@ -121,11 +122,12 @@ K1 therefore has no automatic idle collection; operators must budget retained
 resources. Evidence-preserving deletion needs a later explicit retirement
 operation with the saved UIDs, settlement barriers and UID delete preconditions.
 
-## Future K2 Workspace storage and handoff
+## K2 Workspace storage and handoff
 
-This section records future requirements, not implementation in this K1 PR.
-Workspace storage requires a separately reviewed design, target preflight and
-qualification of mount provenance and retirement before public admission.
+The [K2 detailed design](2026-10-01-managed-kubernetes-k2.md) records the target
+preflight, implementation sequence, platform qualification and unresolved
+mount-provenance/retirement contracts. Its read-only and MySQL baseline results
+do not upgrade K2/K3 acceptance.
 
 Persist a trusted mapping from tenant/storage ID to cluster, namespace, PVC UID,
 PV UID, CSI driver, backend domain and opaque volumeHandle. Verify the PVC/PV
@@ -177,38 +179,24 @@ it does not open those tools through public Hosted admission.
 
 ## Validation and acceptance
 
-For the pre-implementation baseline, run the global `qwen` worker command;
-rejection of the container argument demonstrates the gap. Verify this PR against
-its own built bundle and Maven tests after rebasing. Run root build/typecheck/
-bundle, focused CLI worker tests, Broker tests and Checkstyle, and the current
-Maven SpotBugs gate described in the runtime-broker README. Record actual commands,
-exits and unresolved environment requirements in the PR test report. Detailed
-local verification artifacts (not committed) retain supporting outputs and hashes.
+The baseline dry-run uses the global `qwen` worker command. Its rejection of the
+container argument is the expected gap. Local verification uses the built bundle
+and Maven tests. The fake Kubernetes client launches the real worker for a private
+read/write/edit, duplicate-call and original-status round trip; this is protocol
+integration evidence, not scheduler/CSI evidence. The local test proves live-worker
+adoption and settled-call deduplication; it does not prove Broker UNKNOWN
+recovery, durable journal restoration after Pod loss, or JVM crash recovery.
 
-The fake Kubernetes client launches the real worker for a private read/write/edit,
-duplicate-call and original-status round trip. This test covers protocol
-integration, live-worker adoption and settled-call deduplication. It does not
-qualify scheduling, CSI, Broker UNKNOWN recovery, durable journal restoration
-after Pod loss, or JVM crash recovery.
-
-K1 acceptance tests must cover deterministic create/join, lost replies, Pod/Secret
-UID and boot conflicts, image/placement changes, startup deadline, API
-denial/oversize/redirect,
+K1 tests cover deterministic create/join, lost replies, Pod/Secret UID and boot
+conflicts, image/placement changes, startup deadline, API denial/oversize/redirect,
 token rotation, restart and deletion observations, stale release, lease-cache
 invalidation, missing local
-handle, and regression of loopback/stdin startup. They must demonstrate no create during
+handle, and regression of loopback/stdin startup. They prove no create during
 reconcile, no recreation after ambiguous loss and no deletion from release.
 
-### Historical development-cluster snapshot
-
-On 2026-10-01, an earlier K1 implementation snapshot passed a smoke test on an
-ACK managed development cluster running Kubernetes 1.36.2-aliyun.1 through
-authenticated Workbench kubectl. The experiment preceded this PR's
-`576689d07342dd2ba80d60ec00df23ea53251945` base and has not been repeated for this
-PR. It is historical design evidence, not current-PR target-cluster acceptance.
-
-The production HTTPS Kubernetes client, provisioner, Broker and complete bundled
-worker created
+On 2026-10-01, the K1 smoke passed on an ACK managed development cluster running
+Kubernetes 1.36.2-aliyun.1 through authenticated Workbench kubectl. The production
+HTTPS Kubernetes client, provisioner, Broker and complete bundled worker created
 one Pod and one boot Secret, attested READY, and executed remote write/edit/read.
 Broker and worker duplicate paths preserved the edited file. Two separate,
 sequential JVMs shared file-backed H2 state within one runner Pod; the second
@@ -216,11 +204,11 @@ restored identical binding/generation, Pod/Secret UIDs, endpoint, execution ID
 and result, with zero resource creates. Anonymous 401, wrong-lease 409, tampered
 saved-UID rejection and resource retention after Broker close passed. Both final
 phase outputs were `pass`, and the runner terminated `Succeeded` with exit 0.
-The test engineer independently checked that snapshot's captured terminal
-results against its runner and packet. Detailed results are retained as local
-verification artifacts (not committed).
+The test engineer independently checked the captured terminal results against
+the runner and packet. Evidence is recorded in
+local verification artifacts (not committed).
 
-That smoke used digest-pinned official ECR Node/Java base images and SHA-256
+This smoke uses digest-pinned official ECR Node/Java base images and SHA-256
 verified temporary artifact delivery, not a production worker image. Docker Hub
 pulls timed out; the official ECR distribution worked. ACK automatically added
 a workload node because the original nodes had untolerated taints. Cold capacity
@@ -229,13 +217,11 @@ establish a zero-cost test. The smoke does not establish MySQL acceptance, abrup
 JVM crash recovery, Pod/PVC recovery, physical Pod replacement, enforced network
 denial or production worker TLS.
 
-After that historical experiment, the approved namespace Broker RBAC was revoked.
-The test namespace and Workbench files were removed after checking resource identities;
+After acceptance, the approved namespace Broker RBAC was revoked. The test
+namespace and Workbench files were removed after checking resource identities;
 the live API returned namespace NotFound and no test resources. ACK's automatic
 workload node was still Ready at the final checkpoint; its reclamation is not
 verified.
-
-### Future Workspace and deployment qualification
 
 K2/K3 acceptance additionally needs real MySQL and the target Kubernetes/CNI/CSI:
 two independent volumes, two Sessions on one volume, aliases, stale/late grants,
@@ -249,15 +235,13 @@ policy, TLS/workload identity and quotas for the admitted profile.
 
 ## Open decisions and evidence
 
-The earlier smoke qualified only its recorded ACK development target and
-artifact snapshot. This PR still requires verification on its current sources;
-that historical run does not validate a new image or deployment. CSI, production
-worker image/registry, runtime workload identity and a trusted stop/unmount
-evidence source must be selected and qualified before K2/K3 enablement.
-Development uses portable Kubernetes contracts while those decisions are open.
-The historical cluster run used authenticated Workbench because the local test
-environment lacked Docker, kubectl and kind. Current verification must record
-its own environment, actual results and unexecuted gates separately.
+The ACK development target and official base-image digests have been validated
+for K1. CSI, production worker image/registry, runtime workload identity and
+trusted stop/unmount evidence source must still be selected before K2/K3
+enablement. Development defaults to portable Kubernetes contracts while these
+are pending. Real-cluster access is through authenticated Workbench; local
+Docker, kubectl and kind remain absent. Test results and unexecuted gates must
+be recorded separately.
 
 Sources: [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380),
 [reference Hosted physical-volume design](https://github.com/doudouOUC/qwen-code/blob/c7abb13f79f35b7bd2dfbca277624cbf36054616/docs/design/2026-09-21-managed-runtime-endpoint-recovery.md#hosted-runtime-profile),
