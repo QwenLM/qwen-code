@@ -69,7 +69,8 @@ Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
 `packages/cli` are reflected immediately without rebuilding. Browser Use reuses
 its built runtime, like other compiled workspace dependencies. After editing
 Browser Use, run `npm run build --workspace=@qwen-code/browser-use` to rebuild
-and stage its runtime for dev. Normal `npm install` prepares it automatically.
+and stage its runtime for dev. `prepare` builds it only when `dist/` is absent;
+otherwise rebuild explicitly.
 
 ### Unit Testing
 
@@ -80,12 +81,7 @@ root.
 packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
 `packages/channels/*`, ...) through their built `dist/` output, and
 `packages/core` tests import the package's own entry
-(`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
-`corepack pnpm install --frozen-lockfile` already builds them via the
-`prepare` script, but a worktree that shares the main checkout's
-`node_modules` (or a deep-cleaned copy) does not have them. If any
-prerequisite is missing, a vitest `globalSetup` guard stops the run and names
-the fix; build once from the repository root:
+(`@qwen-code/qwen-code-core`), which also resolves into `dist/`. `prepare` runs `husky` + `generate` and, only when `dist/review-sources.sha256` is absent (fresh clone), `build` + `bundle`; otherwise run `npm run build` once after install. A worktree that shares the main checkout's `node_modules` (or a deep-cleaned copy) does not have them. If any prerequisite is missing, a vitest `globalSetup` guard stops the run and names the fix; build once from the repository root:
 
 ```bash
 npm run build
