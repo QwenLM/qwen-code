@@ -12,7 +12,6 @@ import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   generateLegacyMcpToolName,
-  LEGACY_REDUCTION_HEAD_LENGTH,
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
@@ -1650,34 +1649,6 @@ export function matchesDomainPattern(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Match an MCP tool name against a pattern that may contain wildcards.
- *
- * Per Claude Code docs:
- *   "mcp__puppeteer" matches any tool provided by the puppeteer server
- *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
- *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
- *
- * `toolName` is the registered provider-safe name and `rawToolName` the
- * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
- * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
- * are compared *literally* against those spellings — never through
- * `sanitizeToolNameForProvider`, which is what let a rule for the server
- * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
- * Prefix patterns additionally read the legacy reduction of the raw
- * identity, admitted by `resolveLegacyMcpSpelling` only when `toolAliases`
- * advertises it, because a persisted rule was copied from the spelling
- * settings showed when it was written. A middle-truncated reduction vouches
- * only for its 28-character head window: the `___` it injects is not a
- * separator, so prefix arms never read past it (R12-2).
- *
- * A rule written provider-safe (`mcp__foo_bar`) still matches any server
- * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
- * registered spelling a literal comparison runs against *is* that reduction.
- * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
- * `disallowedTools`, which is why the gates thread the alias channel (the
- * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
- */
-/**
  * The producer-carried identity of an MCP tool. `serverName` is the
  * operator-facing server key from the config; `serverToolName` is the
  * server's own tool name. Carrying these beats re-deriving the boundary
@@ -1706,6 +1677,33 @@ function mcpSegmentSpellings(serverName: string): string[] {
   ];
 }
 
+/**
+ * Match an MCP tool name against a pattern that may contain wildcards.
+ *
+ * Per Claude Code docs:
+ *   "mcp__puppeteer" matches any tool provided by the puppeteer server
+ *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
+ *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
+ *
+ * `toolName` is the registered provider-safe name and `rawToolName` the
+ * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
+ * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
+ * are compared *literally* against those spellings — never through
+ * `sanitizeToolNameForProvider`, which is what let a rule for the server
+ * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
+ * Prefix patterns additionally read the legacy reduction of the raw
+ * identity, admitted by `resolveLegacyMcpSpelling` only when `toolAliases`
+ * advertises it. Prefixes use the length-preserving legacy substitution of
+ * the raw identity, so the injected `___` in a truncated alias never reads
+ * as a separator (R12-2).
+ *
+ * A rule written provider-safe (`mcp__foo_bar`) still matches any server
+ * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
+ * registered spelling a literal comparison runs against *is* that reduction.
+ * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
+ * `disallowedTools`, which is why the gates thread the alias channel (the
+ * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
+ */
 export function matchesMcpPattern(
   pattern: string,
   toolName: string,
@@ -1742,46 +1740,12 @@ export function matchesMcpPattern(
   if (legacySpelling !== undefined && !spellings.includes(legacySpelling)) {
     spellings.push(legacySpelling);
   }
-  // A middle-truncated reduction is `slice(0, 28) + '___' + slice(-32)`: only
-  // its head window is positionally faithful to the raw identity — the
-  // injected `___` is not a separator, but a `startsWith` comparison cannot
-  // tell, so both prefix arms would read a fabricated boundary as a real one
-  // and a whole-server rule written for one key (`mcp__X_`, `mcp__X___*`)
-  // would match a DIFFERENT server's tool (R12-2). Prefix matching therefore
-  // reads only the head window of a truncated reduction; prefixes that stay
-  // inside it compare the raw identity's own (character-substituted)
-  // characters, and anything longer is refused. Exact entries are
-  // unaffected: they compare the whole spelling. The truncation test is the
-  // producer's own (`legacyName.length === rawName.length` in
-  // `DiscoveredMCPTool.permissionAliases`).
-  const legacyTruncated =
-    legacySpelling !== undefined &&
-    rawToolName !== undefined &&
-    legacySpelling.length !== rawToolName.length;
-  const windowedSpellings = legacyTruncated
-    ? spellings.map((spelling) =>
-        spelling === legacySpelling
-          ? spelling.slice(0, LEGACY_REDUCTION_HEAD_LENGTH)
-          : spelling,
-      )
-    : spellings;
-  // A truncated reduction vouches only for its head window, but the tool's
-  // own raw identity re-rendered in the legacy character set — the
-  // substitution half of `generateLegacyMcpToolName`, with no middle
-  // truncation — is positionally faithful for its whole length, so the
-  // prefix arms may read all of it. Without it a legacy-spelled per-tool
-  // prefix longer than the 28-character window matches nothing once the raw
-  // identity crosses the 63-character budget, even though the reduction IS
-  // advertised (R14-2). Copy the array: when the reduction is not truncated
-  // `windowedSpellings` IS `spellings`, and the exact and server-level arms
-  // must not see this rendering.
-  let prefixSpellings = windowedSpellings;
-  if (legacySpelling !== undefined && rawToolName !== undefined) {
-    const lengthPreservingLegacy = rawToolName.replace(/[^A-Za-z0-9_.-]/g, '_');
-    if (!windowedSpellings.includes(lengthPreservingLegacy)) {
-      prefixSpellings = [...windowedSpellings, lengthPreservingLegacy];
-    }
-  }
+  // The untruncated legacy rendering already contains the faithful head of
+  // a truncated alias, without treating its injected `___` as a separator.
+  const prefixSpellings =
+    legacySpelling === undefined || rawToolName === undefined
+      ? spellings
+      : [toolName, rawToolName, rawToolName.replace(/[^A-Za-z0-9_.-]/g, '_')];
   const matchesPrefixLiterally = (prefix: string): boolean =>
     prefixSpellings.some((spelling) => spelling.startsWith(prefix));
 
@@ -1837,12 +1801,15 @@ export function matchesMcpPattern(
       }
       // The rule's tool side is written in a rendering too, so compare against
       // the producer's own renderings of its tool name. The registered name's
-      // own tool segment is read off the boundary-matched name — never
-      // recompute a hash — so a prefix reaching into the hash suffix or past
+      // own tool segment uses the producer's provider-safe server boundary,
+      // independently of the rule spelling, so a prefix reaching the hash or
       // a truncation cut still matches, the way the unthreaded path does.
-      const registeredToolSegment = toolName.startsWith(boundary)
-        ? toolName.slice(boundary.length)
-        : undefined;
+      const registeredBoundary = `mcp__${mcpIdentity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
+      const registeredToolSegment = toolName.startsWith(registeredBoundary)
+        ? toolName.slice(registeredBoundary.length)
+        : toolName.startsWith(boundary)
+          ? toolName.slice(boundary.length)
+          : undefined;
       return (
         toolPrefix === '' ||
         (registeredToolSegment !== undefined &&
