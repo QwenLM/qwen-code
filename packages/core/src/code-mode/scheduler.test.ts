@@ -50,6 +50,7 @@ function setup(
   const config = makeFakeConfig({
     codeModeOnly: true,
     approvalMode: ApprovalMode.DEFAULT,
+    chatRecording: false,
     targetDir: '/tmp',
     cwd: '/tmp',
     ...opts.params,

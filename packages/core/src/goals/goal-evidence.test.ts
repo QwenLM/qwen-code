@@ -209,6 +209,42 @@ describe('Goal verifier evidence window', () => {
     expect(window.omitted).toBe(3);
   });
 
+  it('classifies legacy bridge results by their Goal-owned call, preserving unrelated facts', () => {
+    const bridge = record('bridge-call', 'assistant', { turnId: 'turn-3' });
+    bridge.message = {
+      parts: [
+        {
+          functionCall: {
+            id: 'wrapped',
+            name: 'tool_call',
+            args: { name: 'EXEC', arguments: { source: 'text(42)' } },
+          },
+        },
+      ],
+    };
+    const result = record('bridge-result', 'tool_result', { turnId: 'turn-3' });
+    result.message = {
+      parts: [
+        {
+          functionResponse: {
+            id: 'wrapped',
+            name: 'tool_call',
+            response: { output: '42' },
+          },
+        },
+      ],
+    };
+    const earlier = record('earlier-fact', 'tool_result', { turnId: 'turn-2' });
+    earlier.message = result.message;
+    const window = build([earlier, bridge, result]);
+    expect(
+      window.evidence.find((entry) => entry.uuid === result.uuid)?.proofKind,
+    ).toBe('execution_output');
+    expect(
+      window.evidence.find((entry) => entry.uuid === earlier.uuid)?.proofKind,
+    ).toBe('external_fact');
+  });
+
   it('spends the budget on the serialized record, its comma and each new turn id, to the byte', () => {
     const records = [
       tool('older', 'turn-2', 'é"\n'.repeat(50)),
