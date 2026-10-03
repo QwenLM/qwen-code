@@ -683,7 +683,9 @@ export function containsUnmodelledWindowsSyntax(
 // shell-quote throws on a parameter expansion whose interior holds shell
 // punctuation (`${arr[1 << 2]}`), which would deny a legitimate word. Mask
 // each balanced `${…}` span with an inert placeholder word for the parse and
-// restore it in the token texts afterwards; the word stays dynamic either way.
+// restore it in the token texts afterwards; the word stays dynamic either
+// way. The trailing `__` matters: without it `…_1` prefixes `…_10`, and the
+// ascending restore rewrites the eleventh span with the second one's text.
 function maskParameterExpansions(segment: string): {
   text: string;
   spans: string[];
@@ -721,7 +723,7 @@ function maskParameterExpansions(segment: string): {
       }
       if (depth === 0) {
         spans.push(segment.slice(i, end));
-        out += `${prefix}${spans.length - 1}`;
+        out += `${prefix}${spans.length - 1}__`;
         i = end - 1;
         continue;
       }
@@ -734,8 +736,26 @@ function maskParameterExpansions(segment: string): {
 function tokenizeSegment(
   segment: string,
   startDepth: number,
+  substitutionSpans: Array<{ start: number; end: number }>,
 ): TokenizedSegment | null {
-  const masked = maskParameterExpansions(segment);
+  // Mask the substitution sources the extractor lifted out before anything
+  // else: their interior is analysed as a command of its own, and leaving
+  // `$(` in a token would either be misread as structure or exempt the token
+  // from the marker scan on nothing but a substring hunch. A `$(` inside
+  // single quotes runs nothing and must stay scannable.
+  let csubstPrefix = '__QWEN_CSUBST_';
+  while (segment.includes(csubstPrefix)) csubstPrefix += '_';
+  const csubstSpans: string[] = [];
+  let substMasked = '';
+  let cursor = 0;
+  for (const span of substitutionSpans) {
+    substMasked += segment.slice(cursor, span.start);
+    csubstSpans.push(segment.slice(span.start, span.end));
+    substMasked += `${csubstPrefix}${csubstSpans.length - 1}__`;
+    cursor = span.end;
+  }
+  substMasked += segment.slice(cursor);
+  const masked = maskParameterExpansions(substMasked);
   let parsed: ReturnType<typeof parse>;
   try {
     // The caller already normalized the whole command text once; re-running
@@ -744,27 +764,22 @@ function tokenizeSegment(
   } catch {
     return null;
   }
-  if (masked.spans.length > 0) {
-    const restore = (text: string): string => {
-      let restored = text;
-      for (const [index, span] of masked.spans.entries()) {
-        restored = restored.replaceAll(`${masked.prefix}${index}`, span);
-      }
-      return restored;
-    };
-    parsed = parsed.map((token) => {
-      if (typeof token === 'string') return restore(token);
-      if (
-        token !== null &&
-        typeof token === 'object' &&
-        'pattern' in token &&
-        typeof token.pattern === 'string'
-      ) {
-        return { ...token, pattern: restore(token.pattern) };
-      }
-      return token;
-    });
-  }
+  // Parameter spans restore first: they can wrap a substitution placeholder
+  // (`${x:-$(…)}`), never the other way round. A token earns the
+  // substitution exemption only when a lifted span actually lands in it.
+  const restore = (text: string): { text: string; substitution: boolean } => {
+    let restored = text;
+    for (const [index, span] of masked.spans.entries()) {
+      restored = restored.replaceAll(`${masked.prefix}${index}__`, span);
+    }
+    let substitution = false;
+    for (const [index, span] of csubstSpans.entries()) {
+      const placeholder = `${csubstPrefix}${index}__`;
+      if (restored.includes(placeholder)) substitution = true;
+      restored = restored.replaceAll(placeholder, span);
+    }
+    return { text: restored, substitution };
+  };
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
   let redirectOperand = false;
@@ -773,10 +788,11 @@ function tokenizeSegment(
     if (typeof token === 'string') {
       const isRedirectOperand = redirectOperand;
       redirectOperand = false;
-      // A `$(...)` substitution arrives as a string ending in `$` followed
-      // by an `(` operator. Consume the whole body as one opaque dynamic
-      // token so the assignment/flag it belongs to keeps its place instead
-      // of being severed into a separate run.
+      // `$((…))` arithmetic is not masked (a real substitution nested inside
+      // it must stay visible to the extractor), so it still arrives as a
+      // string ending in `$` followed by an `(` operator. Consume the whole
+      // body as one opaque dynamic token so the assignment/flag it belongs
+      // to keeps its place instead of being severed into a separate run.
       if (token.endsWith('$')) {
         const next = parsed[index + 1];
         if (
@@ -798,7 +814,7 @@ function tokenizeSegment(
             }
           }
           runs.at(-1)!.tokens.push({
-            text: token,
+            text: restore(token).text,
             dynamic: true,
             substitution: true,
             ...(isRedirectOperand ? { redirect: true } : {}),
@@ -806,12 +822,11 @@ function tokenizeSegment(
           continue;
         }
       }
+      const restored = restore(token);
       runs.at(-1)!.tokens.push({
-        text: token,
-        dynamic: token.includes('$') || token.includes('`'),
-        ...(token.includes('$(') || token.includes('`')
-          ? { substitution: true }
-          : {}),
+        text: restored.text,
+        dynamic: restored.text.includes('$') || restored.text.includes('`'),
+        ...(restored.substitution ? { substitution: true } : {}),
         ...(isRedirectOperand ? { redirect: true } : {}),
       });
       continue;
@@ -825,7 +840,7 @@ function tokenizeSegment(
       // cannot evaluate it statically.
       const pattern =
         'pattern' in token && typeof token.pattern === 'string'
-          ? token.pattern
+          ? restore(token.pattern).text
           : '';
       runs.at(-1)!.tokens.push({ text: pattern, dynamic: true });
       continue;
@@ -2155,8 +2170,10 @@ async function denyOutsideDiscoveredRepository(
  * Extract the bodies of `$(…)` and backtick command substitutions from one
  * segment. They execute before the command they are embedded in, so a
  * relocated mutation hidden inside one (`echo $(git -C <outside> reset
- * --hard)`) has to be analysed rather than folded into an opaque token.
- * Returns null when a substitution is left unterminated.
+ * --hard)`) has to be analysed rather than folded into an opaque token. The
+ * spans carry the full source slice of each substitution so the tokenizer can
+ * mask exactly what was lifted out. Returns null when a substitution is left
+ * unterminated.
  */
 // `$'…'` is ANSI-C quoting: unlike a plain single-quoted string, a backslash
 // escapes inside it, so `$'a\'b'` does not end at the middle quote. Treating
@@ -2171,8 +2188,12 @@ function skipAnsiCQuote(segment: string, start: number): number {
   return index + 1;
 }
 
-function extractCommandSubstitutions(segment: string): string[] | null {
+function extractCommandSubstitutions(segment: string): {
+  bodies: string[];
+  spans: Array<{ start: number; end: number }>;
+} | null {
   const bodies: string[] = [];
+  const spans: Array<{ start: number; end: number }> = [];
   let single = false;
   let double = false;
   let index = 0;
@@ -2196,6 +2217,7 @@ function extractCommandSubstitutions(segment: string): string[] | null {
       const end = findSubstitutionEnd(segment, index + 2);
       if (end === -1) return null;
       bodies.push(segment.slice(index + 2, end));
+      spans.push({ start: index, end: end + 1 });
       index = end + 1;
       continue;
     }
@@ -2207,6 +2229,7 @@ function extractCommandSubstitutions(segment: string): string[] | null {
       }
       if (end >= segment.length) return null;
       bodies.push(segment.slice(index + 1, end));
+      spans.push({ start: index, end: end + 1 });
       index = end + 1;
       continue;
     }
@@ -2214,14 +2237,26 @@ function extractCommandSubstitutions(segment: string): string[] | null {
     else if (character === '"' && !single) double = !double;
     index++;
   }
-  return bodies;
+  return { bodies, spans };
 }
 
 /** Index of the `)` closing a `$(` body opened at `start`, or -1. */
 function findSubstitutionEnd(segment: string, start: number): number {
   let single = false;
   let double = false;
-  let depth = 0;
+  // Paren kinds, innermost last. `$((` arithmetic frames suppress heredoc
+  // detection: inside them `<<` is a shift, not an opener. Grouping parens
+  // nested in arithmetic are indistinguishable from subshells here, one of
+  // the boundaries of scanning line-local text.
+  const parens: Array<'plain' | 'arith'> = [];
+  // Heredocs opened inside the substitution, drained in order. Their bodies
+  // are not shell structure, so a `)` there must not close the substitution
+  // early (the AGENTS.md PR-body idiom: `1) run npm test` inside the body).
+  const heredocs: Array<{
+    delimiter: string;
+    stripTabs: boolean;
+    quoted: boolean;
+  }> = [];
   for (let index = start; index < segment.length; index++) {
     const character = segment[index]!;
     if (!single && character === '\\') {
@@ -2241,10 +2276,85 @@ function findSubstitutionEnd(segment: string, start: number): number {
       continue;
     }
     if (single || double) continue;
-    if (character === '(') depth++;
+    if (character === '\n' && heredocs.length > 0) {
+      let cursor = index;
+      while (heredocs.length > 0) {
+        const lineStart = cursor + 1;
+        let lineEnd = segment.indexOf('\n', lineStart);
+        if (lineEnd === -1) lineEnd = segment.length;
+        const current = heredocs[0]!;
+        let line = segment.slice(lineStart, lineEnd);
+        if (current.stripTabs) line = line.replace(/^\t+/, '');
+        if (!current.quoted && (line.includes('$(') || line.includes('`'))) {
+          // bash expands an unquoted body at read time, so where the
+          // delimiter really lands is undecidable statically.
+          return -1;
+        }
+        if (line === current.delimiter) heredocs.shift();
+        cursor = lineEnd;
+        if (lineEnd === segment.length) break;
+      }
+      index = cursor;
+      if (index >= segment.length) break;
+      continue;
+    }
+    if (
+      character === '$' &&
+      segment[index + 1] === '(' &&
+      segment[index + 2] === '('
+    ) {
+      parens.push('arith', 'arith');
+      index += 2;
+      continue;
+    }
+    if (
+      character === '<' &&
+      segment[index + 1] === '<' &&
+      segment[index + 2] !== '<' &&
+      segment[index + 2] !== '&' &&
+      !parens.includes('arith')
+    ) {
+      // Parse the delimiter word; a dynamic or missing one makes the body
+      // boundary unreadable, so fail closed.
+      let cursor = index + 2;
+      let stripTabs = false;
+      if (segment[cursor] === '-') {
+        stripTabs = true;
+        cursor++;
+      }
+      while (segment[cursor] === ' ' || segment[cursor] === '\t') cursor++;
+      let delimiter = '';
+      let quoted = false;
+      while (cursor < segment.length) {
+        const ch = segment[cursor]!;
+        if (' \t\n&|;()<>'.includes(ch)) break;
+        if (ch === "'" || ch === '"') {
+          quoted = true;
+        } else if (ch === '\\' && cursor + 1 < segment.length) {
+          quoted = true;
+          delimiter += segment[cursor + 1];
+          cursor += 2;
+          continue;
+        } else {
+          delimiter += ch;
+        }
+        cursor++;
+      }
+      if (
+        delimiter.length === 0 ||
+        delimiter.includes('$') ||
+        delimiter.includes('`')
+      ) {
+        return -1;
+      }
+      heredocs.push({ delimiter, stripTabs, quoted });
+      index = cursor - 1;
+      continue;
+    }
+    if (character === '(') parens.push('plain');
     else if (character === ')') {
-      if (depth === 0) return index;
-      depth--;
+      if (parens.length === 0) return index;
+      parens.pop();
     }
   }
   return -1;
@@ -2676,7 +2786,9 @@ async function evaluateCommandWithCwd(
     const allExportBefore = allExport;
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
-      substitutions === null ? null : tokenizeSegment(segment, subshellDepth);
+      substitutions === null
+        ? null
+        : tokenizeSegment(segment, subshellDepth, substitutions.spans);
     const runs = tokenized?.runs ?? null;
     if (runs === null) {
       return {
@@ -2721,7 +2833,7 @@ async function evaluateCommandWithCwd(
 
     // A substitution body executes before the command it is embedded in, in a
     // subshell of the current directory, so its cwd changes do not escape it.
-    for (const body of substitutions!) {
+    for (const body of substitutions!.bodies) {
       if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
         return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
       }

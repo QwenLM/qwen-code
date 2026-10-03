@@ -436,6 +436,31 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // Same idiom, but the body carries `)` characters (checklists, emoticons):
+  // the substitution scan must read the heredoc instead of letting the first
+  // body paren close the substitution early and failing closed.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body whose lines carry closing parens',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## Checklist\n1) run npm test\n2) open the preview\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\nlgtm :)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
 
@@ -443,6 +468,45 @@ describe('createDaemonToolGuard', () => {
       guard(request(`echo $(git -C ${outsideRepo} reset --hard`)),
     ).resolves.toMatchObject({ allowed: false });
   });
+
+  it.runIf(bashSemanticsLane)(
+    'denies a relocation masked by placeholder index collisions',
+    async () => {
+      // Ten filler expansions push the GIT_DIR one to index 10: a placeholder
+      // without a terminator makes `..._1` a prefix of `..._10`, and a naive
+      // restore rewrites the eleventh span with the second one's text.
+      const guard = createDaemonToolGuard();
+      const filler = Array.from({ length: 10 }, (_, i) => `\${v${i}}`).join(
+        ' ',
+      );
+
+      await expect(
+        guard(
+          request(
+            `${filler} \${GIT_DIR=${cmdPath(outsideRepo)}/.git} git reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not exempt a quoted payload from scanning over a literal $(',
+    async () => {
+      // The `$(date)` sits inside single quotes, so bash never runs it and
+      // the extractor never lifts it out; the token must stay scannable or
+      // the whole wrapper payload escapes the relocation scan.
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `nice sh -c 'cd ${cmdPath(outsideRepo)} && git reset --hard $(date)'`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
   it.each([
     () => `bash -c'git -C ${outsideRepo} reset --hard'`,
@@ -2779,6 +2843,9 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     // Interpreters run the body as a program.
     `python <<'EOF'\nimport os\nEOF`,
     `python - X=1 <<'EOF'\nprint(1)\nEOF`,
+    // The issue #9381 repro: the bare `-` idiom still reads a program, not
+    // data, so it fails closed like any other interpreter entrance.
+    `python - <<'PY'\nimport os\nprint(os.getcwd())\nPY`,
     `node <<'EOF'\nprocess.exit(1)\nEOF`,
     // Command substitution inside an unquoted body executes.
     `cat <<EOF\n$(git reset --hard)\nEOF`,
@@ -2804,11 +2871,9 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
   });
 
   // The round-19 narrowing: bodies a provably inert receiver reads as data
-  // (or as its program through the bare `-` idiom) are as opaque to shell
-  // rules as any script file, so these entrances must stop denying.
+  // are as opaque to shell rules as any script file, so these entrances must
+  // stop denying.
   it.runIf(bashSemanticsLane).each([
-    // The issue #9381 repro: python reads its program from stdin.
-    `python - <<'PY'\nimport os\nprint(os.getcwd())\nPY`,
     // An output redirect on the opener never moves stdin.
     `cat > README.md <<'EOF'\nhello\nEOF`,
     // git commit -F - reads the message from stdin; the body is data.
@@ -2832,6 +2897,32 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       allowed: true,
     });
   });
+
+  it.runIf(bashSemanticsLane)(
+    'denies interpreter and assignment-prefixed heredoc payloads',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // python reads the body as its program: the body stays visible, and
+      // the relocated git inside is exactly what the scan has to see.
+      await expect(
+        guard(
+          request(
+            `python - <<'PY'\ngit -C ${cmdPath(outsideRepo)} reset --hard\nPY`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      // A leading NAME=value can load code into the receiver (LD_PRELOAD
+      // &co), so the inert-receiver classification must not strip the body.
+      await expect(
+        guard(
+          request(
+            `LD_PRELOAD=/tmp/hijack.so cat <<'EOF'\ngit -C ${cmdPath(outsideRepo)} reset --hard\nEOF`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
   it.runIf(bashSemanticsLane)(
     'still denies the inert-looking shapes that execute the body',
