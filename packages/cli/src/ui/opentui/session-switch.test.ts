@@ -156,6 +156,10 @@ function createFakeHost(config: Config): SessionSwitchHost & {
 
 describe('handleResumeSession', () => {
   beforeEach(() => {
+    vi.spyOn(
+      SessionService.prototype,
+      'assertLegacySessionExecution',
+    ).mockImplementation(() => {});
     vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
       emptySession() as never,
     );
@@ -193,6 +197,33 @@ describe('handleResumeSession', () => {
     expect(replay.at(-1)?.type).toBe('done');
   });
 
+  it('rejects a Managed target before loading or switching sessions', async () => {
+    vi.mocked(
+      SessionService.prototype.assertLegacySessionExecution,
+    ).mockImplementationOnce(() => {
+      throw new Error('belongs to managed');
+    });
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(
+      SessionService.prototype.assertLegacySessionExecution,
+    ).toHaveBeenCalledWith('target-session');
+    expect(SessionService.prototype.loadSession).not.toHaveBeenCalled();
+    expect(calls.startNewSession).toHaveLength(0);
+    expect(host.startNewSession).not.toHaveBeenCalled();
+    expect(host.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('belongs to managed'),
+      }),
+      expect.any(Number),
+    );
+    expect(calls.swapCommit).toBe(1);
+  });
+
   it('rolls the core back to the old session when the swap fails', async () => {
     const { config, calls } = createFakeConfig({
       failClientInitialize: true,
@@ -216,6 +247,30 @@ describe('handleResumeSession', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('re-initializes the client when rolling back after the core swap', async () => {
+    // The forward initialize succeeds; the failure lands at the transcript
+    // reset (after the core swap, before the UI commit). The rollback's
+    // startNewSession clears the reviewed-schema evidence, so the client
+    // must be re-initialized against the restored session — otherwise the
+    // next hidden deferred call is refused even though its tool_search
+    // block is still in context. Removing the rollback's initialize() reds
+    // this: the count stays at the forward call alone.
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    vi.mocked(host.resetTranscript).mockImplementation(() => {
+      throw new Error('transcript boom');
+    });
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(calls.startNewSession.map(([id]) => id)).toEqual([
+      'target-session',
+      'old-session',
+    ]);
+    expect(calls.clientInitialize).toBe(2);
+    expect(calls.swapAbort).toBe(1);
   });
 
   it('blocks the switch while background work is running', async () => {

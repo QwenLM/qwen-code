@@ -19,6 +19,10 @@ if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
   process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] = '1';
 }
 
+// Model limits and modalities come from the regex tables unless a test opts
+// into the models.dev catalog.
+process.env['QWEN_CODE_MODELS_DEV'] = 'off';
+
 // The review sandbox policy is the OPERATOR's setting for their own reviews,
 // and this suite must not inherit it. A maintainer who turns the feature on
 // and then runs `npm test` would otherwise watch the review tests refuse to
@@ -38,7 +42,19 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // one explicitly.
 delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
 
+import { configure } from '@testing-library/react';
+
 import './src/test-utils/customMatchers.js';
+
+// CI and the autofix verification gate run this suite on a shared,
+// oversubscribed host, where the testing-library default 1s async budget is
+// spent on neighbour load rather than on the code under test (the gate's
+// 60s testTimeout cannot help: waitFor has its own default). Give async
+// queries room there only — locally the 1s default keeps failures fast.
+// Assertions are untouched: a condition that never holds still fails.
+if (process.env['CI']) {
+  configure({ asyncUtilTimeout: 10_000 });
+}
 
 // Lowlight is loaded asynchronously in production to keep it out of the
 // startup-critical bundle chunk. Snapshot tests render synchronously via

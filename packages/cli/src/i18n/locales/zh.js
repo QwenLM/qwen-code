@@ -21,6 +21,8 @@ export default {
   'Project level': '项目级',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪贴板图片粘贴不可用：未找到受支持的剪贴板工具。Linux 下请安装 `wl-clipboard`（Wayland）或 `xclip`（X11），无显示器环境下请设置 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -184,7 +186,10 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
+  'toolDisplayName.ManageMemory': '管理记忆',
+  'toolDisplayName.SearchMemory': '搜索记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '审查模型',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.RecordSource': '记录来源',
@@ -223,6 +228,12 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.ThreadPost': '发帖到线程',
+  'toolDisplayName.ThreadWait': '等待协作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞问题',
+  'toolDisplayName.ThreadReview': '提交待评审',
+  'toolDisplayName.ThreadCreate': '创建子线程',
+  'toolDisplayName.ThreadRead': '读取线程',
   'toolDisplayName.DownsampleImage': '降采样图像',
   'toolDisplayName.DownscaleVideo': '降采样视频',
   'toolDisplayName.DownsampleAudio': '降采样音频',
@@ -422,6 +433,8 @@ export default {
     '回退不会影响手工编辑或通过 shell 命令修改的文件。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '无法将对话回退到该轮次：它已无法与模型历史对应（例如经过重试）。请尝试更近一些的轮次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -2203,6 +2216,9 @@ export default {
   Unattributed: '未归因',
   'Cached prefix': '缓存前缀',
   tokens: 'tokens',
+  'Estimated usage, including the conversation': '估算用量（含对话）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下为本地估算，包含对话。',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
@@ -2308,6 +2324,13 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
+  'Configure the Advisor model': '配置 Advisor 模型',
+  'Disable Advisor': '禁用 Advisor',
+  'Select Advisor Model': '选择 Advisor 模型',
+  'Advisor disabled': 'Advisor 已禁用',
+  'Advisor set to {{model}}': 'Advisor 已设置为 {{model}}',
+  'Selected Advisor model is unavailable.': '所选 Advisor 模型不可用。',
+  'Advisor configuration is unavailable.': 'Advisor 配置不可用。',
   'Consulting advisor...': '正在咨询审查模型...',
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
@@ -2697,4 +2720,6 @@ export default {
   'Kept model as {{model}}': '模型保持为 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交信息创建 git 提交',
 };

@@ -23,6 +23,11 @@ import {
 } from './gc.js';
 
 const DAY_MS = 24 * 3600_000;
+const RECOGNITION = {
+  ingestionConfigHash: '',
+  detectorVersion: 'omni-sniff-ffprobe/1',
+  probeStatus: 'complete',
+} as const;
 
 describe('runOmniGcOnce', () => {
   let qwenDir: string;
@@ -46,8 +51,9 @@ describe('runOmniGcOnce', () => {
     sha256: string,
     ageDays: number,
     sizeBytes = 4,
+    objectsDir = store.getObjectsDir(),
   ): Promise<string> {
-    const shardDir = path.join(store.getObjectsDir(), sha256.slice(0, 2));
+    const shardDir = path.join(objectsDir, sha256.slice(0, 2));
     await fs.mkdir(shardDir, { recursive: true });
     const filePath = path.join(shardDir, `${sha256}.bin`);
     await fs.writeFile(filePath, Buffer.alloc(sizeBytes, 1));
@@ -68,11 +74,7 @@ describe('runOmniGcOnce', () => {
       mimeType: 'video/x-matroska',
       origin: 'user',
       source: { protocol: 'local', locator: 'film.mkv' },
-      recognition: {
-        ingestionConfigHash: '',
-        detectorVersion: 'omni-sniff-ffprobe/1',
-        probeStatus: 'complete',
-      },
+      recognition: RECOGNITION,
     }))!;
     await memory.commitPolicySucceeded({
       invocationId: 'aabbccdd00112233',
@@ -99,6 +101,31 @@ describe('runOmniGcOnce', () => {
         },
       ],
     });
+  }
+
+  const writeLedger = (content: string) =>
+    fs.writeFile(
+      path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
+      content,
+    );
+
+  /** A live session registry holding one image handle on `fileRef`. */
+  function registryOn(fileRef: string): MediaResourceRegistry {
+    const registry = new MediaResourceRegistry();
+    registry.bind({
+      fileId: 'f1',
+      fileVersionId: 'v1',
+      rootFileId: 'f1',
+      fileRef,
+      mediaType: 'image',
+    });
+    return registry;
+  }
+
+  /** The run deleted nothing and the object at `p` is still on disk. */
+  async function expectKept(result: { deletedObjects: number }, p: string) {
+    expect(result.deletedObjects).toBe(0);
+    await expect(fs.access(p)).resolves.toBeUndefined();
   }
 
   function gcOptions(overrides?: Partial<Parameters<typeof runOmniGcOnce>[0]>) {
@@ -128,20 +155,17 @@ describe('runOmniGcOnce', () => {
   it('keeps a young unreferenced object (retention grace)', async () => {
     // The window is what makes "promoted, memory commit still in flight"
     // and cross-process races safe — a fresh orphan must survive.
-    const young = 'c'.repeat(64);
-    const p = await writeObject(young, 2);
+    const p = await writeObject('c'.repeat(64), 2);
 
     const result = await runOmniGcOnce(gcOptions());
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('treats a managed source locator as a root, not just artifactRefs', async () => {
-    // Tool/URL media anchor their file identity in the object store —
-    // their only reference is `versions[].source.locator`. A GC that only
-    // reads artifactRefs would delete exactly the objects whose store copy
-    // is the only copy.
+    // Tool/URL media anchor their file identity in the object store; their
+    // only reference is `versions[].source.locator`. A GC reading only
+    // artifactRefs would delete exactly the objects whose only copy it is.
     const anchored = 'd'.repeat(64);
     const p = await writeObject(anchored, 30);
     await memory.recordFileRecognized({
@@ -153,25 +177,19 @@ describe('runOmniGcOnce', () => {
       mimeType: 'image/png',
       origin: 'tool',
       source: { protocol: 'managed', locator: `sha256/${anchored}` },
-      recognition: {
-        ingestionConfigHash: '',
-        detectorVersion: 'omni-sniff-ffprobe/1',
-        probeStatus: 'complete',
-      },
+      recognition: RECOGNITION,
     });
 
     const result = await runOmniGcOnce(gcOptions());
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('roots a URL-origin version through its in-store fileRef', async () => {
-    // URL media keep the ORIGINAL URL as source.locator (protocol 'url'),
-    // but their staging download is deleted the turn it lands — the store
-    // copy named by fileRef is the only persistent bytes. A root set that
-    // only reads managed locators would delete exactly those objects
-    // while the ledger still vouches for them (hard rule 2).
+    // URL media keep the ORIGINAL URL as source.locator (protocol 'url'), but
+    // the staging download is deleted the turn it lands: the store copy named
+    // by fileRef is the only persistent bytes. A root set reading only managed
+    // locators would delete it while the ledger vouches for it (hard rule 2).
     const urlAnchored = '5'.repeat(64);
     const p = await writeObject(urlAnchored, 30);
     await memory.recordFileRecognized({
@@ -183,36 +201,23 @@ describe('runOmniGcOnce', () => {
       mimeType: 'video/mp4',
       origin: 'user',
       source: { protocol: 'url', locator: 'https://example.com/clip.mp4' },
-      recognition: {
-        ingestionConfigHash: '',
-        detectorVersion: 'omni-sniff-ffprobe/1',
-        probeStatus: 'complete',
-      },
+      recognition: RECOGNITION,
     });
 
     // Both passes must keep it: pass 1 (expired) and pass 2 (budget).
     const result = await runOmniGcOnce(gcOptions({ maxTotalBytes: 1 }));
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('protects objects the live session registry still points at', async () => {
     const live = 'f'.repeat(64);
     const p = await writeObject(live, 30);
-    const registry = new MediaResourceRegistry();
-    registry.bind({
-      fileId: 'f1',
-      fileVersionId: 'v1',
-      rootFileId: 'f1',
-      fileRef: store.objectPathFor(live, '.bin'),
-      mediaType: 'image',
-    });
+    const registry = registryOn(store.objectPathFor(live, '.bin'));
 
     const result = await runOmniGcOnce(gcOptions({ registry }));
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('ignores a registry fileRef OUTSIDE the store, even with a matching name', async () => {
@@ -223,14 +228,7 @@ describe('runOmniGcOnce', () => {
     const p = await writeObject(sha, 30);
     const outside = path.join(qwenDir, `${sha}.bin`);
     await fs.writeFile(outside, 'user copy');
-    const registry = new MediaResourceRegistry();
-    registry.bind({
-      fileId: 'f1',
-      fileVersionId: 'v1',
-      rootFileId: 'f1',
-      fileRef: outside,
-      mediaType: 'image',
-    });
+    const registry = registryOn(outside);
 
     const result = await runOmniGcOnce(gcOptions({ registry }));
 
@@ -240,25 +238,16 @@ describe('runOmniGcOnce', () => {
   });
 
   it('deletes NOTHING when the ledger was corrupt (recovery-backup guard)', async () => {
-    // A corrupt document does not read as null: the store SELF-HEALS it
-    // (rename to `.corrupt-<ts>`, continue on empty). What blocks this
-    // run is the corruption-recovery guard — an empty post-heal ledger
-    // must not read as "nothing is referenced".
-    await writeObject('a'.repeat(64), 400);
-    await fs.writeFile(
-      path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
-      '{not json',
-    );
+    // A corrupt document does not read as null: the store SELF-HEALS it (rename
+    // to `.corrupt-<ts>`, continue on empty). The corruption-recovery guard
+    // blocks this run: an empty post-heal ledger is not "nothing referenced".
+    const p = await writeObject('a'.repeat(64), 400);
+    await writeLedger('{not json');
 
     const result = await runOmniGcOnce(gcOptions());
 
     expect(result.ran).toBe(false);
-    expect(result.deletedObjects).toBe(0);
-    await expect(
-      fs.access(
-        path.join(store.getObjectsDir(), 'aa', `${'a'.repeat(64)}.bin`),
-      ),
-    ).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('deletes NOTHING when the root set is unknowable (refs === null)', async () => {
@@ -275,19 +264,17 @@ describe('runOmniGcOnce', () => {
     );
 
     expect(result.ran).toBe(false);
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('roots an entry artifactRef on its own (no version locator for it)', async () => {
-    // `entries[].artifactRef.managedId` must be an independent root: a
-    // hand-written ledger references the object ONLY through an entry —
-    // no version record backs it up (the service's own commit would
-    // double-root, masking a regression in this branch).
+    // `entries[].artifactRef.managedId` must be an independent root: this
+    // hand-written ledger references the object ONLY through an entry, with no
+    // version record (the service's own commit would double-root, masking a
+    // regression in this branch).
     const sha = '8'.repeat(64);
     const p = await writeObject(sha, 30);
-    await fs.writeFile(
-      path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
+    await writeLedger(
       JSON.stringify({
         schemaVersion: 1,
         files: {},
@@ -304,33 +291,27 @@ describe('runOmniGcOnce', () => {
 
     const result = await runOmniGcOnce(gcOptions());
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
   });
 
   it('over budget: deletes oldest unreferenced objects regardless of age', async () => {
-    const older = '1'.repeat(64);
-    const newer = '2'.repeat(64);
-    await writeObject(older, 5, 600); // younger than retention, but budget
-    await writeObject(newer, 1, 600);
+    // Younger than retention, but over budget.
+    const older = await writeObject('1'.repeat(64), 5, 600);
+    const newer = await writeObject('2'.repeat(64), 1, 600);
 
     const result = await runOmniGcOnce(gcOptions({ maxTotalBytes: 800 }));
 
     // Oldest goes first; once within budget the newer one survives.
     expect(result.deletedObjects).toBe(1);
-    await expect(
-      fs.access(path.join(store.getObjectsDir(), '11', `${older}.bin`)),
-    ).rejects.toThrow();
-    await expect(
-      fs.access(path.join(store.getObjectsDir(), '22', `${newer}.bin`)),
-    ).resolves.toBeUndefined();
+    await expect(fs.access(older)).rejects.toThrow();
+    await expect(fs.access(newer)).resolves.toBeUndefined();
   });
 
   it('budget pass spares an object the FRESH ledger references (stale-snapshot race)', async () => {
-    // The initial root snapshot goes stale while the sweep runs; a commit
-    // landing in that gap must not lose its object. The budget pass
-    // re-reads the ledger right before deleting — simulate the race with
-    // a service whose second read knows the new reference.
+    // The initial root snapshot goes stale while the sweep runs; a commit in
+    // that gap must not lose its object. The budget pass re-reads the ledger
+    // right before deleting; a service whose second read knows the new
+    // reference simulates the race.
     const contested = '7'.repeat(64);
     const p = await writeObject(contested, 5, 600);
     let reads = 0;
@@ -344,31 +325,26 @@ describe('runOmniGcOnce', () => {
     );
 
     expect(reads).toBeGreaterThanOrEqual(2);
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(p)).resolves.toBeUndefined();
+    await expectKept(result, p);
     // Still over budget with (now-)referenced bytes only → suspended.
     expect(result.derivationsSuspended).toBe(true);
   });
 
   it('budget pass skips an object whose mtime was touched during the sweep', async () => {
-    // putFile's dedup touch precedes every new commit; an object touched
-    // after the sweep began signals an in-flight reference. The delete
-    // loop re-stats each candidate — the touched one must survive even
-    // though the budget still wants its bytes. (`first` is expired and
-    // goes in pass 1; young `second` is only reachable by the budget
-    // pass, whose cascade-triggered touch must spare it.)
-    const first = '3'.repeat(64);
-    const second = '4'.repeat(64);
-    await writeObject(first, 30, 600);
-    const secondPath = await writeObject(second, 5, 600);
+    // putFile's dedup touch precedes every new commit; an object touched after
+    // the sweep began signals an in-flight reference. The delete loop re-stats
+    // each candidate, so the touched one survives though the budget wants its
+    // bytes. (Expired `first` goes in pass 1; young `second` is only reachable
+    // by the budget pass, whose cascade-triggered touch must spare it.)
+    await writeObject('3'.repeat(64), 30, 600);
+    const secondPath = await writeObject('4'.repeat(64), 5, 600);
 
     const result = await runOmniGcOnce(
       gcOptions({
         maxTotalBytes: 100,
         uploadCache: {
-          // Fires while `first` is being deleted — before `second`'s turn.
-          // A +10s timestamp keeps the assertion immune to filesystems
-          // that truncate mtime to whole seconds (observed on the CI
+          // Fires while `first` is deleted, before `second`'s turn. +10s keeps
+          // it immune to filesystems truncating mtime to whole seconds (CI
           // runner: touch-with-now floored below the sweep start).
           removeBySha256: async () => {
             const future = new Date(Date.now() + 10_000);
@@ -442,8 +418,7 @@ describe('runOmniGcOnce', () => {
   });
 
   it('accounts a failed rm as a survivor (budget keeps its bytes)', async () => {
-    const stuck = 'a'.repeat(64);
-    const p = await writeObject(stuck, 30, 600);
+    const p = await writeObject('a'.repeat(64), 30, 600);
     const rmSpy = vi
       .spyOn(fs, 'rm')
       .mockRejectedValue(new Error('EPERM: operation not permitted'));
@@ -479,19 +454,10 @@ describe('runOmniGcOnce', () => {
       const first = await runOmniGcOnce(gcOptions({ maxTotalBytes: 100 }));
 
       // Root B: one expired orphan, comfortable budget → swept, clean.
-      const orphan = 'a'.repeat(64);
-      const shard = path.join(otherStore.getObjectsDir(), orphan.slice(0, 2));
-      await fs.mkdir(shard, { recursive: true });
-      const orphanPath = path.join(shard, `${orphan}.bin`);
-      await fs.writeFile(orphanPath, Buffer.alloc(4, 1));
-      const old = new Date(Date.now() - 30 * 24 * 3600_000);
-      await fs.utimes(orphanPath, old, old);
-      const second = await runOmniGcOnce({
-        store: otherStore,
-        memoryService: otherMemory,
-        retentionDays: 14,
-        maxTotalBytes: 1024 * 1024,
-      });
+      await writeObject('a'.repeat(64), 30, 4, otherStore.getObjectsDir());
+      const second = await runOmniGcOnce(
+        gcOptions({ store: otherStore, memoryService: otherMemory }),
+      );
 
       // Distinct runs, not the first root's settled result.
       expect(second).not.toBe(first);
@@ -564,8 +530,7 @@ describe('runOmniGcOnce', () => {
 
     const result = await runOmniGcOnce(gcOptions());
 
-    expect(result.deletedObjects).toBe(0);
-    await expect(fs.access(victim)).resolves.toBeUndefined();
+    await expectKept(result, victim);
     await fs.rm(outside, { recursive: true, force: true });
   });
 });
