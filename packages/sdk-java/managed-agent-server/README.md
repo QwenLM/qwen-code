@@ -292,9 +292,21 @@ for transport identity. Responses under the private prefix use
 
 The full WebShell can keep an ordinary Qwen daemon for its existing chat,
 workspace, settings, and terminal surfaces while routing only the Managed
-panel to this Spring service. Start an ordinary `qwen serve` on port 4170 in
-addition to the private Hosted Harness used by Spring, then run from the
-repository root:
+panel to this Spring service. The two servers must bind different ports:
+keep the ordinary daemon on 4170 (the vite proxy's default) and start the
+private Hosted Harness on a distinct one —
+
+```bash
+qwen serve --profile hosted-harness --port 4171
+```
+
+— and point Spring at it with the matching base URL:
+
+```bash
+export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
+```
+
+With both up, run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
