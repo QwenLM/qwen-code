@@ -827,6 +827,10 @@ it('refuses unsupported profile calls before acquiring or reserving work', async
   for (const call of [
     { ...calls[0], name: 'run_shell_command' },
     { ...calls[0], wasOutputTruncated: true },
+    // Arguments that arrived unterminated are refused even when the output
+    // token limit was not what cut them: this profile writes to a remote
+    // Workspace with no undo backup (#12970).
+    { ...calls[0], hadIncompleteArguments: true },
   ]) {
     await expect(
       turn.execute([call], parts, 'model', new AbortController().signal),

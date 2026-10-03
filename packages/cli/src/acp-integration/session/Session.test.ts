@@ -34,6 +34,7 @@ import type {
   ContentGeneratorConfig,
   Extension,
   LlmChat,
+  ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -1131,6 +1132,11 @@ describe('Session', () => {
       isTrusted: false,
       user: { settings: {} },
       workspace: { settings: {} },
+      forScope: vi.fn((scope: SettingScope) =>
+        scope === SettingScope.Workspace
+          ? mockSettings.workspace
+          : mockSettings.user,
+      ),
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
       reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
@@ -8492,6 +8498,193 @@ describe('Session', () => {
         authType: AuthType.USE_OPENAI,
       });
     });
+
+    it.each([
+      ['configured Responses', ['responses'], AuthType.USE_OPENAI],
+      ['configured Chat', ['chat-completions'], AuthType.USE_OPENAI],
+      ['raw', [], AuthType.USE_OPENAI_RESPONSES],
+      ['runtime', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      [
+        'duplicate Responses',
+        ['chat-completions', 'responses'],
+        AuthType.USE_OPENAI_RESPONSES,
+      ],
+      [
+        'duplicate Chat',
+        ['chat-completions', 'responses'],
+        AuthType.USE_OPENAI,
+      ],
+      ['Workspace', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      ['inherited Workspace', ['responses'], AuthType.USE_OPENAI],
+      [
+        'invalid reload',
+        ['responses', 'invalid'],
+        AuthType.USE_OPENAI_RESPONSES,
+      ],
+    ] as const)(
+      'persists the auth choice for %s',
+      async (scenario, wires, expectedAuth) => {
+        const modelId = 'gpt-6-astra';
+        const baseUrl = 'https://api.example/v1';
+        const isChat = scenario.endsWith('Chat');
+        const authType = isChat
+          ? AuthType.USE_OPENAI
+          : AuthType.USE_OPENAI_RESPONSES;
+        const scope = scenario.endsWith('Workspace')
+          ? SettingScope.Workspace
+          : SettingScope.User;
+        const owner =
+          scope === SettingScope.Workspace
+            ? mockSettings.workspace
+            : mockSettings.user;
+        Object.assign(mockSettings, {
+          isTrusted: scope === SettingScope.Workspace,
+        });
+        mockSettings.user.settings.security = {
+          auth: { selectedType: AuthType.USE_OPENAI },
+        };
+        owner.settings.security = {
+          auth: {
+            selectedType:
+              scenario === 'Workspace' || isChat
+                ? AuthType.USE_OPENAI_RESPONSES
+                : AuthType.USE_OPENAI,
+          },
+        };
+        if (scenario === 'inherited Workspace') {
+          delete owner.settings.security;
+          mockSettings.merged.security = mockSettings.user.settings.security;
+        }
+        owner.settings.modelProviders = {
+          openai: wires.map((wireApi) => ({
+            id: wireApi === 'invalid' ? 'broken' : modelId,
+            baseUrl,
+            wireApi: wireApi as ProviderModelConfig['wireApi'],
+          })),
+        };
+        mockSettings.merged.modelProviders = owner.settings.modelProviders;
+        const models = wires
+          .filter((wire) => wire !== 'invalid')
+          .map((wire) => ({
+            id: modelId,
+            label: wire,
+            authType:
+              wire === 'responses'
+                ? AuthType.USE_OPENAI_RESPONSES
+                : AuthType.USE_OPENAI,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+          }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType,
+          model: modelId,
+        } as ReturnType<Config['getContentGeneratorConfig']>);
+        const snapshotId = `$runtime|${authType}|${modelId}`;
+        const selectedId =
+          scenario === 'runtime'
+            ? `${snapshotId}(${authType})`
+            : (buildAcpModelOptions(models).find(
+                (option) => option.model.authType === authType,
+              )?.modelId ?? `${modelId}(${authType})`);
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: selectedId,
+        });
+
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([[scope, 'security.auth.selectedType', expectedAuth]]);
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          authType,
+          scenario === 'runtime' ? snapshotId : modelId,
+          scenario === 'raw' || scenario === 'runtime'
+            ? undefined
+            : { baseUrl },
+        );
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith(expect.objectContaining({ authType }));
+      },
+    );
+
+    it.each([
+      {
+        scenario: 'a workspace-only auth choice',
+        selectedType: undefined,
+        wires: ['responses'],
+      },
+      {
+        scenario: 'the same id at endpoints with different wires',
+        selectedType: AuthType.USE_OPENAI,
+        wires: ['responses', 'chat-completions'],
+      },
+    ] as const)(
+      'keeps the effective auth for $scenario',
+      async ({ selectedType, wires }) => {
+        const providers = wires.map((wireApi) => ({
+          id: 'shared-model',
+          baseUrl: `https://${wireApi}.example/v1`,
+          wireApi,
+        }));
+        mockSettings.user.settings = {
+          security: { auth: { selectedType } },
+          modelProviders: { openai: providers },
+        };
+        mockSettings.workspace.settings = {
+          security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        };
+        Object.assign(mockSettings, {
+          isTrusted: true,
+          merged: {
+            ...mockSettings.user.settings,
+            security: mockSettings.workspace.settings.security,
+          },
+        });
+        const models = providers.map(({ wireApi, ...model }) => ({
+          ...model,
+          label: wireApi,
+          registryBaseUrl: model.baseUrl,
+          authType:
+            wireApi === 'responses'
+              ? AuthType.USE_OPENAI_RESPONSES
+              : AuthType.USE_OPENAI,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        const target = buildAcpModelOptions(models).find(
+          (option) => option.model.authType === AuthType.USE_OPENAI_RESPONSES,
+        )!;
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: target.modelId,
+        });
+
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([
+          [
+            SettingScope.User,
+            'security.auth.selectedType',
+            AuthType.USE_OPENAI_RESPONSES,
+          ],
+        ]);
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'model.baseUrl',
+          'https://responses.example/v1',
+        );
+      },
+    );
 
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
@@ -43658,6 +43851,88 @@ describe('Session', () => {
       ]);
     });
 
+    it.each([false, true])(
+      'recovers from an automatic Host refusal, preserving user cancellation (agent-host=%s)',
+      async (agentHost) => {
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          agentHost ? 'agent-host' : undefined,
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        const deniedExecute = vi.fn();
+        const allowedExecute = vi.fn().mockResolvedValue({
+          llmContent: 'ALLOWED_HOST_DIRECTORY',
+          returnDisplay: 'ALLOWED_HOST_DIRECTORY',
+        });
+        const deniedTool = mockConfirmingTool(
+          core.ToolNames.READ_FILE,
+          deniedExecute,
+          'info',
+        );
+        deniedTool.kind = core.Kind.Read;
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.READ_FILE
+            ? deniedTool
+            : mockAllowedTool(name, allowedExecute),
+        );
+        const guard = vi.fn().mockResolvedValue({ allowed: true });
+        mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+        vi.mocked(mockClient.requestPermission).mockImplementation(
+          async (p) => {
+            const reject = p.options.find(
+              (option: PermissionOption) => option.kind === 'reject_once',
+            );
+            expect(reject).toBeDefined();
+            return {
+              outcome: { outcome: 'selected', optionId: reject!.optionId },
+            };
+          },
+        );
+
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-host-refusal', [
+          {
+            id: 'outside_read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/outside/denied.txt' },
+          },
+          {
+            id: 'inside_list',
+            name: core.ToolNames.LS,
+            args: { path: process.cwd() },
+          },
+        ]);
+
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(deniedExecute).not.toHaveBeenCalled();
+        expect(result.stopAfterPermissionCancel).toBe(!agentHost);
+        expect(allowedExecute).toHaveBeenCalledTimes(agentHost ? 1 : 0);
+        expect(guard).toHaveBeenCalledTimes(agentHost ? 1 : 0);
+        if (agentHost) {
+          expect(guard).toHaveBeenCalledWith(
+            expect.objectContaining({
+              toolName: core.ToolNames.LS,
+              permissionChecked: true,
+            }),
+          );
+          expect(result.parts[1]?.functionResponse?.response).toEqual({
+            output: 'ALLOWED_HOST_DIRECTORY',
+          });
+        }
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'outside_read',
+            status: agentHost ? 'error' : 'cancelled',
+            executionStatus: 'not_started',
+            errorType: agentHost
+              ? core.ToolErrorType.EXECUTION_DENIED
+              : undefined,
+          }),
+        );
+      },
+    );
+
     it('skips later tools after non-question permission cancellation', async () => {
       const cancelledExecute = vi.fn();
       const laterExecute = vi.fn().mockResolvedValue({
@@ -43968,73 +44243,81 @@ describe('Session', () => {
       );
     });
 
-    it('does not treat a parent abort during permission as explicit rejection', async () => {
-      const permissionExecute = vi.fn();
-      const laterExecute = vi.fn().mockResolvedValue({
-        llmContent: 'should not execute',
-        returnDisplay: 'should not execute',
-      });
-      mockToolRegistry.getTool.mockImplementation((name: string) =>
-        name === core.ToolNames.SHELL
-          ? mockConfirmingTool(name, permissionExecute, 'exec')
-          : mockAllowedTool(name, laterExecute),
-      );
-      vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
-        new Promise<never>(() => {
-          // requestPermissionWithAbort owns cancellation of this pending call.
-        }),
-      );
-      const abortController = new AbortController();
+    it.each([false, true])(
+      'does not treat a parent abort during permission as explicit rejection (agent-host=%s)',
+      async (agentHost) => {
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          agentHost ? 'agent-host' : undefined,
+        );
+        const permissionExecute = vi.fn();
+        const laterExecute = vi.fn().mockResolvedValue({
+          llmContent: 'should not execute',
+          returnDisplay: 'should not execute',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.SHELL
+            ? mockConfirmingTool(name, permissionExecute, 'exec')
+            : mockAllowedTool(name, laterExecute),
+        );
+        vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
+          new Promise<never>(() => {
+            // requestPermissionWithAbort owns cancellation of this pending call.
+          }),
+        );
+        const abortController = new AbortController();
 
-      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
-        abortController.signal,
-        'prompt-shell-permission-parent-abort',
-        [
-          {
-            id: 'shell_call',
-            name: core.ToolNames.SHELL,
-            args: { command: 'echo denied' },
-          },
-          {
-            id: 'read_call',
-            name: core.ToolNames.READ_FILE,
-            args: { file_path: '/tmp/should-not-run' },
-          },
-        ],
-      );
+        const runPromise = (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          abortController.signal,
+          'prompt-shell-permission-parent-abort',
+          [
+            {
+              id: 'shell_call',
+              name: core.ToolNames.SHELL,
+              args: { command: 'echo denied' },
+            },
+            {
+              id: 'read_call',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: '/tmp/should-not-run' },
+            },
+          ],
+        );
 
-      await vi.waitFor(() =>
-        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
-      );
-      abortController.abort();
-      const result = await runPromise;
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        abortController.abort();
+        const result = await runPromise;
 
-      expect(result.stopAfterPermissionCancel).toBe(false);
-      expect(
-        result.parts.map((part) => part.functionResponse?.response),
-      ).toEqual([
-        { error: 'Tool call was cancelled before execution.' },
-        { error: 'Tool call was cancelled before execution.' },
-      ]);
-      expect(permissionExecute).not.toHaveBeenCalled();
-      expect(laterExecute).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
-        [result.parts[0]],
-        expect.objectContaining({
-          callId: 'shell_call',
-          status: 'cancelled',
-          executionStatus: 'not_started',
-        }),
-      );
-      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
-        [result.parts[1]],
-        expect.objectContaining({
-          callId: 'read_call',
-          status: 'cancelled',
-          executionStatus: 'not_started',
-        }),
-      );
-    });
+        expect(result.stopAfterPermissionCancel).toBe(false);
+        expect(
+          result.parts.map((part) => part.functionResponse?.response),
+        ).toEqual([
+          { error: 'Tool call was cancelled before execution.' },
+          { error: 'Tool call was cancelled before execution.' },
+        ]);
+        expect(permissionExecute).not.toHaveBeenCalled();
+        expect(laterExecute).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'shell_call',
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[1]],
+          expect.objectContaining({
+            callId: 'read_call',
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      },
+    );
 
     it('keeps plan mode and gives manual guidance when switch_mode approval is unavailable', async () => {
       const execute = vi.fn();
