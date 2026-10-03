@@ -708,6 +708,74 @@ describe('managed extensions', () => {
     expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
   });
 
+  it.each(['portable', 'user-only'])(
+    'loads details only for the visible %s package while preserving all identities',
+    async (name) => {
+      const managedPath = writeExtension(managed, 'deployed', {
+        name: 'portable',
+      });
+      const userPath = writeExtension(user, 'user-only');
+      const paths = [
+        managedPath,
+        userPath,
+        writeExtension(user, 'shadowed', { name: 'PORTABLE' }),
+        writeExtension(managed, 'other-managed'),
+        writeExtension(user, 'other-user'),
+      ];
+      for (const extensionPath of paths) {
+        fs.writeFileSync(path.join(extensionPath, 'QWEN.md'), 'Context');
+      }
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const subject = manager();
+      const load = vi.spyOn(subject, 'loadExtension');
+      const { snapshot, extension } =
+        await subject.refreshExtensionDetailsSnapshot(name.toUpperCase());
+      const selectedPath = name === 'portable' ? managedPath : userPath;
+      expect(extension).toMatchObject({
+        name,
+        path: selectedPath,
+        source: name === 'portable' ? 'managed' : 'user',
+        contextFiles: [path.join(selectedPath, 'QWEN.md')],
+      });
+      expect(
+        Object.values(snapshot.extensions)
+          .map((entry) => entry.name)
+          .sort(),
+      ).toEqual(['other-managed', 'other-user', 'portable', 'user-only']);
+      const loaded = await Promise.all(
+        load.mock.results.map((result) => result.value),
+      );
+      expect(
+        loaded
+          .filter((entry) => entry?.contextFiles.length)
+          .map((entry) => entry.path),
+      ).toEqual([selectedPath]);
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(subject.getLoadedExtensions()).toHaveLength(4);
+    },
+  );
+
+  it('reads managed plugin details without creating plugin data', async () => {
+    const pluginPath = path.join(managed, 'plugin');
+    fs.mkdirSync(pluginPath);
+    fs.writeFileSync(
+      path.join(pluginPath, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'managed-plugin',
+        version: '1.0.0',
+      }),
+    );
+    const { extension } =
+      await manager().refreshExtensionDetailsSnapshot('managed-plugin');
+    expect(extension).toMatchObject({
+      name: 'managed-plugin',
+      source: 'managed',
+    });
+    expect(fs.existsSync(path.join(store.storeDir, 'plugin-data'))).toBe(false);
+  });
+
   it('rejects duplicate managed names on full, filtered and by-name discovery', async () => {
     writeExtension(managed, 'first', { name: 'duplicate' });
     writeExtension(managed, 'second', { name: 'DUPLICATE' });

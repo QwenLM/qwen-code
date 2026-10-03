@@ -399,12 +399,85 @@ describe('extension management v2 REST', () => {
     vi.restoreAllMocks();
   });
 
+  it('serves lightweight legacy-primary summaries with snapshot activation and redacted sources', async () => {
+    const h = await makeHarness();
+    try {
+      const extension = mockExtensionManager();
+      extension.installMetadata!.source =
+        'https://user:secret@example.com/demo.zip?token=private#fragment';
+      const response = await auth(
+        request(h.app).get('/workspace/extensions/summary'),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.workspaceCwd).toBe(h.primary.workspaceCwd);
+      expect(response.body.extensions).toEqual([
+        expect.objectContaining({
+          name: 'demo',
+          isActive: false,
+          source: 'https://***REDACTED***@example.com/demo.zip',
+        }),
+      ]);
+      expect(response.body.extensions[0]).not.toHaveProperty('capabilities');
+      expect(response.body.extensions[0]).not.toHaveProperty('details');
+      expect(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
+      ).toHaveBeenCalledWith(
+        extension,
+        expect.objectContaining({ generation: 7 }),
+        h.primary.workspaceCwd,
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves one complete detail entry and returns 404 for an absent extension', async () => {
+    const h = await makeHarness();
+    try {
+      const extension = mockExtensionManager();
+      extension.commands = ['hello'];
+      const snapshot = await new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+      }).getExtensionStoreSnapshot();
+      const load = vi
+        .spyOn(ExtensionManager.prototype, 'refreshExtensionDetailsSnapshot')
+        .mockResolvedValueOnce({ snapshot, extension })
+        .mockResolvedValueOnce({ snapshot, extension: null });
+      const response = await auth(
+        request(h.app).get('/workspace/extensions/demo/details'),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        name: 'demo',
+        isActive: false,
+        capabilities: { commandCount: 1 },
+        details: { commands: ['hello'] },
+      });
+      expect(load).toHaveBeenCalledWith('demo');
+      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+      const missing = await auth(
+        request(h.app).get('/workspace/extensions/missing/details'),
+      );
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('extension_not_found');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('advertises extension_management_v2 but not the abandoned capability', async () => {
     const h = await makeHarness({ singleWorkspace: true });
     try {
       const response = await auth(request(h.app).get('/capabilities'));
       expect(response.status).toBe(200);
       expect(response.body.features).toContain('extension_management_v2');
+      expect(response.body.features).toContain('extension_list_details');
       expect(response.body.features).toContain('extension_state');
       expect(response.body.features).toContain('extension_git_credentials');
       expect(response.body.features).toContain('extension_local_path_install');
@@ -611,6 +684,11 @@ describe('extension management v2 REST', () => {
       await manager.refreshCache();
       const [managed] = manager.getLoadedExtensions();
       await manager.setExtensionDefaultActivation(managed.id, 'disabled');
+      await manager.setExtensionWorkspaceActivation(
+        managed.id,
+        h.secondary.workspaceCwd,
+        'enabled',
+      );
       const before = await manager.getExtensionStoreSnapshot();
       for (let round = 0; round < 2; round++) {
         const response = await auth(request(h.app).get('/extensions'));
@@ -628,6 +706,51 @@ describe('extension management v2 REST', () => {
           ],
         });
         expect(response.body.extensions).toHaveLength(1);
+        const summary = await auth(
+          request(h.app).get('/workspace/extensions/summary'),
+        );
+        expect(summary.status).toBe(200);
+        expect(summary.body.workspaceCwd).toBe(h.primary.workspaceCwd);
+        expect(summary.body.extensions).toEqual([
+          expect.objectContaining({
+            id: managed.id,
+            name: 'demo',
+            version: 'managed',
+            extensionSource: 'managed',
+            isActive: false,
+          }),
+        ]);
+        expect(summary.body.extensions[0]).not.toHaveProperty('capabilities');
+        expect(summary.body.extensions[0]).not.toHaveProperty('details');
+        const details = await auth(
+          request(h.app).get('/workspace/extensions/demo/details'),
+        );
+        expect(details.status).toBe(200);
+        expect(details.body).toMatchObject({
+          id: managed.id,
+          name: 'demo',
+          version: 'managed',
+          extensionSource: 'managed',
+          isActive: false,
+          capabilities: { skillCount: 0 },
+          details: { skills: [] },
+        });
+        const selected = await auth(
+          request(h.app).get(
+            `/workspaces/${h.secondary.workspaceId}/extensions`,
+          ),
+        );
+        expect(selected.status).toBe(200);
+        expect(selected.body.workspaceCwd).toBe(h.secondary.workspaceCwd);
+        expect(selected.body.extensions).toEqual([
+          expect.objectContaining({
+            extensionId: managed.id,
+            name: 'demo',
+            version: 'managed',
+            extensionSource: 'managed',
+            effectiveActivation: 'enabled',
+          }),
+        ]);
         expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
       }
     } finally {

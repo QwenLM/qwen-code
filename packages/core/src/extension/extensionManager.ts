@@ -1620,6 +1620,13 @@ export class ExtensionManager {
   async refreshCatalogSnapshot(options?: {
     names?: string[];
   }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
+    return this.readExtensionSnapshot(options);
+  }
+
+  private async readExtensionSnapshot(options?: {
+    names?: string[];
+    detailName?: string;
+  }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     let managedAbsenceProven = false;
     const unprovenManagedNames = new Set<string>();
@@ -1630,7 +1637,9 @@ export class ExtensionManager {
         const loadedAll = await this.loadDiscoveredExtensions(
           this.workspaceDir,
           {
-            manifestOnly: true,
+            manifestOnly: options?.detailName === undefined,
+            detailName: options?.detailName,
+            createDataDir: false,
             onManagedListFailure: () => {
               managedListFailed = true;
             },
@@ -1654,8 +1663,8 @@ export class ExtensionManager {
           this.managedExtensionsDir !== undefined &&
           !managedListFailed &&
           !unnamedManagedFailure;
-        // Catalog reads may discover identities, but must not release managed
-        // ownership or delete secrets when a deployment has withdrawn a package.
+        // Read-only discovery must not release managed ownership or delete
+        // secrets when a deployment has withdrawn a package.
         return {
           value: extensions,
           extensions: extensions.map((extension) => ({
@@ -1698,6 +1707,20 @@ export class ExtensionManager {
         );
       }
     }
+  }
+
+  async refreshExtensionDetailsSnapshot(name: string): Promise<{
+    snapshot: ExtensionStoreSnapshot;
+    extension: Extension | null;
+  }> {
+    const { extensions, snapshot } = await this.readExtensionSnapshot({
+      detailName: name,
+    });
+    const extension =
+      extensions.findLast(
+        (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+      ) ?? null;
+    return { snapshot, extension };
   }
 
   private static stampPath(target: string, followSymlinks = true): string {
@@ -1903,6 +1926,7 @@ export class ExtensionManager {
     workspaceDir: string,
     options: {
       manifestOnly?: boolean;
+      detailName?: string;
       createDataDir?: boolean;
       onListFailure?: (extensionsDir: string, error: unknown) => void;
       onEntrySkipped?: (extensionDir: string) => void;
@@ -1949,6 +1973,7 @@ export class ExtensionManager {
     workspaceDir: string,
     options: {
       manifestOnly?: boolean;
+      detailName?: string;
       createDataDir?: boolean;
       onManagedListFailure?: () => void;
       onManagedLoadFailure?: (failure: {
@@ -2008,7 +2033,13 @@ export class ExtensionManager {
     const users = await this.loadExtensionsFromExtensionsDir(
       this.configDir,
       workspaceDir,
-      options,
+      {
+        ...loadOptions,
+        manifestOnly:
+          loadOptions.manifestOnly ||
+          (loadOptions.detailName !== undefined &&
+            managedNames.has(loadOptions.detailName.toLowerCase())),
+      },
     );
     const visibleUsers = users.filter((extension) => {
       if (!managedNames.has(extension.name.toLowerCase())) return true;
@@ -2129,6 +2160,7 @@ export class ExtensionManager {
     workspaceDir: string,
     options: {
       manifestOnly?: boolean;
+      detailName?: string;
       createDataDir?: boolean;
       source?: 'managed' | 'user';
       onLoadFailure?: (
@@ -2158,6 +2190,7 @@ export class ExtensionManager {
         { extensionDir, workspaceDir },
         {
           manifestOnly: options.manifestOnly,
+          detailName: options.detailName,
           createDataDir: options.createDataDir,
           source,
           onLoadFailure: options.onLoadFailure,
@@ -2305,6 +2338,7 @@ export class ExtensionManager {
     options: {
       throwOnError?: boolean;
       manifestOnly?: boolean;
+      detailName?: string;
       createDataDir?: boolean;
       source?: 'managed' | 'user';
       onLoadFailure?: (
@@ -2378,12 +2412,18 @@ export class ExtensionManager {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
       const head = await this.loadExtensionManifestHead(context, {
-        createDataDir: options.createDataDir ?? !options.manifestOnly,
+        createDataDir:
+          options.createDataDir ??
+          (!options.manifestOnly && options.detailName === undefined),
         source,
       });
       extension = head.extension;
 
-      if (options.manifestOnly) {
+      if (
+        options.manifestOnly ||
+        (options.detailName !== undefined &&
+          extension.name.toLowerCase() !== options.detailName.toLowerCase())
+      ) {
         // Catalog-style loads: everything after the head is subresource work
         // the catalog never reads, and skipping it here keeps the inclusion
         // set identical to the full load — the head throws for the same

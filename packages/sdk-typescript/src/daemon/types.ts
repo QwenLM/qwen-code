@@ -5519,6 +5519,16 @@ export interface DaemonWorkspaceExtensionsStatus {
   errors?: DaemonStatusCell[];
 }
 
+export type DaemonExtensionSummary = Omit<
+  DaemonExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type DaemonWorkspaceExtensionSummaries = Omit<
+  DaemonWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: DaemonExtensionSummary[] };
+
 export interface ExtensionInstallRequest {
   /** Git, GitHub, npm, or an absolute path on the daemon host. */
   source: string;

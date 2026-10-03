@@ -146,6 +146,8 @@ describe('workspace managed extension reads', () => {
 
   it.each([
     { read: 'status', mutation: 'runtime refresh' },
+    { read: 'summary', mutation: 'runtime refresh' },
+    { read: 'details', mutation: 'runtime refresh' },
     { read: 'catalog', mutation: 'runtime refresh' },
     { read: 'state', mutation: 'runtime refresh' },
     { read: 'skills', mutation: 'runtime refresh' },
@@ -178,6 +180,27 @@ describe('workspace managed extension reads', () => {
               isActive: false,
             }),
           ]);
+        } else if (read === 'summary') {
+          const status = await controller.buildLocalExtensionSummaries();
+          expect(status.initialized).toBe(true);
+          expect.soft(status.extensions).toEqual([
+            expect.objectContaining({
+              name: managed.name,
+              extensionSource: 'user',
+              isActive: false,
+            }),
+          ]);
+          expect(status.extensions[0]).not.toHaveProperty('details');
+        } else if (read === 'details') {
+          const details = await controller.buildLocalExtensionDetails(
+            managed.name,
+          );
+          expect.soft(details).toMatchObject({
+            name: managed.name,
+            extensionSource: 'user',
+            isActive: false,
+            details: { skills: ['probe'] },
+          });
         } else if (read === 'catalog') {
           const catalog = await controller
             .createExtensionManager()
