@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
+import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Textarea } from '../ui/textarea';
@@ -10,7 +18,12 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
+import { useManagedActions } from './use-managed-actions';
+import { toManagedPermissionRequest } from './managed-approval';
+import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
+import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -55,20 +68,6 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   }
 }
 
-function isNonRetryableClientError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('status' in error)) {
-    return false;
-  }
-  const status = (error as { status?: unknown }).status;
-  return (
-    typeof status === 'number' &&
-    status >= 400 &&
-    status < 500 &&
-    status !== 408 &&
-    status !== 429
-  );
-}
-
 export function ManagedSessionsPage({
   sessionId,
   onSelectSession,
@@ -84,6 +83,7 @@ export function ManagedSessionsPage({
   if (managedAgentProvider) {
     return (
       <ManagedSessionsContent
+        key={managedAgentProvider.storageKey}
         sessionId={sessionId}
         onSelectSession={onSelectSession}
         workspaceCwd={workspaceCwd}
@@ -128,6 +128,21 @@ function ManagedSessionsContent({
   const [error, setError] = useState<string>();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [outputTarget, setOutputTarget] = useState<{
+    sessionId: string;
+    itemId?: string;
+  }>();
+  useEffect(() => setOutputTarget(undefined), [provider, sessionId]);
+  useEffect(() => {
+    if (detail.summary && !detail.summary.capabilities.artifacts)
+      setOutputTarget(undefined);
+  }, [detail.summary]);
+  const openResult = useCallback(
+    (itemId: string) => {
+      if (sessionId) setOutputTarget({ sessionId, itemId });
+    },
+    [sessionId],
+  );
   const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}`;
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
@@ -142,6 +157,32 @@ function ManagedSessionsContent({
     () => managedEventsToMessages(detail.events, t('managed.truncated')),
     [detail.events, t],
   );
+  // The caveat sits beside the card rather than inside the panel, so the panel
+  // is told about it: without this the dialog describes only the tool name and
+  // a screen-reader user confirms an approval whose arguments are missing.
+  const argumentsCaveatId = useId();
+  const answerNoticeId = useId();
+  const approvals = useManagedActions(
+    provider,
+    enabled ? sessionId : undefined,
+    clientId,
+    // Unknown while the summary reloads, so the shown approval is kept.
+    detail.summary ? detail.summary.capabilities.actions === true : undefined,
+    detail.events,
+  );
+  const pendingApproval = useMemo(
+    () =>
+      approvals.action
+        ? toManagedPermissionRequest(approvals.action, messages)
+        : null,
+    [approvals.action, messages],
+  );
+  // The reason line below is mounted exactly when this holds, so the dialog can
+  // point at it without ever leaving a dangling IDREF. A latch-only render has
+  // no `alert` node and no operable option left, so this line is the only place
+  // a screen-reader user can hear why the card is dead.
+  const answerNoticeShown =
+    approvals.answerError !== undefined || approvals.respondForbidden;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -323,7 +364,8 @@ function ManagedSessionsContent({
   if (!enabled) return <p role="status">{t('managed.unavailable')}</p>;
   const summary = detail.summary;
   const active =
-    summary && !['completed', 'failed', 'cancelled'].includes(summary.phase);
+    summary &&
+    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
@@ -412,10 +454,42 @@ function ManagedSessionsContent({
               <Badge variant="secondary">
                 {t(`managed.phase.${summary.phase}`)}
               </Badge>
-              <span className="text-muted-foreground">
-                {t('managed.runtime')}:{' '}
-                {t(`managed.runtime.${summary.runtimeState}`)}
-              </span>
+              {summary.phase !== 'created' && (
+                <span className="text-muted-foreground">
+                  {t('managed.runtime')}:{' '}
+                  {t(`managed.runtime.${summary.runtimeState}`)}
+                </span>
+              )}
+              {summary.capabilities.artifacts && provider.toolResults && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    setOutputTarget({ sessionId: summary.sessionId })
+                  }
+                >
+                  {t('managed.result.outputs')}
+                </Button>
+              )}
+            </div>
+          )}
+          {summary?.workspace && (
+            <div
+              className="rounded-md border px-3 py-2 text-sm"
+              data-managed-workspace-binding
+            >
+              <p>
+                {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
+              </p>
+              <p>
+                {t('managed.workspaceDirectory')}:{' '}
+                {summary.workspace.cwdRelative}
+              </p>
+              {!summary.capabilities.workspaceTurns && (
+                <p className="text-muted-foreground">
+                  {t('managed.workspaceExecutionUnavailable')}
+                </p>
+              )}
             </div>
           )}
           {summary?.failure && (
@@ -423,28 +497,117 @@ function ManagedSessionsContent({
               {summary.failure.message}
             </p>
           )}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <MessageList
-              messages={messages}
-              pendingApproval={null}
-              sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
-              loadingTranscript={detail.loading}
-              isResponding={Boolean(active)}
-              hasOlderHistory={Boolean(detail.olderCursor)}
-              loadingOlderHistory={detail.loadingOlder}
-              onLoadOlderHistory={detail.loadOlder}
-              workspaceCwd={summary?.workspaceCwd}
-              hideSessionTimeline
-              welcomeHeader={
-                <p className="p-4 text-muted-foreground">
-                  {t('managed.prompt')}
-                </p>
-              }
+          {!sessionId && provider.workspaceBinding ? (
+            <WorkspaceBindingCreator
+              provider={provider}
+              clientId={clientId}
+              onCreated={(createdId) => {
+                setListRevision((current) => current + 1);
+                onSelectSession(createdId);
+              }}
             />
-          </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <MessageList
+                messages={messages}
+                onToolResultOpen={
+                  summary?.capabilities.artifacts && provider.toolResults
+                    ? openResult
+                    : undefined
+                }
+                pendingApproval={pendingApproval}
+                sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                loadingTranscript={detail.loading}
+                isResponding={Boolean(active)}
+                hasOlderHistory={Boolean(detail.olderCursor)}
+                loadingOlderHistory={detail.loadingOlder}
+                onLoadOlderHistory={detail.loadOlder}
+                workspaceCwd={summary?.workspaceCwd}
+                hideSessionTimeline
+                welcomeHeader={
+                  summary?.workspace ? null : (
+                    <p className="p-4 text-muted-foreground">
+                      {t('managed.prompt')}
+                    </p>
+                  )
+                }
+              />
+            </div>
+          )}
           {pending && !busy && (
             <p role="status" className="text-sm text-muted-foreground">
               {t('managed.uncertain')}
+            </p>
+          )}
+          {pendingApproval && (
+            <div className="shrink-0" data-testid="managed-approval">
+              <ToolApproval
+                request={pendingApproval}
+                variant="floating"
+                keyboardActive={false}
+                // Only the Session creator may answer; once the service says
+                // so, that is true of every approval this Session raises, so
+                // the latch is scoped to the Session rather than the Action.
+                disabled={approvals.respondForbidden}
+                extraDescriptionId={
+                  [
+                    pendingApproval.rawInput === undefined
+                      ? argumentsCaveatId
+                      : null,
+                    answerNoticeShown ? answerNoticeId : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' ') || undefined
+                }
+                onConfirm={(actionId, optionId) =>
+                  approvals.respond(actionId, optionId)
+                }
+              />
+              {pendingApproval.rawInput === undefined && (
+                <p
+                  id={argumentsCaveatId}
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                >
+                  {t('managed.approval.argumentsUnavailable')}
+                </p>
+              )}
+            </div>
+          )}
+          {approvals.loadError !== undefined && (
+            <div
+              role="alert"
+              className="flex items-center gap-2 text-sm text-destructive"
+            >
+              <span>
+                {t(
+                  approvals.loaded
+                    ? 'managed.approval.refreshFailed'
+                    : 'managed.approval.loadFailed',
+                )}
+              </span>
+              <Button variant="outline" size="sm" onClick={approvals.retry}>
+                {t('managed.approval.retry')}
+              </Button>
+            </div>
+          )}
+          {/* `answerError` is only exposed for the Action on screen, so this
+              guard only bounds the latch: the reason describes a card, and
+              once the Session has none there is nothing left to explain. */}
+          {pendingApproval !== null && answerNoticeShown && (
+            <p
+              id={answerNoticeId}
+              // The first refusal is news; the latch that keeps every later
+              // approval of this Session disabled only restates it, so it is
+              // a status line rather than a second alert.
+              role={approvals.answerError !== undefined ? 'alert' : 'status'}
+              className="text-sm text-destructive"
+            >
+              {t(
+                approvals.respondForbidden
+                  ? 'managed.approval.forbidden'
+                  : 'managed.approval.failed',
+              )}
             </p>
           )}
           <ManagedSessionProgress
@@ -454,62 +617,79 @@ function ManagedSessionsContent({
             }
             loading={detail.loading}
           />
-          <form
-            className="flex shrink-0 flex-col gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submit();
-            }}
-          >
-            <Textarea
-              aria-label={t('managed.prompt')}
-              value={pending?.text ?? text}
-              onChange={(event) => setText(event.target.value)}
-              disabled={
-                busy ||
-                Boolean(pending) ||
-                Boolean(sessionId && !summary?.capabilities.canSend)
-              }
-              placeholder={t('managed.prompt')}
-            />
-            <div className="flex items-center justify-end gap-2">
-              {sessionId &&
-                !active &&
-                summary &&
-                !summary.capabilities.canSend && (
-                  <span className="mr-auto text-sm text-muted-foreground">
-                    {t('managed.newRequired')}
-                  </span>
-                )}
-              {cancellationEnabled &&
-                summary?.capabilities.canCancel &&
-                summary.activeTurnId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => void cancel()}
-                  >
-                    {t('managed.cancel')}
-                  </Button>
-                )}
-              <Button
-                type="submit"
+          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
+          (!provider.workspaceBinding || (sessionId && summary)) ? (
+            <form
+              className="flex shrink-0 flex-col gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submit();
+              }}
+            >
+              <Textarea
+                aria-label={t('managed.prompt')}
+                value={pending?.text ?? text}
+                onChange={(event) => setText(event.target.value)}
                 disabled={
                   busy ||
-                  (!pending &&
-                    (!text.trim() ||
-                      Boolean(sessionId && !summary?.capabilities.canSend)))
+                  Boolean(pending) ||
+                  Boolean(sessionId && !summary?.capabilities.canSend)
                 }
-              >
-                {busy
-                  ? t('managed.sending')
-                  : pending
-                    ? t('managed.retry')
-                    : t('managed.send')}
-              </Button>
-            </div>
-          </form>
+                placeholder={t('managed.prompt')}
+              />
+              <div className="flex items-center justify-end gap-2">
+                {sessionId &&
+                  !active &&
+                  summary &&
+                  !summary.capabilities.canSend && (
+                    <span className="mr-auto text-sm text-muted-foreground">
+                      {t('managed.newRequired')}
+                    </span>
+                  )}
+                {cancellationEnabled &&
+                  summary?.capabilities.canCancel &&
+                  summary.activeTurnId && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void cancel()}
+                    >
+                      {t('managed.cancel')}
+                    </Button>
+                  )}
+                <Button
+                  type="submit"
+                  disabled={
+                    busy ||
+                    (!pending &&
+                      (!text.trim() ||
+                        Boolean(sessionId && !summary?.capabilities.canSend)))
+                  }
+                >
+                  {busy
+                    ? t('managed.sending')
+                    : pending
+                      ? t('managed.retry')
+                      : t('managed.send')}
+                </Button>
+              </div>
+            </form>
+          ) : null}
+          {outputTarget &&
+            outputTarget.sessionId === sessionId &&
+            sessionId &&
+            (!summary || summary.capabilities.artifacts) &&
+            provider.toolResults && (
+              <ManagedToolResultPanel
+                key={`${sessionId}:${outputTarget.itemId ?? 'all'}`}
+                reader={provider.toolResults}
+                sessionId={sessionId}
+                clientId={clientId}
+                itemId={outputTarget.itemId}
+                onClose={() => setOutputTarget(undefined)}
+              />
+            )}
         </section>
       </div>
     </div>

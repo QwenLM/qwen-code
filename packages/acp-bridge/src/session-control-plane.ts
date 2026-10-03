@@ -162,6 +162,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -678,6 +679,11 @@ interface ChannelInfo {
   /** Revisions of workspace changes this channel did not acknowledge. */
   workspaceChangesMissing?: Set<number>;
   /**
+   * Revision of a missing change that tightened permissions. A session whose
+   * restore or creation lands on this channel afterwards is fenced too.
+   */
+  workspaceChangeFence?: number;
+  /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
    * sending it again.
@@ -688,7 +694,8 @@ interface ChannelInfo {
 /**
  * A paired channel's quarantine, from the moment it first stops taking fresh
  * sessions until its process tree is confirmed gone. While it lasts the
- * channel admits no new prompt, background turn or side request, and its
+ * channel admits no new prompt, message from another session or side request,
+ * and a background notification turn only until its termination starts; its
  * engine admits no fresh session — even after termination starts, because a
  * child that has not exited may still hold work nobody can cancel.
  */
@@ -704,6 +711,7 @@ interface ChannelQuarantine {
 }
 
 interface SessionEntry {
+  mcpAppCalls?: Map<string, { clientId: string; cancel: () => void }>;
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
@@ -2901,6 +2909,7 @@ export function createSessionControlPlane(
    */
   function entryHasLocalWork(entry: SessionEntry): boolean {
     return (
+      (entry.mcpAppCalls?.size ?? 0) > 0 ||
       entry.pendingPromptCount > 0 ||
       entry.pendingAgentNotificationCount > 0 ||
       !!entry.backgroundTurn
@@ -3747,15 +3756,18 @@ export function createSessionControlPlane(
     for (const entry of unsettled) {
       void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
     }
-    void harness
-      .killChannelWithLog(ci.harness, 'quarantine drain deadline')
-      .then(() => armQuarantineExitCheck(ci, episode));
+    // Terminating the channel starts its exit check (see
+    // `onChannelTerminationStart`).
+    void harness.killChannelWithLog(ci.harness, 'quarantine drain deadline');
   }
 
   /**
-   * A child still not confirmed gone one budget after termination (never less
-   * than the registry's own termination window) is reported as needing an
-   * operator; its engine stays closed meanwhile.
+   * A child still not confirmed gone one budget after its termination began
+   * (never less than the registry's own termination window) is reported as
+   * needing an operator; its engine stays closed meanwhile. Armed when a kill
+   * or reap starts terminating the channel (the deadline, a drained channel's
+   * reap, a failed close's recovery), when its transport fails, or when its
+   * root exits before the registry releases the tree.
    */
   function armQuarantineExitCheck(
     ci: ChannelInfo,
@@ -3779,6 +3791,24 @@ export function createSessionControlPlane(
       );
     }, exitCheckMs);
     episode.exitTimer.unref();
+  }
+
+  /**
+   * Whether a quarantined channel may run a background notification turn. A
+   * report of background work is admitted whether that work began before the
+   * quarantine or was started by a turn admitted during it: the work already
+   * exists, and refusing its report never retires the channel sooner, because
+   * the child keeps the report queued and keeps reporting it as held work. The
+   * drain deadline, not a refusal, bounds how long admitted turns keep the
+   * channel busy. A message from another session is new input and is refused,
+   * and so is every turn once the channel's termination has begun. A session
+   * fenced by a tightening change is refused before this is asked.
+   */
+  function quarantineAdmitsBackgroundTurn(
+    ci: ChannelInfo,
+    turn: BackgroundNotificationTurn,
+  ): boolean {
+    return turn.kind !== 'peer' && !ci.harness.isDying;
   }
 
   /**
@@ -4098,7 +4128,8 @@ export function createSessionControlPlane(
    * sessions take no new work, settled ones are closed, and it retires by the
    * drain deadline unless a late acknowledgement ends the quarantine first. A
    * change that tightens permissions also cancels running turns now, refuses
-   * permission requests, and cancels Goal turns the child reports later.
+   * permission requests and background turns, and cancels Goal turns the child
+   * reports later, including on sessions that register on the channel later.
    */
   function refuseUnacknowledgedChannel(
     ci: ChannelInfo,
@@ -4111,6 +4142,7 @@ export function createSessionControlPlane(
         (tightening ? '; cancelling its running turns' : ''),
     );
     if (tightening) {
+      ci.workspaceChangeFence = revision;
       for (const sessionId of Array.from(ci.sessionIds)) {
         const entry = byId.get(sessionId);
         if (!entry || entry.channel !== ci.channel) continue;
@@ -4128,11 +4160,12 @@ export function createSessionControlPlane(
   }
 
   /**
-   * A late, exact acknowledgement of every change a channel missed ends its
+   * A late, exact acknowledgement of every change a channel missed lifts its
+   * permission fence, because the engine now holds those changes, and ends its
    * quarantine before the drain deadline, as #12737 Q3 allows. It never ends
    * an episode that began for another cause or that another cause has joined,
    * nor one whose channel is already terminating (the deadline starts that);
-   * sessions already closed stay closed.
+   * the fence lifts even then. Sessions already closed stay closed.
    */
   function acknowledgeMissingWorkspaceChange(
     ci: ChannelInfo,
@@ -4141,6 +4174,12 @@ export function createSessionControlPlane(
     const missing = ci.workspaceChangesMissing;
     if (!missing?.delete(revision) || missing.size > 0) return;
     ci.workspaceChangesMissing = undefined;
+    const fenced = ci.workspaceChangeFence !== undefined;
+    ci.workspaceChangeFence = undefined;
+    for (const sessionId of ci.sessionIds) {
+      const entry = byId.get(sessionId);
+      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
+    }
     const episode = ci.quarantine;
     // With this cause gone, any other one, or the one the episode began with,
     // is what the channel reports now.
@@ -4149,14 +4188,16 @@ export function createSessionControlPlane(
       ci.harness.isDying ||
       channelUnavailableReason(ci) !== 'workspace_change_unacknowledged'
     ) {
+      if (episode && fenced) {
+        writeStderrLine(
+          `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
+            `its permission fence is lifted, and its quarantine continues`,
+        );
+      }
       return;
     }
     clearTimeout(episode.drainTimer);
     ci.quarantine = undefined;
-    for (const sessionId of ci.sessionIds) {
-      const entry = byId.get(sessionId);
-      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
-    }
     writeStderrLine(
       `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
         `its quarantine ended after ${Date.now() - episode.startedAt}ms`,
@@ -4576,6 +4617,10 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      entry.attachments.cancelClientUploads(clientId);
+      for (const call of entry.mcpAppCalls?.values() ?? []) {
+        if (call.clientId === clientId) call.cancel();
+      }
       // Drop the last-seen entry alongside the registration ref.
       // Otherwise a long-lived daemon servicing a churn of disconnect/
       // reconnect clients (each picking a fresh `clientId`) would
@@ -4808,8 +4853,11 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive ||
           entry.pendingPromptList.some((p) => !p.terminalPublished) ||
-          // A quarantined channel admits no new background turn.
-          infoRef.current?.quarantine
+          // An unacknowledged change that tightened permissions admits no
+          // model turn at all until it is acknowledged (#12737 Q2).
+          entry.workspaceChangeFence !== undefined ||
+          (infoRef.current?.quarantine !== undefined &&
+            !quarantineAdmitsBackgroundTurn(infoRef.current, turn))
         )
           return false;
         entry.backgroundTurn = turn;
@@ -5030,6 +5078,7 @@ export function createSessionControlPlane(
 
   function handleChannelTransportUnavailable(info: ChannelInfo): void {
     clearInFlightExtensionRefreshes(info.connection);
+    if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
   }
 
   const harness = createHarness({
@@ -5048,6 +5097,10 @@ export function createSessionControlPlane(
     constructHarnessChannel: constructChannelInfo,
     handleChannelTransportUnavailable: (channel) =>
       handleChannelTransportUnavailable(getChannelInfo(channel)),
+    onChannelTerminationStart: (channel) => {
+      const info = getChannelInfo(channel);
+      if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
+    },
     beforeChannelExit: (channel) => beforeChannelExit(getChannelInfo(channel)),
     handleChannelExit: (channel, exitInfo) =>
       handleChannelExit(getChannelInfo(channel), exitInfo),
@@ -7076,6 +7129,33 @@ export function createSessionControlPlane(
     });
   };
 
+  const syncRestoreStateApprovalMode = (
+    entry: SessionEntry,
+    mode: string,
+    planExecutionMode: string | undefined,
+  ): void => {
+    const state = entry.restoreState;
+    if (!state) return;
+    if (state.modes) {
+      state.modes = { ...state.modes, currentModeId: mode };
+      const metadata: Record<string, unknown> = { ...state.modes._meta };
+      delete metadata['planExecutionMode'];
+      if (planExecutionMode) {
+        metadata['planExecutionMode'] = planExecutionMode;
+      }
+      if (Object.keys(metadata).length > 0) {
+        state.modes._meta = metadata;
+      } else {
+        delete state.modes._meta;
+      }
+    }
+    if (Array.isArray(state.configOptions)) {
+      state.configOptions = state.configOptions.map((option) =>
+        option.id === 'mode' ? { ...option, currentValue: mode } : option,
+      );
+    }
+  };
+
   const publishApprovalModeChanged = (
     entry: SessionEntry,
     payload: {
@@ -7089,6 +7169,7 @@ export function createSessionControlPlane(
     entry.currentApprovalMode = payload.next;
     entry.planExecutionMode =
       payload.next === 'plan' ? payload.planExecutionMode : undefined;
+    syncRestoreStateApprovalMode(entry, payload.next, entry.planExecutionMode);
     entry.approvalModePublishGeneration++;
     // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
     entry.events.publish({
@@ -7314,6 +7395,11 @@ export function createSessionControlPlane(
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,
+      // A restore or creation already in flight when the channel missed a
+      // tightening change lands under the same fence as the sessions it found.
+      ...(ci.workspaceChangeFence !== undefined
+        ? { workspaceChangeFence: ci.workspaceChangeFence }
+        : {}),
     };
     if (isReservedStandaloneSessionSourceType(options.sourceType)) {
       entry.prepareArtifactWorkspace = () =>
@@ -11233,6 +11319,11 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  // Stripped from every caller for the same reason as the
+                  // delivery above: an agent's thread tools act on whatever
+                  // this names, so a caller that could set it could make one
+                  // agent post under another's name.
+                  delete meta[DAEMON_AGENT_RUN_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
@@ -11274,6 +11365,9 @@ export function createSessionControlPlane(
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (context?.agentRun) {
+                    meta[DAEMON_AGENT_RUN_META_KEY] = context.agentRun;
                   }
                   if (promptDisplayText !== undefined) {
                     meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
@@ -11971,7 +12065,8 @@ export function createSessionControlPlane(
         );
       }
       const isSideTask = source.sourceType === 'side_task';
-      const restoreBranch = isSideTask || req.atRecordId === undefined;
+      const restoreBranch =
+        !req.persistOnly && (isSideTask || req.atRecordId === undefined);
 
       if (context?.clientId !== undefined) {
         resolveTrustedClientId(entry, context.clientId);
@@ -12008,7 +12103,7 @@ export function createSessionControlPlane(
 
         assertFreshSessionsAvailable(sourceCi.harness.executionEngine);
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
-        if (restoreBranch) {
+        if (restoreBranch || req.persistOnly) {
           if (
             byId.size +
               inFlightSpawns.size +
@@ -12018,6 +12113,8 @@ export function createSessionControlPlane(
           ) {
             throw new SessionLimitExceededError(maxSessions);
           }
+        }
+        if (restoreBranch) {
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
@@ -12049,6 +12146,9 @@ export function createSessionControlPlane(
               name: req.name,
               ...(req.atRecordId !== undefined
                 ? { atRecordId: req.atRecordId }
+                : {}),
+              ...(req.targetSessionId !== undefined
+                ? { targetSessionId: req.targetSessionId }
                 : {}),
             },
           );
@@ -12092,6 +12192,14 @@ export function createSessionControlPlane(
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
               `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
+            );
+          }
+          if (
+            req.targetSessionId !== undefined &&
+            result.newSessionId !== req.targetSessionId
+          ) {
+            throw new Error(
+              'branchSession: agent returned a different target session id',
             );
           }
           // The fork is durably committed at this point, including the
@@ -13103,6 +13211,16 @@ export function createSessionControlPlane(
       return toSessionSummary(entry);
     },
 
+    getSessionExecutionSnapshot(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return {
+        workspaceCwd: entry.workspaceCwd,
+        effectiveCwd: entry.effectiveCwd,
+        ...(entry.worktree ? { worktree: { ...entry.worktree } } : {}),
+      };
+    },
+
     recordHeartbeat(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -13522,6 +13640,43 @@ export function createSessionControlPlane(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
+    },
+
+    async callMcpAppTool(sessionId, request, signal, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context.clientId);
+      if (!clientId) throw new Error('A session-bound client id is required');
+      if (entry.closing) throw new SessionNotFoundError(sessionId);
+      assertSessionResetNotPending(sessionId);
+      signal.throwIfAborted();
+      const callId = `mcp-app-${randomUUID()}`;
+      const calls = (entry.mcpAppCalls ??= new Map());
+      const cancel = () => {
+        calls.delete(callId);
+        permissionMediator.cancelForPrompt(sessionId, callId);
+        void entry.connection
+          .extMethod('qwen/session/mcp-app/cancel', {
+            sessionId,
+            callId,
+          })
+          .catch(() => undefined);
+      };
+      calls.set(callId, { clientId, cancel });
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        return await requestSessionStatus<
+          import('./bridgeTypes.js').BridgeMcpAppToolResult
+        >(
+          sessionId,
+          'qwen/session/mcp-app/call',
+          { ...request, callId },
+          300_000,
+        );
+      } finally {
+        signal.removeEventListener('abort', cancel);
+        cancel();
+      }
     },
 
     async getSessionResourcesStatus(sessionId) {
@@ -14452,6 +14607,44 @@ export function createSessionControlPlane(
       return { sessionId, state: 'idle' as const };
     },
 
+    createSessionAttachmentUpload(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.createUpload(metadata, clientId);
+    },
+
+    appendSessionAttachmentUpload(sessionId, uploadId, offset, data, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.appendUpload(uploadId, offset, data, clientId);
+    },
+
+    async completeSessionAttachmentUpload(
+      sessionId,
+      uploadId,
+      context,
+      assertCanCommit,
+    ) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.completeUpload(uploadId, clientId, () => {
+        assertCanCommit?.();
+        if (byId.get(sessionId) !== entry)
+          throw new SessionNotFoundError(sessionId);
+        resolveTrustedClientId(entry, clientId);
+      });
+    },
+
+    cancelSessionAttachmentUpload(sessionId, uploadId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      entry.attachments.cancelUpload(uploadId, clientId);
+    },
+
     async storeSessionAttachment(sessionId, data, mimeType, context, name) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -14730,6 +14923,9 @@ export function createSessionControlPlane(
         eventDetailMode,
         messageId,
         text: trimmed,
+        ...(options?.queueOnly && !originatorClientId && context?.agentRun
+          ? { agentRun: context.agentRun }
+          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly
@@ -16117,7 +16313,7 @@ export function createSessionControlPlane(
         );
         const teardownResults = await Promise.allSettled([
           ...channels.map((ci) => harness.terminate(ci)),
-          ...[...byId.values()].map((entry) => entry.attachments.close()),
+          ...entries.map((entry) => entry.attachments.close()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           ...abandonedNewSessionAwaits,

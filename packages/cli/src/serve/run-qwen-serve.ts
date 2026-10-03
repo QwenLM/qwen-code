@@ -93,6 +93,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -206,6 +207,7 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -1901,6 +1903,8 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /** Current primary runtime for callers that must inherit its trust lifetime. */
+  getPrimaryWorkspaceRuntime(): WorkspaceRuntime | undefined;
   /**
    * The Local Control service, once the runtime app exists.
    *
@@ -2292,6 +2296,7 @@ async function loadServeRuntimeModules() {
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
+    sessionExecutionEngineSelectorModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2306,6 +2311,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
+    import('./session-execution-engine-selector.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2336,6 +2342,8 @@ async function loadServeRuntimeModules() {
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
+    createPairedExecutionEngines:
+      sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
   };
 }
 
@@ -3311,6 +3319,36 @@ export async function runQwenServe(
     restoreScrubbedLoaderEnv?.();
     throw error;
   }
+}
+
+function bridgeHasLiveSessionWithin(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  worktreePath: string,
+): boolean {
+  return bridge.listWorkspaceSessions(workspaceCwd).some((session) => {
+    try {
+      return isWithinRoot(
+        path.resolve(
+          bridge.getSessionExecutionSnapshot(session.sessionId).effectiveCwd,
+        ),
+        path.resolve(worktreePath),
+      );
+    } catch {
+      return true;
+    }
+  });
+}
+
+async function createBranchRecoverySessionService(
+  runtime: WorkspaceRuntime,
+): Promise<SessionService> {
+  const { SessionService } = await import(
+    '@qwen-code/qwen-code-core/services/sessionService.js'
+  );
+  return new SessionService(runtime.workspaceCwd, {
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+  });
 }
 
 let brokenPipeGuardInstalled = false;
@@ -5044,6 +5082,7 @@ async function runQwenServeImpl(
     if (!app || stoppedRuntimeAppProducers.has(app)) return;
     stoppedRuntimeAppProducers.add(app);
     const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
@@ -5061,6 +5100,7 @@ async function runQwenServeImpl(
         );
       }
     };
+    stopSafely('MCP App sandbox', locals.stopMcpAppSandbox);
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
@@ -6159,7 +6199,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: channelFactory,
+                runtimeBaseDir: primarySessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
@@ -6343,6 +6390,23 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
+    if (trustedWorkspace) {
+      await recoverBranchWorktreePreparations({
+        workspaceCwd: boundWorkspace,
+        sessionService: await createBranchRecoverySessionService(
+          workspaceRuntimes[0],
+        ),
+        assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
+        isWorktreeOccupied: (worktreePath) =>
+          bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
+        warn: (message, fields) => daemonLog.warn(message, fields),
+      }).catch((error: unknown) => {
+        daemonLog.warn('branch worktree recovery sweep failed', {
+          workspace: boundWorkspace,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
 
     const createRuntimeEnvMetadata = (
       workspace: string,
@@ -6743,7 +6807,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory: secondaryChannelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: secondaryChannelFactory,
+                runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
@@ -7450,7 +7521,18 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          channelFactory: wsChannelFactory,
+          // The Conversations runtime hosts only daemon-owned standalone
+          // conversations and the sessions they start, which stay on Legacy,
+          // so it keeps a single factory.
+          ...(opts.experimentalPairedEngines &&
+          provenance !== 'live-conversation'
+            ? {
+                executionEngines: runtime.createPairedExecutionEngines({
+                  legacy: wsChannelFactory,
+                  runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+                }),
+              }
+            : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
@@ -7731,6 +7813,21 @@ async function runQwenServeImpl(
             validationAttempt: (buildOptions?.validationAttempt ?? 0) + 1,
           });
         }
+      }
+      if (wsRuntime.primary && wsRuntime.trusted) {
+        await recoverBranchWorktreePreparations({
+          workspaceCwd: cwd,
+          sessionService: await createBranchRecoverySessionService(wsRuntime),
+          assertGenerationOpen: () => generationGuard.assertOpen(),
+          isWorktreeOccupied: (worktreePath) =>
+            bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),
+          warn: (message, fields) => daemonLog.warn(message, fields),
+        }).catch((error: unknown) => {
+          daemonLog.warn('branch worktree recovery sweep failed', {
+            workspace: cwd,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       return wsRuntime;
     };
@@ -8690,12 +8787,20 @@ async function runQwenServeImpl(
       // through (and start the runtime) exactly like the warm app would.
       // Dynamic import keeps web-shell-static out of the serve fast-path
       // static closure (see the import-boundary guards in fast-path.test.ts).
-      isPreAuthRequest: webShellMounted
-        ? (req) =>
-            import('./web-shell-static.js').then((webShellStatic) =>
-              webShellStatic.isPreAuthWebShellRequest(req),
-            )
-        : undefined,
+      // Agent Host transport routes authenticate with their own scoped
+      // credential on the mounted route; during a coordinator restart the
+      // bearer gate would answer a 401 the Host could misread as revocation,
+      // so those requests instead wait for the runtime like the warm path.
+      isPreAuthRequest: async (req) => {
+        if (req.path.startsWith('/agent-hosts/')) {
+          return true;
+        }
+        if (!webShellMounted) {
+          return false;
+        }
+        const webShellStatic = await import('./web-shell-static.js');
+        return webShellStatic.isPreAuthWebShellRequest(req);
+      },
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -9976,6 +10081,13 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getPrimaryWorkspaceRuntime: () => {
+          const registry = runtimeApp?.locals?.['workspaceRegistry'] as
+            | WorkspaceRegistry
+            | undefined;
+          const entry = registry?.primaryEntry;
+          return entry?.state === 'active' ? entry.current?.runtime : undefined;
+        },
         getLocalControl: () =>
           (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
             'localControlService'
