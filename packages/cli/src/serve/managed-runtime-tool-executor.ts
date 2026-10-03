@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { braceExpand } from 'minimatch';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -101,6 +102,12 @@ export interface ManagedToolSet {
    */
   readonly sessionId: string;
   readonly directory?: string;
+  /**
+   * The mount root the Workspace-wide reads are confined to (the Session
+   * directory can be a subdirectory of it). Resolve its realpath before
+   * comparing it with a resolved file path.
+   */
+  readonly workspaceRoot?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
   /**
    * Whether a shell `directory` lies inside the tools' workspace. Calls run
@@ -283,6 +290,17 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
+    /**
+     * True when a realpath lands inside ANOTHER installed Session's
+     * directory. The file-tool boundary is the Session directory for that
+     * case (a sibling Session's files are never this Session's business);
+     * anywhere else inside the mount — a linked dependency's real location
+     * — keeps the pre-containment behavior of reading through the symlink.
+     */
+    private readonly ownsAnotherSessionDir?: (
+      sessionId: string,
+      realPath: string,
+    ) => Promise<boolean>,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -799,21 +817,43 @@ export class ManagedToolExecutor {
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
-        // refuse anything that lands outside the Session directory. The
-        // ENOENT fallback keeps a nonexistent file reported by the tool
-        // itself rather than accused as traversal.
+        // refuse anything that lands outside the boundary. A create's leaf
+        // does not exist yet, so resolve the deepest ancestor that does —
+        // a genuinely absent path stays lexical and keeps the tool's own
+        // not-found answer rather than a traversal accusation.
+        const realTarget = await realpathDeepestExisting(
+          params['file_path'] as string,
+        );
         const relative = path.relative(
-          await realpathIfPresent(directory),
-          await realpathIfPresent(params['file_path'] as string),
+          await realpathDeepestExisting(directory),
+          realTarget,
         );
         if (
           relative === '..' ||
           relative.startsWith(`..${path.sep}`) ||
           path.isAbsolute(relative)
         ) {
-          throw new Error(
-            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
-          );
+          // The boundary is the Session directory only when the target lands
+          // in ANOTHER installed Session's directory; anywhere else inside
+          // the mount — a linked dependency's real location — stays
+          // reachable, the behavior /1 Sessions had before containment.
+          const workspaceRoot = tools.workspaceRoot;
+          const inMount =
+            workspaceRoot !== undefined &&
+            !escapesSession(
+              path.relative(
+                await realpathDeepestExisting(workspaceRoot),
+                realTarget,
+              ),
+            );
+          if (
+            !inMount ||
+            (await this.ownsAnotherSessionDir?.(tools.sessionId, realTarget))
+          ) {
+            throw new Error(
+              `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+            );
+          }
         }
       }
       if (entry.toolName === GlobTool.Name) {
@@ -829,10 +869,27 @@ export class ManagedToolExecutor {
           typeof params['path'] === 'string' ? params['path'].trim() : '';
         // `pattern` is a second search root: glob resolves `..` segments and
         // treats an absolute pattern as absolute, so it is contained too, by
-        // segment so a literal `a/..b/*.ts` stays usable.
+        // segment so a literal `a/..b/*.ts` stays usable. The rule runs on
+        // the brace-expanded alternatives: `{/etc,/zz}/host*` composes an
+        // absolute search root the literal check cannot see, while
+        // `*.{ts,tsx}` expands to ordinary input. The budget bounds the
+        // expansion COST, not the length: the scan never materializes the
+        // alternatives, so a ~70-byte pattern cannot block this shared
+        // worker's event loop for seconds.
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        if (path.isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) {
+        if (!globPatternWithinBudget(pattern)) {
+          throw new Error(
+            `Glob pattern expands beyond the ${GLOB_PATTERN_MAX_EXPANSIONS}-alternative budget. Narrow the brace groups and retry.`,
+          );
+        }
+        if (
+          braceExpand(pattern).some(
+            (alternative) =>
+              path.isAbsolute(alternative) ||
+              alternative.split(/[\\/]/).includes('..'),
+          )
+        ) {
           throw new Error(
             'Glob pattern must stay within the Session working directory.',
           );
@@ -844,14 +901,10 @@ export class ManagedToolExecutor {
         // Containment compares realpaths: a lexical compare cannot see a
         // symlink inside the Session context that leaves it.
         const relative = path.relative(
-          await realpathIfPresent(root),
-          await realpathIfPresent(resolved),
+          await realpathDeepestExisting(root),
+          await realpathDeepestExisting(resolved),
         );
-        if (
-          relative === '..' ||
-          relative.startsWith(`..${path.sep}`) ||
-          path.isAbsolute(relative)
-        ) {
+        if (escapesSession(relative)) {
           throw new Error(
             `Path '${requested}' is not within the Session working directory.`,
           );
@@ -922,26 +975,30 @@ export class ManagedToolExecutor {
           throw new ManagedToolUnavailableError(
             'Managed context directory is unavailable.',
           );
-        // Contain the OUTPUT, not the pattern's grammar: brace expansion
-        // (`{.,..}/**/*`) and a symlink named as a literal pattern segment
-        // both resolve after every input-side check, so each hit is compared
-        // against the Session root's realpath and any escape refuses the
-        // result rather than certifying a sibling Session's files as local.
-        const resultPaths = (result as { resultFilePaths?: unknown })
-          .resultFilePaths;
+        // Contain the OUTPUT, over glob's full collected set — not the
+        // display slice: the header's count certifies every collected hit,
+        // and a Session's own recent files systematically fill the slice,
+        // so containing only `resultFilePaths` would certify a count drawn
+        // from outside the boundary. Each hit is judged by its lexical path
+        // plus its parent's realpath: realpathing the hit itself would
+        // punish an ordinary outward symlink that is merely listed, while
+        // the parent arm still refuses a file reached *through* a
+        // symlinked directory.
+        const resultPaths =
+          (result as { collectedFilePaths?: unknown }).collectedFilePaths ??
+          (result as { resultFilePaths?: unknown }).resultFilePaths;
         if (Array.isArray(resultPaths)) {
-          const realRoot = await realpathIfPresent(root);
+          const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
             const relative = path.relative(
               realRoot,
-              await realpathIfPresent(hit),
+              path.join(
+                await realpathDeepestExisting(path.dirname(hit)),
+                path.basename(hit),
+              ),
             );
-            if (
-              relative === '..' ||
-              relative.startsWith(`..${path.sep}`) ||
-              path.isAbsolute(relative)
-            ) {
+            if (escapesSession(relative)) {
               throw new Error(
                 'Glob results must stay within the Session working directory.',
               );
@@ -1113,6 +1170,7 @@ export function createManagedToolSet(
   return {
     sessionId,
     directory,
+    workspaceRoot,
     admitsDirectory: (candidate) =>
       config.getWorkspaceContext().isPathWithinWorkspace(candidate),
     tools: new Map(
@@ -1239,18 +1297,79 @@ function relativizeGlobResult(
   return next;
 }
 
+/** The relative-shape test every containment check shares. */
+function escapesSession(relative: string): boolean {
+  return (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
+}
+
 /**
- * A path that does not exist has nothing to escape through, so containment
- * falls back to the lexical value and lets the tool report it; any other
- * failure to resolve is not something containment may assume away.
+ * A create's leaf does not exist yet, so a bare realpath cannot see a symlink
+ * mid-path (`peek/pwned.txt` through `peek -> ../web`): resolve the deepest
+ * ancestor that does exist and re-attach the lexical tail below it. A path
+ * with no symlink in its ancestry keeps its lexical value, so the tool keeps
+ * its own not-found answer rather than being accused as traversal; any
+ * non-ENOENT failure to resolve is not something containment may assume away.
  */
-async function realpathIfPresent(candidate: string): Promise<string> {
-  try {
-    return await realpath(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return candidate;
-    throw error;
+async function realpathDeepestExisting(candidate: string): Promise<string> {
+  let resolved = candidate;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(await realpath(resolved), ...tail);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      const parent = path.dirname(resolved);
+      if (parent === resolved) return path.join(resolved, ...tail);
+      tail.unshift(path.basename(resolved));
+      resolved = parent;
+    }
   }
+}
+
+/**
+ * A glob pattern's brace-expansion cost, as a saturating product over the
+ * groups' alternative counts — computed by a left-to-right scan, never by
+ * expanding. `{a,b}` repeated twenty times is 96 bytes that block this
+ * shared worker's event loop for seconds; the budget refuses it before
+ * minimatch materializes anything. Over-counting nested or escaped braces
+ * is the safe direction.
+ */
+const GLOB_PATTERN_MAX_EXPANSIONS = 4096;
+
+function globPatternWithinBudget(pattern: string): boolean {
+  let product = 1;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (c !== '{') continue;
+    let depth = 1;
+    let alternatives = 1;
+    let j = i + 1;
+    for (; j < pattern.length; j++) {
+      const g = pattern[j];
+      if (g === '\\') {
+        j++;
+        continue;
+      }
+      if (g === '{') depth++;
+      else if (g === '}') {
+        depth--;
+        if (depth === 0) break;
+      } else if (g === ',' && depth === 1) alternatives++;
+    }
+    if (depth !== 0) break; // unbalanced: minimatch treats it as literal
+    product *= alternatives;
+    if (product > GLOB_PATTERN_MAX_EXPANSIONS) return false;
+    i = j;
+  }
+  return true;
 }
 
 function toPayload(

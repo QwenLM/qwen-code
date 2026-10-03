@@ -14,6 +14,7 @@ import {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import path from 'node:path';
+import { braceExpand } from 'minimatch';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -143,6 +144,48 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * A glob pattern's brace-expansion cost, as a saturating product over the
+ * groups' alternative counts — computed by a left-to-right scan, never by
+ * expanding. The worker re-checks the same rule after dispatch; refusing
+ * here keeps the walk (and its seconds of event-loop block) off the shared
+ * worker entirely. Over-counting nested or escaped braces is the safe
+ * direction.
+ */
+const GLOB_PATTERN_MAX_EXPANSIONS = 4096;
+
+function globPatternWithinBudget(pattern: string): boolean {
+  let product = 1;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (c !== '{') continue;
+    let depth = 1;
+    let alternatives = 1;
+    let j = i + 1;
+    for (; j < pattern.length; j++) {
+      const g = pattern[j];
+      if (g === '\\') {
+        j++;
+        continue;
+      }
+      if (g === '{') depth++;
+      else if (g === '}') {
+        depth--;
+        if (depth === 0) break;
+      } else if (g === ',' && depth === 1) alternatives++;
+    }
+    if (depth !== 0) break; // unbalanced: minimatch treats it as literal
+    product *= alternatives;
+    if (product > GLOB_PATTERN_MAX_EXPANSIONS) return false;
+    i = j;
+  }
+  return true;
 }
 
 export interface HostedApprovalTurnOptions {
@@ -851,9 +894,18 @@ export class HostedWorkspaceToolTurn {
             // shapes here, pre-acquisition, with the identical segment
             // equality rule the worker applies after dispatch — a refusal
             // before acquisition stays model-correctable and costs no
-            // durable Runtime work (#13030).
-            path.isAbsolute(pattern) ||
-            pattern.split(/[\\/]/).includes('..')
+            // durable Runtime work (#13030). The rule runs on the
+            // brace-expanded alternatives: `{/etc,/zz}/host*` composes an
+            // absolute search root the literal check cannot see, while
+            // `*.{ts,tsx}` expands to ordinary input. The budget bounds the
+            // expansion COST first — a ~70-byte brace pattern otherwise
+            // blocks the shared worker's event loop for seconds.
+            !globPatternWithinBudget(pattern) ||
+            braceExpand(pattern).some(
+              (alternative) =>
+                path.isAbsolute(alternative) ||
+                alternative.split(/[\\/]/).includes('..'),
+            )
           ) {
             validationError = globError;
           } else {

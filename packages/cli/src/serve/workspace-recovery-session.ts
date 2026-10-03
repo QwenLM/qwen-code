@@ -740,20 +740,29 @@ export async function verifyRecoverySession(
         'invalid genesis',
       );
       const definition = object(json(await read(header.definitionRef)));
+      // The /2 profiles are the same Hosted files/shell surfaces plus glob;
+      // the W1b bundle doc puts Hosted files and Shell profiles inside the
+      // capture closure, so one /2 Session must not abort recovery of the
+      // whole shared storage.
+      const recoverableProfiles = [
+        'hosted-workspace-files/1',
+        'hosted-workspace-shell/1',
+        'hosted-workspace-files/2',
+        'hosted-workspace-shell/2',
+      ];
       requireValue(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
           definition['mcpServers'] === undefined &&
           (definition['toolProfile'] === undefined ||
-            ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-              definition['toolProfile'] as string,
-            )),
+            recoverableProfiles.includes(definition['toolProfile'] as string)),
         'unsupported Hosted profile',
       );
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||
-            (definition['toolProfile'] === 'hosted-workspace-shell/1' &&
+            ((definition['toolProfile'] === 'hosted-workspace-shell/1' ||
+              definition['toolProfile'] === 'hosted-workspace-shell/2') &&
               Number.isSafeInteger(definition['captureBytes']) &&
               (definition['captureBytes'] as number) >= 1 &&
               (definition['captureBytes'] as number) <= 2 ** 41)),

@@ -348,6 +348,9 @@ class GlobToolInvocation extends BaseToolInvocation<
         llmContent: resultMessage,
         returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
+        // The certified count covers the collected set, not the display
+        // slice — containment consumers must check this, never the slice.
+        collectedFilePaths: sortedEntries.map((entry) => entry.fullpath()),
       };
     } catch (error) {
       const errorMessage =

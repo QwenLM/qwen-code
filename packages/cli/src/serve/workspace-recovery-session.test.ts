@@ -39,7 +39,7 @@ const KEY = {
 const hash = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture(toolProfile = 'hosted-workspace-files/1') {
   const resources = new Map<string, Buffer>();
   const refs = new Map<string, ManagedSessionDurableRef>();
   const complete = new Set<string>();
@@ -204,7 +204,7 @@ function fixture() {
         definitionRef: resource('managed-definition', {
           engine: 'managed',
           sessionId: SESSION,
-          toolProfile: 'hosted-workspace-files/1',
+          toolProfile,
         }),
         rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
         createdBy: 'hosted-harness',
@@ -927,6 +927,20 @@ describe('verifyRecoverySession', () => {
     ).resolves.toEqual({ fileHistory: 'not_captured' });
     expect(f.io.read).not.toHaveBeenCalled();
   });
+
+  it.each(['hosted-workspace-files/2', 'hosted-workspace-shell/2'])(
+    'verifies a Hosted %s session instead of aborting the shared storage',
+    async (toolProfile) => {
+      // One /2 Session must not fail recovery for every Session sharing the
+      // storage: the /2 profiles are the same Hosted files/shell surfaces
+      // plus glob, inside the W1b capture closure. The sealed-head genesis
+      // walk reads the profile before anything else can refuse.
+      const f = fixture(toolProfile);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: expect.any(String) as string,
+      });
+    },
+  );
 
   it('does not mistake a business resourceId argument for a durable reference', async () => {
     const f = fixture();

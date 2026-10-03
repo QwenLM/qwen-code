@@ -1151,9 +1151,8 @@ describe('Managed context tool gate', () => {
     const missing = await glob('call-3', { pattern: '**/*', path: 'nope' });
     // A link inside the Session context that points at a sibling Session.
     const linked = await glob('call-4', { pattern: '*', path: 'peek' });
-    // Brace expansion happens after the input-side segment check, so the
-    // `..` alternative never appears as a literal segment; containment is
-    // enforced on glob's output instead.
+    // Brace expansion happens before admission now: the `..` alternative
+    // is refused at the input gate, never reaching the search.
     const braced = await glob('call-5', { pattern: '{.,..}/**/*' });
     // A symlink named as a literal pattern segment is resolved by the
     // filesystem: `follow: false` governs links met during a globstar walk,
@@ -1199,6 +1198,13 @@ describe('Managed context tool gate', () => {
     const install1 = workspaceInstallation('session-1', 'services/api');
     await post(origin, CONTEXT, install1);
     await post(origin, ACTIVATION, workspaceActivation(install1));
+    // The sibling directory is protected because it is another installed
+    // Session's directory: the boundary names Sessions, not mount contents.
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
     const read = async (callId: string, filePath: string) =>
       (
         await post(origin, EXECUTE, {
@@ -1227,6 +1233,235 @@ describe('Managed context tool gate', () => {
     const own = await read('call-3', 'src/index.ts');
     expect(own.result.executionStatus).toBe('success');
     expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('refuses write_file that creates through an in-context symlink', async () => {
+    // A create's leaf does not exist yet, so containment must resolve the
+    // deepest existing ancestor: `peek/pwned.txt` is lexically inside the
+    // Session but lands in the sibling through the link.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+
+    const created = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'write_file',
+        input: {
+          file_path: 'peek/pwned.txt',
+          content: 'written by session-1',
+        },
+      })
+    ).json();
+    expect(created.result.executionStatus).toBe('error');
+    expect(JSON.stringify(created)).toContain(
+      "Path 'peek/pwned.txt' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web/pwned.txt'))).toBe(
+      false,
+    );
+
+    // Control: an ordinary in-Session create still works.
+    const own = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-2', ''),
+        toolName: 'write_file',
+        input: { file_path: 'src/new.txt', content: 'mine too' },
+      })
+    ).json();
+    expect(own.result.executionStatus).toBe('success');
+    expect(
+      fs.readFileSync(path.join(root, 'services/api/src/new.txt'), 'utf8'),
+    ).toBe('mine too');
+  });
+
+  it('reads through a symlink to a shared directory that is no Session', async () => {
+    // The Session boundary protects sibling SESSIONS. A linked dependency
+    // inside the same mount (`node_modules/@acme/ui -> ../../packages/ui`)
+    // is no Session: refusing it narrows every /1 workspace that reads
+    // through linked dependencies — the pre-containment behavior.
+    const root = workspace([
+      'services/api/src',
+      'services/web',
+      'packages/ui/src',
+    ]);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    fs.mkdirSync(path.join(root, 'services/api/node_modules/@acme'), {
+      recursive: true,
+    });
+    fs.symlinkSync(
+      path.join('..', '..', '..', '..', 'packages', 'ui'),
+      path.join(root, 'services/api/node_modules/@acme/ui'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    // The shared dependency reads through; the sibling Session still does
+    // not — both halves of the boundary in one fixture.
+    const linkedDep = await read(
+      'call-1',
+      'node_modules/@acme/ui/src/index.ts',
+    );
+    expect(linkedDep.result.executionStatus).toBe('success');
+    expect(JSON.stringify(linkedDep)).toContain('ui-source');
+    const sibling = await read('call-2', 'peek/secret.txt');
+    expect(sibling.result.executionStatus).toBe('error');
+    expect(JSON.stringify(sibling)).not.toContain('sibling');
+  });
+
+  it('refuses a brace pattern whose expansion cost exceeds the budget', async () => {
+    // The scan is a saturating product over brace groups, never an
+    // expansion: twenty `{a,b}` groups are ~100 bytes that would otherwise
+    // block this shared worker's event loop for seconds.
+    const root = workspace(['services/api']);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+
+    const costly = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'glob',
+        // 13 groups clear the 4096 budget and stay fast even unguarded.
+        input: { pattern: '{a,b}'.repeat(13) + '/*' },
+      })
+    ).json();
+    expect(costly.result.executionStatus).toBe('error');
+    expect(JSON.stringify(costly)).toContain('budget');
+    // An ordinary brace pattern stays admitted.
+    const fine = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-2', ''),
+        toolName: 'glob',
+        input: { pattern: '*.{ts,tsx}' },
+      })
+    ).json();
+    expect(fine.result.executionStatus).not.toBe('error');
+  });
+
+  it('certifies a count only over the contained collected set', async () => {
+    // The Session's own recent files fill the display slice, so a count
+    // derived from the slice alone would certify the sibling's files. The
+    // `{.,..}` shape is refused at admission; a large honest result keeps
+    // working because containment sees the whole collected set.
+    const root = workspace(['services/api/src', 'services/web']);
+    for (let i = 0; i < 105; i++) {
+      const file = path.join(
+        root,
+        'services/api/src',
+        `f${String(i).padStart(3, '0')}.md`,
+      );
+      fs.writeFileSync(file, 'mine');
+      const recent = new Date();
+      fs.utimesSync(file, recent, recent);
+    }
+    for (let i = 0; i < 5; i++) {
+      const file = path.join(root, 'services/web', `old${i}.md`);
+      fs.writeFileSync(file, 'sibling');
+      const old = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+      fs.utimesSync(file, old, old);
+    }
+    // Reached only through the symlinked literal segment: the sibling's
+    // older files sort outside the display slice, so containing the slice
+    // alone would certify their count.
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const glob = async (callId: string, input: Record<string, unknown>) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'glob',
+          input,
+        })
+      ).json();
+
+    // The escaping shape never reaches the search.
+    const mixed = await glob('call-1', { pattern: '{.,..}/**/*.md' });
+    expect(mixed.result.executionStatus).toBe('error');
+    expect(JSON.stringify(mixed)).not.toContain('old0.md');
+    // The slice-blind arm: every displayed hit is the Session's own recent
+    // file, while the sibling's hits sit in the collected tail — the count
+    // must still not certify them.
+    const sliced = await glob('call-3', { pattern: '{src,peek}/**/*.md' });
+    expect(sliced.result.executionStatus).toBe('error');
+    expect(JSON.stringify(sliced)).not.toContain('old0.md');
+    // The admission-gate arm: a brace-composed absolute root is refused by
+    // the PATTERN gate (this message), pre-search — not by the output
+    // containment ("Glob results must stay") after the walk.
+    const bracedAbsolute = await glob('call-4', {
+      pattern: '{/etc,/zz-nonexistent}/host*',
+    });
+    expect(bracedAbsolute.result.executionStatus).toBe('error');
+    expect(JSON.stringify(bracedAbsolute)).toContain(
+      'Glob pattern must stay within the Session working directory.',
+    );
+    // A 105-hit in-Session glob still succeeds — the collected set, not
+    // the 100-row display slice, is what containment walks.
+    const honest = await glob('call-2', { pattern: '**/*.md' });
+    expect(honest.result.executionStatus).toBe('success');
+    expect(JSON.stringify(honest)).toContain('Found 105');
   });
 
   it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {

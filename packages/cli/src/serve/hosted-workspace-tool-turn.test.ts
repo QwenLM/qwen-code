@@ -987,6 +987,11 @@ it.each([
   // refusal and into a durable Runtime round trip.
   { pattern: ' ../**/*' },
   { pattern: '\t/etc/host*' },
+  // Brace expansion composes what the literal segment check cannot see,
+  // and its cost is bounded before any expansion runs.
+  { pattern: '{/etc,/zz-nonexistent}/host*' },
+  { pattern: '{.,..}/**/*' },
+  { pattern: '{a,b}'.repeat(20) + '/*' },
   { pattern: '**/*.ts', path: '/private/secret-host-path' },
   { pattern: '**/*.ts', path: '../escape' },
   { pattern: '**/*.ts', path: 'a\\b' },
