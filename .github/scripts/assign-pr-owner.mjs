@@ -272,16 +272,25 @@ function main() {
     return;
   }
 
+  // REST, not `gh pr edit`: that command's GraphQL lookup requests
+  // repository.pullRequest.projectCards, which GitHub rejects on the gh
+  // builds that still send that query — the ECS runners' gh does, so every
+  // assignment there exited 1 before mutating anything (see
+  // pr-self-report-label.yml). Unlike `gh pr edit`, this endpoint silently
+  // drops an assignee it cannot accept, so the assignee list it returns is
+  // read back below instead of trusting the exit status.
+  let assignedLogins;
   try {
-    gh([
-      'pr',
-      'edit',
-      String(prNumber),
-      '--repo',
-      repository,
-      '--add-assignee',
-      assignee,
-    ]);
+    assignedLogins = gh([
+      'api',
+      '-X',
+      'POST',
+      `repos/${repository}/issues/${prNumber}/assignees`,
+      '-f',
+      `assignees[]=${assignee}`,
+      '--jq',
+      '.assignees[].login',
+    ]).split('\n');
   } catch (error) {
     if (/assigning agents is not supported/i.test(error.message)) {
       // A PR that already carries a coding-agent assignee can only change
@@ -303,6 +312,20 @@ function main() {
       return;
     }
     throw error;
+  }
+  if (
+    !assignedLogins.some(
+      (login) => login.toLowerCase() === assignee.toLowerCase(),
+    )
+  ) {
+    console.warn(
+      `::warning::GitHub did not add @${assignee} as an assignee; check their access and ${OWNERS_FILE}.`,
+    );
+    record([
+      `Area: ${area.name}`,
+      `Assignment: skipped — GitHub did not accept @${assignee} as an assignee`,
+    ]);
+    return;
   }
   record([
     `Area: ${area.name}`,
