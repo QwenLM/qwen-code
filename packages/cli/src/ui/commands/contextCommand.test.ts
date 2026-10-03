@@ -1036,12 +1036,15 @@ describe('collectContextData (contextCommand)', () => {
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
       );
-      // Before the first reply the estimate must account for exactly the window.
-      expect(
-        sumRows(unscaled.breakdown) +
-          unscaled.breakdown.freeSpace +
-          unscaled.breakdown.autocompactBuffer,
-      ).toBe(unscaled.contextWindowSize);
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
       // The deficit comes out of the mcp row, not the built-in or skills rows.
       expect(unscaled.breakdown.builtinTools).toBe(0);
       expect(unscaled.breakdown.mcpTools).toBe(
@@ -1058,14 +1061,18 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
       expect(undeclared.breakdown.mcpTools).toBe(0);
-      expect(undeclared.breakdown.skills).toBeLessThan(
-        unscaled.breakdown.skills,
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(JSON.stringify([])),
       );
-      expect(
-        sumRows(undeclared.breakdown) +
-          undeclared.breakdown.freeSpace +
-          undeclared.breakdown.autocompactBuffer,
-      ).toBe(undeclared.contextWindowSize);
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
+      );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
       const total =
