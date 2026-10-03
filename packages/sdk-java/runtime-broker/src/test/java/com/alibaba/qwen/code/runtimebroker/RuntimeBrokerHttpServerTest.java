@@ -835,14 +835,35 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    void rejectsOversizedRequestBodies() throws Exception {
+    void rejectsOversizedContentLengthBeforeReadingTheBody() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            HttpResponse<String> response = fixture.post("/tool-sessions:acquire", Map.of(
-                    "protocolVersion", 1, "requestId", "acquire",
-                    "harnessSessionId", "harness", "runtimeSessionId", "runtime",
-                    "turnKind", "bootstrap", "padding", "x".repeat(9 * 1024 * 1024)));
-            assertEquals(413, response.statusCode(), response.body());
-            assertTrue(response.body().contains("runtime_broker_request_too_large"), response.body());
+            URI baseUri = fixture.uri("/tool-sessions:acquire");
+            try (java.net.Socket socket = new java.net.Socket(
+                    baseUri.getHost(), baseUri.getPort())) {
+                // Headers only — the body is never sent. The server must
+                // reject from Content-Length alone; streaming the 9 MiB body
+                // would race the close and abort the socket on Windows.
+                byte[] headers = ("POST " + baseUri.getRawPath()
+                        + " HTTP/1.1\r\nHost: " + baseUri.getHost() + ":"
+                        + baseUri.getPort()
+                        + "\r\nAuthorization: Bearer secret"
+                        + "\r\nContent-Type: application/json"
+                        + "\r\nContent-Length: " + (9 * 1024 * 1024)
+                        + "\r\nConnection: close\r\n\r\n")
+                        .getBytes(StandardCharsets.UTF_8);
+                socket.getOutputStream().write(headers);
+                socket.getOutputStream().flush();
+                // EOF the write side: the server drains unread request bytes
+                // before closing, so it must not wait for the 9 MiB body.
+                socket.shutdownOutput();
+                socket.setSoTimeout(30_000);
+                String response = new String(
+                        socket.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertTrue(response.startsWith("HTTP/1.1 413"), response);
+                assertTrue(response.contains("runtime_broker_request_too_large"),
+                        response);
+            }
         }
     }
 
