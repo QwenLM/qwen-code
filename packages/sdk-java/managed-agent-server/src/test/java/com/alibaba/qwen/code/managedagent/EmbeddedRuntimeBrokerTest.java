@@ -59,7 +59,8 @@ class EmbeddedRuntimeBrokerTest {
         assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("requires durable local-process")
-                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY");
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY")
+                .hasMessageContaining(local ? "enable durable local-process" : "configured: static");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

@@ -389,9 +389,9 @@ worker. This requires Linux and fails startup elsewhere; on such hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
 worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
 must be persistent local storage, owned by the Broker user with mode `0700`,
-without symlinks, outside every configured Workspace root; the Broker user
-must be resolvable by name on the host (a JVM running under a numeric UID
-without a passwd entry fails startup). Workers and tools
+without symlinks, outside every configured Workspace root. The expected
+owner is resolved from the process UID, so a numeric UID without a passwd
+entry is fine. Workers and tools
 must be trusted; same-UID hostile tools and multi-host or remote storage are
 unsupported. Keep the host machine ID, SQL credential key, placement mapping,
 state directory and worker command stable across Broker restarts. Shutdown and
@@ -400,7 +400,7 @@ late lease discard detach from registered workers instead of killing them.
 and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
 requires Linux 5.6 or newer with `CONFIG_TIME_NS`). An empty or malformed
 identity fails startup the same way as an absent one, naming both opt-out
-variables. The service
+switches. The service
 manager must let workers survive a Broker exit: systemd's default
 `KillMode=control-group` kills them, as does restarting a container whose main
 process is the Broker. Configure the service to leave child workers running

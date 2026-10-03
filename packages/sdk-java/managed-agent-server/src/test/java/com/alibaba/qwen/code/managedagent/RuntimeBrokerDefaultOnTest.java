@@ -1,22 +1,36 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.verify;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.env.MapPropertySource;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 /**
  * Boots the production-default combination (`local-process` with durable
- * registration and trusted reboot recovery at their shipped defaults) on a
- * real Linux host. This context pins neither flag: reverting the default in
- * either `application.yml` or the `ManagedAgentProperties` initializers
- * turns it red through the binding assertions or the coupling guard.
+ * registration and trusted reboot recovery) on a real Linux host, with the
+ * ambient QWEN_MANAGED_AGENT_RUNTIME_* environment scrubbed. This context
+ * pins neither flag: reverting either YAML placeholder default turns it red
+ * through the binding assertions (and the coupling guard for durable); a
+ * silent scan-configuration regression (coordinator never reaching the
+ * candidate query) turns it red through the batch-read verification; and the
+ * `ManagedAgentProperties` field defaults are pinned by
+ * `EmbeddedRuntimeBrokerTest#usesFetchCompatibleDefaultBrokerPort`.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:runtime-broker-default-on;MODE=MySQL;"
@@ -42,12 +56,15 @@ import org.springframework.boot.test.context.SpringBootTest;
         "qwen.managed-agent.runtime-broker.worker-entry=worker.js",
         "qwen.managed-agent.runtime-broker.cli-entry=cli.js"
 })
+@ContextConfiguration(initializers = RuntimeBrokerDefaultOnTest.ScrubRuntimeEnv.class)
 @EnabledOnOs(OS.LINUX)
 class RuntimeBrokerDefaultOnTest {
     @Autowired
     private RuntimeWarmer runtimeWarmer;
     @Autowired
     private ManagedAgentProperties properties;
+    @MockitoSpyBean
+    private RuntimeBindingRepository bindingRepository;
 
     @Test
     void defaultCombinationBootsWithTheYmlDefaultsBound() {
@@ -55,7 +72,24 @@ class RuntimeBrokerDefaultOnTest {
         var broker = properties.getRuntimeBroker();
         assertThat(broker.isDurableLocalProcess()).isTrue();
         assertThat(broker.isTrustedLocalRebootRecovery()).isTrue();
-        // No saved bindings: the scheduled scan is a no-op and must not throw.
+        // The scan must actually reach the candidate query, not just no-op.
         ((EmbeddedRuntimeBroker) runtimeWarmer).recoverSavedRuntimes();
+        verify(bindingRepository, atLeastOnce()).findRecoveryCandidates("local-process", isNull(), eq(8));
+    }
+
+    /** Removes the ambient copies of the two documented opt-out variables. */
+    static class ScrubRuntimeEnv implements ApplicationContextInitializer<ConfigurableApplicationContext> {
+        @Override
+        public void initialize(ConfigurableApplicationContext context) {
+            var filtered = new java.util.LinkedHashMap<String, Object>();
+            System.getenv().forEach((name, value) -> {
+                if (!"QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS".equals(name)
+                        && !"QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY".equals(name)) {
+                    filtered.put(name, value);
+                }
+            });
+            context.getEnvironment().getPropertySources().replace(
+                    "systemEnvironment", new MapPropertySource("systemEnvironment", filtered));
+        }
     }
 }

@@ -3,37 +3,61 @@ package com.alibaba.qwen.code.runtimebroker;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 
 class LocalRuntimeStoreTest {
     @Test
-    void malformedHostIdentityFailsClosedNamingSourcesAndBothOptOuts() {
+    void nonLinuxReportsThePlatformAndBothOptOutProperties() {
+        String os = System.getProperty("os.name");
+        org.junit.jupiter.api.Assumptions.assumeFalse("Linux".equals(os));
         IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> LocalRuntimeStore.HostIdentity.of("",
-                        "ffffffff-ffff-ffff-ffff-ffffffffffff", "pid:[1]", "time:[1]"));
-        assertTrue(error.getMessage().contains("host/boot identity is unavailable"), error::getMessage);
-        assertTrue(error.getMessage().contains("/etc/machine-id"), error::getMessage);
-        assertTrue(error.getMessage().contains("QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS"),
-                error::getMessage);
-        assertTrue(error.getMessage().contains("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY"),
+                LocalRuntimeStore.HostIdentity::linux);
+        assertTrue(error.getMessage().contains(os), error::getMessage);
+        assertTrue(error.getMessage().contains("durable-local-process"), error::getMessage);
+        assertTrue(error.getMessage().contains("runtime-broker.trusted-local-reboot-recovery"),
                 error::getMessage);
     }
 
     @Test
-    void unresolvableBrokerUserNamesItselfAndTheOptOut(
-            @org.junit.jupiter.api.io.TempDir Path directory) {
+    void identityUnavailableCarriesSourcesAndBothOptOuts() {
+        IllegalStateException error = LocalRuntimeStore.HostIdentity
+                .identityUnavailable(new IllegalArgumentException("malformed probe"));
+        assertTrue(error.getMessage().contains("/etc/machine-id"), error::getMessage);
+        assertTrue(error.getMessage().contains("durable-local-process"), error::getMessage);
+        assertTrue(error.getMessage().contains("runtime-broker.trusted-local-reboot-recovery"),
+                error::getMessage);
+    }
+
+    @Test
+    void linuxReadFailureUsesTheSameSharedMessage() {
+        String os = System.getProperty("os.name");
+        org.junit.jupiter.api.Assumptions.assumeFalse("Linux".equals(os));
+        System.setProperty("os.name", "Linux");
+        try {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    LocalRuntimeStore.HostIdentity::linux);
+            assertTrue(error.getMessage().contains("/etc/machine-id"), error::getMessage);
+            assertTrue(error.getMessage().contains("runtime-broker.trusted-local-reboot-recovery"),
+                    error::getMessage);
+        } finally {
+            System.setProperty("os.name", os);
+        }
+    }
+
+    @Test
+    void brokerUserNeedNotResolveByNameInThePasswdDatabase(
+            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
+        // LocalRuntimeStore rejects symlinked ancestors (e.g. /var on macOS).
+        Path state = directory.toRealPath().resolve("state");
         String user = System.getProperty("user.name");
         System.setProperty("user.name", "qwen-unresolvable-user-4242");
         try {
-            IllegalStateException error = assertThrows(IllegalStateException.class,
-                    () -> new LocalRuntimeStore(directory.resolve("state"),
-                            DurableLocalProcessRuntimeProvisionerTest.HOST));
-            assertTrue(error.getMessage().contains("qwen-unresolvable-user-4242"), error::getMessage);
-            assertTrue(error.getMessage().contains("QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS"),
-                    error::getMessage);
+            new LocalRuntimeStore(state, DurableLocalProcessRuntimeProvisionerTest.HOST);
         } finally {
             System.setProperty("user.name", user);
         }
+        assertTrue(Files.isDirectory(state), "state directory created");
     }
 }

@@ -239,11 +239,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             HttpRuntimeTransport transport) {
         if (broker.isTrustedLocalRebootRecovery()
                 && (!broker.isDurableLocalProcess() || !"local-process".equals(broker.getProvisioner()))) {
+            if (!broker.isDurableLocalProcess()) {
+                throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
+                        + " provisioning; enable durable local-process"
+                        + " (QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true),"
+                        + " or set trusted-local-reboot-recovery=false"
+                        + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)");
+            }
             throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
-                    + " provisioning; set trusted-local-reboot-recovery=false"
-                    + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false), or use the"
-                    + " local-process provisioner with durable local-process"
-                    + " (QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true)");
+                    + " provisioning with the local-process provisioner (configured: "
+                    + broker.getProvisioner() + "); set trusted-local-reboot-recovery=false"
+                    + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)"
+                    + " for non-durable provisioners");
         }
         if ("local-process".equals(broker.getProvisioner())) {
             require(broker.getStateDirectory(),
