@@ -192,11 +192,14 @@ describe('collectContextData (contextCommand)', () => {
   });
 
   it('shows a million-token context window in millions', async () => {
-    const data = await collectContextData(makeMockConfig(1_000_000), false);
+    const text = async (window: number) =>
+      formatContextUsageText(
+        await collectContextData(makeMockConfig(window), false),
+      );
 
-    expect(formatContextUsageText(data)).toContain(
-      'Context window: 1.0m tokens',
-    );
+    expect(await text(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_950)).toContain('Context window: 1.0m tokens');
+    expect(await text(999_949)).toContain('Context window: 999.9k tokens');
   });
 
   it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
