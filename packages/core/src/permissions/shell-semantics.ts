@@ -225,6 +225,30 @@ function isNetworkPseudoDevice(target: string): boolean {
   return /^\/dev\/(tcp|udp)\//.test(target);
 }
 
+function toRedirectOperations({
+  readFiles,
+  writeFiles,
+}: RedirectResult): ShellOperation[] {
+  return [
+    ...readFiles.map((p) => ({
+      virtualTool: 'read_file' as const,
+      filePath: p,
+    })),
+    ...writeFiles.map((p) => ({
+      virtualTool: 'write_file' as const,
+      filePath: p,
+    })),
+  ];
+}
+
+/** Only the redirections of a simple command, e.g. the `> log` of `cd x > log`. */
+function extractRedirectOperations(
+  simpleCommand: string,
+  cwd: string,
+): ShellOperation[] {
+  return toRedirectOperations(extractRedirects(tokenize(simpleCommand), cwd));
+}
+
 /**
  * Extract I/O redirections from a token array.
  *
@@ -1945,16 +1969,10 @@ export function extractShellOperations(
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return [
-      ...redirectReads.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: p,
-      })),
-      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-    ];
+    return toRedirectOperations({
+      readFiles: redirectReads,
+      writeFiles: redirectWrites,
+    });
   }
 
   const ops: ShellOperation[] = [];
@@ -2121,7 +2139,10 @@ function resolveCdTargetCwd(
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments. A `cd` ended by an
+ *     operator only one backslash reading found leaves both the moved and
+ *     the unmoved cwd open, so the segments after it report their paths
+ *     under each (#12246).
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2257,6 +2278,46 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+/**
+ * A directory the segments after a `cd` may run in. The walk carries more than
+ * one when the operator that ended a `cd` was found by only one backslash
+ * reading: that operator does not say whether bash ran the `cd` in this shell,
+ * so the rules must hold for the cwd before it and the one after (#12246).
+ */
+interface CwdCandidate {
+  cwd: string;
+  cwdUnknown: boolean;
+}
+
+/**
+ * Candidates double at every undecided `cd`, so cap them. Two are never
+ * dropped: the cwd from reading every operator at face value (`&` leaves the
+ * cwd, anything else moves it), which keeps the operations a superset of that
+ * reading's, and the cwd from skipping every undecided `cd`, which is where
+ * bash stays when each of them ran in a subshell.
+ */
+const MAX_CWD_CANDIDATES = 8;
+
+function dedupeCwdCandidates(candidates: CwdCandidate[]): CwdCandidate[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = `${candidate.cwd}\u0000${candidate.cwdUnknown}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeOps(ops: ShellOperation[]): ShellOperation[] {
+  const seen = new Set<string>();
+  return ops.filter((op) => {
+    const key = JSON.stringify(op);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2266,10 +2327,29 @@ function walkCompoundCommand(
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
-  let effectiveCwd = cwd;
-  let cwdUnknown = initialCwdUnknown;
+  let candidates: CwdCandidate[] = [{ cwd, cwdUnknown: initialCwdUnknown }];
+  let faceValue = candidates[0]!;
+  let undecidedSkipped = candidates[0]!;
+  let branched = false;
+  let capped = false;
+  // Past a boundary only one reading found, the split may have cut through
+  // what bash reads as one word (a wrapper body, say), and a later boundary
+  // both readings agree on does not re-align them. Paths from there on are
+  // reported as cwd-unknown so they escalate instead of resolving confidently.
+  let splitUnverified = false;
+  const pushOps = (
+    subOps: ShellOperation[],
+    sub: string,
+    { cwd: segmentCwd, cwdUnknown }: CwdCandidate,
+  ) => {
+    ops.push(
+      ...(cwdUnknown || splitUnverified
+        ? markCwdUnknownOps(subOps, sub, segmentCwd)
+        : subOps),
+    );
+  };
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const { command: sub, terminator, terminatorAmbiguous } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
@@ -2277,51 +2357,85 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind === 'static') {
-      if (!backgrounded) {
-        effectiveCwd = cdTarget.cwd;
-        cwdUnknown = cdTarget.cwdUnknown;
+    // `cd`-ness does not depend on the cwd, only the target it resolves to.
+    const first = resolveCdTargetCwd(
+      sub,
+      candidates[0]!.cwd,
+      candidates[0]!.cwdUnknown,
+    );
+    if (first.kind !== 'not-cd') {
+      // bash opens a `cd`'s own redirections before running it, in the cwd it
+      // starts from, whether the `cd` then succeeds or runs in a subshell.
+      for (const candidate of candidates) {
+        pushOps(extractRedirectOperations(sub, candidate.cwd), sub, candidate);
       }
-      continue;
-    }
-    if (cdTarget.kind === 'dynamic') {
-      if (!backgrounded) {
-        cwdUnknown = true;
+      if (!backgrounded || terminatorAmbiguous) {
+        const move = (from: CwdCandidate): CwdCandidate => {
+          const target = resolveCdTargetCwd(sub, from.cwd, from.cwdUnknown);
+          return target.kind === 'static'
+            ? { cwd: target.cwd, cwdUnknown: target.cwdUnknown }
+            : { cwd: from.cwd, cwdUnknown: true };
+        };
+        const moved = candidates.map(move);
+        branched ||= Boolean(terminatorAmbiguous);
+        if (!backgrounded) {
+          faceValue = move(faceValue);
+          if (!terminatorAmbiguous) undecidedSkipped = move(undecidedSkipped);
+        }
+        const next = dedupeCwdCandidates([
+          faceValue,
+          undecidedSkipped,
+          ...(terminatorAmbiguous ? [...candidates, ...moved] : moved),
+        ]);
+        // Undecided `cd`s already mark every later path cwd-unknown, so the
+        // candidates the cap drops only lose paths that would escalate anyway.
+        if (next.length > MAX_CWD_CANDIDATES) {
+          if (!capped) {
+            shellSemanticsDebugLogger.warn(
+              `More than ${MAX_CWD_CANDIDATES} candidate cwds; keeping the face-value, the undecided-skipped and the latest ones.`,
+            );
+          }
+          capped = true;
+          candidates = [
+            ...next.slice(0, 2),
+            ...next.slice(2 - MAX_CWD_CANDIDATES),
+          ];
+        } else {
+          candidates = next;
+        }
       }
+      splitUnverified ||= Boolean(terminatorAmbiguous);
       continue;
     }
 
     // Unwrap per segment, after the outer split, so wrapper suffixes like
     // `bash -lc 'safe' && echo > file` are not discarded.
-    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(sub);
-      if (subUnwrapped !== sub) {
-        ops.push(
-          ...walkCompoundCommand(
-            subUnwrapped,
-            effectiveCwd,
-            depth + 1,
-            cwdUnknown,
-          ),
-        );
-        continue;
-      }
-    } else if (stripShellWrapper(sub) !== sub) {
+    const unwrappable = depth < MAX_SHELL_UNWRAP_DEPTH;
+    const subUnwrapped = stripShellWrapper(sub);
+    if (!unwrappable && subUnwrapped !== sub) {
       shellSemanticsDebugLogger.warn(
         `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
       );
     }
 
-    const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
-    } else {
-      ops.push(...subOps);
+    for (const candidate of candidates) {
+      if (unwrappable && subUnwrapped !== sub) {
+        ops.push(
+          ...walkCompoundCommand(
+            subUnwrapped,
+            candidate.cwd,
+            depth + 1,
+            candidate.cwdUnknown || splitUnverified,
+          ),
+        );
+        continue;
+      }
+      pushOps(extractShellOperations(sub, candidate.cwd), sub, candidate);
     }
+    splitUnverified ||= Boolean(terminatorAmbiguous);
   }
 
-  return ops;
+  return branched ? dedupeOps(ops) : ops;
 }
 
 function hasAbsolutePathTokenForOperation(
