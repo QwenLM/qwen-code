@@ -2,8 +2,12 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.aliyun.oss.ClientConfiguration;
 import com.aliyun.oss.ClientException;
+import com.aliyun.oss.HttpMethod;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
+import com.aliyun.oss.common.comm.RequestMessage;
+import com.aliyun.oss.common.comm.ResponseMessage;
+import com.aliyun.oss.common.comm.RetryStrategy;
 import com.aliyun.oss.model.BucketVersioningConfiguration;
 import com.aliyun.oss.model.CannedAccessControlList;
 import com.aliyun.oss.model.ObjectMetadata;
@@ -22,6 +26,35 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
     private static final Set<String> TRANSIENT_SERVICE_ERRORS = Set.of("InternalError", "ServiceUnavailable");
     private final OSS client;
     private final String bucket;
+
+    public static void configureClientRetries(ClientConfiguration configuration) {
+        // A nonzero limit exposes the failed HTTP status to the strategy. The
+        // strategy never retries; the guarded read loop owns every new request.
+        configuration.setMaxErrorRetry(1);
+        configuration.setRetryStrategy(new RetryStrategy() {
+            @Override
+            public boolean shouldRetry(Exception error, RequestMessage request,
+                    ResponseMessage response, int retries) {
+                if (error instanceof OSSException service && request != null && response != null
+                        && request.getMethod() == HttpMethod.GET
+                        && !"InvalidResponse".equals(service.getErrorCode())
+                        && (response.getStatusCode() == 500 || response.getStatusCode() == 502
+                                || response.getStatusCode() == 503)) {
+                    throw new TransientReadException(service);
+                }
+                return false;
+            }
+        });
+    }
+
+    private static final class TransientReadException extends RuntimeException {
+        private final OSSException original;
+
+        private TransientReadException(OSSException original) {
+            super(original);
+            this.original = original;
+        }
+    }
 
     public AliyunToolPublicationObjectStore(OSS client, String bucket) {
         this.client = Objects.requireNonNull(client);
@@ -64,6 +97,12 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
     }
 
     @Override
+    public void deleteIfPresent(String key) {
+        requireUnversioned();
+        client.deleteObject(bucket, key);
+    }
+
+    @Override
     public InputStream open(String key) {
         return open(key, () -> {});
     }
@@ -79,6 +118,10 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
             guard.run();
             try {
                 return request.get();
+            } catch (TransientReadException error) {
+                if (retries >= ClientConfiguration.DEFAULT_MAX_RETRIES) {
+                    throw error.original;
+                }
             } catch (OSSException error) {
                 if (retries >= ClientConfiguration.DEFAULT_MAX_RETRIES
                         || error.getErrorCode() == null
