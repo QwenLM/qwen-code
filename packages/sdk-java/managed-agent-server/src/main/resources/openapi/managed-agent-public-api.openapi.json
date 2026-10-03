@@ -1696,7 +1696,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "parameters": [
@@ -1749,7 +1749,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
@@ -1795,7 +1795,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "parameters": [
@@ -1987,7 +1987,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "requestBody": {
@@ -2034,7 +2034,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "requestBody": {
@@ -2082,7 +2082,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V34 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
           }
         },
         "requestBody": {

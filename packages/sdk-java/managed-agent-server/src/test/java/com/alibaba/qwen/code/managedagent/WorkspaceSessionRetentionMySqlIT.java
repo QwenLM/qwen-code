@@ -380,7 +380,7 @@ class WorkspaceSessionRetentionMySqlIT {
         return session;
     }
 
-    // Writes the session with the pre-V34 column set: the current store insert
+    // Writes the session with the pre-V35 column set: the current store insert
     // always names creator_actor_key, which a database at the prerequisite
     // version does not have yet.
     private String createAtLegacySchema(String tenant) {
