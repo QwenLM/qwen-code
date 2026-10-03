@@ -25,7 +25,10 @@ import {
   managedToolResponseMediaBytes,
   MAX_MANAGED_MEDIA_RESPONSE_BYTES,
 } from '../acp-integration/managed-tool-media.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isLoopbackBind } from './loopback-binds.js';
+
+const debugLogger = createDebugLogger('MANAGED_RUNTIME_PROVIDER');
 
 interface ManagedGatewayToolRuntime {
   getManifest(signal: AbortSignal): Promise<BridgeManagedRuntimeToolManifest>;
@@ -269,6 +272,18 @@ function waitForLocalSession(
             try {
               await cleanup();
             } catch (error) {
+              // After a non-release abort the awaiting promise has already
+              // rejected, so throwing here would land on a settled promise and
+              // the cleanup failure would vanish.
+              if (
+                signal.aborted &&
+                !(signal.reason instanceof ManagedRuntimeReleaseAbortError)
+              ) {
+                debugLogger.error(
+                  new ManagedRuntimeSessionCleanupError(cleanup, error),
+                );
+                return;
+              }
               throw new ManagedRuntimeSessionCleanupError(cleanup, error);
             }
             reject(
@@ -614,8 +629,13 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
         release.binding = await release.warmup.promise;
       } catch (error) {
         if (error instanceof ManagedRuntimeReleaseAbortError) return true;
-        if (error instanceof ManagedRuntimeSessionCleanupError)
+        if (error instanceof ManagedRuntimeSessionCleanupError) {
           release.cleanup = error.cleanup;
+          throw error;
+        }
+        // A transport-failed warmup must not wedge the release record: drop it
+        // so a retried release takes the resume-then-close path below.
+        release.warmup = undefined;
         throw error;
       }
     }
@@ -981,7 +1001,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     this.retryWindowMs = validRetryOption(
       options.prepareRetryWindowMs,
       DEFAULT_PREPARE_RETRY_WINDOW_MS,
-      0,
+      1,
     );
     this.retryDelayMs = validRetryOption(
       options.prepareRetryDelayMs,
@@ -995,10 +1015,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     );
   }
 
-  prepare(
-    request: ManagedRuntimePrepareRequest,
-    retryWindowMs = this.retryWindowMs,
-  ): ManagedRuntimeHandle {
+  prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle {
     request = structuredClone(request);
     if (this.lifetime.signal.aborted) {
       throw new ManagedRuntimeProviderError(
@@ -1040,7 +1057,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
       // Release must await preparation before sending close. Aborting only its
       // HTTP response would leave a late-created Session without an owner.
       const signal = this.lifetime.signal;
-      const ready = this.prepareRemote(request, signal, retryWindowMs);
+      const ready = this.prepareRemote(request, signal, this.retryWindowMs);
       entry = { request: structuredClone(request), controller, ready };
       this.entries.set(request.sessionId, entry);
       void ready.catch(() => {
@@ -1137,7 +1154,18 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
       );
     }
     entry.v2 ??= this.createToolV2Client(entry);
-    await entry.ready;
+    try {
+      await entry.ready;
+    } catch (error) {
+      // A failed cold start must not pin the v2 marker: keep the entry
+      // re-preparable instead of converting the next release into a
+      // permanently closing one.
+      if (this.entries.get(request.sessionId) === entry && !entry.releasing) {
+        if (entry.v2 !== undefined) delete entry.v2;
+        this.entries.delete(request.sessionId);
+      }
+      throw error;
+    }
     this.lifetime.signal.throwIfAborted();
     return entry.v2;
   }

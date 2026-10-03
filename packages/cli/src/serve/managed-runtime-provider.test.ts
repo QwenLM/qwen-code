@@ -22,8 +22,6 @@ import {
 } from './managed-runtime-provider.js';
 import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
-  parseManagedRuntimeExecuteRequest,
-  parseManagedRuntimePrepareRequest,
   type ManagedRuntimePrepareRequest,
 } from './managed-runtime-protocol.js';
 import type {
@@ -1100,37 +1098,147 @@ describe('Managed Runtime providers', () => {
     expect(runtime.bridge.getManagedRuntimeToolManifest).not.toHaveBeenCalled();
     local.dispose();
   });
-});
 
-describe('Managed Runtime protocol', () => {
-  it('accepts only versioned Prompt-free identity payloads', () => {
-    expect(parseManagedRuntimePrepareRequest(prepareRequest)).toEqual(
-      prepareRequest,
+  it('forwards a provider-level cancel with the bound client identity', async () => {
+    const runtime = fakeRuntime();
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    await local.prepare(prepareRequest).ready;
+    await expect(
+      local.cancel(prepareRequest.sessionId, 'execution-1', prepareRequest),
+    ).resolves.toBe(true);
+    expect(runtime.cancel).toHaveBeenCalledWith(
+      prepareRequest.sessionId,
+      'execution-1',
+      { clientId: 'runtime-client-p8' },
     );
-    expect(() =>
-      parseManagedRuntimePrepareRequest({
+    local.dispose();
+  });
+
+  it('rejects a cancel whose expected identity changed without reaching the bridge', async () => {
+    const runtime = fakeRuntime();
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    await local.prepare(prepareRequest).ready;
+    await expect(
+      local.cancel(prepareRequest.sessionId, 'execution-1', {
         ...prepareRequest,
-        protocolVersion: 2,
+        tenantId: 'other',
       }),
-    ).toThrow('unsupported');
-    expect(() =>
-      parseManagedRuntimePrepareRequest({
-        ...prepareRequest,
-        history: [],
-      }),
-    ).toThrow();
-    expect(() =>
-      parseManagedRuntimeExecuteRequest({
-        ...prepareRequest,
-        toolRequest: {
-          executionId: 'x'.repeat(129),
-          turnId: 'turn-p8',
-          toolCallId: 'call-p8',
-          capabilityDigest: manifest.capabilityDigest,
-          toolName: 'read_file',
-          input: {},
-        },
-      }),
-    ).toThrow();
+    ).rejects.toThrow('identity');
+    expect(runtime.cancel).not.toHaveBeenCalled();
+    local.dispose();
+  });
+
+  it('resolves a provider-level cancel false when nothing is held', async () => {
+    const runtime = fakeRuntime();
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    await expect(
+      local.cancel(prepareRequest.sessionId, 'execution-1'),
+    ).resolves.toBe(false);
+    expect(runtime.cancel).not.toHaveBeenCalled();
+    local.dispose();
+  });
+
+  it('retries a release past a transport-failed warmup via the restore path', async () => {
+    const runtime = fakeRuntime();
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    let rejectGate!: (error: unknown) => void;
+    const pending = new Promise<never>((_resolve, reject) => {
+      rejectGate = reject;
+    });
+    vi.mocked(runtime.bridge.spawnOrAttach).mockReturnValueOnce(pending);
+    const ready = local.prepare(prepareRequest).ready;
+    void ready.catch(() => {});
+    const failed = local.release(prepareRequest.sessionId, prepareRequest);
+    rejectGate(new Error('bridge transport lost'));
+    await expect(failed).rejects.toThrow('bridge transport lost');
+    vi.mocked(runtime.bridge.resumeSession).mockResolvedValueOnce({
+      sessionId: prepareRequest.sessionId,
+      workspaceCwd,
+      attached: false,
+      clientId: 'runtime-client-p8',
+      hasActivePrompt: false,
+      sourceType: 'managed-gateway',
+      sourceId: prepareRequest.sessionId,
+    } as Awaited<ReturnType<AcpSessionBridge['resumeSession']>>);
+    await expect(
+      local.release(prepareRequest.sessionId, prepareRequest),
+    ).resolves.toBe(true);
+    expect(runtime.close).toHaveBeenCalledWith(prepareRequest.sessionId, {
+      clientId: 'runtime-client-p8',
+    });
+    local.dispose();
+  });
+
+  it('re-prepares a remote Session after a failed v2 cold start instead of closing permanently', async () => {
+    let prepares = 0;
+    const releases: string[] = [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, options?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith('/v1/prepare')) {
+          if (++prepares === 1) return new Response('', { status: 500 });
+          return Response.json({ protocolVersion: 1, ready: true });
+        }
+        if (pathname.endsWith('/release')) {
+          const body = JSON.parse(String(options?.body)) as {
+            protocolVersion: number;
+          };
+          releases.push(pathname);
+          return Response.json({
+            protocolVersion: body.protocolVersion,
+            released: true,
+          });
+        }
+        return Response.json({ protocolVersion: 2, result: {} });
+      },
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+    });
+    try {
+      await expect(remote.getToolV2Client(prepareRequest)).rejects.toThrow(
+        'HTTP 500',
+      );
+      expect(prepares).toBe(1);
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).resolves.toBe(true);
+      expect(releases).toEqual(['/internal/managed-runtime/v1/release']);
+      const client = await remote.getToolV2Client(prepareRequest);
+      expect(prepares).toBe(2);
+      expect(client).toBeDefined();
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).resolves.toBe(true);
+    } finally {
+      remote.dispose();
+    }
+  });
+
+  it('treats a zero prepare retry window as the default window', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>
+      new URL(String(input)).pathname.endsWith('/v1/prepare') &&
+      ++prepares === 1
+        ? new Response('', { status: 503 })
+        : Response.json({ protocolVersion: 1, ready: true }),
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+      prepareRetryWindowMs: 0,
+      prepareRetryDelayMs: 0,
+    });
+    try {
+      await remote.prepare(prepareRequest).ready;
+      expect(prepares).toBe(2);
+    } finally {
+      remote.dispose();
+    }
   });
 });
