@@ -392,6 +392,10 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run session owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-session-failover
       - name: 'Run in-flight owner failover E2E'
         timeout-minutes: 10
         run: >-
@@ -400,10 +404,6 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
-      - name: 'Run session owner failover E2E'
-        timeout-minutes: 10
-        run: >-
-          npm run test:e2e:managed-session-failover
       - name: 'Run Harness-restart session failover E2E'
         timeout-minutes: 10
         run: >-
