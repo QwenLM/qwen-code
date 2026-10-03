@@ -268,7 +268,10 @@ describe('GlobTool', () => {
         );
         // The glob really walked the external path: the seeded file comes
         // back (a regression to "nothing found" now fails, not passes).
+        // Count AND identity: a walk redirected to any OTHER single *.txt
+        // satisfies the count alone.
         expect(result.llmContent).toContain('Found 1 file(s)');
+        expect(result.llmContent).toContain(path.join(outside, 'external.txt'));
       } finally {
         await fs.rm(outside, { recursive: true, force: true });
       }

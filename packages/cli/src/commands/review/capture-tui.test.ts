@@ -918,6 +918,10 @@ exit 0
         // And it says WHICH doubt: an operator told "kill-server failed
         // twice" would go looking for a wedged server.
         expect(stderr).toContain('could not reach the base this run started');
+        // ...and the hand-reap hint reaches THIS base: a bare `tmux -L`
+        // re-resolves the socket dir from the paste environment and
+        // answers 'no server running' on the very shape this fixture is.
+        expect(stderr).toContain(`TMUX_TMPDIR='${envBase}'`);
       } finally {
         if (realPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = realPath;
@@ -5410,20 +5414,25 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Every other success capture passes an explicit cwd; the default
     // branch feeds both new-session -c and the manifest — a mutant default
     // would make the capture's only record name a directory the command
-    // never ran in.
+    // never ran in. And the default is observed AT THE PANE, not just
+    // asserted on the field: the command reports its own working
+    // directory, so a split-default mutant (manifest from process.cwd(),
+    // new-session -c from somewhere else) shows up in the bytes.
     await runCaptureTui({
-      command: 'printf "CWDLESS\\n"; sleep 30',
+      command: 'pwd; sleep 30',
       cwd: undefined,
       cols: 80,
       rows: 24,
       settleMs: 0,
-      until: 'CWDLESS',
+      until: '/',
       keys: undefined,
       out: join(dir, 'nocwd'),
       timeoutMs: 10_000,
     } as never);
     const manifest = JSON.parse(readFileSync(join(dir, 'nocwd.json'), 'utf8'));
     expect(manifest.cwd).toBe(process.cwd());
+    const ans = readFileSync(join(dir, 'nocwd.ans'), 'utf8');
+    expect(ans).toContain(process.cwd());
   });
 
   it('survives a C-\\ sent through --keys — QUIT is trapped at layer 0', async () => {
@@ -5522,6 +5531,33 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     await run({ until: 'WORLD', settleMs: 0 });
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('until-match');
+  });
+
+  it('spends the budget against a stepped HOST CLOCK — deadlines are monotonic, not wall', async () => {
+    // A deadline composed from Date.now() dies with the host clock: a
+    // forward NTP step BETWEEN composition and comparison fires it
+    // early, and the never-matching until settles in mid-budget while
+    // the manifest promises the whole window. (A constant offset does
+    // not discriminate — composition and comparison shift together —
+    // so the wall STEPS 600s forward once the run is ~550ms in.)
+    // performance.now() cannot be stepped: this run must still pay the
+    // 1500ms it owes either way.
+    const realNow = Date.now;
+    const t0 = realNow();
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      const r = realNow();
+      return r - t0 >= 550 ? r + 600_000 : r;
+    });
+    const started = performance.now();
+    try {
+      await run({ until: 'NEVER-APPEARS', timeoutMs: 1500 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(process.exitCode).toBeUndefined();
+    expect(performance.now() - started).toBeGreaterThan(1500 * 0.8);
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.settledBy).toBe('timeout');
   });
 
   it('captures anyway on --until timeout and records the degraded settle', async () => {

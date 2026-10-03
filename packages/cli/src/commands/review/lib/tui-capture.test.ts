@@ -121,6 +121,19 @@ describe('kill-verdict base attribution', () => {
     ).toBe(false);
   });
 
+  it('refuses a base string-PREFIX pair — the trailing slash is the boundary, not decoration', () => {
+    // Every fixture above pairs disjoint bases, so a `startsWith(pinned)`
+    // mutant — one character shorter than the real `${pinned}/` — shipped
+    // green: '/tmp/tmux-501' starts with '/tmp/t' lexically, and the
+    // wrongly-credited verdict names a directory the kill never examined.
+    // Both sides canonicalize through realpathSafe here ('/tmp' exists on
+    // every POSIX host; neither sibling path does), so the pair survives
+    // macOS's /private shift with the same discrimination.
+    expect(
+      verdictExaminedBase('no server running on /tmp/tmux-501/srv', '/tmp/t'),
+    ).toBe(false);
+  });
+
   it('normalizes the base before comparing', () => {
     expect(
       verdictExaminedBase('no server running on /tmp/tmux-501/srv', '/tmp/'),
@@ -342,7 +355,18 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       '--',
       'C-c',
     ]);
-    expect(plan.sendKeys('-l')[plan.sendKeys('-l').length - 1]).toBe('-l');
+    // Full array, not just the last element: the C-c pin above cannot
+    // discriminate a mutant that drops `--` for DASH-LEADING tokens only,
+    // and leaving the last-element check alone shipped exactly that.
+    expect(plan.sendKeys('-l')).toEqual([
+      '-L',
+      'srv',
+      'send-keys',
+      '-t',
+      'cap',
+      '--',
+      '-l',
+    ]);
   });
 
   it('escapes a TRAILING `;` on the user-derived key and cwd elements', () => {

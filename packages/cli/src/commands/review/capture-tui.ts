@@ -1760,7 +1760,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
                     'its permissions or type, not the server)'
                   : ''
         }; the private tmux server ${server} may still be running ` +
-          `(tmux -L ${server} kill-server to reap it by hand).`,
+          // WITH the base override, mirroring cleanup's manual-reap note:
+          // a bare `-L` re-resolves the socket directory from the invoking
+          // environment, so on the very hosts this WARNING can appear — a
+          // non-/tmp, possibly since-unusable base — the unadorned command
+          // answers 'no server running' and reads as "already gone" while
+          // the orphan runs out its window. Single-quoted, never
+          // JSON.stringify: a base carrying $ or a backtick expands at
+          // paste time and resolves the wrong base.
+          `(TMUX_TMPDIR='${startBase.replaceAll("'", "'\\''")}' tmux -L ` +
+          `'${server.replaceAll("'", "'\\''")}' kill-server to reap it ` +
+          'by hand).',
       );
     }
   };
@@ -1853,10 +1863,18 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // pty's INTR fires the instant tmux writes 0x03 — a C-c racing the
     // holder's own `trap : INT` line killed pane, session and server
     // (measured; no in-script ordering can win, so the wait sits out here).
+    // Monotonic, never wall: a deadline composed from Date.now() is a
+    // hostage to the host clock stepping (NTP sync, VM time drift — the
+    // same skew the suite's monotonic discipline names), and a backward
+    // step burns the belt in real time while a forward one fires a
+    // deadline that never ran. Every deadline and poll comparison in
+    // this capture is a difference of two reads, so performance.now()
+    // is a drop-in. No epoch escapes: the manifest carries differences,
+    // never stamps.
     {
-      const holderDeadline = Date.now() + holderInit.timeoutMs;
+      const holderDeadline = performance.now() + holderInit.timeoutMs;
       while (!existsSync(holderReadyPath)) {
-        if (Date.now() >= holderDeadline) {
+        if (performance.now() >= holderDeadline) {
           throw new PaneInitFailed(
             'the pane never initialized — its holder wrote no ready marker',
           );
@@ -1866,7 +1884,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
     // One deadline covers the ready gate AND the until poll: two separate
     // clocks would let a capture run to 2× --timeout-ms.
-    const deadline = Date.now() + args.timeoutMs;
+    const deadline = performance.now() + args.timeoutMs;
     if (readyRe) {
       readyFailed = true;
       for (;;) {
@@ -1877,7 +1895,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           break;
         }
         if (m === 'overrun') matchOverruns++;
-        if (Date.now() >= deadline) break;
+        if (performance.now() >= deadline) break;
         await sleep(250);
       }
     }
@@ -1903,7 +1921,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // What the marker search ACTUALLY got, for the degradation to report:
       // the ready gate above shares this one deadline, so with --ready given
       // the poll starts with only the remainder.
-      untilPolledMs = Math.max(0, deadline - Date.now());
+      untilPolledMs = Math.max(0, deadline - performance.now());
       // Poll for the settle marker on the LOGICAL view (wraps joined,
       // escapes absent): on the physical frame, a marker spanning a wrap
       // boundary or an SGR attribute change can never match (measured:
@@ -1922,7 +1940,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           break;
         }
         if (m === 'overrun') matchOverruns++;
-        if (Date.now() >= deadline) {
+        if (performance.now() >= deadline) {
           ansText = tmux(plan.capture);
           break;
         }
@@ -1942,13 +1960,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
       (err.message ?? String(e)).split('\n')[0];
     captureFailed = true;
+    // Same host attribution as the out-prep catch: a spawn-level EMFILE
+    // here is the caller's fd table, not tmux, and the reason is
+    // machine-read — 'tmux failed mid-capture: spawnSync tmux EMFILE'
+    // sent the operator to fix a binary that was never reached. The
+    // class cannot be fixture'd without a real fd-exhaustion injector,
+    // so the mapping rides on hostStateFor's directly-pinned arms.
+    const host = hostStateFor((e as NodeJS.ErrnoException).code);
     // WHO failed: the ready gate is a pure existsSync poll after a tmux
     // start that SUCCEEDED, so routing it through this catch blamed tmux
     // for something no tmux invocation did — in a reason a machine reads.
     refuse(
       e instanceof PaneInitFailed
         ? `capture never started: ${detail}`
-        : `tmux failed mid-capture: ${detail}`,
+        : `tmux failed mid-capture: ${host ?? detail}`,
     );
     return;
   } finally {
@@ -2592,7 +2617,8 @@ export const captureTuiCommand: CommandModule = {
       .option('settle-ms', {
         type: 'number',
         default: 3000,
-        describe: 'Fixed delay before capturing (ignored when --until is set)',
+        describe:
+          'Fixed delay before capturing (ignored when --until is set, and when a --ready gate times out)',
       })
       .option('until', {
         type: 'string',
@@ -2620,7 +2646,7 @@ export const captureTuiCommand: CommandModule = {
         type: 'number',
         default: 60_000,
         describe:
-          'One shared deadline for the --ready gate and --until polling. NOT the whole capture: --settle-ms runs after it, so wall time is bounded by timeout-ms + settle-ms',
+          'One shared deadline for the --ready gate and --until polling. NOT wall time: --settle-ms runs after it, and the freeze probe/render and the reap each carry their own belts (up to ~55s more on a wedged host)',
       }),
   handler: (argv) =>
     runCaptureTui({

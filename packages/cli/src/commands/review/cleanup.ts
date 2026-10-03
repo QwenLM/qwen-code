@@ -716,6 +716,19 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     let serverDead = false;
     let dirUnusable = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      // Same pause, same reason as capture-tui's own reap (whose comment
+      // carries the probe): back-to-back, both attempts failed under fd
+      // exhaustion in the same microsecond — the condition that makes the
+      // CLIENT fail rather than the server — and the retry bought nothing.
+      // Synchronous by necessity: this sweep is sync throughout.
+      if (attempt > 0) {
+        try {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        } catch {
+          // Blocking waits are disallowed on some hosts; the retry still
+          // happens, just without the pause.
+        }
+      }
       try {
         execFileSync(tmuxBin, ['-L', name, 'kill-server'], {
           stdio: 'pipe',

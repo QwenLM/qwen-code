@@ -1803,7 +1803,15 @@ describe('runCleanup', () => {
           }
           return Buffer.from('');
         });
+        // The pause between the two attempts is REAL, mirroring
+        // capture-tui's own reap: back-to-back, both attempts failed
+        // under fd exhaustion in the same microsecond — the precise host
+        // shape the pause exists for — and the retry bought nothing. A
+        // floor at 0.8x the 100ms budget tolerates timer coarseness
+        // without tolerating its removal.
+        const started = performance.now();
         runCleanup('local');
+        expect(performance.now() - started).toBeGreaterThanOrEqual(80);
         const killCalls = mocks.execFileSync.mock.calls.filter(
           (c: unknown[]) =>
             c[0] === SWEEP_TMUX &&
