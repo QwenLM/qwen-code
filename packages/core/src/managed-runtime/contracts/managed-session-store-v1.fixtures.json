@@ -9,6 +9,7 @@
     "maxResourcesPerTransaction": 1024,
     "maxTransactionBytes": 8388608,
     "maxTransactionEvents": 256,
+    "maxJsonDepth": 64,
     "minimumWriterTokenLength": 32,
     "maximumWriterTokenLength": 512,
     "minimumLeaseDurationMs": 1000,

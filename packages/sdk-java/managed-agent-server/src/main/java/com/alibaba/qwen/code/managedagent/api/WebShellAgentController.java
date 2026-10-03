@@ -13,10 +13,14 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import jakarta.servlet.http.HttpServletRequest;
@@ -38,13 +42,30 @@ public class WebShellAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
     private final SessionLifecycleService lifecycle;
+    private final ManagedTaskService tasks;
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
-            SessionLifecycleService lifecycle) {
+            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
+        this.tasks = tasks;
+    }
+
+    @PostMapping("/tasks/query")
+    public WebShellPage<WebShellTask> tasks(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskQueryRequest request) {
+        return tasks.queryWebShellTasks(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(), request.cursor(),
+                request.limit() == null ? 20 : request.limit());
+    }
+
+    @PostMapping("/tasks/get")
+    public WebShellTask task(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskGetRequest request) {
+        return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(), request.taskId());
     }
 
     @PostMapping("/sessions/query")
@@ -162,6 +183,15 @@ public class WebShellAgentController {
             TenantContext tenant,
             @Valid @RequestBody WebShellLifecycleRequest request) {
         return operation(tenant, request, OperationKind.DELETE);
+    }
+
+    @PostMapping("/sessions/unarchive")
+    public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(result.body());
     }
 
     @PostMapping("/operations/query")

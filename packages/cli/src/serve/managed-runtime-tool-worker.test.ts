@@ -182,6 +182,13 @@ describe('Managed Runtime tool worker', () => {
             });
           }
           expect(response.headers.get('cache-control')).toBe('no-store');
+          // A request without the token never learns the worker's
+          // incarnation.
+          if (fixture.expected.status === 401) {
+            expect(
+              response.headers.get('x-qwen-managed-runtime-incarnation'),
+            ).toBeNull();
+          }
         });
       }
     }
@@ -201,6 +208,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(executeResponse.status).toBe(200);
+    expect(
+      executeResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const settled = (await executeResponse.json()) as {
       state: string;
       result: { executionStatus: string; responseParts: unknown[] };
@@ -224,6 +234,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(statusResponse.status).toBe(200);
+    expect(
+      statusResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     const view = (await statusResponse.json()) as {
       state: string;
       lastSequence: number;
@@ -299,6 +312,42 @@ describe('Managed Runtime tool worker', () => {
       result: { executionStatus: 'error' },
     });
     expect(fs.existsSync(path.join(late, 'sub', 'probe.txt'))).toBe(false);
+  });
+
+  it('keeps unapproved managed shells inside their workspace', async () => {
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-managed-outside-'),
+    );
+    try {
+      const origin = await start();
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            ...executeBody({
+              command: 'echo probe > probe.txt',
+              directory: outside,
+            }),
+            toolName: 'run_shell_command',
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'error' },
+      });
+      expect(JSON.stringify(settled)).toContain(
+        'not within any of the registered workspace directories',
+      );
+      expect(fs.existsSync(path.join(outside, 'probe.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("gives shells the Runtime's session and project directory, as before", async () => {
@@ -777,6 +826,9 @@ describe('Managed Runtime tool worker', () => {
       },
     );
     expect(cancelResponse.status).toBe(200);
+    expect(
+      cancelResponse.headers.get('x-qwen-managed-runtime-incarnation'),
+    ).toBe(BOOT.runtimeIncarnation);
     expect(await cancelResponse.json()).toMatchObject({
       state: 'cancel_requested',
     });

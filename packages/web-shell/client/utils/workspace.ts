@@ -10,6 +10,30 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
+
+export function isAgentCollaborationEnabledForWorkspace(
+  capabilities: DaemonCapabilities | undefined,
+  cwd: string | undefined,
+): boolean {
+  if (!capabilities?.features?.includes(AGENT_COLLABORATION_FEATURE)) {
+    return false;
+  }
+  const workspaces = capabilities.workspaces;
+  if (
+    !workspaces?.some((entry) => entry.agentCollaborationEnabled !== undefined)
+  ) {
+    return true;
+  }
+  if (!cwd) {
+    return workspaces.some((entry) => entry.agentCollaborationEnabled === true);
+  }
+  return (
+    workspaces.find((entry) => entry.cwd === cwd)?.agentCollaborationEnabled ===
+    true
+  );
+}
+
 /**
  * Last path segment of an absolute workspace cwd, for a compact per-workspace
  * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when

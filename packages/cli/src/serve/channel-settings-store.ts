@@ -18,6 +18,7 @@ import {
 import {
   multiSessionCompatibilityError,
   parseMessageRoutingConfig,
+  parseSessionRotationConfig,
 } from '../commands/channel/config-utils.js';
 import {
   loadSettings,
@@ -143,6 +144,16 @@ function assertSharedField(
   if (key === 'multiSession') {
     if (typeof value !== 'boolean') {
       throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
+  if (key === 'sessionRotation') {
+    try {
+      parseSessionRotationConfig('settings', value);
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
     }
     return true;
   }
@@ -654,6 +665,10 @@ export class WorkspaceChannelSettingsStore {
     );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
+      sessionRotation: parseSessionRotationConfig(
+        name,
+        nextConfig['sessionRotation'],
+      ),
       sessionScope:
         (nextConfig['sessionScope'] as
           | 'user'
@@ -722,6 +737,27 @@ export class WorkspaceChannelSettingsStore {
     const { current, storedChannels } = this.assertRevision(
       options.expectedRevision,
     );
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured) {
+      if (!current.startupNames.includes(name)) return current;
+      // The config is already gone from this scope; only a stale startup
+      // selection can remain. Write just that selection — replacing the
+      // whole `channels` subtree would erase entries the read view filters
+      // out (and this delete never touched), such as legacy scalar values.
+      saveSettings(
+        channelSettingsScope(this.workspaceCwd),
+        {
+          serve: {
+            channels: current.startupNames.filter(
+              (startupName) => startupName !== name,
+            ),
+          },
+        },
+        ['serve', 'channels'],
+        { throwOnWriteFailure: true },
+      );
+      return this.snapshot();
+    }
     const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);

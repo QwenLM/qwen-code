@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -28,8 +29,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -58,12 +62,15 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
         "qwen.managed-agent.events.heartbeat-interval=60s",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// Streaming flows write the Mock response from a background thread while a
+// printing handler would walk the same headers.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 class ManagedEventReplayTest {
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
     // More events than SessionEventHub buffers for one Session.
     private static final int OVERFLOW = 600;
+    private static final long RESUME_AFTER = 5;
 
     @Autowired
     private MockMvc mvc;
@@ -157,17 +164,18 @@ class ManagedEventReplayTest {
         assertThat(ids(stream)).containsExactlyElementsOf(range(1, last));
     }
 
-    @Test
-    void overflowFallsBackToTheStoreWithoutGapsOrDuplicates()
+    @ParameterizedTest(name = "web shell: {0}")
+    @ValueSource(booleans = {false, true})
+    void overflowFallsBackToTheStoreWithoutGapsOrDuplicates(boolean webShell)
             throws Exception {
+        assertThat(SessionEventHub.CAPACITY).isLessThan(OVERFLOW);
         String tenant = tenant();
         String sessionId = session(tenant);
         long caughtUp = append(tenant, sessionId, 20);
         RecordingEmitter emitter = new RecordingEmitter(caughtUp + 1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            streams(executor, emitter).publicStream(tenant, null, sessionId,
-                    0);
+            open(streams(executor, emitter), webShell, tenant, sessionId);
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> emitter.ids().contains(caughtUp));
             append(tenant, sessionId, 1);
@@ -180,15 +188,18 @@ class ManagedEventReplayTest {
             assertThat(emitter.completed.await(10, TimeUnit.SECONDS))
                     .isTrue();
             assertThat(emitter.ids())
-                    .containsExactlyElementsOf(range(1, last));
+                    .containsExactlyElementsOf(range(RESUME_AFTER + 1, last));
             assertThat(emitter.failed).isEmpty();
+            // Catching up from the store needs no Snapshot reload.
+            assertThat(emitter.resync).isEmpty();
         } finally {
             executor.shutdownNow();
         }
     }
 
-    @Test
-    void aFloorAdvancedPastALaggingStreamSendsOneResyncFrame()
+    @ParameterizedTest(name = "web shell: {0}")
+    @ValueSource(booleans = {false, true})
+    void aFloorAdvancedPastALaggingStreamSendsOneResyncFrame(boolean webShell)
             throws Exception {
         String tenant = tenant();
         String sessionId = session(tenant);
@@ -196,8 +207,7 @@ class ManagedEventReplayTest {
         RecordingEmitter emitter = new RecordingEmitter(caughtUp + 1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            streams(executor, emitter).publicStream(tenant, null, sessionId,
-                    0);
+            open(streams(executor, emitter), webShell, tenant, sessionId);
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> emitter.ids().contains(caughtUp));
             long stuck = append(tenant, sessionId, 1);
@@ -209,9 +219,14 @@ class ManagedEventReplayTest {
             assertThat(emitter.completed.await(10, TimeUnit.SECONDS))
                     .isTrue();
             assertThat(emitter.ids())
-                    .containsExactlyElementsOf(range(1, stuck));
-            assertThat(emitter.resync).containsExactly(
-                    new SessionResyncRequired(
+                    .containsExactlyElementsOf(range(RESUME_AFTER + 1, stuck));
+            assertThat(emitter.resync).containsExactly(webShell
+                    ? new WebShellResyncRequired(
+                            ManagedEventStreamService.RESYNC, sessionId,
+                            window.floorSequence(),
+                            window.snapshotThroughSequence(),
+                            ManagedEventStreamService.RESYNC_ACTION)
+                    : new SessionResyncRequired(
                             ManagedEventStreamService.RESYNC, sessionId,
                             window.floorSequence(),
                             window.snapshotThroughSequence(),
@@ -295,6 +310,16 @@ class ManagedEventReplayTest {
         assertThat(frame.indexOf("\n\n")).as("frames in %s", frame)
                 .isEqualTo(frame.length() - 2);
         return objectMapper.readTree(frame.substring(prefix.length()));
+    }
+
+    // Both transports have their own delivery loop; resume from a cursor.
+    private static void open(ManagedEventStreamService streams,
+            boolean webShell, String tenant, String sessionId) {
+        if (webShell) {
+            streams.webShellStream(tenant, null, sessionId, RESUME_AFTER);
+        } else {
+            streams.publicStream(tenant, null, sessionId, RESUME_AFTER);
+        }
     }
 
     private ManagedEventStreamService streams(ExecutorService executor,

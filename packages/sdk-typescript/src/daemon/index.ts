@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -806,6 +807,8 @@ export type {
   DaemonExtensionEntry,
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  DaemonExtensionSummary,
+  DaemonWorkspaceExtensionSummaries,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,

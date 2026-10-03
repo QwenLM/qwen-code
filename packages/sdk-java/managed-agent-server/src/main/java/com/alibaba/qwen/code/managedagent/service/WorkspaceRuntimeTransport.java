@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -9,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
@@ -20,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
@@ -85,37 +89,222 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Map<String, Object>> execute(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference) {
+        Context captureContext = null;
         if (managed(session)) {
             try {
                 Context context = context(lease, session, true);
                 ownership.assertHeld(context.binding(), context.session());
+                if (v3(reference)) {
+                    captureContext = requireLocalCapture(context);
+                }
             } catch (RuntimeException error) {
                 // These checks precede HTTP dispatch, so no tool could have started.
                 String code = error instanceof RuntimeBrokerException refusal
                         ? refusal.getCode() : "workspace_unavailable";
-                return CompletableFuture.completedFuture(Map.of("executionStatus", "not_started",
+                Map<String, Object> result = new LinkedHashMap<>(Map.of("executionStatus", "not_started",
                         "responseParts", List.of(), "error", Map.of("type", code,
                                 "message", "Workspace execution was refused before dispatch.")));
+                if (v3(reference)) {
+                    result.put("capture", null);
+                }
+                return CompletableFuture.completedFuture(result);
             }
+        }
+        if (v3(reference)) {
+            if (captureContext == null || !"run_shell_command".equals(reference.get("toolName"))) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            Map<String, Object> capture = Map.of("tenantId", session.getScope().getTenantId(),
+                    "sessionId", session.getHarnessSessionId(), "turnId", reference.get("promptId"),
+                    "executionCallId", reference.get("executionCallId"),
+                    "bindingGeneration", Long.toString(captureContext.runtime().getGeneration()),
+                    "capturePolicy", "complete_required");
+            return delegate.executeV3(lease, session, wireReference(reference), capture).thenApply(answer -> {
+                if (!"settled".equals(answer.get("state")) || !(answer.get("result") instanceof Map<?, ?>)) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> result = (Map<String, Object>) answer.get("result");
+                return result;
+            });
         }
         return delegate.execute(lease, session, reference);
     }
 
     @Override
+    public CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.installPublication(lease, session, grant);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        try {
+            requireOwnedWorkspace(lease, session);
+        } catch (RuntimeException error) {
+            String code = error instanceof RuntimeBrokerException refusal
+                    ? refusal.getCode() : "workspace_unavailable";
+            Map<String, Object> result = new LinkedHashMap<>(Map.of("executionStatus", "not_started",
+                    "responseParts", List.of(), "error", Map.of("type", code,
+                            "message", "Workspace execution was refused before dispatch.")));
+            result.put("capture", null);
+            return CompletableFuture.completedFuture(Map.of("state", "settled", "result", result));
+        }
+        return delegate.executeV3(lease, session, reference, payload, capture);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        requireOriginalRuntime(lease, session);
+        return delegate.statusV3(lease, session, reference, afterSequence);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        requireOriginalRuntime(lease, session);
+        return delegate.cancelV3(lease, session, reference);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        requireOriginalRuntime(lease, session);
+        return delegate.acknowledgeV3(lease, session, reference, receipt);
+    }
+
+    private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = context(lease, session, true);
+        ownership.assertHeld(context.binding(), context.session());
+    }
+
+    private void requireOriginalRuntime(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        context(lease, session, false);
+    }
+
+    @Override
+    public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> publisher) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = requireLocalCapture(context(lease, session, true));
+        ownership.assertHeld(context.binding(), context.session());
+        return delegate.installPublisherV3(lease, session, publisher);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> reference, Map<String, Object> receipt) {
+        if (!managed(session) || !v3(reference)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireLocalCapture(context(lease, session, false));
+        return delegate.acknowledgeV3(lease, session, wireReference(reference), receipt)
+                .thenApply(WorkspaceRuntimeTransport::projectStatus);
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> status(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference, long afterSequence) {
+        if (v3(reference)) {
+            if (!managed(session)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            requireLocalCapture(context(lease, session, false));
+            return delegate.statusV3(lease, session, wireReference(reference), afterSequence)
+                    .thenApply(WorkspaceRuntimeTransport::projectStatus);
+        }
         return delegate.status(lease, session, reference, afterSequence);
     }
 
     @Override
     public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference) {
+        if (v3(reference)) {
+            if (!managed(session)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            requireLocalCapture(context(lease, session, false));
+            return delegate.cancelV3(lease, session, wireReference(reference))
+                    .thenApply(WorkspaceRuntimeTransport::projectStatus);
+        }
         return delegate.cancel(lease, session, reference);
+    }
+
+    private static boolean v3(Map<String, Object> reference) {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
+    }
+
+    private static Context requireLocalCapture(Context context) {
+        if (!"local-process".equals(context.runtime().getRequest().getProvisionerKind())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return context;
+    }
+
+    private static Map<String, Object> wireReference(Map<String, Object> reference) {
+        Map<String, Object> wire = new LinkedHashMap<>();
+        for (String field : List.of("sessionId", "promptId", "callId", "toolName", "input")) {
+            if (reference.containsKey(field)) {
+                wire.put(field, reference.get(field));
+            }
+        }
+        wire.put("argsDigest", reference.get("inputDigest"));
+        return Map.copyOf(wire);
+    }
+
+    private static Map<String, Object> projectStatus(Map<String, Object> answer) {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("state", answer.get("state"));
+        if (answer.containsKey("result")) {
+            status.put("result", answer.get("result"));
+        }
+        return Map.copyOf(status);
     }
 
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
+            if (!managed(session)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            if (ManagedHookProtocol.isOperation(operation)) {
+                ManagedHookProtocol.validateSession(session, operation);
+            } else {
+                ManagedMcpProtocol.validateSession(session, operation);
+            }
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
+            Context context = context(lease, session, !recovery);
+            if (context.runtime().getState() != RuntimeBindingRecord.State.READY
+                    && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            if (recovery) {
+                if (!ownership.isHeld(context.binding(), context.session())) {
+                    throw new RuntimeBrokerException(409, "workspace_busy",
+                            "Workspace storage is held by another tool turn.", true);
+                }
+            } else {
+                ownership.assertHeld(context.binding(), context.session());
+            }
+        } else if (managed(session) && !"history".equals(operation.get("kind"))) {
+            Context context = context(lease, session, true);
+            ownership.assertHeld(context.binding(), context.session());
+        }
         return delegate.control(lease, session, operation);
     }
 
@@ -125,7 +314,18 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
-        return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
+        // RELEASING fences later claims; an absent holder needs no physical release.
+        if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !context.runtime().isDrainRequested()
+                && !ownership.isHeld(context.binding(), context.session())) {
+            return CompletableFuture.completedFuture(true);
+        }
+        return delegate.release(lease, session).thenCompose(released -> {
+            if (!Boolean.TRUE.equals(released)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false);
+        })
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());
                     return true;

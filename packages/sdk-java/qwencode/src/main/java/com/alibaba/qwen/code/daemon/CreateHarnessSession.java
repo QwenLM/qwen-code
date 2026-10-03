@@ -8,12 +8,16 @@ public final class CreateHarnessSession {
     private final String harnessSessionId;
     private final String approvalMode;
     private final ManagedSessionStoreConnection managedSessionStore;
+    private final String toolProfile;
+    private final Long approvalTimeoutMs;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 builder.harnessSessionId, "harnessSessionId");
         this.approvalMode = builder.approvalMode;
         this.managedSessionStore = builder.managedSessionStore;
+        this.toolProfile = builder.toolProfile;
+        this.approvalTimeoutMs = builder.approvalTimeoutMs;
     }
 
     public static Builder builder() {
@@ -34,6 +38,12 @@ public final class CreateHarnessSession {
         if (managedSessionStore != null) {
             result.put("managedSessionStore", managedSessionStore.toJson());
         }
+        if (toolProfile != null) {
+            result.put("toolProfile", toolProfile);
+        }
+        if (approvalTimeoutMs != null) {
+            result.put("approvalTimeoutMs", approvalTimeoutMs);
+        }
         return result;
     }
 
@@ -41,6 +51,16 @@ public final class CreateHarnessSession {
         private String harnessSessionId;
         private String approvalMode;
         private ManagedSessionStoreConnection managedSessionStore;
+        private String toolProfile;
+        private Long approvalTimeoutMs;
+
+        public Builder approvalTimeoutMs(long value) {
+            if (value < 1000 || value > 86400000) {
+                throw new IllegalArgumentException("Invalid approval timeout");
+            }
+            this.approvalTimeoutMs = value;
+            return this;
+        }
 
         private Builder() {
         }
@@ -71,6 +91,11 @@ public final class CreateHarnessSession {
 
         public CreateHarnessSession build() {
             return new CreateHarnessSession(this);
+        }
+
+        public Builder toolProfile(String toolProfile) {
+            this.toolProfile = toolProfile;
+            return this;
         }
     }
 }

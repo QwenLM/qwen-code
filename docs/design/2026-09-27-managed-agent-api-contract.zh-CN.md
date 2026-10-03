@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现；生命周期工作作为 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 的 D4 已在[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)中实现
+状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现；生命周期工作作为 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 的 D4 已在[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)中实现；D5 已在 [Turn 查询](2026-09-28-managed-agent-turn-queries.zh-CN.md)中实现；D6 已在 [Actions](2026-09-30-managed-agent-actions.zh-CN.md) 中设计，其中 Hosted Harness 部分（D6a）已实现
 日期：2026-09-27
 Issue：[#12793](https://github.com/QwenLM/qwen-code/issues/12793)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -81,9 +81,10 @@ main 已经提供改名（`PATCH /v1/agents/sessions/{sessionId}`）、`unarchiv
 
 ### 4.4 AgentDefinition 之前的 `agent_revision`
 
-`PublicSession.agent_revision` 是必填字段，但 `/v1/agents` 仍是 `planned`。在
-AgentDefinition 落地之前，D2 返回取自服务端 agent 配置的固定 revision。D1 只
-记录该字段缺失。
+`PublicSession.agent_revision` 是必填字段。D2 返回取自服务端 agent 配置的固定
+revision，D1 只记录该字段缺失。D8a（v1.29）把 `/v1/agents` 路由实现为已存储、
+不可变的 revision；在 D8b 让会话固定已存储的 revision 之前，会话仍使用配置的
+revision。参见 [AgentDefinition revision](2026-10-01-managed-agent-definitions.zh-CN.md)。
 
 ### 4.5 W0d 发现与空会话绑定
 
