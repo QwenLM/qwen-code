@@ -947,18 +947,37 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (signal.aborted) return undefined;
       const cause = getErrorMessage(error);
-      // Raising the general timeout cannot exceed the App resource ceiling.
-      const timeoutKey =
-        (typeof configuredTimeoutMs === 'number' &&
-          Number.isFinite(configuredTimeoutMs)) ||
-        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS
-          ? 'appResourceTimeoutMs'
-          : 'timeout';
+      // Name the key that produced this deadline -- and, when that key is
+      // already pinned at the App resource cap, the one that can go past it.
+      //
+      // Without an explicit `appResourceTimeoutMs` the deadline derives from
+      // the server `timeout` through
+      // `boundedAppLimit(mcpTimeout, DEFAULT, 1, DEFAULT)`, so a `timeout`
+      // at or above DEFAULT yields exactly DEFAULT. Reporting only
+      // `appResourceTimeoutMs` there hides both which key produced the limit
+      // and why raising it changed nothing, and points at a key the operator
+      // never set. Below DEFAULT the cap is not binding and raising
+      // `timeout` does work, so naming the cap would only mislead.
+      const hasExplicitAppTimeout =
+        typeof configuredTimeoutMs === 'number' &&
+        Number.isFinite(configuredTimeoutMs);
+      const derivedFromServerTimeout =
+        !hasExplicitAppTimeout &&
+        typeof this.mcpTimeout === 'number' &&
+        Number.isFinite(this.mcpTimeout);
+      const capIsBinding =
+        derivedFromServerTimeout &&
+        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS;
+      const timeoutRef = capIsBinding
+        ? `${this.appLimitSettingRef('timeout')}, capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; only appResourceTimeoutMs lifts that cap`
+        : derivedFromServerTimeout
+          ? this.appLimitSettingRef('timeout')
+          : this.appLimitSettingRef('appResourceTimeoutMs');
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
         isMcpSdkRequestTimeout(error)
-          ? `resource read timed out (limit: ${timeoutMs} ms; ${this.appLimitSettingRef(timeoutKey)})`
+          ? `resource read timed out (limit: ${timeoutMs} ms; ${timeoutRef})`
           : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
       // On the timeout branch `reason` replaces the underlying message, so
