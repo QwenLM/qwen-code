@@ -414,8 +414,8 @@ E2E (runner arms, all against the packaged stack):
 3. D7 freeze arm: post-SIGCONT assertions as listed. Deleting any of them
    fails the arm.
 4. CI: `hosted-harness-mysql` gains the D7 arm, the D8 arms and
-   `--session-failover`, and the job ceiling moves from 60 to 105 minutes
-   so the nine summed step ceilings (12 + 8×10 = 92) plus the uncapped
+   `--session-failover`, and the job ceiling moves from 60 to 120 minutes
+   so the step ceilings sum to 104 (12 + 8×10 + 12, the workspace-output gates added their own step) plus the uncapped
    setup steps keep headroom.
 
 The lost-reply race behind D4 (the old generation admits, its 202 reply is

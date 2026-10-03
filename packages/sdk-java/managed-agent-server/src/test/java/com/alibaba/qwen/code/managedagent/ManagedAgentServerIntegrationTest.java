@@ -80,6 +80,7 @@ import org.springframework.transaction.support.TransactionTemplate;
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.runtime-broker.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -114,6 +115,20 @@ class ManagedAgentServerIntegrationTest {
     @AfterEach
     void restoreHarnessAvailability() {
         harness.setAvailable(true);
+    }
+
+    // This context pins the Runtime Broker off (which is also its shipped
+    // default), so the dedicated recovery scheduler must not exist: a
+    // deployment that never runs the tick should not pay for an idle
+    // scheduler thread. The enabled side is pinned by
+    // RuntimeBrokerConfigurationIntegrationTest.
+    @Test
+    void disabledBrokerDoesNotCreateTheRecoveryScheduler() {
+        // The ungated sibling proves this context really loads the
+        // configuration that declares both schedulers, so the absence below
+        // cannot pass for the wrong reason.
+        assertThat(applicationContext.containsBean("managedArtifactScheduler")).isTrue();
+        assertThat(applicationContext.containsBean("runtimeRecoveryScheduler")).isFalse();
     }
 
     // Keeps the dispatch recovery scanner from claiming a Turn that the
@@ -640,7 +655,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAPendingRenameWithTheSameIdempotencyKey() throws Exception {
+    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -661,15 +676,17 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("hosted_harness_unavailable"));
 
+        // The answered failure retired its command row, so a different key
+        // is admitted instead of wedging on session_operation_active.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("session_operation_active"));
+                .andExpect(status().isOk());
 
+        // The retained failed receipt replays the same content and retries
+        // the Harness mutation without duplicating the requested event.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
@@ -685,7 +702,7 @@ class ManagedAgentServerIntegrationTest {
                 .getResponse().getContentAsString()).get("data");
         assertThat(events).filteredOn(event -> "session.updated".equals(
                         event.get("type").asText()))
-                .hasSize(1);
+                .hasSize(2);
     }
 
     @Test

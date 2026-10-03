@@ -1696,7 +1696,9 @@ describe('Hosted Harness no-tool session', () => {
   it('settles End and Delete before releasing the Hook Runtime', async () => {
     const { server, authorize, requests, release } = await hookApp();
     const order: string[] = [];
+    const released: Array<[string, boolean]> = [];
     release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      released.push([this.runtimeSessionId, Boolean(this.runtime)]);
       if (this.runtime) order.push('release');
     });
     const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
@@ -1711,6 +1713,11 @@ describe('Hosted Harness no-tool session', () => {
         .status,
     ).toBe(204);
     expect(order).toEqual(['SessionEnd', 'SessionDelete', 'release']);
+    // Both Hook operations replaced the load activation and restored it;
+    // neither names an earlier owner, so only this load's Runtime is released.
+    expect(released).toEqual([
+      [expect.stringMatching(/^hooks-activation-/), true],
+    ]);
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(2);

@@ -81,6 +81,9 @@ public final class StoreModels {
             boolean replayed) {
     }
 
+    public record SessionMutation(SessionRecord session, boolean replayed) {
+    }
+
     public enum OperationKind {
         CLOSE,
         ARCHIVE,
