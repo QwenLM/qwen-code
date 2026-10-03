@@ -240,3 +240,21 @@ describe('Web Shell remote workspace development proxy', () => {
     ).toBeUndefined();
   });
 });
+
+describe('Web Shell launcher-supplied open path', () => {
+  // scripts/managed-agent-dev.js hands the token-bearing open path through
+  // the environment instead of argv; server.open is where it lands.
+  it('opens the path QWEN_WEB_SHELL_OPEN_PATH carries', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', '/?managed=1&token=PROBETOKEN');
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBe('/?managed=1&token=PROBETOKEN');
+  });
+
+  it('stays closed when no launcher set the variable', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', undefined);
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBeUndefined();
+  });
+});

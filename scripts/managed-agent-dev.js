@@ -22,7 +22,15 @@
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
@@ -33,6 +41,9 @@ const args = process.argv.slice(2);
 const isWin = platform() === 'win32';
 
 const HOST = '127.0.0.1';
+// Vite binds 'localhost' (IPv6-first hosts resolve it to ::1 only), and the
+// web banner must spell the same host Vite bound.
+const WEB_HOST = 'localhost';
 const DEFAULT_DAEMON_PORT = 4170;
 const DEFAULT_HARNESS_PORT = 4270;
 const DEFAULT_WEB_PORT = 5174;
@@ -176,21 +187,132 @@ export function renderSpringPs1Env({
   ].join('\n');
 }
 
-// Outside any served workspace: the ordinary daemon exposes workspace files
-// (including .gitignored ones) through its file routes, so a live bearer
-// token must not sit under the workspace root.
-export function springEnvFilePath() {
-  return join(tmpdir(), 'qwen-managed-agent-dev', 'spring.env');
+function currentUid() {
+  return typeof process.getuid === 'function'
+    ? String(process.getuid())
+    : 'nouid';
 }
 
-export function springEnvPs1FilePath() {
-  return join(dirname(springEnvFilePath()), 'spring.env.ps1');
+// Outside any served workspace (the ordinary daemon exposes workspace files,
+// including .gitignored ones, through its file routes) and keyed by owner +
+// checkout: a fixed host-global name would let a local user pre-plant the
+// path, and two worktrees would truncate each other's credentials. The path
+// must stay stable across runs of the same checkout, or R1-12's
+// stale-Spring reuse warning (existsSync before write) never fires.
+export function springEnvDir(rootPath) {
+  const checkoutHash = crypto
+    .createHash('sha256')
+    .update(rootPath)
+    .digest('hex')
+    .slice(0, 8);
+  return join(
+    tmpdir(),
+    `qwen-managed-agent-dev-${currentUid()}-${checkoutHash}`,
+  );
+}
+
+export function springEnvFilePath(rootPath) {
+  return join(springEnvDir(rootPath), 'spring.env');
+}
+
+export function springEnvPs1FilePath(rootPath) {
+  return join(springEnvDir(rootPath), 'spring.env.ps1');
+}
+
+function refuseUnlessOwned(path, stat) {
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(
+      `[managed-agent-dev] ${path} is owned by another user — refusing to write credentials over it`,
+    );
+  }
+}
+
+function refuseUnlessOwnedRegularFile(path, stat) {
+  if (!stat.isFile()) {
+    throw new Error(
+      `[managed-agent-dev] ${path} exists and is not a regular file — refusing to write credentials over it`,
+    );
+  }
+  refuseUnlessOwned(path, stat);
+}
+
+// Fail-closed credential write: the directory must be ours and 0700, each
+// target must be absent or a regular file we own (a planted symlink to a
+// victim file is refused, not truncated), and the 0600 mode is applied by
+// chmod so it also holds on the overwrite path, where writeFileSync's mode
+// is a no-op.
+export function writeSpringEnvFiles({
+  directory,
+  springEnv,
+  springPs1Env,
+  isWinPlatform,
+}) {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const dirStat = statSync(directory);
+  refuseUnlessOwned(directory, dirStat);
+  // Mode/chmod enforcement is POSIX-only: on Windows stat().mode masks
+  // privilege bits from ACLs (a normal user dir reads 777), and chmod 0600
+  // would set the read-only attribute and break the next run's overwrite.
+  // NTFS already scopes the per-user TEMP directory by ACL.
+  if (!isWinPlatform && (dirStat.mode & 0o077) !== 0) {
+    throw new Error(
+      `[managed-agent-dev] ${directory} must be 0700 (found ${(
+        dirStat.mode & 0o777
+      ).toString(8)})`,
+    );
+  }
+  const springEnvPath = join(directory, 'spring.env');
+  if (existsSync(springEnvPath)) {
+    refuseUnlessOwnedRegularFile(springEnvPath, lstatSync(springEnvPath));
+  }
+  writeFileSync(springEnvPath, springEnv, { mode: 0o600 });
+  if (!isWinPlatform) chmodSync(springEnvPath, 0o600);
+  if (isWinPlatform) {
+    const ps1Path = join(directory, 'spring.env.ps1');
+    if (existsSync(ps1Path)) {
+      refuseUnlessOwnedRegularFile(ps1Path, lstatSync(ps1Path));
+    }
+    writeFileSync(ps1Path, springPs1Env, { mode: 0o600 });
+  }
 }
 
 export function springEnvReuseWarning(existed) {
   return existed
     ? '[managed-agent-dev] spring.env already existed: a Spring started from a previous run still holds the old harness token and capability digest — restart it (source the new file first).'
     : null;
+}
+
+export function buildSpringRecipeLines({
+  isWinPlatform,
+  springEnvPath,
+  springPs1Path,
+}) {
+  const lines = [
+    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost';"`,
+    '  # one-time: mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install',
+    '  #           mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install',
+  ];
+  if (isWinPlatform) {
+    // `#` starts a comment in PowerShell too, so actionable lines must not
+    // carry that prefix; dot-sourcing a .ps1 also needs the process-scoped
+    // policy bypass under Windows PowerShell's default Restricted policy.
+    lines.push(
+      `  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; . "${springPs1Path}"`,
+      "  $env:SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
+      "  $env:SPRING_DATASOURCE_USERNAME='qwen'",
+      "  $env:SPRING_DATASOURCE_PASSWORD='replace-me'",
+      '  Set-Location packages\\sdk-java\\managed-agent-server; mvn spring-boot:run',
+    );
+  } else {
+    lines.push(
+      `  source "${springEnvPath}"`,
+      "  export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
+      "  export SPRING_DATASOURCE_USERNAME='qwen'",
+      "  export SPRING_DATASOURCE_PASSWORD='replace-me'",
+      '  cd packages/sdk-java/managed-agent-server && mvn spring-boot:run',
+    );
+  }
+  return lines;
 }
 
 export function buildManagedWebShellPath({ tenant, daemonToken }) {
@@ -203,8 +325,11 @@ export function buildManagedWebShellPath({ tenant, daemonToken }) {
   return `/?${params.toString()}`;
 }
 
-export function buildWebShellUrl({ host, port, webShellPath }) {
-  return `http://${host}:${port}${webShellPath}`;
+// The host is not a parameter: it must always equal Vite's bind host
+// (`--host localhost` at spawn), so IPv6-first hosts never get an
+// unreachable 127.0.0.1 banner.
+export function buildWebShellUrl({ port, webShellPath }) {
+  return `http://${WEB_HOST}:${port}${webShellPath}`;
 }
 
 export function findAvailablePort(
@@ -253,15 +378,68 @@ export function findAvailablePort(
   });
 }
 
+export function findWebPort(excludedPorts) {
+  return findAvailablePort(DEFAULT_WEB_PORT, excludedPorts, WEB_HOST);
+}
+
+// `qwen serve` retries EADDRINUSE by bumping regardless of whether the port
+// was explicitly pinned, so a busy pinned port would leave the launcher
+// polling an address the child never bound. Fail fast instead.
+export async function ensurePortFree(port, label, probeHost = HOST) {
+  const probe = net.createServer();
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      probe.once('error', rejectListen);
+      probe.listen(port, probeHost, resolveListen);
+    });
+  } catch (err) {
+    if (err && typeof err === 'object' && err.code === 'EADDRINUSE') {
+      throw new Error(
+        `${label} ${port} is already in use (qwen serve would silently bump past it; free the port or omit the flag to auto-increment).`,
+      );
+    }
+    throw err;
+  } finally {
+    probe.close();
+  }
+}
+
 export function buildKillPlan(isWinPlatform, hasPid) {
   if (isWinPlatform && hasPid) return { kind: 'taskkill' };
   if (!isWinPlatform && hasPid) return { kind: 'process-group' };
   return { kind: 'direct' };
 }
 
+// The effectful half of killChild, with the OS touchpoints injectable so a
+// test can witness the real argv without signalling any real process.
+export function executeKillPlan(plan, pid, child, runners = {}) {
+  const taskkill =
+    runners.taskkill ??
+    ((taskkillArgs) =>
+      spawnSync('taskkill', taskkillArgs, { stdio: 'ignore' }));
+  const killProcess =
+    runners.killProcess ?? ((target, signal) => process.kill(target, signal));
+  if (plan.kind === 'taskkill') {
+    // dev.js spawns the real serve process as a grandchild and Windows
+    // has no process group (detached is false there): a bare child.kill()
+    // orphans the credentialed servers. taskkill /T takes the whole tree.
+    taskkill(['/pid', String(pid), '/T', '/F']);
+    return;
+  }
+  if (plan.kind === 'process-group') {
+    killProcess(-pid, 'SIGTERM');
+    return;
+  }
+  child.kill();
+}
+
+export function generateDaemonToken() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
 export function generateHarnessSecrets() {
   return {
-    harnessToken: crypto.randomBytes(16).toString('hex'),
+    harnessToken: generateDaemonToken(),
     capabilityDigest: `sha256:${crypto.randomBytes(32).toString('hex')}`,
   };
 }
@@ -368,10 +546,30 @@ export function buildServeStages({
   ];
 }
 
+// Spawns and health-gates each stage in turn. The serialized interleaving
+// matters: dev.js does a destructive re-stage (rmSync + cpSync) of the
+// shared browser-use runtime directory on every boot, so two concurrent
+// children race and majority-silently tear the tree.
+export async function runServeStages(stages, { spawnStage, waitStage }) {
+  for (const stage of stages) {
+    spawnStage(stage);
+    await waitStage(stage);
+    console.log(`[${stage.label}] healthy`);
+  }
+}
+
 export function healthFailureAction(label) {
   // Spring is external: timing out on it must not tear down the healthy
   // children the launcher owns. A failed daemon/harness wait is fatal.
   return label === 'java' ? 'continue' : 'abort';
+}
+
+export function springHealthExpectBody(body) {
+  return body !== null &&
+    typeof body === 'object' &&
+    typeof body.status === 'string'
+    ? true
+    : 'not a Spring Boot actuator health response';
 }
 
 export function buildWebShellLaunch({
@@ -385,7 +583,9 @@ export function buildWebShellLaunch({
     // The open path carries the daemon token, so it travels by environment,
     // never by argv: npm echoes expanded argv to the inherited stdio and
     // argv is world-readable in /proc/<pid>/cmdline. Vite consumes it via
-    // server.open in packages/web-shell/vite.config.ts.
+    // server.open in packages/web-shell/vite.config.ts. --strictPort keeps
+    // Vite fail-closed on a taken port instead of silently relocating past
+    // the probed value; --host pins the same bind family the probe used.
     args: [
       'run',
       'dev',
@@ -393,6 +593,9 @@ export function buildWebShellLaunch({
       '--',
       '--port',
       String(webPort),
+      '--host',
+      WEB_HOST,
+      '--strictPort',
     ],
     env: {
       ...process.env,
@@ -422,6 +625,7 @@ export async function waitForHttpOk(
         headers: token ? { authorization: `Bearer ${token}` } : {},
         signal: AbortSignal.timeout(1_000),
       });
+      lastError = undefined;
       if (response.ok) {
         if (!expectBody) return;
         const body = await response.json().catch(() => undefined);
@@ -438,7 +642,21 @@ export async function waitForHttpOk(
         observation = `HTTP ${response.status}`;
       }
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      // undici rejects with "fetch failed" and hides the real reason in
+      // err.cause.code; and an error always supersedes an older response —
+      // neither accumulator may survive a differently-failing attempt.
+      const causeCode =
+        err instanceof Error &&
+        err.cause !== null &&
+        typeof err.cause === 'object' &&
+        'code' in err.cause &&
+        typeof err.cause.code === 'string'
+          ? err.cause.code
+          : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      lastError = causeCode ? `${message} (${causeCode})` : message;
+      lastStatus = undefined;
+      lastDetail = undefined;
       observation = lastError;
     }
     if (observation !== undefined && !loggedObservation) {
@@ -493,23 +711,12 @@ function spawnDevProcess(label, command, commandArgs, options) {
 }
 
 function killChild(child) {
+  // Re-entrancy guard: shutdown() iterates every still-live child and the
+  // exit hook reaps the same set, so a second pass must be a no-op.
   if (child.killed) return;
   const plan = buildKillPlan(isWin, Boolean(child.pid));
   try {
-    if (plan.kind === 'taskkill') {
-      // dev.js spawns the real serve process as a grandchild and Windows
-      // has no process group (detached is false there): a bare child.kill()
-      // orphans the credentialed servers. taskkill /T takes the whole tree.
-      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-      });
-      return;
-    }
-    if (plan.kind === 'process-group') {
-      process.kill(-child.pid, 'SIGTERM');
-      return;
-    }
-    child.kill();
+    executeKillPlan(plan, child.pid, child);
   } catch {
     child.kill();
   }
@@ -521,7 +728,7 @@ function shutdown(code) {
 
   let pending = 0;
   for (const child of children) {
-    if (child.exitCode !== null || child.signalCode !== null) continue;
+    if (child.exitCode !== null || child.signalCode === null) continue;
     pending += 1;
     child.on('close', () => {
       pending -= 1;
@@ -533,9 +740,42 @@ function shutdown(code) {
   setTimeout(() => process.exit(code), 5_000).unref();
 }
 
+// SIGHUP is what a closing terminal tab, a dropped SSH session or a killed
+// tmux pane actually delivers; without it the launcher dies via Node's
+// default action and the detached children live on, credentialed. POSIX-only
+// by design: on Windows the children share the console and get the
+// console-close event directly.
+export const TEARDOWN_SIGNALS = [
+  'SIGINT',
+  'SIGTERM',
+  ...(isWin ? [] : ['SIGHUP']),
+];
+
+export function installTeardownHandlers() {
+  for (const signal of TEARDOWN_SIGNALS) {
+    process.on(signal, () => shutdown(0));
+  }
+  // Signal-independent reaping: whichever way out the process takes, no
+  // credentialed child may survive the launcher. killChild is synchronous
+  // (process.kill/child.kill()/spawnSync taskkill), legal in an exit hook.
+  process.on('exit', () => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        killChild(child);
+      }
+    }
+  });
+}
+
 async function main() {
   const options = parseLauncherArgs(args);
 
+  if (options.daemonPort !== undefined) {
+    await ensurePortFree(options.daemonPort, '--daemon-port');
+  }
+  if (options.harnessPort !== undefined) {
+    await ensurePortFree(options.harnessPort, '--harness-port');
+  }
   const daemonPort =
     options.daemonPort ??
     (await findAvailablePort(
@@ -546,7 +786,7 @@ async function main() {
     options.harnessPort ??
     (await findAvailablePort(DEFAULT_HARNESS_PORT, new Set([daemonPort])));
   const workspace = resolve(options.workspace ?? process.cwd());
-  const daemonToken = crypto.randomBytes(16).toString('hex');
+  const daemonToken = generateDaemonToken();
   const secrets = generateHarnessSecrets();
   const harnessWiring = buildHarnessWiring({
     harnessPort,
@@ -555,14 +795,18 @@ async function main() {
     capabilityDigest: secrets.capabilityDigest,
   });
 
-  const springEnvPath = springEnvFilePath();
-  const springPs1Path = springEnvPs1FilePath();
+  const envDirectory = springEnvDir(root);
+  const springEnvPath = springEnvFilePath(root);
+  const springPs1Path = springEnvPs1FilePath(root);
   const envExisted = existsSync(springEnvPath);
   const reuseWarning = springEnvReuseWarning(envExisted);
   if (reuseWarning) console.warn(reuseWarning);
-  mkdirSync(dirname(springEnvPath), { recursive: true });
-  writeFileSync(springEnvPath, harnessWiring.springEnv, { mode: 0o600 });
-  writeFileSync(springPs1Path, harnessWiring.springPs1Env, { mode: 0o600 });
+  writeSpringEnvFiles({
+    directory: envDirectory,
+    springEnv: harnessWiring.springEnv,
+    springPs1Env: harnessWiring.springPs1Env,
+    isWinPlatform: isWin,
+  });
 
   const daemonUrl = `http://${HOST}:${daemonPort}`;
   const harnessUrl = `http://${HOST}:${harnessPort}`;
@@ -570,14 +814,7 @@ async function main() {
     tenant: options.tenant,
     daemonToken,
   });
-  // Vite binds 'localhost', which on IPv6-first hosts is ::1 only — probing
-  // 127.0.0.1 would call a held port free and Vite would silently bump past
-  // the probed value (any printed URL then names the wrong port).
-  const webPort = await findAvailablePort(
-    DEFAULT_WEB_PORT,
-    new Set([daemonPort, harnessPort]),
-    'localhost',
-  );
+  const webPort = await findWebPort(new Set([daemonPort, harnessPort]));
 
   const tsxLoaderUrl = pathToFileURL(
     join(root, 'node_modules', 'tsx', 'dist', 'esm', 'index.mjs'),
@@ -605,30 +842,15 @@ async function main() {
   console.log(
     'Spring Managed Agent Server runs separately (Java 21 + MySQL 8):',
   );
-  console.log(
-    '  # one-time: mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install',
-  );
-  console.log(
-    '  #           mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install',
-  );
-  console.log(`  source ${springEnvPath}`);
-  if (isWin) {
-    console.log(`  # PowerShell: . "${springPs1Path}"`);
+  for (const line of buildSpringRecipeLines({
+    isWinPlatform: isWin,
+    springEnvPath,
+    springPs1Path,
+  })) {
+    console.log(line);
   }
-  console.log(
-    "  export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
-  );
-  console.log("  export SPRING_DATASOURCE_USERNAME='qwen'");
-  console.log("  export SPRING_DATASOURCE_PASSWORD='replace-me'");
-  console.log(
-    '  cd packages/sdk-java/managed-agent-server && mvn spring-boot:run',
-  );
   console.log('');
 
-  // Stages run one at a time and each is health-gated before the next
-  // spawns: dev.js does a destructive re-stage (rmSync + cpSync) of the
-  // shared browser-use runtime directory on every boot, so two concurrent
-  // children race and majority-silently tear the tree.
   const stages = buildServeStages({
     workspace,
     daemonPort,
@@ -636,27 +858,26 @@ async function main() {
     serveEnv,
     harnessWiring,
   });
-  for (const stage of stages) {
-    spawnDevProcess(stage.label, 'node', stage.args, {
-      cwd: root,
-      env: stage.env,
+  try {
+    await runServeStages(stages, {
+      spawnStage: (stage) =>
+        spawnDevProcess(stage.label, 'node', stage.args, {
+          cwd: root,
+          env: stage.env,
+        }),
+      waitStage: (stage) =>
+        waitForHttpOk(stage.health.url, {
+          token: stage.health.token,
+          timeoutMs: 60_000,
+          expectBody: stage.health.expectBody,
+        }),
     });
-    try {
-      await waitForHttpOk(stage.health.url, {
-        token: stage.health.token,
-        timeoutMs: 60_000,
-        expectBody: stage.health.expectBody,
-      });
-      console.log(`[${stage.label}] healthy`);
-    } catch (err) {
-      if (healthFailureAction(stage.label) === 'abort') {
-        console.error(
-          `[managed-agent-dev] ${err instanceof Error ? err.message : String(err)}`,
-        );
-        shutdown(1);
-        return;
-      }
-    }
+  } catch (err) {
+    console.error(
+      `[managed-agent-dev] ${err instanceof Error ? err.message : String(err)}`,
+    );
+    shutdown(1);
+    return;
   }
 
   const javaHealthUrl = `${options.javaUrl}/actuator/health`;
@@ -672,6 +893,7 @@ async function main() {
       await waitForHttpOk(javaHealthUrl, {
         timeoutMs: 600_000,
         intervalMs: 1_000,
+        expectBody: springHealthExpectBody,
       });
       console.log('[java] healthy');
       if (reuseWarning) console.warn(reuseWarning);
@@ -693,10 +915,8 @@ async function main() {
   }
 
   if (process.stdout.isTTY) {
-    // 'localhost', not 127.0.0.1: on IPv6-first hosts Vite binds ::1 only,
-    // and the IPv4 spelling would not connect.
     console.log(
-      `web-shell: ${buildWebShellUrl({ host: 'localhost', port: webPort, webShellPath })}`,
+      `web-shell: ${buildWebShellUrl({ port: webPort, webShellPath })}`,
     );
     console.log('  (the URL contains the daemon token — treat it as secret)');
   }
@@ -711,8 +931,8 @@ async function main() {
     cwd: root,
     env: launch.env,
     // npm is npm.cmd on Windows, which per Node's docs cannot be launched
-    // without the shell option. The args carry no '&' anymore (the open path
-    // travels by env), so cmd's quote-stripping re-parse is harmless here.
+    // without the shell option. The args carry no '&' (the open path travels
+    // by env), so cmd's quote-stripping re-parse is harmless here.
     shell: isWin,
   });
 }
@@ -725,8 +945,7 @@ const isMain =
 if (isMain) {
   // Registered here rather than at module top level: importers of the
   // helpers must not inherit these exit-0-on-signal semantics.
-  process.on('SIGINT', () => shutdown(0));
-  process.on('SIGTERM', () => shutdown(0));
+  installTeardownHandlers();
   main().catch((err) => {
     console.error(
       `[managed-agent-dev] ${err instanceof Error ? err.message : String(err)}`,

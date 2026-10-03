@@ -296,6 +296,8 @@ npm run dev:managed-agent
 # One-time, on a fresh clone:
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+# One-time, on a fresh MySQL 8 (creates the database and user the URL names):
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost';"
 # Every run; the launcher prints this spring.env path at startup:
 source <printed spring.env path>
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
@@ -306,9 +308,13 @@ mvn -f packages/sdk-java/managed-agent-server/pom.xml spring-boot:run
 
 The daemon, Harness and Java URLs print at startup with the `spring.env`
 path, and the full Managed URL (which carries the daemon token) prints on an
-interactive terminal; ports auto-increment when busy. To wire the pieces by
-hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
-private Hosted Harness used by Spring, then run from the repository root:
+interactive terminal; ports auto-increment when busy. The launcher verifies
+only that something Spring-Boot-shaped answers `/actuator/health` — it
+cannot prove that Spring loaded this run's `spring.env`, so restart Spring
+whenever the launcher (and its rotating token and digest) restarts. To wire
+the pieces by hand instead, start an ordinary `qwen serve` on port 4170 in
+addition to the private Hosted Harness used by Spring, then run from the
+repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \

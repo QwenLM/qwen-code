@@ -7,7 +7,16 @@
 import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,17 +27,26 @@ import {
   buildKillPlan,
   buildManagedWebShellPath,
   buildServeStages,
+  buildSpringRecipeLines,
   buildWebShellLaunch,
   buildWebShellUrl,
+  ensurePortFree,
+  executeKillPlan,
   findAvailablePort,
+  generateDaemonToken,
   generateHarnessSecrets,
   healthFailureAction,
   parseLauncherArgs,
   renderSpringEnv,
   renderSpringPs1Env,
+  runServeStages,
+  springEnvDir,
   springEnvFilePath,
   springEnvReuseWarning,
+  springHealthExpectBody,
+  TEARDOWN_SIGNALS,
   waitForHttpOk,
+  writeSpringEnvFiles,
 } from '../managed-agent-dev.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +54,7 @@ const root = path.resolve(__dirname, '..', '..');
 const script = path.join(__dirname, '..', 'managed-agent-dev.js');
 
 const VALID_DIGEST = `sha256:${'a'.repeat(64)}`;
+const onWindows = process.platform === 'win32';
 
 describe('parseLauncherArgs', () => {
   it('returns defaults with no arguments', () => {
@@ -160,6 +179,35 @@ describe('parseLauncherArgs', () => {
   });
 });
 
+describe('ensurePortFree', () => {
+  it('rejects a busy pinned port before any health wait', async () => {
+    const blocker = net.createServer();
+    await new Promise((resolveListen) =>
+      blocker.listen(0, '127.0.0.1', resolveListen),
+    );
+    const occupied = blocker.address().port;
+    try {
+      await expect(ensurePortFree(occupied, '--daemon-port')).rejects.toThrow(
+        `--daemon-port ${occupied} is already in use`,
+      );
+    } finally {
+      await new Promise((resolveClose) => blocker.close(resolveClose));
+    }
+  });
+
+  it('resolves on a free pinned port', async () => {
+    const blocker = net.createServer();
+    await new Promise((resolveListen) =>
+      blocker.listen(0, '127.0.0.1', resolveListen),
+    );
+    const free = blocker.address().port;
+    await new Promise((resolveClose) => blocker.close(resolveClose));
+    await expect(
+      ensurePortFree(free, '--harness-port'),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe('findAvailablePort', () => {
   it('skips an excluded port without probing it', async () => {
     const blocker = net.createServer();
@@ -183,18 +231,23 @@ describe('findAvailablePort', () => {
     }
   });
 
-  it('walks past a port Vite already holds on the localhost family', async () => {
-    // Vite binds 'localhost'; on IPv6-first hosts that is ::1 only, so a
-    // 127.0.0.1 probe would call the held port free and Vite would silently
-    // bump past the probed value (observed in a two-launcher dry run).
+  it('walks by family: the probe sees only what its own bind family can collide with', async () => {
+    // On IPv6-first hosts Vite binds ::1 only, which a 127.0.0.1 probe
+    // cannot see — the web probe's host must match the server's bind family.
+    // The fixture binds ::1 literally so the parameter stays observable even
+    // where 'localhost' resolves IPv4-only; skipped when ::1 cannot listen.
     const viteStandIn = net.createServer();
-    await new Promise((resolveListen) =>
-      viteStandIn.listen(0, 'localhost', resolveListen),
-    );
+    const bound = await new Promise((resolveListen) => {
+      viteStandIn.once('error', () => resolveListen(false));
+      viteStandIn.listen(0, '::1', () => resolveListen(true));
+    });
+    if (!bound) {
+      return;
+    }
     const held = viteStandIn.address().port;
     try {
-      const found = await findAvailablePort(held, new Set(), 'localhost');
-      expect(found).not.toBe(held);
+      expect(await findAvailablePort(held, new Set(), '::1')).not.toBe(held);
+      expect(await findAvailablePort(held, new Set(), '127.0.0.1')).toBe(held);
     } finally {
       await new Promise((resolveClose) => viteStandIn.close(resolveClose));
     }
@@ -207,6 +260,51 @@ describe('buildKillPlan', () => {
     expect(buildKillPlan(false, true)).toEqual({ kind: 'process-group' });
     expect(buildKillPlan(true, false)).toEqual({ kind: 'direct' });
     expect(buildKillPlan(false, false)).toEqual({ kind: 'direct' });
+  });
+});
+
+describe('executeKillPlan', () => {
+  it('runs taskkill /T on the Windows plan', () => {
+    const taskkill = vi.fn();
+    executeKillPlan(
+      { kind: 'taskkill' },
+      1234,
+      { kill: vi.fn() },
+      { taskkill, killProcess: vi.fn() },
+    );
+    expect(taskkill).toHaveBeenCalledWith(['/pid', '1234', '/T', '/F']);
+  });
+
+  it('signals the process group on the POSIX plan', () => {
+    const killProcess = vi.fn();
+    executeKillPlan(
+      { kind: 'process-group' },
+      1234,
+      { kill: vi.fn() },
+      { taskkill: vi.fn(), killProcess },
+    );
+    expect(killProcess).toHaveBeenCalledWith(-1234, 'SIGTERM');
+  });
+
+  it('falls back to a direct kill when there is no pid', () => {
+    const directChild = { kill: vi.fn() };
+    executeKillPlan({ kind: 'direct' }, undefined, directChild, {
+      taskkill: vi.fn(),
+      killProcess: vi.fn(),
+    });
+    expect(directChild.kill).toHaveBeenCalled();
+  });
+});
+
+describe('TEARDOWN_SIGNALS', () => {
+  it('covers SIGINT, SIGTERM and (on POSIX) SIGHUP', () => {
+    expect(TEARDOWN_SIGNALS).toContain('SIGINT');
+    expect(TEARDOWN_SIGNALS).toContain('SIGTERM');
+    if (process.platform === 'win32') {
+      expect(TEARDOWN_SIGNALS).not.toContain('SIGHUP');
+    } else {
+      expect(TEARDOWN_SIGNALS).toContain('SIGHUP');
+    }
   });
 });
 
@@ -243,22 +341,147 @@ describe('renderSpringPs1Env', () => {
     });
     expect(content).toContain(`$env:QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'`);
     expect(content).toContain(
-      `$env:QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4270'`,
-    );
-    expect(content).toContain(
       `$env:QWEN_MANAGED_AGENT_HARNESS_TOKEN='harness-token'`,
-    );
-    expect(content).toContain(
-      `$env:QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='${VALID_DIGEST}'`,
     );
     expect(content.endsWith('\n')).toBe(true);
   });
 });
 
-describe('springEnvFilePath', () => {
+describe('springEnvDir', () => {
   it('never resolves inside the served workspace', () => {
-    expect(springEnvFilePath().startsWith(root + path.sep)).toBe(false);
+    expect(springEnvFilePath(root).startsWith(root + path.sep)).toBe(false);
   });
+
+  it('differs per checkout so two worktrees cannot truncate each other', () => {
+    expect(springEnvDir('/checkout/a')).not.toBe(springEnvDir('/checkout/b'));
+    expect(springEnvDir('/checkout/a')).toBe(springEnvDir('/checkout/a'));
+  });
+});
+
+describe('writeSpringEnvFiles', () => {
+  const envContent = "export TOKEN='t'\n";
+  const ps1Content = "$env:TOKEN='t'\n";
+  const guardedIt = onWindows ? it.skip : it;
+
+  function freshDir() {
+    const dir = mkdtempSync(path.join(tmpdir(), 'spring-env-writer-'));
+    return {
+      dir,
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  }
+
+  guardedIt('writes 0600 files and a ps1 sibling only on Windows', () => {
+    const { dir, cleanup } = freshDir();
+    try {
+      writeSpringEnvFiles({
+        directory: dir,
+        springEnv: envContent,
+        springPs1Env: ps1Content,
+        isWinPlatform: false,
+      });
+      expect(readFileSync(path.join(dir, 'spring.env'), 'utf8')).toBe(
+        envContent,
+      );
+      expect(statSync(path.join(dir, 'spring.env')).mode & 0o777).toBe(0o600);
+      expect(existsSync(path.join(dir, 'spring.env.ps1'))).toBe(false);
+
+      writeSpringEnvFiles({
+        directory: dir,
+        springEnv: envContent,
+        springPs1Env: ps1Content,
+        isWinPlatform: true,
+      });
+      expect(statSync(path.join(dir, 'spring.env.ps1')).mode & 0o777).toBe(
+        0o600,
+      );
+      expect(readFileSync(path.join(dir, 'spring.env.ps1'), 'utf8')).toBe(
+        ps1Content,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  guardedIt('refuses a planted symlink and leaves its target untouched', () => {
+    const { dir, cleanup } = freshDir();
+    const victimDir = mkdtempSync(path.join(tmpdir(), 'spring-env-victim-'));
+    try {
+      const victim = path.join(victimDir, 'victim.txt');
+      writeFileSync(victim, 'precious');
+      symlinkSync(victim, path.join(dir, 'spring.env'));
+      expect(() =>
+        writeSpringEnvFiles({
+          directory: dir,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: false,
+        }),
+      ).toThrow(/not a regular file/);
+      expect(readFileSync(victim, 'utf8')).toBe('precious');
+    } finally {
+      cleanup();
+      rmSync(victimDir, { recursive: true, force: true });
+    }
+  });
+
+  guardedIt(
+    'forces 0600 on the overwrite path where writeFileSync mode is a no-op',
+    () => {
+      const { dir, cleanup } = freshDir();
+      try {
+        const target = path.join(dir, 'spring.env');
+        writeFileSync(target, 'stale');
+        chmodSync(target, 0o666);
+        writeSpringEnvFiles({
+          directory: dir,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: false,
+        });
+        expect(statSync(target).mode & 0o777).toBe(0o600);
+        expect(readFileSync(target, 'utf8')).toBe(envContent);
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
+  guardedIt('refuses a directory that is not 0700', () => {
+    const { dir, cleanup } = freshDir();
+    try {
+      chmodSync(dir, 0o755);
+      expect(() =>
+        writeSpringEnvFiles({
+          directory: dir,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: false,
+        }),
+      ).toThrow(/must be 0700/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  guardedIt(
+    'skips the 0700 gate on the Windows arm, where NTFS ACLs own the boundary',
+    () => {
+      const { dir, cleanup } = freshDir();
+      try {
+        chmodSync(dir, 0o755);
+        writeSpringEnvFiles({
+          directory: dir,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: true,
+        });
+        expect(existsSync(path.join(dir, 'spring.env.ps1'))).toBe(true);
+      } finally {
+        cleanup();
+      }
+    },
+  );
 });
 
 describe('springEnvReuseWarning', () => {
@@ -268,11 +491,19 @@ describe('springEnvReuseWarning', () => {
   });
 });
 
-describe('generateHarnessSecrets', () => {
-  it('mints a 32-hex token and a sha256 digest the harness profile accepts', () => {
+describe('generateDaemonToken / generateHarnessSecrets', () => {
+  it('mints accepted formats', () => {
     const secrets = generateHarnessSecrets();
     expect(secrets.harnessToken).toMatch(/^[0-9a-f]{32}$/);
     expect(secrets.capabilityDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it('rotates: two mints never agree', () => {
+    const a = generateHarnessSecrets();
+    const b = generateHarnessSecrets();
+    expect(a.harnessToken).not.toBe(b.harnessToken);
+    expect(a.capabilityDigest).not.toBe(b.capabilityDigest);
+    expect(generateDaemonToken()).not.toBe(generateDaemonToken());
   });
 });
 
@@ -311,8 +542,6 @@ describe('buildHarnessWiring', () => {
       harnessToken: 'the-one-token',
       capabilityDigest: VALID_DIGEST,
     });
-    // The pairing cannot drift to two sources: mutating one consumer away
-    // from the shared input turns this red (R1-13).
     expect(wiring.springEnv).toContain(
       `export QWEN_MANAGED_AGENT_HARNESS_TOKEN='${wiring.extraEnv.QWEN_SERVER_TOKEN}'`,
     );
@@ -321,6 +550,22 @@ describe('buildHarnessWiring', () => {
     );
     expect(wiring.springPs1Env).toContain(
       `$env:QWEN_MANAGED_AGENT_HARNESS_TOKEN='${wiring.extraEnv.QWEN_SERVER_TOKEN}'`,
+    );
+  });
+
+  it('renders the same harness port into argv and both base URLs', () => {
+    const wiring = buildHarnessWiring({
+      harnessPort: 4321,
+      workspace: '/ws',
+      harnessToken: 't',
+      capabilityDigest: VALID_DIGEST,
+    });
+    expect(wiring.serveArgs).toContain('4321');
+    expect(wiring.springEnv).toContain(
+      `HARNESS_BASE_URL='http://127.0.0.1:4321'`,
+    );
+    expect(wiring.springPs1Env).toContain(
+      `HARNESS_BASE_URL='http://127.0.0.1:4321'`,
     );
   });
 });
@@ -332,11 +577,16 @@ describe('buildServeStages', () => {
     harnessToken: 'harness-token',
     capabilityDigest: VALID_DIGEST,
   });
+  // Ambient credentials must always lose to this run's freshly minted ones.
   const stages = buildServeStages({
     workspace: '/ws',
     daemonPort: 4170,
     daemonToken: 'daemon-token',
-    serveEnv: { MARKER: '1' },
+    serveEnv: {
+      MARKER: '1',
+      QWEN_SERVER_TOKEN: 'ambient-must-lose',
+      QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: `sha256:${'f'.repeat(64)}`,
+    },
     harnessWiring: wiring,
   });
 
@@ -362,6 +612,28 @@ describe('buildServeStages', () => {
       url: 'http://127.0.0.1:4270/capabilities',
       token: 'harness-token',
     });
+  });
+
+  it('pins the daemon argv and moves it with the daemon port', () => {
+    expect(stages[0].args).toEqual([
+      'scripts/dev.js',
+      'serve',
+      '--hostname',
+      '127.0.0.1',
+      '--port',
+      '4170',
+      '--workspace',
+      '/ws',
+    ]);
+    const moved = buildServeStages({
+      workspace: '/ws',
+      daemonPort: 4199,
+      daemonToken: 'daemon-token',
+      serveEnv: {},
+      harnessWiring: wiring,
+    });
+    expect(moved[0].args).toContain('4199');
+    expect(moved[0].health.url).toBe('http://127.0.0.1:4199/capabilities');
   });
 
   it('rejects a harness answering the daemon health check', () => {
@@ -392,6 +664,41 @@ describe('buildServeStages', () => {
   });
 });
 
+describe('runServeStages', () => {
+  it('spawns and gates strictly in turn; a failed gate stops the next spawn', async () => {
+    const calls = [];
+    const stages = [{ label: 'daemon' }, { label: 'harness' }];
+    await runServeStages(stages, {
+      spawnStage: (stage) => {
+        calls.push(`spawn:${stage.label}`);
+      },
+      waitStage: async (stage) => {
+        calls.push(`wait:${stage.label}`);
+      },
+    });
+    expect(calls).toEqual([
+      'spawn:daemon',
+      'wait:daemon',
+      'spawn:harness',
+      'wait:harness',
+    ]);
+
+    const failingCalls = [];
+    await expect(
+      runServeStages(stages, {
+        spawnStage: (stage) => {
+          failingCalls.push(`spawn:${stage.label}`);
+        },
+        waitStage: async (stage) => {
+          failingCalls.push(`wait:${stage.label}`);
+          throw new Error('boom');
+        },
+      }),
+    ).rejects.toThrow('boom');
+    expect(failingCalls).toEqual(['spawn:daemon', 'wait:daemon']);
+  });
+});
+
 describe('healthFailureAction', () => {
   it('continues past a Spring timeout but aborts on owned children', () => {
     expect(healthFailureAction('java')).toBe('continue');
@@ -401,11 +708,27 @@ describe('healthFailureAction', () => {
   });
 });
 
+describe('springHealthExpectBody', () => {
+  it('accepts only a Spring Boot actuator health shape', () => {
+    expect(springHealthExpectBody({ status: 'UP' })).toBe(true);
+    expect(springHealthExpectBody({ status: 'OUT_OF_SERVICE' })).toBe(true);
+    expect(springHealthExpectBody(null)).toBe(
+      'not a Spring Boot actuator health response',
+    );
+    expect(springHealthExpectBody({})).toBe(
+      'not a Spring Boot actuator health response',
+    );
+    expect(springHealthExpectBody('<html>ok</html>')).toBe(
+      'not a Spring Boot actuator health response',
+    );
+  });
+});
+
 describe('waitForHttpOk', () => {
-  function serve(statusCode, body = '{}') {
+  function serve(alwaysStatus, alwaysBody = '{}') {
     const server = http.createServer((_req, res) => {
-      res.writeHead(statusCode, { 'content-type': 'application/json' });
-      res.end(body);
+      res.writeHead(alwaysStatus, { 'content-type': 'application/json' });
+      res.end(alwaysBody);
     });
     return new Promise((resolveListen) => {
       server.listen(0, '127.0.0.1', () => resolveListen(server));
@@ -427,6 +750,34 @@ describe('waitForHttpOk', () => {
     }
   });
 
+  it('sends the bearer token when one is given and none otherwise', async () => {
+    const seen = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.headers.authorization);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    await new Promise((resolveListen) =>
+      server.listen(0, '127.0.0.1', resolveListen),
+    );
+    try {
+      const { port } = server.address();
+      await waitForHttpOk(`http://127.0.0.1:${port}/capabilities`, {
+        token: 'abc',
+        timeoutMs: 1_000,
+        intervalMs: 25,
+      });
+      await waitForHttpOk(`http://127.0.0.1:${port}/capabilities`, {
+        timeoutMs: 1_000,
+        intervalMs: 25,
+      });
+      expect(seen[0]).toBe('Bearer abc');
+      expect(seen[1]).toBeUndefined();
+    } finally {
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  });
+
   it('reports the last HTTP status on timeout instead of implying no responder', async () => {
     const server = await serve(404);
     try {
@@ -442,7 +793,7 @@ describe('waitForHttpOk', () => {
     }
   });
 
-  it('reports the last connection error when nothing answers', async () => {
+  it('carries the connection error cause through the generic fetch failure', async () => {
     const blocker = net.createServer();
     await new Promise((resolveListen) =>
       blocker.listen(0, '127.0.0.1', resolveListen),
@@ -454,7 +805,37 @@ describe('waitForHttpOk', () => {
         timeoutMs: 300,
         intervalMs: 50,
       }),
-    ).rejects.toThrow(/last error: /);
+    ).rejects.toThrow(/last error: .*ECONNREFUSED/);
+  });
+
+  it('lets a fresh error supersede an older response status', async () => {
+    let hits = 0;
+    const server = http.createServer((_req, res) => {
+      hits += 1;
+      // `connection: close` keeps undici from pooling a keep-alive socket,
+      // so after the listener stops the next attempt really is a refusal.
+      res.writeHead(503, {
+        'content-type': 'application/json',
+        connection: 'close',
+      });
+      res.end('{}');
+      // The responder dies mid-wait: the next attempts are refusals, and the
+      // stale 503 must not outlive them.
+      if (hits >= 4) server.close();
+    });
+    await new Promise((resolveListen) =>
+      server.listen(0, '127.0.0.1', resolveListen),
+    );
+    const { port } = server.address();
+    const err = await waitForHttpOk(`http://127.0.0.1:${port}/capabilities`, {
+      timeoutMs: 900,
+      intervalMs: 50,
+    }).then(
+      () => new Error('unexpected resolve'),
+      (caught) => caught,
+    );
+    expect(String(err)).toMatch(/ECONNREFUSED/);
+    expect(String(err)).not.toContain('503');
   });
 
   it('keeps waiting until the identity predicate accepts the body', async () => {
@@ -468,7 +849,33 @@ describe('waitForHttpOk', () => {
           expectBody: (body) =>
             body?.digest === 'right' ? true : 'digest mismatch',
         }),
-      ).rejects.toThrow(/digest mismatch/);
+      ).rejects.toThrow(/last response: HTTP 200, digest mismatch/);
+    } finally {
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  });
+
+  it('resolves when a later attempt finally satisfies the predicate', async () => {
+    let hits = 0;
+    const server = http.createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ digest: hits < 3 ? 'wrong' : 'right' }));
+    });
+    await new Promise((resolveListen) =>
+      server.listen(0, '127.0.0.1', resolveListen),
+    );
+    try {
+      const { port } = server.address();
+      await expect(
+        waitForHttpOk(`http://127.0.0.1:${port}/capabilities`, {
+          timeoutMs: 2_000,
+          intervalMs: 25,
+          expectBody: (body) =>
+            body?.digest === 'right' ? true : 'digest mismatch',
+        }),
+      ).resolves.toBeUndefined();
+      expect(hits).toBeGreaterThanOrEqual(3);
     } finally {
       await new Promise((resolveClose) => server.close(resolveClose));
     }
@@ -501,16 +908,15 @@ describe('buildManagedWebShellPath', () => {
 });
 
 describe('buildWebShellUrl', () => {
-  it('composes the full Managed URL for the printed banner', () => {
+  it('always spells localhost, matching Vite’s bind host', () => {
     expect(
       buildWebShellUrl({
-        host: '127.0.0.1',
         port: 5174,
         webShellPath:
           '/?managed=1&managedProvider=java&tenant=local-java-demo&token=t',
       }),
     ).toBe(
-      'http://127.0.0.1:5174/?managed=1&managedProvider=java&tenant=local-java-demo&token=t',
+      'http://localhost:5174/?managed=1&managedProvider=java&tenant=local-java-demo&token=t',
     );
   });
 });
@@ -519,18 +925,87 @@ describe('buildWebShellLaunch', () => {
   it('carries the token-bearing open path by environment, never by argv', () => {
     const launch = buildWebShellLaunch({
       webShellPath: '/?managed=1&token=TOPSECRET',
-      webPort: 5174,
+      webPort: 5199,
       daemonUrl: 'http://127.0.0.1:4170',
       javaUrl: 'http://127.0.0.1:8080',
     });
     expect(launch.command).toBe('npm');
-    expect(launch.args).toContain('--port');
+    expect(launch.args).toEqual([
+      'run',
+      'dev',
+      '--workspace=packages/web-shell',
+      '--',
+      '--port',
+      '5199',
+      '--host',
+      'localhost',
+      '--strictPort',
+    ]);
     expect(JSON.stringify(launch.args)).not.toContain('TOPSECRET');
     expect(launch.env.QWEN_WEB_SHELL_OPEN_PATH).toContain('TOPSECRET');
     expect(launch.env.QWEN_DAEMON_URL).toBe('http://127.0.0.1:4170');
     expect(launch.env.QWEN_MANAGED_AGENT_JAVA_URL).toBe(
       'http://127.0.0.1:8080',
     );
+    expect(launch.env.PATH).toBe(process.env.PATH);
+  });
+});
+
+describe('buildSpringRecipeLines', () => {
+  const envPath = '/tmp/x/spring.env';
+  const ps1Path = '/tmp/x/spring.env.ps1';
+
+  it('prints a POSIX source line and no PowerShell bypass on POSIX', () => {
+    const lines = buildSpringRecipeLines({
+      isWinPlatform: false,
+      springEnvPath: envPath,
+      springPs1Path: ps1Path,
+    });
+    const joined = lines.join('\n');
+    expect(joined).toContain(`source "${envPath}"`);
+    expect(joined).toContain('export SPRING_DATASOURCE_URL=');
+    expect(joined).not.toContain('Set-ExecutionPolicy');
+  });
+
+  it('prints an uncommented self-enabling line on Windows, never a bare source', () => {
+    const lines = buildSpringRecipeLines({
+      isWinPlatform: true,
+      springEnvPath: envPath,
+      springPs1Path: ps1Path,
+    });
+    const joined = lines.join('\n');
+    expect(joined).toContain('Set-ExecutionPolicy -Scope Process');
+    expect(joined).toContain(ps1Path);
+    expect(joined).toContain('$env:SPRING_DATASOURCE_URL=');
+    expect(joined).not.toContain(`  source "${envPath}"`);
+  });
+
+  it('creates the database and user exactly as the reference e2e does', () => {
+    const e2eSource = readFileSync(
+      path.join(root, 'scripts', 'run-managed-agent-server-e2e.ts'),
+      'utf8',
+    );
+    const clause = e2eSource.match(
+      /CREATE DATABASE qwen_managed_agent[^']+unicode_ci/,
+    )?.[0];
+    expect(clause).toBeTruthy();
+    const posix = buildSpringRecipeLines({
+      isWinPlatform: false,
+      springEnvPath: envPath,
+      springPs1Path: ps1Path,
+    }).join('\n');
+    expect(posix).toContain(clause);
+    const readme = readFileSync(
+      path.join(
+        root,
+        'packages',
+        'sdk-java',
+        'managed-agent-server',
+        'README.md',
+      ),
+      'utf8',
+    );
+    expect(readme).toContain(clause);
   });
 });
 
@@ -547,7 +1022,7 @@ describe('script entry', () => {
 
   // File symlinks on Windows need a privilege the runner may not grant;
   // the guard logic this pins is platform-agnostic.
-  (process.platform === 'win32' ? it.skip : it)(
+  (onWindows ? it.skip : it)(
     'still runs main when invoked through a symlink',
     () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'managed-agent-dev-link-'));
@@ -569,7 +1044,7 @@ describe('script entry', () => {
     },
   );
 
-  (process.platform === 'win32' ? it.skip : it)(
+  (onWindows ? it.skip : it)(
     'leaves an importer’s signal semantics untouched',
     () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'managed-agent-dev-probe-'));
