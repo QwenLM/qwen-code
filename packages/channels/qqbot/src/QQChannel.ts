@@ -497,24 +497,25 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
-    // groupAllPolicy 'keyword' or 'all' requires a shared-context session
-    // scope ('thread' for per-group shared context, 'single' for one global
-    // session — routing key = channel:chatId / channel:__single__).
-    // 'chat_thread' is also shared (ChannelBase treats it as shared; QQ has
-    // no threadId, so its routing key falls back to channel:chatId —
-    // identical to 'thread'). Only 'user' fragments group messages per
-    // sender. We warn but do NOT force the scope: forcibly flattening the
-    // user's multi-level session isolation into a global single session was
-    // incorrect (see PR #6457 review). The user's sessionScope choice wins.
+    // groupAllPolicy 'keyword' or 'all' requires per-group shared context.
+    // 'thread' is the only scope that gives it without collateral: it shares
+    // each group's session (routing key = channel:chatId) while keeping every
+    // direct message per-user. 'chat_thread' routes groups identically but
+    // ChannelBase treats it as unconditionally shared, so every DM becomes a
+    // shared session too (no operator can /clear it, and a DM tool call has no
+    // answerer). 'single' is shared as well but collapses every group and every
+    // DM into one `channel:__single__` context — the cross-group leakage issue
+    // #8238 describes. 'user' fragments group messages per sender. We warn but
+    // do NOT force the scope: forcibly flattening the user's multi-level
+    // session isolation into a global single session was incorrect (see
+    // PR #6457 review). The user's sessionScope choice wins.
     const qqCfg = config as unknown as QQChannelConfig;
     if (
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
-      config.sessionScope !== 'thread' &&
-      config.sessionScope !== 'chat_thread' &&
-      config.sessionScope !== 'single'
+      config.sessionScope !== 'thread'
     ) {
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not a shared-context scope). groupAllPolicy keyword/all needs sessionScope: 'thread' or 'chat_thread' for per-group shared context (or 'single' for one global session); with sessionScope 'user' group messages fragment per sender.\n`,
+        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context with each direct message kept private; 'chat_thread' routes groups the same but makes every direct message a shared session, and 'single' merges every group and direct message into one context. With 'user', group messages fragment per sender.\n`,
       );
     }
 
@@ -1658,12 +1659,7 @@ export class QQChannel extends ChannelBase {
     // Capture the anchor once, before the first attempt: a successor turn can
     // overwrite sessionReplyMsgId while a re-attempt is pending, and this
     // turn's text must not go out under the successor's anchor.
-    const anchorEntry = this.sessionReplyMsgId.get(sessionId);
-    const sessionAnchor =
-      anchorEntry &&
-      Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
-        ? anchorEntry.msgId
-        : undefined;
+    const sessionAnchor = this.resolveSessionReplyAnchor(sessionId).msgId;
     // A caller that knows which turn this text belongs to overrides the lookup
     // above: by the time such a caller runs, a successor may already own the
     // session anchor. `null` means the caller knows there is none — deliver
@@ -2187,8 +2183,13 @@ export class QQChannel extends ChannelBase {
             e.code === 'ACTIVE_MSG_DISABLED' ||
             e.code === 'FALLBACK_FAILED')
         ) {
+          // The residual that accumulated into state.buffer while this send was
+          // in flight is dropped with the entry below, so the loss log must
+          // report it too: the payload count alone under-reports what the
+          // operator loses.
+          const inFlightResidual = state.buffer;
           process.stderr.write(
-            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars\n`,
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars${inFlightResidual ? ` plus ${inFlightResidual.length} chars buffered in flight` : ''}\n`,
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Drop everything — including any residual buffer that arrived concurrently.
@@ -2296,19 +2297,13 @@ export class QQChannel extends ChannelBase {
             // injected into a successor's reply. The carried-seal
             // branch is the backstop for a re-seal whose boundary marker was
             // missed.
-            if (this.ownsLiveTurn(sessionId, state)) {
-              if (state.boundaryClearedInFlight !== undefined) {
-                current.sealedPre = this.sealClearedPayload(
-                  buffer,
-                  this.capturedResidual(state),
-                );
-              } else if (
-                carriedSeal !== undefined &&
-                current.sealedPre !== carriedSeal
-              ) {
-                current.sealedPre = carriedSeal + (current.sealedPre ?? '');
-              }
-            }
+            this.resealOnRebuffer(
+              sessionId,
+              state,
+              current,
+              buffer,
+              carriedSeal,
+            );
             current.retryCount++;
             if (
               this.maxFlushRetries <= 0 ||
@@ -2354,22 +2349,16 @@ export class QQChannel extends ChannelBase {
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
-            // Same re-seal and turn-ownership gate as the parked branch above
-            // (see it for why the whole payload is sealed and `carriedSeal` is
-            // the backstop).
-            if (this.ownsLiveTurn(sessionId, state)) {
-              if (state.boundaryClearedInFlight !== undefined) {
-                current.sealedPre = this.sealClearedPayload(
-                  buffer,
-                  this.capturedResidual(state),
-                );
-              } else if (
-                carriedSeal !== undefined &&
-                current.sealedPre !== carriedSeal
-              ) {
-                current.sealedPre = carriedSeal + (current.sealedPre ?? '');
-              }
-            }
+            // Same re-seal and turn-ownership rule as the parked branch above
+            // (see resealOnRebuffer for why the whole payload is sealed and
+            // `carriedSeal` is the backstop).
+            this.resealOnRebuffer(
+              sessionId,
+              state,
+              current,
+              buffer,
+              carriedSeal,
+            );
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= this.streamBufferLimit(current)) {
               current.retryCount++;
@@ -2650,12 +2639,7 @@ export class QQChannel extends ChannelBase {
           this.dropOrphanStash(sessionId, held);
         }
       }
-      const anchorEntry = this.sessionReplyMsgId.get(sessionId);
-      const captured =
-        anchorEntry &&
-        Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
-          ? anchorEntry.msgId
-          : undefined;
+      const captured = this.resolveSessionReplyAnchor(sessionId).msgId;
       try {
         if (captured) {
           // Keep the [sender · task] attribution: sendMessage hardcodes an
@@ -2731,12 +2715,8 @@ export class QQChannel extends ChannelBase {
     // TTL-check the anchor like onResponseChunk does: a final segment sent
     // after the anchor expired must go out as an active message instead of
     // with a stale msg_id.
-    const anchorEntry = this.sessionReplyMsgId.get(sessionId);
-    const capturedMsgId =
-      anchorEntry &&
-      Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
-        ? anchorEntry.msgId
-        : undefined;
+    const { entry: anchorEntry, msgId: capturedMsgId } =
+      this.resolveSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     // This path just took over a parked deferred flush and delivered the
@@ -2850,10 +2830,11 @@ export class QQChannel extends ChannelBase {
     // so a long stream's later windows fall back to the active send path
     // instead of sending chunks with an expired msg_id.
     let anchor: string | undefined;
-    const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+    const { entry: anchorEntry, msgId: freshAnchor } =
+      this.resolveSessionReplyAnchor(sessionId);
     if (anchorEntry) {
-      if (Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS) {
-        anchor = anchorEntry.msgId;
+      if (freshAnchor !== undefined) {
+        anchor = freshAnchor;
       } else {
         // Drop the stale anchor through the release path so its orphaned
         // msg_seq counter is purged too (a raw delete would leave it behind).
@@ -2908,6 +2889,36 @@ export class QQChannel extends ChannelBase {
    */
   private sealClearedPayload(payload: string, residual: string): string {
     return residual ? payload + residual : payload;
+  }
+
+  /**
+   * Re-seal a failed payload that a transient re-buffer puts back on `current`:
+   * a boundary that cleared the bridge's collection while the send was in
+   * flight removed the payload's whole text from fullText, so the entire
+   * payload is sealed, plus the residual the boundary captured (flagged
+   * deterministically, not by comparing seal text). Only a chain that still
+   * owns the live turn may write the seal — a superseded entry's payload is
+   * abandoned with its failure and must not be injected into a successor's
+   * reply. `carriedSeal` is the backstop for a re-seal whose boundary marker
+   * was missed. Shared by the parked and non-parked re-buffer arms; the two
+   * must stay identical because they encode the same rule.
+   */
+  private resealOnRebuffer(
+    sessionId: string,
+    state: QQStreamState,
+    current: QQStreamState,
+    payload: string,
+    carriedSeal: string | undefined,
+  ): void {
+    if (!this.ownsLiveTurn(sessionId, state)) return;
+    if (state.boundaryClearedInFlight !== undefined) {
+      current.sealedPre = this.sealClearedPayload(
+        payload,
+        this.capturedResidual(state),
+      );
+    } else if (carriedSeal !== undefined && current.sealedPre !== carriedSeal) {
+      current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+    }
   }
 
   /**
@@ -3879,6 +3890,25 @@ export class QQChannel extends ChannelBase {
   }
 
   // ── ReplyMsgId helpers ────────────────────────────────────────
+
+  /**
+   * Resolve a session's reply anchor, returning both the raw entry and the
+   * msgId only while the entry is still inside REPLY_MSG_ID_TTL_MS. Callers
+   * that just need a usable anchor take `.msgId`; callers that must tell an
+   * absent anchor from an expired one (the final-segment fallback logs the
+   * expired case) branch on `.entry`. One site, so the freshness rule cannot
+   * drift between the flush, cancelled-stash, completion and create paths.
+   */
+  private resolveSessionReplyAnchor(sessionId: string): {
+    entry: { msgId: string; timestamp: number } | undefined;
+    msgId: string | undefined;
+  } {
+    const entry = this.sessionReplyMsgId.get(sessionId);
+    const fresh =
+      entry !== undefined &&
+      Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS;
+    return { entry, msgId: fresh ? entry.msgId : undefined };
+  }
 
   /**
    * Release a session's reply anchor, cascading to msgSeqMap when the

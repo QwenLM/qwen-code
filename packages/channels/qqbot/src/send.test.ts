@@ -395,32 +395,39 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
-  it('emits NO warning when groupAllPolicy=all and sessionScope=chat_thread', () => {
-    // chat_thread is a shared-context scope (ChannelBase treats it as shared;
-    // QQ has no threadId, so its routing key falls back to channel:chatId —
-    // identical to 'thread' under groupAllPolicy).
+  it('warns when groupAllPolicy=all and sessionScope=chat_thread (DMs become shared)', () => {
+    // chat_thread routes groups the same as thread (QQ has no threadId), but
+    // ChannelBase treats it as unconditionally shared, so it also turns every
+    // direct message into a shared session — the DM /clear rejection issue
+    // #8238 records. The warning must not offer it as an equal alternative.
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({
       groupAllPolicy: 'all',
       sessionScope: 'chat_thread' as const,
     });
     expect(ch.config.sessionScope).toBe('chat_thread');
-    // No scope-mismatch warning (chat_thread is shared), but the operator
-    // warning does fire: chat_thread shares direct-message sessions too.
-    expect(capturedStderr()).not.toContain('groupAllPolicy is');
-    expect(capturedStderr()).toContain('makes every session shared');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain('makes every direct message a shared session');
+    // The operator warning also fires: chat_thread shares DMs with no
+    // operators configured.
+    expect(logged).toContain('makes every session shared');
   });
 
-  it('emits NO warning for groupAllPolicy=all when sessionScope is single (global-session exemption)', () => {
-    // 'single' is a shared-context scope too (one global session keyed as
-    // channel:__single__) — the warning exists only for per-sender scopes.
+  it('warns when groupAllPolicy=all and sessionScope is single (all contexts collapse)', () => {
+    // 'single' is shared, but it merges every group and every DM into one
+    // `channel:__single__` context — the cross-group leakage issue #8238
+    // reports — so it must not be exempt from the scope warning.
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
     expect(ch.config.sessionScope).toBe('single');
-    // No scope-mismatch warning ('single' is a shared-context scope), but the
-    // operator warning fires because 'single' shares every session.
-    expect(capturedStderr()).not.toContain('groupAllPolicy is');
-    expect(capturedStderr()).toContain('makes every session shared');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain(
+      "'single' merges every group and direct message into one context",
+    );
+    // The operator warning fires too because 'single' shares every session.
+    expect(logged).toContain('makes every session shared');
   });
 
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
@@ -4500,6 +4507,33 @@ describe('replyMsgId cleanup timer', () => {
         expect(seqMap.has('msg-X')).toBe(false);
         expect(saveSpy).toHaveBeenCalled();
 
+        vi.useRealTimers();
+      });
+
+      it('reports the residual buffered during a permanent failure, not just the payload', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-residual',
+          msgId: 'msg-R',
+        });
+        // A chunk arrived while the send was in flight: it sits in
+        // state.buffer, is dropped with the entry, and must be counted in the
+        // loss log — the failed payload alone under-reports what is lost.
+        state.buffer = 'stale-tail';
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-residual', state);
+
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropping 11 chars');
+        expect(logged).toContain('plus 10 chars buffered in flight');
+
+        stderrSpy.mockRestore();
         vi.useRealTimers();
       });
 
