@@ -88,7 +88,6 @@ export function ManagedSessionsPage({
         onSelectSession={onSelectSession}
         workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
-        enabled
         cancellationEnabled={managedAgentProvider.canCancel}
       />
     );
@@ -101,14 +100,12 @@ function ManagedSessionsContent({
   onSelectSession,
   workspaceCwd,
   provider,
-  enabled,
   cancellationEnabled,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
   workspaceCwd?: string;
   provider: ManagedAgentProvider;
-  enabled: boolean;
   cancellationEnabled: boolean;
 }) {
   const { t } = useI18n();
@@ -116,11 +113,7 @@ function ManagedSessionsContent({
     () => getManagedClientId(provider.storageKey),
     [provider.storageKey],
   );
-  const detail = useManagedSession(
-    provider,
-    clientId,
-    enabled ? sessionId : undefined,
-  );
+  const detail = useManagedSession(provider, clientId, sessionId);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
@@ -164,7 +157,7 @@ function ManagedSessionsContent({
   const answerNoticeId = useId();
   const approvals = useManagedActions(
     provider,
-    enabled ? sessionId : undefined,
+    sessionId,
     clientId,
     // Unknown while the summary reloads, so the shown approval is kept.
     detail.summary ? detail.summary.capabilities.actions === true : undefined,
@@ -194,18 +187,20 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
+  // Depend on the value the request actually sends: a provider that drops
+  // workspaceCwd must not refetch (and lose paged rows) on folder change.
+  const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
     listBusy.current = false;
     setSessions([]);
     setNextCursor(undefined);
-    if (!enabled) return () => abort.abort();
     setListLoading(true);
     void provider
       .listSessions({
         clientId,
-        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
+        workspaceCwd: listCwd,
         limit: 50,
         signal: abort.signal,
       })
@@ -224,7 +219,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, enabled, workspaceCwd, listRevision]);
+  }, [provider, clientId, listCwd, listRevision]);
 
   const reloadSession = detail.reload;
   const refresh = useCallback(() => {
@@ -242,7 +237,7 @@ function ManagedSessionsContent({
     try {
       const page = await provider.listSessions({
         clientId,
-        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
+        workspaceCwd: listCwd,
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -267,7 +262,7 @@ function ManagedSessionsContent({
 
   async function submit() {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy || !enabled) return;
+    if (!abort || abort.signal.aborted || busy) return;
     let attempt = pendingRef.current;
     if (!attempt) {
       if (!text.trim() || (sessionId && !detail.summary?.capabilities.canSend))
@@ -361,7 +356,6 @@ function ManagedSessionsContent({
     }
   }
 
-  if (!enabled) return <p role="status">{t('managed.unavailable')}</p>;
   const summary = detail.summary;
   const active =
     summary &&
@@ -535,9 +529,25 @@ function ManagedSessionsContent({
             </div>
           )}
           {pending && !busy && (
-            <p role="status" className="text-sm text-muted-foreground">
-              {t('managed.uncertain')}
-            </p>
+            <div className="flex items-center gap-2" role="status">
+              <p className="text-sm text-muted-foreground">
+                {t('managed.uncertain')}
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  // An escape from a permanently failing retry: reuse the
+                  // draft text without minting a new idempotency key.
+                  pendingRef.current = undefined;
+                  setPending(undefined);
+                  persistPending(pendingKey, undefined);
+                  setText(pending.text);
+                }}
+              >
+                {t('managed.discard')}
+              </Button>
+            </div>
           )}
           {pendingApproval && (
             <div className="shrink-0" data-testid="managed-approval">

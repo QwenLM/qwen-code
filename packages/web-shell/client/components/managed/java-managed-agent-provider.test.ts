@@ -238,15 +238,18 @@ describe('createJavaManagedAgentProvider', () => {
       'https://product.example/api/agent/web-shell/v1/turns/submit',
       'https://product.example/api/agent/web-shell/v1/turns/cancel',
     ]);
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+    const createBody = JSON.parse(String(fetchImpl.mock.calls[0][1]?.body));
+    expect(createBody).toEqual(
       expect.objectContaining({
         requestId: expect.stringMatching(/^managed_/),
         idempotencyKey: 'key-1',
         agentId: 'qwen-code',
-        environmentId: 'python',
         input: [{ type: 'input_text', text: 'hello' }],
       }),
     );
+    // The standalone Java contract 400s any non-blank environmentId; the
+    // option stays a storageKey scope input only.
+    expect(createBody).not.toHaveProperty('environmentId');
   });
 
   it('uses lastEventId only as the Java public sequence cursor', async () => {

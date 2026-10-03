@@ -118,7 +118,7 @@ describe('ManagedAgentWebShell', () => {
       ),
     ).toBe(true);
   });
-  it('uses the host download sink and updates it when the host replaces the callback', async () => {
+  it('keeps the provider stable across callback identity churn and routes calls to the latest callback', async () => {
     const first = vi.fn(async () => undefined);
     const second = vi.fn(async () => undefined);
     const provider = () =>
@@ -149,7 +149,10 @@ describe('ManagedAgentWebShell', () => {
         />,
       ),
     );
-    expect(provider()).not.toBe(before);
+    // A callback identity change must not rebuild the provider (that would
+    // abort the list fetch, reload the summary and restart the SSE) — the
+    // latest callback is read through a ref instead.
+    expect(provider()).toBe(before);
     expect(provider().storageKey).toBe(before.storageKey);
     await provider().toolResults!.downloadArtifact(artifact, {
       clientId: 'client',

@@ -268,6 +268,67 @@ describe('Managed transcript projection', () => {
       ],
     });
   });
+
+  it.each([
+    'runtime_starting',
+    'runtime_ready',
+    'runtime_released',
+    'runtime_failed',
+    'stream_gap',
+    'cancelling',
+  ] as const)(
+    'does not split the streamed answer on a stale-Turn %s',
+    (type) => {
+      // The server appends an old Turn's control event above the new Turn's
+      // deltas; only consumed types may settle the Turn boundary.
+      const messages = managedEventsToMessages(
+        [
+          event(
+            1,
+            'accepted',
+            { prompt: [{ type: 'text', text: 'Go' }] },
+            'p2',
+          ),
+          event(2, 'assistant_delta', { text: 'A' }, 'p2'),
+          event(3, type, { message: 'old control event' }, 'p1'),
+          event(4, 'assistant_delta', { text: 'B' }, 'p2'),
+        ],
+        '[truncated]',
+      );
+      expect(messages).toMatchObject([
+        { role: 'user', content: 'Go' },
+        { role: 'assistant', content: 'AB', isStreaming: true },
+      ]);
+      expect(messages).toHaveLength(2);
+    },
+  );
+
+  it('settles the streamed tail when the active Turn reports a Runtime failure', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Go' }] }),
+        event(2, 'assistant_delta', { text: 'A' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'A',
+      isStreaming: false,
+    });
+  });
+
+  it('fails pending tools when the active Turn reports a Runtime failure', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
+  });
 });
 
 it('preserves the order of assistant / current-turn result / assistant', () => {
