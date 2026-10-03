@@ -191,6 +191,7 @@ describe('no-AK integration CI wiring', () => {
         './cli/tool-hook-context.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/_daemon-harness.test.ts',
         './cli/qwen-serve-standalone-concurrency.test.ts',
         './interactive/workflow-completion.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
