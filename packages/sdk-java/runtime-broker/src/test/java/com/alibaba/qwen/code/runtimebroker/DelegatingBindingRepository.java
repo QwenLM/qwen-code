@@ -16,6 +16,23 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     }
 
     @Override
+    public void requestHarnessDrain(String tenantId, String harnessSessionId) {
+        delegate.requestHarnessDrain(tenantId, harnessSessionId);
+    }
+
+    @Override
+    public boolean isHarnessDraining(String tenantId, String harnessSessionId) {
+        return delegate.isHarnessDraining(tenantId, harnessSessionId);
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByHarnessSession(String tenantId,
+            String harnessSessionId, String afterBindingId, int limit) {
+        return delegate.findByHarnessSession(tenantId, harnessSessionId,
+                afterBindingId, limit);
+    }
+
+    @Override
     public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate) {
         return delegate.admitSession(sessions, candidate);
