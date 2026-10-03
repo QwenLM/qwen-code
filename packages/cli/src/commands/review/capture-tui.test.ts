@@ -41,6 +41,7 @@ import {
 import {
   captureServerName,
   tmuxSupportsCaptureN,
+  tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
 
@@ -4484,6 +4485,116 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       expect(manifest.degradedBecause).toContain('pads capture-pane -N');
       expect(manifest.degradedBecause).not.toContain('tmux tmux');
     },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'drops -N and records the caveat when tmux -V does not parse ("tmux next")',
+    async () => {
+      // R24-1: a probe that SUCCEEDS with an unparseable banner answered
+      // both version predicates undefined, and the capture then kept `-N`
+      // with no `-T` and NO recorded degradation. Measured on this host's
+      // tmux (3.4) under exactly this shim: `-N` alone padded a
+      // three-byte line out to the grid allocation (`BBB` → 21 bytes), and
+      // the manifest presented fabricated grid padding as clean rendering
+      // evidence. The unnameable version now takes the padding host's
+      // fails-closed treatment: no `-N`, and the manifest says so.
+      probes.tmux = realTmuxProbe; // the shim on PATH answers -V instead
+      const realTmuxBin = spawnSync('sh', ['-c', 'command -v tmux'], {
+        encoding: 'utf8',
+      }).stdout?.trim();
+      expect(realTmuxBin).toBeTruthy();
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const callLog = join(dir, 'tmux-calls');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh\necho "$*" >> '${callLog}'\n` +
+          `if [ "$1" = "-V" ]; then echo "tmux next"; exit 0; fi\n` +
+          `exec '${realTmuxBin}' "$@"\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      try {
+        await withStdio(() =>
+          run({
+            command: 'printf "BBB\\n"; sleep 30',
+            until: 'BBB',
+          }),
+        );
+        expect(process.exitCode).toBeUndefined(); // captured, not refused
+        const calls = readFileSync(callLog, 'utf8');
+        // The EVIDENCE capture (`-p -e`), not the `-p -J` marker-poll
+        // view: the poll never carries `-N`, so selecting the first
+        // capture-pane line pins the wrong call.
+        const captureCall = calls
+          .split('\n')
+          .find((l) => l.includes('capture-pane -p -e'));
+        expect(captureCall).toBeDefined();
+        expect(captureCall).not.toMatch(/ -N( |$)/);
+        expect(captureCall).not.toMatch(/ -T( |$)/);
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.degradedBecause).toContain('tmux next');
+        expect(manifest.degradedBecause).toContain('could not be parsed');
+        expect(manifest.degradedBecause).toContain('WITHOUT -N');
+        // The evidence property itself, where the fabricating family is
+        // observable (3.4 pads under -N without -T; 3.1–3.2.x pads with no
+        // -T at all): dropping -N leaves `BBB` exactly, keeping it pads
+        // the line out. 3.3 does not pad either way, so nothing pinned.
+        const padsWithoutRemedy =
+          tmuxPadsWithCaptureN(tmuxVersionProbe.stdout ?? '') === true ||
+          tmuxSupportsCaptureT(tmuxVersionProbe.stdout ?? '') === true;
+        if (padsWithoutRemedy) {
+          const ans = readFileSync(join(dir, 'cap.ans'), 'utf8');
+          expect(ans.split('\n')[0]).toBe('BBB');
+        }
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'names an EMPTY tmux -V probe answer without leading a sentence with it',
+    async () => {
+      // R24-1's second shape: the probe exits 0 and prints NOTHING — the
+      // version string is empty, and a message built as `${tmuxVersion}
+      // could not be parsed` would open the manifest sentence on a space.
+      const realTmuxBin = spawnSync('sh', ['-c', 'command -v tmux'], {
+        encoding: 'utf8',
+      }).stdout?.trim();
+      expect(realTmuxBin).toBeTruthy();
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const callLog = join(dir, 'tmux-calls');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh\necho "$*" >> '${callLog}'\n` +
+          `if [ "$1" = "-V" ]; then printf ''; exit 0; fi\n` +
+          `exec '${realTmuxBin}' "$@"\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      try {
+        await withStdio(() => run({ until: 'WORLD' }));
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.degradedBecause).toContain(
+          'tmux -V output could not be parsed',
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      }
+    },
+    60_000,
   );
 
   it('an ans-only manifest does not authorize clearing <out>.png', async () => {

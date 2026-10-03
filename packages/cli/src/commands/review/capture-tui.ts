@@ -1296,6 +1296,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // there rather than fabricated, and the manifest says so.
   const capturePads = tmuxPadsWithCaptureN(tmuxVersion) === true;
   const captureTrims = tmuxSupportsCaptureT(tmuxVersion) === true;
+  // An unparseable version ("tmux next", or an empty exit-0 probe) answers
+  // BOTH predicates undefined, and defaulting then kept `-N` with no `-T` —
+  // which pads a three-character line out to the grid allocation even on
+  // 3.4 (measured under exactly that shim: 21 bytes for "BBB"), the
+  // fabrication the 3.1–3.2.x path drops `-N` to prevent, with NO
+  // degradation recorded for either case. An unnameable version is not
+  // refused (the gate above refuses only a NAMED old one), but it takes
+  // the same fails-closed treatment as a padding host: no `-N`, and the
+  // manifest names the uncertainty.
+  const versionKnown = tmuxPadsWithCaptureN(tmuxVersion) !== undefined;
   // BEFORE the start, not after a collapsed capture: the holder cannot hold
   // a pane open without `sleep`, and a bare name in the held script would
   // resolve through the pane's PATH — the watchdog then exits 127 and runs
@@ -1321,8 +1331,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     cwd: resolvedCwd,
     // Only 3.4+ has the flag; older versions have nothing to trim.
     captureTrim: captureTrims,
-    // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it.
-    captureTrailing: !capturePads,
+    // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it;
+    // an unparseable version carries the same risk on a host this command
+    // cannot name, so it drops -N too.
+    captureTrailing: !capturePads && versionKnown,
     readyFile: holderReadyPath,
     sleepBin,
   });
@@ -2038,6 +2050,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       `${tmuxVersion} pads capture-pane -N to the grid allocation and ` +
         `has no -T — trailing spaces were TRIMMED rather than fabricated; ` +
         `a trailing-space or right-edge claim needs tmux 3.3+`,
+    );
+  }
+  if (!versionKnown) {
+    degradations.push(
+      // tmuxVersion is the raw `tmux -V` stdout and can be EMPTY (an
+      // exit-0 probe that printed nothing); leading with it produced a
+      // manifest sentence opening on a space.
+      `${tmuxVersion || 'tmux -V output'} could not be parsed — captured ` +
+        `WITHOUT -N, so trailing spaces were TRIMMED rather than risk ` +
+        `fabricating grid padding from an unknown tmux; trailing-space, ` +
+        `right-edge and column claims carry that caveat`,
     );
   }
   if (captureTrims) {
