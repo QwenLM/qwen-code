@@ -106,6 +106,9 @@ class ManagedSessionStoreContractFixtureTest {
         expected.put("resourceNotFound", new ExpectedError(
                 HttpStatus.NOT_FOUND.value(),
                 ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND));
+        expected.put("writerCredentialInvalid", new ExpectedError(
+                HttpStatus.FORBIDDEN.value(),
+                ManagedSessionStoreModels.ERROR_WRITER_CREDENTIAL_INVALID));
         expected.put("ossDisabled", new ExpectedError(
                 HttpStatus.NOT_IMPLEMENTED.value(),
                 ManagedSessionStoreModels.ERROR_OSS_DISABLED));

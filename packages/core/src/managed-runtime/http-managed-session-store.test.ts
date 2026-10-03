@@ -82,7 +82,7 @@ describe('HTTP Managed Session store', () => {
     const request = { executionCallId: 'execution-1', historyRevision: 7 };
     const verified = vi.fn();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -119,11 +119,49 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('refuses plaintext http on non-loopback hosts without an opt-in', () => {
+    const options = {
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: (async () => jsonResponse({})) as typeof fetch,
+    };
+    for (const baseUrl of [
+      'http://session-store.test',
+      'http://203.0.113.10:8080',
+      'http://[fd00::1]:8080',
+      'http://127.example.com:8080',
+    ]) {
+      expect(() =>
+        createHttpManagedSessionStores({ ...options, baseUrl }),
+      ).toThrow(/plaintext HTTP/);
+    }
+    for (const baseUrl of [
+      'http://127.0.0.1:8080',
+      'http://127.1:8080',
+      'http://localhost:8080',
+      'http://broker.localhost',
+      'http://[::1]:8080',
+      'https://broker.example.com',
+    ]) {
+      expect(() =>
+        createHttpManagedSessionStores({ ...options, baseUrl }),
+      ).not.toThrow();
+    }
+    expect(() =>
+      createHttpManagedSessionStores({
+        ...options,
+        baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
+      }),
+    ).not.toThrow();
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -189,7 +227,7 @@ describe('HTTP Managed Session store', () => {
   it('refuses a changed durable publication receipt rather than staging it', async () => {
     const server = new FakeManagedSessionStore();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -230,7 +268,7 @@ describe('HTTP Managed Session store', () => {
     const requests: Array<Record<string, unknown>> = [];
     let outcomeRef: ManagedSessionDurableRef;
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -245,7 +283,7 @@ describe('HTTP Managed Session store', () => {
             429,
           );
         const committed = await server.fetch(
-          `http://session-store.test/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          `http://127.0.0.1:8080/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
           init,
         );
         return jsonResponse({
@@ -342,7 +380,7 @@ describe('HTTP Managed Session store', () => {
       let armed = false;
       let replay: unknown;
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -479,7 +517,7 @@ describe('HTTP Managed Session store', () => {
     temporaryDirectories.push(runtimeBaseDir);
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const firstStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -623,7 +661,7 @@ describe('HTTP Managed Session store', () => {
     await first.close();
     const committedBeforeRestore = server.commits.length;
     const secondStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-b',
       writerToken: TOKEN_B,
@@ -677,7 +715,7 @@ describe('HTTP Managed Session store', () => {
     temporaryDirectories.push(runtimeBaseDir);
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const firstStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -757,7 +795,7 @@ describe('HTTP Managed Session store', () => {
     await first.close();
 
     const secondStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-b',
       writerToken: TOKEN_B,
@@ -804,7 +842,7 @@ describe('HTTP Managed Session store', () => {
       ),
     );
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -825,7 +863,7 @@ describe('HTTP Managed Session store', () => {
   it('persists a fenced recovery block through the active writer', async () => {
     const server = new FakeManagedSessionStore();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -857,7 +895,7 @@ describe('HTTP Managed Session store', () => {
     );
     temporaryDirectories.push(runtimeBaseDir);
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -918,7 +956,7 @@ describe('HTTP Managed Session store', () => {
       return response;
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -962,7 +1000,7 @@ describe('HTTP Managed Session store', () => {
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const open = async (writerId: string, writerToken: string) => {
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId,
         writerToken,
@@ -1256,7 +1294,7 @@ describe('HTTP Managed Session store', () => {
       );
       temporaryDirectories.push(runtimeBaseDir);
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -1377,7 +1415,7 @@ describe('HTTP Managed Session store', () => {
 
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
