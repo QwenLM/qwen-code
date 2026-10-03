@@ -657,20 +657,16 @@ describe('assign-pr-owner: workflow invariants', () => {
     );
     assert.match(checkout.with.ref, /pull_request\.base\.sha/);
     assert.equal(checkout.with['persist-credentials'], false);
-    assert.match(checkout.with['sparse-checkout'], /issue-owners\.json/);
-    // The run step's guard skips when this entry is dropped, so pin the
-    // membership — otherwise routing could be silently disabled forever.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-pr-owner\.mjs$/m,
-    );
-    // The entry script statically imports assign-issue-owner.mjs, and the
-    // bootstrap guard only checks for assign-pr-owner.mjs — dropping this
-    // entry makes node fail on the missing module after the guard passed.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-issue-owner\.mjs$/m,
-    );
+    // One cone-mode directory carries everything the run step needs: both
+    // entry scripts (the run step's guard skips without assign-pr-owner.mjs,
+    // and it statically imports assign-issue-owner.mjs), plus
+    // issue-owners.json, which cone mode adds as a direct child of .github/.
+    // File entries break on a reused ECS workspace — cone mode dies with
+    // "is not a directory" once the index holds them as files — and
+    // non-cone mode leaves core.sparseCheckout behind, so the next full
+    // checkout on that runner comes out sparse.
+    assert.equal(checkout.with['sparse-checkout'], '.github/scripts');
+    assert.equal(checkout.with['sparse-checkout-cone-mode'], undefined);
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
