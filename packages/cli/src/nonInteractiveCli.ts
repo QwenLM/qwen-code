@@ -2436,7 +2436,10 @@ export async function runNonInteractive(
             resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(executionRequest);
+          const goalProvenance = goalToolResultProvenance(
+            executionRequest,
+            finalizedParts,
+          );
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {

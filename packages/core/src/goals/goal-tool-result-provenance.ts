@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Part } from '@google/genai';
+import { getToolResponseDisplayText } from '../utils/generateContentResponseUtilities.js';
 import type { RecordToolResultOptions } from '../services/chatRecordingService.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
@@ -39,6 +41,7 @@ export interface GoalToolResultRequest {
  */
 export function goalToolResultProvenance(
   request: GoalToolResultRequest,
+  responseParts?: Part[],
 ): RecordToolResultOptions | undefined {
   const { goalContext } = request;
   if (!goalContext) return undefined;
@@ -58,31 +61,37 @@ export function goalToolResultProvenance(
   if (
     lowerToolName === ToolNames.GET_GOAL ||
     lowerToolName === ToolNames.UPDATE_GOAL ||
-    // Only the discovery that IS Goal bookkeeping counts: a `select:` lookup
-    // naming a Goal tool. An unconditional tool_search stamp would also
-    // swallow keyword discovery about the objective's own work — e.g.
-    // `tool_search wiki fetch` returning "No tools found" is exactly the
-    // external_fact a blocked/infeasible proposal is proved with.
     (requestName === ToolNames.TOOL_SEARCH &&
-      selectsGoalTool(request.args?.['query']))
+      discoversOnlyGoalTools(responseParts))
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
   return { goalContext: { ...goalContext } };
 }
 
-/** Whether a tool_search query is a `select:` lookup naming a Goal tool. */
-function selectsGoalTool(query: unknown): boolean {
-  if (typeof query !== 'string' || !query.startsWith('select:')) return false;
+function discoversOnlyGoalTools(responseParts: Part[] | undefined): boolean {
+  const output = getToolResponseDisplayText(responseParts);
+  // Only the complete schema block and Code Mode call hint are bookkeeping.
+  // Missing, unavailable or truncated capabilities remain external facts.
+  const schemas = output?.match(
+    /^<functions>\n([\s\S]+)\n<\/functions>(?:\n\nCall these tools through exec using tools\.<jsName>\(args\) and the required parameters above\.)?$/,
+  )?.[1];
+  if (!schemas) return false;
   const goalTools = new Set<string>([
     ToolNames.GET_GOAL,
     ToolNames.UPDATE_GOAL,
     ToolNames.PROPOSE_GOAL,
   ]);
-  return query
-    .slice('select:'.length)
-    .split(',')
-    .some((name) => goalTools.has(canonicalToolName(name.trim())));
+  return schemas.split('\n').every((schema) => {
+    const match = schema.match(/^<function>(.*)<\/function>$/);
+    if (!match) return false;
+    try {
+      const { name } = JSON.parse(match[1]!) as Record<string, unknown>;
+      return typeof name === 'string' && goalTools.has(name);
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -96,11 +105,15 @@ function selectsGoalTool(query: unknown): boolean {
 export function ambientGoalToolResultProvenance(
   toolName: string,
   args?: Record<string, unknown>,
+  responseParts?: Part[],
 ): RecordToolResultOptions | undefined {
   const goalContext = goalTurnContext.getStore();
-  return goalToolResultProvenance({
-    name: toolName,
-    ...(args ? { args } : {}),
-    ...(goalContext ? { goalContext } : {}),
-  });
+  return goalToolResultProvenance(
+    {
+      name: toolName,
+      ...(args ? { args } : {}),
+      ...(goalContext ? { goalContext } : {}),
+    },
+    responseParts,
+  );
 }

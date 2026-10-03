@@ -52,19 +52,29 @@ describe('goalToolResultProvenance', () => {
     // `external_fact` (a schema dump cited as proof about the world) and
     // count toward the finishing turn's evidence-bearing results.
     expect(
-      goalToolResultProvenance({
-        name: ToolNames.TOOL_SEARCH,
-        args: { query: 'select:update_goal' },
-        goalContext: permit,
-      }),
+      goalToolResultProvenance(
+        {
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'select:update_goal' },
+          goalContext: permit,
+        },
+        [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: {
+                output:
+                  '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>',
+              },
+            },
+          },
+        ],
+      ),
     ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
   });
 
   it('keeps keyword and non-Goal discovery as evidence during a Goal turn', () => {
-    // The stamp is only for select:-of-a-Goal-tool bookkeeping: a keyword
-    // search about the objective's own work (e.g. "wiki fetch" returning
-    // "No tools found") is exactly the external_fact a blocked/infeasible
-    // proposal is proved with, and must keep its ordinary stamp.
+    // Without a complete Goal-only result, discovery stays external evidence.
     expect(
       goalToolResultProvenance({
         name: ToolNames.TOOL_SEARCH,
@@ -128,6 +138,32 @@ describe('goalToolResultProvenance', () => {
         args,
         goalContext: permit,
       }),
+    ).toEqual({ goalContext: permit });
+  });
+
+  it.each([
+    undefined,
+    '<functions>\n<function>{"name":"update_goal"',
+    '<functions>\n<function>{broken}</function>\n</functions>',
+    '<functions>\n<function>null</function>\n</functions>',
+    '<functions>\n</functions>',
+  ])('keeps unreadable discovery as ordinary evidence', (output) => {
+    expect(
+      goalToolResultProvenance(
+        {
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'select:update_goal' },
+          goalContext: permit,
+        },
+        [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: { output },
+            },
+          },
+        ],
+      ),
     ).toEqual({ goalContext: permit });
   });
 

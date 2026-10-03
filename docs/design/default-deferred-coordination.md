@@ -44,6 +44,13 @@ explain how to discover a missing `list_agents` in Direct mode. Reuse the
 conditional bridge sentence so eager visibility and later reveals remain valid;
 no registry predicate or execution policy changes are needed.
 
+All five recording sites classify Goal discovery from the finalized returned
+schemas, not the query spelling. A complete result containing only `get_goal`,
+`update_goal`, or `propose_goal` declarations is Goal runtime bookkeeping,
+including keyword discovery and Code Mode's invocation hint. Mixed work
+schemas, capability diagnostics, and incomplete or unreadable results retain
+ordinary tool-result provenance for the verifier.
+
 ## Risks and acceptance
 
 An extra discovery request can offset the first-request saving. Natural
@@ -59,6 +66,9 @@ and prompts on the base and candidate, with no `tools.eager` override:
    and verifier outcome through the bridge; refusal must not start a Goal.
    Hidden Goal tools must have actionable continuation instructions on every
    host, including objective-updated and wind-down turns.
+   Goal-only discovery must stay out of external-fact evidence regardless of
+   quoting, casing, or search mode; mixed work and missing-capability results
+   must remain in the evidence window.
 4. `tools.visible`, a disabled bridge, denied tools, and a resumed direct-call
    history: verify the existing visibility and permission contracts.
 5. ACP direct and bridged Agent calls: verify concurrent delegation and the

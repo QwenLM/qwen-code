@@ -12601,6 +12601,7 @@ export class Session implements SessionContext {
         const goalProvenance = ambientGoalToolResultProvenance(
           record.toolName,
           record.toolArgs,
+          finalized[index].responseParts,
         );
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
