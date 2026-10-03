@@ -1036,6 +1036,43 @@ describe('collectContextData (contextCommand)', () => {
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
       );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      // The deficit comes out of the mcp row, not the built-in or skills rows.
+      expect(unscaled.breakdown.builtinTools).toBe(0);
+      expect(unscaled.breakdown.mcpTools).toBe(
+        Math.max(
+          0,
+          estimateContextTextTokens(JSON.stringify(declared)) -
+            estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+        ),
+      );
+      // With nothing declared the mcp row cannot absorb the whole deficit, so
+      // the rest is charged to skills and the window still adds up.
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        false,
+      );
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(JSON.stringify([])),
+      );
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
+      );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
       const total =
