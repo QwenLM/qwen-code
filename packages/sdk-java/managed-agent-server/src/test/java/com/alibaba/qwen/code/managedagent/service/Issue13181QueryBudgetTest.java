@@ -1377,6 +1377,15 @@ class Issue13181QueryBudgetTest {
                         + "{}\n",
                 1, List.of(), null))
                 .hasMessageContaining("Journal event scope conflicts");
+        // A key carrying extra fields reads as foreign too, matching the
+        // read paths' closed-key comparison.
+        ObjectNode paddedKey = binding.get("sessionKey").deepCopy();
+        paddedKey.put("junk", 1);
+        assertThatThrownBy(() -> append("activation.padded-key",
+                event(journal.sequence + 1, "activation.changed",
+                        activation("active"), paddedKey, 1) + "{}\n",
+                1, List.of(), null))
+                .hasMessageContaining("Journal event scope conflicts");
         // The head columns keep the previous activation.
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
                         + " qwen_managed_session_journal_head", String.class))

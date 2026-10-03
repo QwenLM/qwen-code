@@ -1368,7 +1368,11 @@ class ToolPublicationStoreTest {
     }
 
     // Ambiguous evidence fails closed on both read paths: two tool.intent
-    // lines sharing one sequence are never silently resolved.
+    // lines sharing one sequence within the revisions a path reads are
+    // never silently resolved. A stray line claiming an out-of-range
+    // sequence lives outside every declared revision range, so the head
+    // path's locate never reads it — and writing one requires an authority
+    // already writing outside its declared ranges.
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void duplicateIntentLinesAtOneSequenceAreFenced(boolean journalHeadAuthorization) {

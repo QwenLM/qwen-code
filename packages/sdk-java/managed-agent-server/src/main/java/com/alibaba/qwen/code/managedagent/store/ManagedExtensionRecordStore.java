@@ -209,13 +209,16 @@ public class ManagedExtensionRecordStore {
                 // The capture writes durable authorization state, so it
                 // applies the same scope check both read paths enforce —
                 // a line naming another Session is refused, not promoted.
-                JsonNode key = event.path("sessionKey");
+                // The read paths compare against the contract-closed key
+                // (exactly the three fields), so this compares against a
+                // closed key too: an extra-fielded key reads as foreign.
+                JsonNode expected = JSON.createObjectNode()
+                        .put("tenantId", tenantId)
+                        .put("workspaceId", workspaceId)
+                        .put("sessionId", sessionId);
                 require(event.path("v").asInt() == 1
-                        && tenantId.equals(key.path("tenantId").textValue())
-                        && workspaceId.equals(
-                                key.path("workspaceId").textValue())
-                        && sessionId.equals(key.path("sessionId")
-                                .textValue()), "Journal event scope conflicts");
+                        && expected.equals(event.path("sessionKey")),
+                        "Journal event scope conflicts");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(event.path("kind").asText())) {
