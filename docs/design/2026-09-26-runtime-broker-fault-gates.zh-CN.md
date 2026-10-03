@@ -22,7 +22,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
 
 范围内：#12748 中针对工具链路的 FG1–FG4 门禁，以及针对 W0c 上下文安装的 FG5 门禁，运行在真实服务、真实打包的 worker、真实 HTTP、真实数据库和真实进程死亡之上。
 
-范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的 `--session-failover` 模式仍不进 CI；in-flight 与 continuation 模式在 `hosted-harness-mysql` 任务中运行（见[ Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.zh-CN.md)）。
+范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的三个故障转移模式（`--session-failover`、`--inflight-failover`、`--continuation-failover`）都在 `hosted-harness-mysql` 任务中运行（#13258)；只有真实模型检查仍不进 CI（见[ Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.zh-CN.md)）。
 
 ## 3. 设计
 

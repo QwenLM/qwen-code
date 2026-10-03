@@ -435,11 +435,16 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.events).toEqual([
-      expect.objectContaining({ id: 1, type: 'accepted' }),
+      expect.objectContaining({
+        id: 1,
+        type: 'accepted',
+        assembledFromItem: true,
+      }),
       expect.objectContaining({
         id: 2,
         type: 'assistant_delta',
         data: { itemId: 'output-1', text: 'world' },
+        assembledFromItem: true,
       }),
       expect.objectContaining({ id: 4, type: 'completed' }),
     ]);
@@ -606,6 +611,67 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       (await provider.getSession('session-1', { clientId: 'c' })).capabilities,
     ).toEqual({ canSend: true, canCancel: false });
+  });
+
+  it('lets a bound Session send only when the service allows its caller', async () => {
+    const bound = {
+      sessionId: 'bound-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 3,
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...bound,
+            capabilities: { tasks: true, workspaceTurns: true },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...bound,
+            capabilities: { tasks: true, workspaceTurns: false },
+          }),
+        ),
+    });
+
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: true, canCancel: false, workspaceTurns: true });
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: false, canCancel: false });
+  });
+
+  it('lets the allowed caller cancel a running Turn of a bound Session', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'bound-1',
+          status: 'ACTIVE',
+          createdAt: 1,
+          updatedAt: 2,
+          lastSequence: 5,
+          workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+          activeTurn: {
+            turnId: 'turn-2',
+            sessionId: 'bound-1',
+            status: 'RUNNING',
+            submittedAt: 2,
+          },
+          capabilities: { tasks: true, workspaceTurns: true },
+        }),
+      ),
+    });
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
   });
 
   it('passes download cancellation through the host sink to the content fetch', async () => {

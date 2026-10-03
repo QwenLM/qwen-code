@@ -117,7 +117,7 @@ def test_build_cli_arguments_maps_all_consolidated_options() -> None:
     assert args[args.index("--fallback-model") + 1] == "qwen-plus,qwen-turbo"
     assert "--proxy" in args
     assert args[args.index("--proxy") + 1] == "http://proxy:8080"
-    assert "--sandbox" in args
+    assert "--sandbox=true" in args
     assert "--safe-mode" in args
     assert "--insecure" in args
     assert "--worktree" in args
@@ -125,6 +125,14 @@ def test_build_cli_arguments_maps_all_consolidated_options() -> None:
     assert args[args.index("--disabled-slash-commands") + 1] == "/init,/vim"
     assert "--custom-flag" in args
     assert args[args.index("--custom-flag") + 1] == "value"
+
+
+def test_automatic_sandbox_keeps_text_extra_args_separate() -> None:
+    args = build_cli_arguments(
+        QueryOptions(sandbox=True, extra_args=["explain the parser"])
+    )
+
+    assert args[-2:] == ["--sandbox=true", "explain the parser"]
 
 
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:

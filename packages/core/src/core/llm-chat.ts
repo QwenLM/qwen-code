@@ -24,6 +24,7 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import { beginRetryWait } from '../utils/retry-wait.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -1398,25 +1399,33 @@ function delay(
 } {
   let resolveRef: () => void;
   let timeoutId: ReturnType<typeof setTimeout>;
+  // Every settle path ends the announced retry wait synchronously — a skip or
+  // abort must not keep shielding the request until the generator resumes.
+  let endWait = () => {};
 
   const promise = new Promise<void>((resolve, reject) => {
-    resolveRef = resolve;
+    resolveRef = () => {
+      endWait();
+      resolve();
+    };
 
     if (signal?.aborted) {
       reject(signal.reason);
       return;
     }
 
-    timeoutId = setTimeout(resolve, delayMs);
+    timeoutId = setTimeout(resolveRef, delayMs);
 
     signal?.addEventListener(
       'abort',
       () => {
         clearTimeout(timeoutId);
+        endWait();
         reject(signal.reason);
       },
       { once: true },
     );
+    endWait = beginRetryWait(delayMs);
   });
 
   return {
@@ -2976,6 +2985,10 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // After a Managed Runtime call ended without a known outcome, the model
+    // must not continue: it could repeat a call that already took effect.
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) throw managedSessionBlock;
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
