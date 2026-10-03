@@ -22,6 +22,16 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The 100 ms materialize pass runs sequential JDBC transactions; sharing
+     * the one-thread default scheduler would delay turn recovery by a whole
+     * pass whenever a materialization stalls.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler messageMaterializerScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("message-materialize-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle

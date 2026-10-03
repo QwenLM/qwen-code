@@ -76,7 +76,6 @@ class EmbeddedRuntimeBrokerTest {
         config.setDurableLocalProcess(true);
         config.setNodeExecutable("node");
         config.setWorkerEntry("worker.js");
-        config.setCliEntry("cli.js");
         Path storage = managed ? java.nio.file.Files.createDirectory(root.resolve("storage")).toRealPath() : workspace;
         if (managed) {
             config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(

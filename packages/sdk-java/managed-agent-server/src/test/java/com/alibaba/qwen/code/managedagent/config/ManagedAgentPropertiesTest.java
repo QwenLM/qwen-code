@@ -82,6 +82,68 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void everyDurationFieldDeclaresABindingUnit() {
+        // A unit-less numeric override binds as milliseconds unless the
+        // field declares its unit; this pin keeps the sweep complete for
+        // future fields too.
+        for (Class<?> nested : ManagedAgentProperties.class
+                .getDeclaredClasses()) {
+            for (java.lang.reflect.Field field : nested
+                    .getDeclaredFields()) {
+                if (field.getType() == java.time.Duration.class) {
+                    assertThat(field.getAnnotation(
+                            org.springframework.boot.convert.DurationUnit.class))
+                            .as(nested.getSimpleName() + "."
+                                    + field.getName())
+                            .isNotNull();
+                }
+            }
+        }
+    }
+
+    @Test
+    void unitLessNumericOverridesBindInTheDeclaredUnit() {
+        // Without @DurationUnit this binds PT0.12S — a 120 ms lease renewed
+        // every 20 s invites double execution.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.dispatch.lease-duration=120")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(started.getBean(ManagedAgentProperties.class)
+                            .getDispatch().getLeaseDuration())
+                            .isEqualTo(java.time.Duration.ofSeconds(120));
+                });
+    }
+
+    @Test
+    void materializeIntervalIsTypedAgainstTheScheduledCadence()
+            throws Exception {
+        assertThat(new ManagedAgentProperties().getEvents()
+                .getMaterializeInterval())
+                .isEqualTo(java.time.Duration.ofMillis(100));
+        // The annotation fallback is the single source of truth; the typed
+        // default must never drift from it.
+        var annotation = com.alibaba.qwen.code.managedagent.service
+                .MessageMaterializer.class.getMethod("materialize")
+                .getAnnotation(
+                        org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(annotation.fixedDelayString()).isEqualTo(
+                "${qwen.managed-agent.events.materialize-interval:100ms}");
+    }
+
+    @Test
+    void droppedConfigSurfacesStayDropped() {
+        // The kubernetes* and cliEntry blocks had no consumer; they come
+        // back only together with their provisioner/invocation.
+        assertThat(ManagedAgentProperties.RuntimeBroker.class
+                .getDeclaredFields()).noneMatch(field -> field.getName()
+                        .startsWith("kubernetes"))
+                .noneMatch(field -> field.getName().equals("cliEntry"));
+    }
+
+    @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class);

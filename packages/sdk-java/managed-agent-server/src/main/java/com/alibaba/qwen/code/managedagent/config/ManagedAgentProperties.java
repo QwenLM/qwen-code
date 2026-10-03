@@ -2,10 +2,12 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
 import java.util.Locale;
 import java.util.Set;
 
@@ -96,6 +98,9 @@ public class ManagedAgentProperties {
         private String token = "";
         private String capabilityDigest = "";
         private String approvalMode = "yolo";
+        // Unit-less operator overrides must bind in the annotated unit; an
+        // un-annotated Duration silently binds milliseconds.
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration approvalTimeout = Duration.ofMinutes(10);
 
         public Duration getApprovalTimeout() {
@@ -106,8 +111,11 @@ public class ManagedAgentProperties {
             approvalTimeout = value;
         }
 
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration connectTimeout = Duration.ofSeconds(5);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration requestTimeout = Duration.ofSeconds(30);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration heartbeatInterval = Duration.ofSeconds(30);
 
         public boolean isEnabled() {
@@ -187,6 +195,7 @@ public class ManagedAgentProperties {
         private boolean enabled;
         private String baseUrl = "";
         private String workspaceId = "";
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
 
         public boolean isEnabled() {
@@ -233,11 +242,15 @@ public class ManagedAgentProperties {
         private Long tenantBytes;
         private Long activeCaptures;
         private Integer entryConcurrency;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration operationTimeout;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
 
         public boolean isGcEnabled() { return gcEnabled; }
@@ -280,6 +293,7 @@ public class ManagedAgentProperties {
         private boolean publishOriginal;
         private boolean publishPreview;
         private int maxConcurrentReads = 4;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration readTimeout = Duration.ofMinutes(2);
 
         public boolean isEnabled() { return enabled; }
@@ -295,20 +309,18 @@ public class ManagedAgentProperties {
     }
 
     public static class Dispatch {
-        private Duration scanDelay = Duration.ofSeconds(1);
+        // The scan delay has one source of truth: the placeholder fallback
+        // on HarnessCoordinator.recoverExpiredTurns. No typed field — a dead
+        // second default would drift from it.
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseDuration = Duration.ofSeconds(60);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseRenewInterval = Duration.ofSeconds(20);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryInitialDelay = Duration.ofSeconds(1);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration retryMaxDelay = Duration.ofMinutes(1);
         private int maxPreAdmissionRetries = 5;
-
-        public Duration getScanDelay() {
-            return scanDelay;
-        }
-
-        public void setScanDelay(Duration scanDelay) {
-            this.scanDelay = scanDelay;
-        }
 
         public Duration getLeaseDuration() {
             return leaseDuration;
@@ -352,10 +364,16 @@ public class ManagedAgentProperties {
     }
 
     public static class Events {
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration pollInterval = Duration.ofSeconds(5);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration heartbeatInterval = Duration.ofSeconds(15);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration streamTimeout = Duration.ofMinutes(30);
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration batchInterval = Duration.ofMillis(75);
+        @DurationUnit(ChronoUnit.MILLIS)
+        private Duration materializeInterval = Duration.ofMillis(100);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
 
@@ -389,6 +407,14 @@ public class ManagedAgentProperties {
 
         public void setBatchInterval(Duration batchInterval) {
             this.batchInterval = batchInterval;
+        }
+
+        public Duration getMaterializeInterval() {
+            return materializeInterval;
+        }
+
+        public void setMaterializeInterval(Duration materializeInterval) {
+            this.materializeInterval = materializeInterval;
         }
 
         public int getBatchMaxEvents() {
@@ -428,19 +454,6 @@ public class ManagedAgentProperties {
         private String credentialKey = "";
         private String nodeExecutable = "";
         private String workerEntry = "";
-        private String cliEntry = "";
-        private String kubernetesApiServer =
-                "https://kubernetes.default.svc";
-        private String kubernetesTokenFile =
-                "/var/run/secrets/kubernetes.io/serviceaccount/token";
-        private String kubernetesCaFile =
-                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-        private String kubernetesClusterUid = "";
-        private String kubernetesNamespace = "qwen-runtimes";
-        private String kubernetesImage = "";
-        private int kubernetesPort = 4190;
-        private String kubernetesServiceAccountName = "";
-        private String kubernetesWorkspaceClaimName = "";
         private String staticEndpoint = "";
         private String staticToken = "";
         private String staticRuntimeInstanceId = "standalone-runtime";
@@ -601,90 +614,6 @@ public class ManagedAgentProperties {
 
         public void setWorkerEntry(String workerEntry) {
             this.workerEntry = workerEntry;
-        }
-
-        public String getCliEntry() {
-            return cliEntry;
-        }
-
-        public void setCliEntry(String cliEntry) {
-            this.cliEntry = cliEntry;
-        }
-
-        public String getKubernetesApiServer() {
-            return kubernetesApiServer;
-        }
-
-        public void setKubernetesApiServer(String kubernetesApiServer) {
-            this.kubernetesApiServer = kubernetesApiServer;
-        }
-
-        public String getKubernetesTokenFile() {
-            return kubernetesTokenFile;
-        }
-
-        public void setKubernetesTokenFile(String kubernetesTokenFile) {
-            this.kubernetesTokenFile = kubernetesTokenFile;
-        }
-
-        public String getKubernetesCaFile() {
-            return kubernetesCaFile;
-        }
-
-        public void setKubernetesCaFile(String kubernetesCaFile) {
-            this.kubernetesCaFile = kubernetesCaFile;
-        }
-
-        public String getKubernetesClusterUid() {
-            return kubernetesClusterUid;
-        }
-
-        public void setKubernetesClusterUid(String kubernetesClusterUid) {
-            this.kubernetesClusterUid = kubernetesClusterUid;
-        }
-
-        public String getKubernetesNamespace() {
-            return kubernetesNamespace;
-        }
-
-        public void setKubernetesNamespace(String kubernetesNamespace) {
-            this.kubernetesNamespace = kubernetesNamespace;
-        }
-
-        public String getKubernetesImage() {
-            return kubernetesImage;
-        }
-
-        public void setKubernetesImage(String kubernetesImage) {
-            this.kubernetesImage = kubernetesImage;
-        }
-
-        public int getKubernetesPort() {
-            return kubernetesPort;
-        }
-
-        public void setKubernetesPort(int kubernetesPort) {
-            this.kubernetesPort = kubernetesPort;
-        }
-
-        public String getKubernetesServiceAccountName() {
-            return kubernetesServiceAccountName;
-        }
-
-        public void setKubernetesServiceAccountName(
-                String kubernetesServiceAccountName) {
-            this.kubernetesServiceAccountName =
-                    kubernetesServiceAccountName;
-        }
-
-        public String getKubernetesWorkspaceClaimName() {
-            return kubernetesWorkspaceClaimName;
-        }
-
-        public void setKubernetesWorkspaceClaimName(
-                String kubernetesWorkspaceClaimName) {
-            this.kubernetesWorkspaceClaimName =
-                    kubernetesWorkspaceClaimName;
         }
 
         public String getStaticEndpoint() {

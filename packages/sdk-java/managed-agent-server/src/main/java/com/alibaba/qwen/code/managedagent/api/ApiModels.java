@@ -279,7 +279,7 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellTurn(String turnId, String sessionId,
             String status, long submittedAt, Long completedAt,
-            String errorCode, Map<String, Object> usage) {
+            String errorCode) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
