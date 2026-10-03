@@ -390,6 +390,18 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+Two optional knobs change how the Broker listens and how long it keeps a
+finished v3 result readable:
+
+```bash
+# Default false: the Broker refuses to bind a non-loopback address. Set it
+# only when the Harness reaches the Broker over a non-loopback interface and
+# that interface is already restricted to trusted peers.
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
+# Default 30m, minimum 1s: how long a finished v3 result stays retrievable.
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
+```
+
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup

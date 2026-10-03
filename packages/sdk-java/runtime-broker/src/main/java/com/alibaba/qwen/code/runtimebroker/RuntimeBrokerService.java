@@ -3018,8 +3018,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         // Each round costs two repository reads and one worker
                         // call; back off instead of pinning them at 10/s for
-                        // the whole window.
-                        long delay = Math.min(5_000,
+                        // the whole window. The 2s cap bounds how late a
+                        // finished result is picked up.
+                        long delay = Math.min(2_000,
                                 100L << Math.min(attempt, 6));
                         try {
                             scheduler.schedule(() -> pollV3Result(context,

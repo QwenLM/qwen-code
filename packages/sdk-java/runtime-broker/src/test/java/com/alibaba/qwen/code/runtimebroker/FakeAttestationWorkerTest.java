@@ -189,13 +189,20 @@ class FakeAttestationWorkerTest {
     /**
      * The mirror arm: without {@code --ignore-term} the fake worker's
      * default SIGTERM handler must let destroy() stop it — otherwise the
-     * escalation tests prove nothing.
+     * escalation tests prove nothing. The ready line must be read first:
+     * it is written only after the handler is installed, so destroying
+     * earlier would kill the worker through SIGTERM's default disposition
+     * and prove nothing about the handler.
      */
     @Test
     void defaultWorkerExitsOnSigterm() throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
         Process worker = start(JSON.writeValueAsBytes(fixtures().get("boot")));
         try {
+            BufferedReader stdout = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            assertTrue(stdout.readLine() != null,
+                    "worker never became ready");
             worker.toHandle().destroy();
             assertTrue(worker.waitFor(2, TimeUnit.SECONDS),
                     "a default worker must exit on SIGTERM");

@@ -264,8 +264,12 @@ class Issue13183AdversarialTest {
             first = service.warm("harness").toCompletableFuture().get(10,
                     TimeUnit.SECONDS);
         }
-        // One more session than three drain calls can release at 16 bounded
-        // passes each (cleanupLost drives the loop at three sites).
+        // More sessions than one reclaim's pass budget can release: the
+        // first site returns before any release (the loss evidence is not
+        // yet written), then two sites drain 16 * 100 rows each, so the
+        // ~1.6k that remain must stop the reclaim with LOST instead of
+        // looping. Each reclaiming service gets a lease long enough that
+        // the measured operation deadline stays ahead of the wall clock.
         int sessionsToCreate = 3 * 16 * 100 + 1;
         for (int index = 0; index < sessionsToCreate; index++) {
             bindings.admitSession(sessions, new RuntimeSessionRecord(
@@ -276,7 +280,8 @@ class Issue13183AdversarialTest {
         }
 
         try (RuntimeBrokerService service = service(new ReclaimProvisioner(),
-                bindings, sessions, executions, "broker-two")) {
+                bindings, sessions, executions, "broker-two",
+                Duration.ofSeconds(10))) {
             java.util.concurrent.ExecutionException failure =
                     org.junit.jupiter.api.Assertions.assertThrows(
                             java.util.concurrent.ExecutionException.class,
@@ -302,7 +307,8 @@ class Issue13183AdversarialTest {
 
         // The next reclaim resumes where the budgeted one stopped.
         try (RuntimeBrokerService service = service(new ReclaimProvisioner(),
-                bindings, sessions, executions, "broker-three")) {
+                bindings, sessions, executions, "broker-three",
+                Duration.ofSeconds(10))) {
             RuntimeBindingRecord reclaimed = service.warm("harness")
                     .toCompletableFuture().get(60, TimeUnit.SECONDS);
             assertEquals(RuntimeBindingRecord.State.READY,
@@ -499,11 +505,25 @@ class Issue13183AdversarialTest {
             RuntimeBindingRepository bindings,
             RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String owner) {
+        return service(provisioner, bindings, sessions, executions, owner,
+                Duration.ofSeconds(3));
+    }
+
+    /**
+     * A service with explicit operation and dispatch leases. The measured
+     * operation deadline is four times the operation lease, so a test that
+     * drains thousands of rows needs a lease long enough to keep that
+     * deadline ahead of its own wall clock.
+     */
+    private static RuntimeBrokerService service(RuntimeProvisioner provisioner,
+            RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, String owner,
+            Duration lease) {
         return new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 provisioner, new AttestingTransport(), bindings, sessions,
-                executions, owner, Duration.ofSeconds(3),
-                Duration.ofSeconds(3));
+                executions, owner, lease, lease);
     }
 
 

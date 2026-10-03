@@ -689,7 +689,8 @@ class Issue13183RegressionTest {
      * Finding 2 (v3 polling): result polling backs off exponentially from
      * 100ms instead of pinning two repository reads and one worker call at
      * 10/s for the whole window. Gaps are bounded both ways: the doubling
-     * is the backoff, the upper bounds keep early polls prompt.
+     * is the backoff, the 2s cap bounds how late a finished result is
+     * picked up, and the per-step upper bounds keep early polls prompt.
      */
     @Test
     void v3ResultPollingBacksOff() throws Exception {
@@ -697,12 +698,14 @@ class Issue13183RegressionTest {
         try (RuntimeBrokerService service = v3Service(transport,
                 Duration.ofMinutes(30))) {
             startV3Execution(service);
-            await(() -> transport.statusV3Nanos.size() >= 4,
-                    Duration.ofSeconds(10));
+            await(() -> transport.statusV3Nanos.size() >= 7,
+                    Duration.ofSeconds(20));
             List<Long> times = transport.statusV3Nanos;
             long firstGap = times.get(1) - times.get(0);
             long secondGap = times.get(2) - times.get(1);
             long thirdGap = times.get(3) - times.get(2);
+            long fifthGap = times.get(5) - times.get(4);
+            long sixthGap = times.get(6) - times.get(5);
             assertTrue(firstGap >= Duration.ofMillis(90).toNanos(),
                     "first retry must double from 100ms: " + firstGap);
             assertTrue(firstGap < Duration.ofSeconds(1).toNanos(),
@@ -715,6 +718,17 @@ class Issue13183RegressionTest {
                     "third retry must double again: " + thirdGap);
             assertTrue(thirdGap < Duration.ofSeconds(3).toNanos(),
                     "third retry must stay prompt: " + thirdGap);
+            // The doubling reaches 1.6s before the cap binds, so the sixth
+            // gap is the first capped one: 2s, not the uncapped 3.2s.
+            assertTrue(fifthGap >= Duration.ofMillis(1_500).toNanos(),
+                    "fifth retry must still double: " + fifthGap);
+            assertTrue(sixthGap >= Duration.ofMillis(1_900).toNanos(),
+                    "the cap must not shorten the backoff below 2s: "
+                            + sixthGap);
+            // The uncapped doubling would schedule 3.2s here; the slack
+            // below that value absorbs scheduler jitter on a loaded runner.
+            assertTrue(sixthGap < Duration.ofMillis(2_900).toNanos(),
+                    "the backoff must stop at the 2s cap: " + sixthGap);
         }
     }
 
