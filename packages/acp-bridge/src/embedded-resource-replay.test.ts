@@ -7,7 +7,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import {
-  MAX_RECORDED_EMBEDDED_RESOURCES,
   readDaemonNativeResourceIndexes,
   snapshotReplayableEmbeddedResources,
 } from './embedded-resource-replay.js';
@@ -58,16 +57,26 @@ describe('snapshotReplayableEmbeddedResources', () => {
     expect(snapshot.resources).toEqual([small, later]);
   });
 
-  it('bounds the retained resource count', () => {
-    const prompt = Array.from(
-      { length: MAX_RECORDED_EMBEDDED_RESOURCES + 1 },
-      () => textResource('context://example/tiny', ''),
+  it('bounds the retained resource count at exactly 256', () => {
+    const prompt = Array.from({ length: 257 }, () =>
+      textResource('context://example/tiny', ''),
     );
 
     const snapshot = snapshotReplayableEmbeddedResources(prompt);
 
-    expect(snapshot.resources).toHaveLength(MAX_RECORDED_EMBEDDED_RESOURCES);
+    expect(snapshot.resources).toHaveLength(256);
     expect(snapshot.truncated).toBe(true);
+  });
+
+  it('retains 256 tiny resources without truncation', () => {
+    const prompt = Array.from({ length: 256 }, (_, index) =>
+      textResource(`context://example/tiny-${index}`, ''),
+    );
+
+    const snapshot = snapshotReplayableEmbeddedResources(prompt);
+
+    expect(snapshot.resources).toHaveLength(256);
+    expect(snapshot.truncated).toBe(false);
   });
 
   it('neither retains nor charges a resource with an empty URI', () => {
