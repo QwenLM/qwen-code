@@ -375,7 +375,7 @@ export class WorkspaceTrustGrantIneffectiveError extends Error {
   constructor(state: string, source: string) {
     super(
       `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
-        'A pre-existing rule with higher precedence still wins — resolve or remove it first.',
+        'Check the workspace trust status and trust policy before retrying.',
     );
     this.name = 'WorkspaceTrustGrantIneffectiveError';
   }

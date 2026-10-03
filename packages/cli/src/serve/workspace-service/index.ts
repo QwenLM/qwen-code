@@ -706,14 +706,13 @@ export function createDaemonWorkspaceService(
 
     async grantWorkspaceTrust(_ctx: WorkspaceRequestContext) {
       assertActiveGeneration();
-      loadTrustedFolders().setValue(boundWorkspace, TrustLevel.TRUST_FOLDER);
-      // The write succeeding is not the grant taking effect: an equal-depth
-      // DO_NOT_TRUST rule under an alias spelling of the same directory, a
-      // settings error, or an IDE distrust of the daemon's own cwd all win
-      // over the new entry. Re-evaluate with the same evaluator the
-      // reconciler drives and fail loudly when the grant did not take, or
-      // the caller would report success for a workspace that stays
-      // untrusted and the panel spins to its deadline and reverts.
+      loadTrustedFolders().setValue(
+        boundWorkspace,
+        TrustLevel.TRUST_FOLDER,
+        true,
+      );
+      // Workspace settings cannot establish bootstrap trust. Check the
+      // reconciler's host policy before checking the status we report.
       const snapshot = await readDaemonTrustPolicySnapshot();
       const decision = evaluateDaemonWorkspaceTrust(snapshot, boundWorkspace);
       if (!decision.targetTrusted) {
@@ -722,10 +721,17 @@ export function createDaemonWorkspaceService(
           decision.source,
         );
       }
-      return getWorkspaceTrustStatus(
+      const status = getWorkspaceTrustStatus(
         loadBoundSettings(true).merged,
         boundWorkspace,
       );
+      if (status.effective.state !== 'trusted') {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          status.effective.state,
+          status.effective.source,
+        );
+      }
+      return status;
     },
 
     async setWorkspacePermissionRules(

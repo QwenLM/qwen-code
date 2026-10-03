@@ -40,8 +40,9 @@ its own UI, with no in-app recovery path (#13130).
 - Repairing a malformed or unreadable `trustedFolders.json` from the daemon.
   The write fails and reports instead of guessing at the operator's file.
 - Zero-downtime trust application. The runtime replacement stays destructive.
-- Changing standalone CLI trust semantics. `/permissions` and the trust prompt
-  behave exactly as before.
+- Changing standalone CLI trust choices or precedence. `/permissions` and the
+  trust prompt keep the same choices; the shared reader accepts the JSONC
+  format already preserved by their writer.
 
 ## Design
 
@@ -75,23 +76,24 @@ a LAN or `--require-auth` deployment needs real credentials.
 
 The written path is never supplied by the caller. It is the workspace the
 request already resolved to, so the endpoint cannot be aimed at an arbitrary
-directory, and the trust level is always the folder itself. An SSH workspace
+directory. New rules trust only that folder; an existing `TRUST_FOLDER` or
+`TRUST_PARENT` rule is preserved under the write lock. An SSH workspace
 records trust on the daemon host's own trust record, which is the record the
 daemon evaluates.
 
 ### Refusals
 
-| Condition                                               | Result                                   |
-| ------------------------------------------------------- | ---------------------------------------- |
-| Selector names no registered workspace                  | 400 `workspace_mismatch`                 |
-| Folder trust disabled for the workspace                 | 409 `folder_trust_disabled`              |
-| Workspace is managed scratch                            | 409 `managed_scratch_trust_fixed`        |
-| Workspace owns a live conversation                      | 409 `live_conversation_trust_fixed`      |
-| Runtime not active                                      | 503 `workspace_runtime_unavailable`      |
-| Trust file malformed, unreadable, or not a regular file | 500 `trusted_folders_invalid`            |
-| Grant recorded but a higher-precedence rule still wins  | 409 `trust_grant_ineffective`            |
-| Generation closed mid-request                           | generation-closed response, as elsewhere |
-| Already trusted, runtime active                         | 200, idempotent                          |
+| Condition                                                       | Result                                   |
+| --------------------------------------------------------------- | ---------------------------------------- |
+| Selector names no registered workspace                          | 400 `workspace_mismatch`                 |
+| Folder trust disabled for the workspace                         | 409 `folder_trust_disabled`              |
+| Workspace is managed scratch                                    | 409 `managed_scratch_trust_fixed`        |
+| Workspace owns a live conversation                              | 409 `live_conversation_trust_fixed`      |
+| Runtime not active                                              | 503 `workspace_runtime_unavailable`      |
+| Trust file malformed, unreadable, or not a regular file         | 500 `trusted_folders_invalid`            |
+| Grant recorded but the policy or reported status is not trusted | 409 `trust_grant_ineffective`            |
+| Generation closed mid-request                                   | generation-closed response, as elsewhere |
+| Already trusted, runtime active                                 | 200, idempotent                          |
 
 That trust-file row is narrower than it reads. A dangling symlink reads as no
 file at all, so the grant replaces it with a regular file holding only the new
@@ -99,7 +101,7 @@ rule and answers 200. Corruption the write itself discovers mostly answers 500
 `trusted_folders_invalid`: a symlinked or otherwise non-regular trust file, a
 document whose root is not a JSON object, and a rule carrying an invalid trust
 level all raise `FatalConfigError` from the writer. Only a document that is
-syntactically invalid JSON — and was still valid when the daemon first cached
+syntactically invalid JSONC — and was still valid when the daemon first cached
 it — reaches the write as a plain parse failure and answers 500
 `internal_error`. And the malformed/unreadable verdict comes from a cached load
 that nothing clears in production, so a file repaired afterwards keeps
@@ -117,11 +119,14 @@ their own bounded wait, without re-arming the deadline indefinitely; aligning
 the panel is tracked in #13186.
 
 Writing the exact workspace path at the deepest matching depth also overrides
-a shallower `DO_NOT_TRUST` parent rule, and re-keying a path replaces an
-equal-depth rule recorded under that same spelling. A rule recorded under a
-different spelling of the same directory — a symlink alias — survives the write
+a shallower `DO_NOT_TRUST` parent rule. An existing trusted rule is retained;
+an equal-depth `DO_NOT_TRUST` under that same spelling is replaced. A rule
+recorded under a different spelling of the same directory — a symlink alias — survives the write
 and wins the equal-depth tie, so such a grant is recorded but does not take
-effect, and answers 409 `trust_grant_ineffective`.
+effect, and answers 409 `trust_grant_ineffective`. A policy load error or IDE
+refusal can produce the same response; its error names the checked state and
+source, without assuming a blocking file rule. Both trust readers accept the
+comments and trailing commas that the JSONC writer preserves.
 
 The write itself is the existing primitive the terminal uses: it takes
 `proper-lockfile`, re-reads under the lock, preserves comments, and atomically

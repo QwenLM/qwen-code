@@ -126,6 +126,10 @@ import {
   TRUSTED_FOLDERS_FILENAME,
   TrustLevel,
 } from '../../../config/trustedFolders.js';
+import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+} from '../../../config/daemon-trust-policy.js';
 import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
@@ -726,6 +730,156 @@ describe('createDaemonWorkspaceService', () => {
         ).resolves.toMatchObject({
           effective: { state: 'untrusted' },
         });
+      });
+    });
+
+    it('grantWorkspaceTrust refuses a reported deny when only workspace settings enable trust', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const alias = path.join(home, 'ws-alias');
+        await fs.symlink(workspace, alias);
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [alias]: TrustLevel.DO_NOT_TRUST,
+        });
+        const snapshot = await readDaemonTrustPolicySnapshot();
+        expect(snapshot.folderTrustEnabled).toBe(false);
+        const bootDecision = evaluateDaemonWorkspaceTrust(snapshot, workspace);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            isWorkspaceTrusted: () => bootDecision.targetTrusted,
+          }),
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          WorkspaceTrustGrantIneffectiveError,
+        );
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'untrusted', source: 'file' },
+        });
+      });
+    });
+
+    it('grantWorkspaceTrust accepts and preserves JSONC written after the cached load', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        await fs.writeFile(
+          trustFile,
+          '{\n  // operator rule\n  "/other": "TRUST_FOLDER",\n}\n',
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            effective: { state: 'trusted', source: 'file' },
+          },
+        );
+        expect(await fs.readFile(trustFile, 'utf8')).toContain(
+          '// operator rule',
+        );
+        resetTrustedFoldersForTesting();
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'trusted', source: 'file' },
+        });
+      });
+    });
+
+    it.each([false, true])(
+      'grantWorkspaceTrust preserves a disk TRUST_PARENT rule (alias blocker: %s)',
+      async (hasBlocker) => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await writeJson(path.join(home, 'settings.json'), {
+            security: { folderTrust: { enabled: true } },
+          });
+          const svc = createDaemonWorkspaceService(
+            makeDeps({ boundWorkspace: workspace }),
+          );
+          await svc.getWorkspaceTrustStatus(makeCtx());
+          const alias = path.join(home, 'ws-alias');
+          await fs.symlink(workspace, alias);
+          const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+          await writeJson(trustFile, {
+            [workspace]: TrustLevel.TRUST_PARENT,
+            ...(hasBlocker ? { [alias]: TrustLevel.DO_NOT_TRUST } : {}),
+          });
+
+          if (hasBlocker) {
+            await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+              WorkspaceTrustGrantIneffectiveError,
+            );
+          } else {
+            await expect(
+              svc.grantWorkspaceTrust(makeCtx()),
+            ).resolves.toMatchObject({
+              effective: { state: 'trusted' },
+            });
+          }
+          expect(
+            JSON.parse(await fs.readFile(trustFile, 'utf8'))[workspace],
+          ).toBe(TrustLevel.TRUST_PARENT);
+          const snapshot = await readDaemonTrustPolicySnapshot();
+          expect(
+            evaluateDaemonWorkspaceTrust(
+              snapshot,
+              path.join(path.dirname(workspace), 'sibling'),
+            ),
+          ).toMatchObject({ state: 'trusted', targetTrusted: true });
+        });
+      },
+    );
+
+    it('grantWorkspaceTrust replaces a current disk deny despite cached parent trust', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        await writeJson(trustFile, { [workspace]: TrustLevel.TRUST_PARENT });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        await writeJson(trustFile, { [workspace]: TrustLevel.DO_NOT_TRUST });
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            effective: { state: 'trusted', source: 'file' },
+          },
+        );
+        expect(
+          JSON.parse(await fs.readFile(trustFile, 'utf8'))[workspace],
+        ).toBe(TrustLevel.TRUST_FOLDER);
+      });
+    });
+
+    it('grantWorkspaceTrust does not invent a precedence cause for a policy load error', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [`/${'x'.repeat(1024 * 1024)}`]: TrustLevel.TRUST_FOLDER,
+        });
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          'Check the workspace trust status and trust policy before retrying.',
+        );
       });
     });
 
