@@ -879,9 +879,7 @@ describe('ManagedSessionsPage', () => {
       await render('bound');
 
       // Without workspaceTurns the composer stays hidden, but Cancel does not.
-      expect(container.querySelector('textarea') !== null).toBe(
-        workspaceTurns,
-      );
+      expect(container.querySelector('textarea') !== null).toBe(workspaceTurns);
       await click('Cancel turn');
 
       expect(mocks.client.cancel).toHaveBeenCalledWith(
