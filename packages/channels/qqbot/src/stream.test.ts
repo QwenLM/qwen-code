@@ -2124,6 +2124,9 @@ describe('error recovery paths', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const streamState = chp['streamState'] as Map<
       string,
       { msgId?: string; buffer: string }
@@ -2144,6 +2147,12 @@ describe('error recovery paths', () => {
     onResponseChunk(ch, 'test-chat', 'next', 'sess-1');
 
     expect(seqMap.has('msg-1')).toBe(false);
+    // The discard is observable, not silent: the superseded turn's 5 buffered
+    // chars are logged before the release cascades the counter.
+    expect(capturedStderr()).toContain(
+      'dropping 5 chars of superseded turn 1 for sess-1',
+    );
+    stderrSpy.mockRestore();
   });
   it('flushingSessions guard prevents retry while already flushing', async () => {
     const ch = makeChannel();
@@ -2568,7 +2577,7 @@ describe('send path route reporting', () => {
     vi.useRealTimers();
   });
 
-  it('flushAndTrack still drops silently when the route cannot resolve', async () => {
+  it('flushAndTrack drops an unresolvable route with only the resolveRoute diagnostic', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
@@ -2582,6 +2591,12 @@ describe('send path route reporting', () => {
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
     expect(streamState(ch).has('s1')).toBe(false);
+    // flushAndTrack itself stays silent (no delivery-failure log, no retry):
+    // the one line is resolveRoute's, so the drop remains traceable.
+    expect(stderrSpy).toHaveBeenCalledTimes(1);
+    expect(String(stderrSpy.mock.calls[0]![0])).toContain(
+      'resolveRoute: no chat type for test-chat, dropping message',
+    );
     stderrSpy.mockRestore();
   });
 });
@@ -3495,6 +3510,15 @@ describe('cancel/flush coordination', () => {
     // (the old delete-then-release order dropped the counter here, and the
     // tail's re-flush would resolve nextSeq = 1 — QQ dedupes on msg_id +
     // msg_seq and silently drops the reply tail).
+    // Evict msg-A's routing entry first: while it is still present the
+    // routing-map veto masks the ordering this test names, so a release that
+    // ran after the teardown would keep the counter for the wrong reason.
+    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
+    expect(seqMap.get('msg-A')).toBe(1); // held by the in-flight tail alone
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
     expect(seqMap.get('msg-A')).toBe(1); // onPromptStart's release IS guarded
@@ -3510,6 +3534,13 @@ describe('cancel/flush coordination', () => {
     // identity guard sees the replaced entry and touches nothing.
     releaseTokenGate!();
     await drain();
+    // The tail's re-flush resolved the retained counter: (msg-A, 2). Had the
+    // release dropped it, this send would have resolved (msg-A, 1) — a pair QQ
+    // already accepted and therefore dedupes.
+    const tailBody = mockSendQQMessage.mock.calls
+      .map((c) => c[3] as Record<string, unknown>)
+      .find((b) => b['msg_id'] === 'msg-A' && b['msg_seq'] === 2);
+    expect(tailBody).toBeDefined();
     // Turn 2's idle timer delivers its own chunk under msg-B.
     vi.advanceTimersByTime(2000);
     await drain();
