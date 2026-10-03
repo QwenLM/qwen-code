@@ -17,6 +17,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 // --- SET COMMAND ---
 interface SetArgs {
+  managedExtensions?: string;
   name: string;
   setting: string;
   scope: string;
@@ -45,7 +46,7 @@ const setCommand: CommandModule<object, SetArgs> = {
       }),
   handler: async (args) => {
     const { name, setting, scope } = args;
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions);
     if (!extensionManager) return;
     const extensions = extensionManager.getLoadedExtensions();
     if (!extensions || extensions.length === 0) return;
@@ -66,6 +67,7 @@ const setCommand: CommandModule<object, SetArgs> = {
 
 // --- LIST COMMAND ---
 interface ListArgs {
+  managedExtensions?: string;
   name: string;
 }
 
@@ -80,7 +82,7 @@ const listCommand: CommandModule<object, ListArgs> = {
     }),
   handler: async (args) => {
     const { name } = args;
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions);
     if (!extensionManager) return;
     const extensions = extensionManager.getLoadedExtensions();
     if (!extensions || extensions.length === 0) return;

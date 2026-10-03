@@ -26,6 +26,7 @@ import {
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
+  managedExtensions?: string;
   source: string;
   ref?: string;
   autoUpdate?: boolean;
@@ -89,6 +90,7 @@ export async function handleInstall(args: InstallArgs) {
     const workspaceDir = process.cwd();
     const settings = loadSettings(workspaceDir).merged;
     extensionManager = new ExtensionManager({
+      managedExtensionsDir: args.managedExtensions,
       workspaceDir,
       locale: getCurrentLanguage(),
       isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
@@ -125,15 +127,24 @@ export async function handleInstall(args: InstallArgs) {
         );
       }
     }
+    // An install that adopts a retained policy commits that policy's
+    // activation as-is (the adoption branch never reads the requested
+    // initial activation), which can be disabled — report the committed
+    // state, not the requested scope.
     writeStdoutLine(
-      scope === 'project'
+      extension.isActive === false
         ? t(
-            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            'Extension "{{name}}" installed successfully; it remains disabled by the retained activation preference.',
             { name: extension.name },
           )
-        : t('Extension "{{name}}" installed successfully and enabled.', {
-            name: extension.name,
-          }),
+        : scope === 'project'
+          ? t(
+              'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+              { name: extension.name },
+            )
+          : t('Extension "{{name}}" installed successfully and enabled.', {
+              name: extension.name,
+            }),
     );
   } catch (error) {
     if (isExtensionCommittedWithWarningsError(error)) {
@@ -206,6 +217,7 @@ export const installCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleInstall({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       source: argv['source'] as string,
       ref: argv['ref'] as string | undefined,
       autoUpdate: argv['auto-update'] as boolean | undefined,

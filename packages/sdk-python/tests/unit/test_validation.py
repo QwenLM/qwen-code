@@ -326,6 +326,16 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--input-file",
         "--extensions",
         "-e",
+        "--managed-extensions",
+        # yargs binds camelCase and multi-dash spellings to the same option,
+        # so the guard must reject them too (the TS SDK pins the same set).
+        "--managedExtensions",
+        "--managed--extensions",
+        "-e/tmp/attached-value",
+        "-=y",
+        "-=s=v",
+        "-=e",
+        "--allowedMcpServerNames",
         "--sandbox",
         "-s",
         "--no-sandbox",
@@ -364,11 +374,33 @@ def test_rejects_extra_args_with_security_sensitive_flags(flag: str) -> None:
         "--insecure=true",
         "--yolo=true",
         "--proxy=http://localhost:8080",
+        "--managedExtensions=/tmp/attacker",
     ],
 )
 def test_rejects_extra_args_with_flag_value_syntax(flag: str) -> None:
     with pytest.raises(ValidationError, match="reserved flag"):
         validate_query_options(QueryOptions(extra_args=[flag]))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        flag
+        for alias in "ceimoprsy"
+        for flag in (f"-={alias}", f"-={alias}=value", f"-=d{alias}")
+    ],
+)
+def test_rejects_reserved_short_aliases_in_leading_equals_groups(flag: str) -> None:
+    with pytest.raises(ValidationError, match="reserved flag"):
+        validate_query_options(QueryOptions(extra_args=[flag, "value"]))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--verbose", "-x", "-x=s", "--some-flag=value", "-dl", "-=x=s", "-==y", "-=d"],
+)
+def test_preserves_permitted_extra_args_spellings(flag: str) -> None:
+    validate_query_options(QueryOptions(extra_args=[flag]))
 
 
 def test_accepts_extra_args_with_non_reserved_flags() -> None:

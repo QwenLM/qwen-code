@@ -3527,6 +3527,54 @@ describe('extension tests', () => {
   });
 
   describe('loadExtensionConfig', () => {
+    it('still loads a user extension whose stray plugin.json is unparseable', async () => {
+      const extDir = path.join(userExtensionsDir, 'demo');
+      fs.mkdirSync(extDir);
+      fs.writeFileSync(
+        path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'demo', version: '1.0.0' }),
+      );
+      fs.writeFileSync(path.join(extDir, 'plugin.json'), '{');
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      expect(
+        manager
+          .getLoadedExtensions()
+          .map((e) => ({ name: e.name, source: e.source })),
+      ).toEqual([{ name: 'demo', source: 'user' }]);
+    });
+
+    it('detects a manifest edit for a user extension with a stray unparseable plugin.json', async () => {
+      // The fingerprint must stamp the same manifest the loader parses:
+      // qwen-extension.json governs here, so editing it must move the
+      // fingerprint or the self-healing refresh never notices.
+      const extDir = path.join(userExtensionsDir, 'demo');
+      fs.mkdirSync(extDir);
+      fs.writeFileSync(
+        path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'demo', version: '1.0.0' }),
+      );
+      fs.writeFileSync(path.join(extDir, 'plugin.json'), '{');
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+        'demo',
+      ]);
+
+      // The new version is a different length so the size differs too —
+      // otherwise this would depend on the filesystem's mtime granularity.
+      fs.writeFileSync(
+        path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'demo', version: '2.0.0-changed' }),
+      );
+
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()[0]?.version).toBe('2.0.0-changed');
+    });
+
     /** Loads one `test-extension` whose `test-server` MCP server has `env`. */
     async function loadWithServerEnv(env: Record<string, string>) {
       writeManifest(path.join(userExtensionsDir, 'test-extension'), {

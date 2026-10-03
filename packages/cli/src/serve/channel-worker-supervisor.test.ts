@@ -330,6 +330,7 @@ describe('createChannelWorkerSupervisor', () => {
       daemonUrl: 'http://127.0.0.1:4170',
       daemonToken: 'secret-token',
       workspace: '/workspace',
+      managedExtensions: '/deployment/prepared extensions',
       selection: { mode: 'names', names: ['telegram', 'feishu'] },
       workerBaseEnv: { ...process.env, CUSTOM: 'value' },
       spawnWorker,
@@ -350,6 +351,8 @@ describe('createChannelWorkerSupervisor', () => {
         '/repo/dist/index.js',
         'channel',
         'daemon-worker',
+        '--managed-extensions',
+        '/deployment/prepared extensions',
         '--channel=telegram',
         '--channel=feishu',
       ],
@@ -388,6 +391,12 @@ describe('createChannelWorkerSupervisor', () => {
     );
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
+    expect(argv).toEqual(
+      expect.arrayContaining([
+        '--managed-extensions',
+        '/deployment/prepared extensions',
+      ]),
+    );
     expect(supervisor.snapshot()).toMatchObject({
       enabled: true,
       state: 'running',

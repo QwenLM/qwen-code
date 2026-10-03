@@ -19,6 +19,7 @@ import {
   DEFAULT_COMMAND_DESC,
   QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_GLOBAL_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
@@ -430,20 +431,33 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
-  const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
+  // A subcommand is the first positional after `mcp`, wherever it sits:
+  // inspecting argv[1] alone misreads `mcp --managed-extensions <root> list`
+  // as flag-only and prints help with exit 0 while the requested mutation
+  // silently never runs. firstPositionalArg skips the known value slots.
+  const hasSubcommand = firstPositionalArg(argv.slice(1)) !== undefined;
   if (!hasSubcommand) {
     printMcpHelp();
     return;
   }
 
-  const [{ default: yargsInstance }, { mcpCommand }] = await Promise.all([
+  const [
+    { default: yargsInstance },
+    { mcpCommand },
+    { resolveManagedExtensionsDir },
+  ] = await Promise.all([
     import('yargs'),
     import('./commands/mcp.js'),
+    import('@qwen-code/qwen-code-core/extension/managed-extension-dir.js'),
   ]);
 
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
+    .option('managed-extensions', {
+      ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+      coerce: resolveManagedExtensionsDir,
+    })
     .version(false)
     .help()
     .alias('h', 'help')

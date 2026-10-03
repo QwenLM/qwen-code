@@ -2948,9 +2948,12 @@ describe('scheduled-tasks routes', () => {
     // its next fire at the upcoming occurrence instead.
     const createdAt = 1_700_000_000_000;
     const firedAt = createdAt + 3 * 86_400_000;
+    // Minute 7 keeps the fire time off the :00/:30 marks: a one-shot landing
+    // there fires up to 90s early (negative jitter), which pulls nextRunAt
+    // below `now` when the test runs just before the boundary.
     await seedTask({
       id: 'r2o',
-      cron: '0 9 * * *',
+      cron: '7 9 * * *',
       prompt: 'p',
       recurring: true,
       createdAt,

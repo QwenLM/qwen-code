@@ -195,6 +195,7 @@ export type ReserveRuntimeReconciliation =
   () => RuntimeReconciliationReservation;
 
 export interface CreateExtensionsControllerDeps {
+  managedExtensionsDir?: string;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
@@ -387,6 +388,7 @@ export function createExtensionsController(
           }
         : {});
     return new ExtensionManager({
+      managedExtensionsDir: deps.managedExtensionsDir,
       workspaceDir,
       locale: resolveExtensionLocale(settings),
       isWorkspaceTrusted:
@@ -1122,7 +1124,7 @@ export function createExtensionsController(
     trusted: boolean,
   ): Promise<ServeWorkspaceExtensionsStatus> => {
     const extensionManager = createExtensionManager(boundWorkspace, trusted);
-    await extensionManager.refreshCache();
+    await extensionManager.refreshCache({ allowManagedHandBack: false });
     const entries: ServeExtensionEntry[] = extensionManager
       .getLoadedExtensions()
       .map(toExtensionEntry);

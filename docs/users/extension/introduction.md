@@ -251,7 +251,7 @@ qwen extensions update --all
 
 ## How it works
 
-On startup, Qwen Code looks for extensions in `<home>/.qwen/extensions`
+By default, Qwen Code looks for user-installed extensions in `<home>/.qwen/extensions`. An explicit `--managed-extensions <root>` startup option also loads deployment-managed packages from a separate collection directory while keeping preferences in user storage. See [deployment-managed extensions](./getting-started-extensions.md#deployment-managed-extensions).
 
 Native Qwen extensions exist as a directory that contains a `qwen-extension.json` file. Agent Plugins v1 packages instead retain their root `plugin.json`; see [Agent Plugins v1](./agent-plugins.md).
 

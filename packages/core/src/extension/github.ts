@@ -568,6 +568,7 @@ export async function checkForExtensionUpdate(
   signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
   signal?.throwIfAborted();
+  if (extension.source === 'managed') return ExtensionUpdateState.NOT_UPDATABLE;
   const installMetadata = extension.installMetadata;
   if (installMetadata?.type === 'local') {
     if (installMetadata.source.startsWith('upload:')) {
@@ -1430,8 +1431,10 @@ function getSupportedManifestList(): string {
 }
 
 function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
+  const agentPluginStatus = getAgentPluginSchemaStatus(rootPath);
   return (
-    getAgentPluginSchemaStatus(rootPath) !== 'unrelated' ||
+    agentPluginStatus === 'supported' ||
+    agentPluginStatus === 'unsupported' ||
     SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
       fs.existsSync(path.join(rootPath, manifestPath)),
     )

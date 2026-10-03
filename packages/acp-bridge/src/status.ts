@@ -1600,6 +1600,7 @@ export interface ServeExtensionEntry {
   version: string;
   isActive: boolean;
   path: string;
+  extensionSource?: 'managed' | 'user';
   source?: string;
   installType?: ServeExtensionInstallType;
   originSource?: ServeExtensionOriginSource;

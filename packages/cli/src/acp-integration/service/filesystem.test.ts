@@ -582,6 +582,100 @@ describe('AcpFileSystemService', () => {
       });
     });
 
+    it('serves the local read fallback through an intact lexical root', async () => {
+      await withTempRoot(async (tempRoot) => {
+        const managedDir = path.join(tempRoot, 'managed');
+        await fs.mkdir(managedDir, { recursive: true });
+        // The boundary pins the canonical spelling, mirroring
+        // resolveManagedExtensionsDir — and the request path must be built
+        // from it: os.tmpdir() sits behind a symlink on some hosts (macOS
+        // /var), so a lexical join off tempRoot would escape the pinned
+        // root's containment check there.
+        const managedRoot = await fs.realpath(managedDir);
+        const filePath = path.join(managedRoot, 'notes.md');
+        await fs.writeFile(filePath, 'managed file', 'utf8');
+
+        const pathOutsideWorkspaceError =
+          createLocalReadFallbackError(filePath);
+        const client = {
+          readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+        } as unknown as AgentSideConnection;
+        const fallback = createFallback();
+        (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+          content: 'managed file',
+          _meta: { bom: false, encoding: 'utf-8' },
+        });
+
+        const svc = new AcpFileSystemService(
+          client,
+          'session-lexical-intact',
+          { readTextFile: true, writeTextFile: true },
+          fallback,
+          { lexicalLocalReadRoots: [managedRoot] },
+        );
+
+        await expect(svc.readTextFile({ path: filePath })).resolves.toEqual({
+          content: 'managed file',
+          _meta: { bom: false, encoding: 'utf-8' },
+        });
+        expect(fallback.readTextFile).toHaveBeenCalledWith({
+          path: await fs.realpath(filePath),
+        });
+      });
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'refuses a lexical local read root that was swapped for a symlink after pinning',
+      async () => {
+        await withTempRoot(async (tempRoot) => {
+          const managedDir = path.join(tempRoot, 'managed');
+          const outsideDir = path.join(tempRoot, 'outside');
+          await fs.mkdir(managedDir, { recursive: true });
+          await fs.mkdir(outsideDir, { recursive: true });
+          await fs.writeFile(path.join(outsideDir, 'secret.md'), 'secret');
+          const managedRoot = await fs.realpath(managedDir);
+          const filePath = path.join(managedRoot, 'secret.md');
+
+          const pathOutsideWorkspaceError =
+            createLocalReadFallbackError(filePath);
+          const client = {
+            readTextFile: vi.fn().mockRejectedValue(pathOutsideWorkspaceError),
+          } as unknown as AgentSideConnection;
+          const fallback = createFallback();
+          (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+            {
+              content: 'secret',
+              _meta: { bom: false, encoding: 'utf-8' },
+            },
+          );
+
+          const svc = new AcpFileSystemService(
+            client,
+            'session-lexical-swapped',
+            { readTextFile: true, writeTextFile: true },
+            fallback,
+            { lexicalLocalReadRoots: [managedRoot] },
+          );
+
+          // The root is swapped for a symlink after the boundary was pinned.
+          // Re-resolving the root (the plain localReadRoots behavior) would
+          // serve the read from the link target; the lexical root must not.
+          await fs.rm(managedRoot, { recursive: true });
+          await fs.symlink(outsideDir, managedRoot, 'dir');
+
+          const err = await svc
+            .readTextFile({ path: filePath })
+            .catch((e: unknown) => e);
+
+          expect(err).toMatchObject({
+            cause: pathOutsideWorkspaceError,
+            message: `path escapes workspace: ${filePath}`,
+          });
+          expect(fallback.readTextFile).not.toHaveBeenCalled();
+        });
+      },
+    );
+
     it('preserves the original ACP error when local read fallback fails', async () => {
       await withTempRoot(async (tempRoot) => {
         const localRoot = path.join(tempRoot, 'skills');

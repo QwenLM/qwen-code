@@ -45,6 +45,7 @@ export interface ImportedFileNotification {
 }
 
 export interface ProcessImportsOptions {
+  transformContent?: (content: string) => string;
   onFileImported?: (
     notification: ImportedFileNotification,
   ) => void | Promise<void>;
@@ -218,6 +219,7 @@ export async function processImports(
   importFormat: 'flat' | 'tree' = 'tree',
   options: ProcessImportsOptions = {},
 ): Promise<ProcessImportsResult> {
+  content = options.transformContent?.(content) ?? content;
   if (!projectRoot) {
     // Preserve the previous local helper's contract: if no `.git`
     // ancestor exists, fall back to the absolute basePath so
@@ -318,7 +320,9 @@ export async function processImports(
 
         try {
           await fs.access(fullPath);
-          const importedContent = await fs.readFile(fullPath, 'utf-8');
+          const rawContent = await fs.readFile(fullPath, 'utf-8');
+          const importedContent =
+            options.transformContent?.(rawContent) ?? rawContent;
 
           // Process the imported file
           await processFlat(

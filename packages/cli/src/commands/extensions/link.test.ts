@@ -80,6 +80,33 @@ describe('handleLink', () => {
     processExitSpy.mockRestore();
   });
 
+  it('reports the retained disabled activation after a managed-policy adoption', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    // A link that adopts a retained policy commits the managed-era
+    // activation, which can be disabled; the success line must not claim
+    // the opposite of the committed state.
+    mockInstallExtension.mockResolvedValueOnce({
+      name: 'linked-extension',
+      isActive: false,
+    });
+
+    await handleLink({
+      path: '/some/local/path',
+    });
+
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'Extension "linked-extension" linked successfully and enabled.',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "linked-extension" linked successfully; it remains disabled by the retained activation preference.',
+    );
+
+    processExitSpy.mockRestore();
+  });
+
   it('should handle errors and exit with code 1', async () => {
     const processExitSpy = vi
       .spyOn(process, 'exit')

@@ -14,6 +14,7 @@ import {
   unescapePath,
   isSubpaths,
   isSubpath,
+  realpathNearestExisting,
 } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -22,6 +23,7 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
+import { getVerifiedManagedExtensionsDir } from '../extension/managed-extension-dir.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
@@ -134,11 +136,21 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     const workspaceContext = this.config.getWorkspaceContext();
     const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const userExtensionsDir = Storage.getUserExtensionsDir();
+    const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+      this.config.getManagedExtensionsDir(),
+    );
 
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
       isSubpath(userExtensionsDir, dirPath) ||
+      // The managed root is matched against the canonicalized candidate:
+      // execute() follows symlinks, so a link shipped inside the root would
+      // otherwise get an unprompted listing of its out-of-root target. The
+      // root itself stays lexical — it is the canonical path pinned at the
+      // process boundary (see file-read-permission.ts).
+      (managedExtensionsDir !== undefined &&
+        isSubpath(managedExtensionsDir, realpathNearestExisting(dirPath))) ||
       isSubpath(getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';

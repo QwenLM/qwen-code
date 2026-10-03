@@ -85,6 +85,7 @@ describe('directoryCommand', () => {
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
+      getExtensionContextRoots: () => new Map(),
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
       setMemoryFileCount: vi.fn(),
@@ -285,7 +286,10 @@ describe('directoryCommand', () => {
         true,
         'tree',
         expect.anything(),
-        expect.objectContaining({ extensionRuleSources }),
+        expect.objectContaining({
+          extensionContextRoots: new Map(),
+          extensionRuleSources,
+        }),
       );
       expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([

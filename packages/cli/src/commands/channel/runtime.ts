@@ -110,10 +110,12 @@ export function resolveExtensionChannelEntrySpecifier(
  * Load channel plugins from active extensions.
  * Extensions declare channels in their qwen-extension.json manifest.
  */
-export async function loadChannelsFromExtensions(): Promise<number> {
+export async function loadChannelsFromExtensions(
+  managedExtensionsDir?: string,
+): Promise<number> {
   let loaded = 0;
   try {
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(managedExtensionsDir);
     const extensions = extensionManager
       .getLoadedExtensions()
       .filter((e) => e.isActive && e.channels);

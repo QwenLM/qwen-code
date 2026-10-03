@@ -57,6 +57,8 @@ export interface ChannelWebhookConfigSource {
 }
 
 export interface ServeOptions {
+  /** Deployment-owned extension root, resolved once against launch cwd. */
+  managedExtensions?: string;
   hostname: string;
   port: number;
   /** Deployment boundary for provider selection and exposed surfaces. */

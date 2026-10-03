@@ -37,7 +37,7 @@ identity validation and snapshot activation semantics without walking the
 resources of preceding extensions. Neither reader populates the manager cache or
 creates plugin data directories. Existing manifest and subresource error behavior
 is preserved. Shared response mapping keeps source redaction and metadata
-identical to the full-status response.
+identical to the full-status response. Managed and user packages share the same discovery and same-name precedence in all three responses, including `extensionSource`. Summary and detail reads preserve retained managed policy and credentials, projecting user preferences without performing hand-back. Selected managed details do not hydrate a shadowed user copy.
 
 ## Client behavior and compatibility
 

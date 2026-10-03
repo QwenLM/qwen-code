@@ -166,6 +166,7 @@ describe('ManagedToolRuntime', () => {
         terminalHeight: 24,
         showColor: false,
       }),
+      getManagedExtensionsDir: () => undefined,
     } as unknown as Config;
     revision = 'workspace-generation-1';
     tool = new FixtureTool();

@@ -29,6 +29,7 @@ import {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { KeychainTokenStorage } from '@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js';
 import * as settingsModule from '../../config/settings.js';
 
 const extensionId = 'a'.repeat(64);
@@ -127,6 +128,7 @@ async function makeHarness(opts?: {
   internalRuntime?: boolean;
   secondaryTrusted?: boolean;
   singleWorkspace?: boolean;
+  managedExtensions?: string;
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-extension-management-v2-'),
@@ -168,7 +170,14 @@ async function makeHarness(opts?: {
       : [primary, secondary, ...(internal ? [internal] : [])],
   );
   const app = createServeApp(
-    { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
+    {
+      ...baseOpts,
+      workspace: canonicalPrimary,
+      token: 'secret',
+      ...(opts?.managedExtensions
+        ? { managedExtensions: opts.managedExtensions }
+        : {}),
+    },
     undefined,
     {
       workspaceRegistry: registry,
@@ -569,6 +578,7 @@ describe('extension management v2 REST', () => {
             id: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
@@ -623,6 +633,7 @@ describe('extension management v2 REST', () => {
             extensionId: linked.id,
             name: 'linked',
             version: '2.0.0',
+            extensionSource: 'user',
             defaultActivation: 'enabled',
             workspaceActivation: 'disabled',
             effectiveActivation: 'disabled',
@@ -643,6 +654,108 @@ describe('extension management v2 REST', () => {
       } else {
         process.env['QWEN_HOME'] = previousQwenHome;
       }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('serves managed catalog identity without transferring its policy to a shadowed user copy', async () => {
+    const qwenHome = await fsp.realpath(
+      await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-managed-catalog-')),
+    );
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    const managedExtensions = path.join(qwenHome, 'managed-packages');
+    for (const [directory, version] of [
+      [path.join(qwenHome, 'extensions', 'demo'), 'user'],
+      [path.join(managedExtensions, 'deployed'), 'managed'],
+    ]) {
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'qwen-extension.json'),
+        JSON.stringify({ name: 'demo', version }),
+      );
+    }
+    const h = await makeHarness({ managedExtensions });
+    try {
+      const manager = new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+        managedExtensionsDir: managedExtensions,
+      });
+      await manager.refreshCache();
+      const [managed] = manager.getLoadedExtensions();
+      await manager.setExtensionDefaultActivation(managed.id, 'disabled');
+      await manager.setExtensionWorkspaceActivation(
+        managed.id,
+        h.secondary.workspaceCwd,
+        'enabled',
+      );
+      const before = await manager.getExtensionStoreSnapshot();
+      for (let round = 0; round < 2; round++) {
+        const response = await auth(request(h.app).get('/extensions'));
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          generation: before.generation,
+          extensions: [
+            {
+              id: managed.id,
+              name: 'demo',
+              version: 'managed',
+              extensionSource: 'managed',
+              defaultActivation: 'disabled',
+            },
+          ],
+        });
+        expect(response.body.extensions).toHaveLength(1);
+        const summary = await auth(
+          request(h.app).get('/workspace/extensions/summary'),
+        );
+        expect(summary.status).toBe(200);
+        expect(summary.body.workspaceCwd).toBe(h.primary.workspaceCwd);
+        expect(summary.body.extensions).toEqual([
+          expect.objectContaining({
+            id: managed.id,
+            name: 'demo',
+            version: 'managed',
+            extensionSource: 'managed',
+            isActive: false,
+          }),
+        ]);
+        expect(summary.body.extensions[0]).not.toHaveProperty('capabilities');
+        expect(summary.body.extensions[0]).not.toHaveProperty('details');
+        const details = await auth(
+          request(h.app).get('/workspace/extensions/demo/details'),
+        );
+        expect(details.status).toBe(200);
+        expect(details.body).toMatchObject({
+          id: managed.id,
+          name: 'demo',
+          version: 'managed',
+          extensionSource: 'managed',
+          isActive: false,
+          capabilities: { skillCount: 0 },
+          details: { skills: [] },
+        });
+        const selected = await auth(
+          request(h.app).get(
+            `/workspaces/${h.secondary.workspaceId}/extensions`,
+          ),
+        );
+        expect(selected.status).toBe(200);
+        expect(selected.body.workspaceCwd).toBe(h.secondary.workspaceCwd);
+        expect(selected.body.extensions).toEqual([
+          expect.objectContaining({
+            extensionId: managed.id,
+            name: 'demo',
+            version: 'managed',
+            extensionSource: 'managed',
+            effectiveActivation: 'enabled',
+          }),
+        ]);
+        expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
       await fsp.rm(qwenHome, { recursive: true, force: true });
     }
   });
@@ -2617,6 +2730,9 @@ describe('extension management v2 REST', () => {
         request(h.app).post('/workspace/extensions/check-updates'),
       ).then((result) => result);
       await vi.waitFor(() => expect(refreshCache).toHaveBeenCalledOnce());
+      expect(refreshCache).toHaveBeenCalledWith({
+        allowManagedHandBack: false,
+      });
 
       await vi.advanceTimersByTimeAsync(2 * 60_000);
 
@@ -3039,6 +3155,197 @@ describe('extension management v2 REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it('releases a retained managed policy whose package is gone through uninstall', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const managedId = 'b'.repeat(64);
+    const retainedSnapshot = {
+      version: 2 as const,
+      generation: 9,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [managedId]: {
+          name: 'demo',
+          managed: true as const,
+          defaultActivation: 'disabled' as const,
+          workspaceOverrides: {},
+        },
+      },
+    };
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue(retainedSnapshot);
+    // The deployment root no longer holds the package.
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      [],
+    );
+    try {
+      const started = await auth(
+        request(h.app).delete(`/extensions/${encodeURIComponent(managedId)}`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'uninstalled', name: 'demo' },
+      });
+      // The route must not 204 the retained policy away: only the manager
+      // releases it, so the name stops blocking a same-name user install.
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).toHaveBeenCalledWith(managedId, false, undefined, expect.any(Function));
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    'still-deployed',
+    'withdrawn-with-user',
+    'unavailable-with-user',
+    'manifestless-with-user',
+    'withdrawn-no-user',
+  ])(
+    'handles managed uninstall after %s through the real store',
+    async (state) => {
+      const root = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-managed-uninstall-')),
+      );
+      vi.stubEnv('QWEN_HOME', path.join(root, 'home'));
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+        false,
+      );
+      const managedRoot = path.join(root, 'deployment');
+      const deployed = path.join(managedRoot, 'bundle');
+      const userPath = path.join(root, 'home', 'extensions', 'demo');
+      const hasUser = state !== 'withdrawn-no-user';
+      const writePackage = async (directory: string) => {
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'qwen-extension.json'),
+          JSON.stringify({ name: 'demo', version: '1.0.0' }),
+        );
+      };
+      await fsp.mkdir(managedRoot);
+      const h = await makeHarness({
+        singleWorkspace: true,
+        managedExtensions: managedRoot,
+      });
+      try {
+        const manager = new ExtensionManager({
+          managedExtensionsDir: managedRoot,
+          workspaceDir: h.primary.workspaceCwd,
+          isWorkspaceTrusted: true,
+        });
+        let userId: string | undefined;
+        if (hasUser) {
+          await writePackage(userPath);
+          await manager.refreshCache();
+          const [userCopy] = manager.getLoadedExtensions();
+          expect(userCopy.source).toBe('user');
+          userId = userCopy.id;
+        }
+        await writePackage(deployed);
+        await manager.refreshCache();
+        const [managed] = manager.getLoadedExtensions();
+        expect(managed.source).toBe('managed');
+        const listed = await auth(request(h.app).get('/extensions'));
+        expect(listed.status).toBe(200);
+        expect(listed.body.extensions).toEqual([
+          expect.objectContaining({
+            id: managed.id,
+            extensionSource: 'managed',
+          }),
+        ]);
+        if (state.startsWith('withdrawn')) {
+          await fsp.rm(deployed, { recursive: true });
+        } else if (state === 'unavailable-with-user') {
+          await fsp.rename(managedRoot, `${managedRoot}-offline`);
+        } else if (state === 'manifestless-with-user') {
+          await fsp.rm(path.join(deployed, 'qwen-extension.json'));
+        }
+        expect(
+          (await manager.getExtensionStoreSnapshot()).extensions[managed.id]
+            ?.managed,
+        ).toBe(true);
+        const response = await auth(
+          request(h.app).delete(`/extensions/${managed.id}`),
+        );
+        expect(response.status).toBe(202);
+        const operation = await pollOperation(h.app, response.body.operationId);
+        const after = await manager.getExtensionStoreSnapshot();
+        if (state === 'withdrawn-no-user') {
+          expect(operation).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'uninstalled', name: 'demo' },
+          });
+          expect(after.extensions[managed.id]).toBeUndefined();
+          expect(
+            (await auth(request(h.app).delete(`/extensions/${managed.id}`)))
+              .status,
+          ).toBe(204);
+          return;
+        }
+        await expect(fsp.access(userPath)).resolves.toBeUndefined();
+        expect(operation).toMatchObject({
+          status: 'failed',
+          code:
+            state === 'withdrawn-with-user'
+              ? 'extension_conflict'
+              : 'extension_managed_read_only',
+        });
+        if (state === 'still-deployed') {
+          expect(after.extensions[managed.id]?.managed).toBe(true);
+          await expect(fsp.access(deployed)).resolves.toBeUndefined();
+          return;
+        }
+        expect(after.extensions[managed.id]).toBeUndefined();
+        expect(after.extensions[userId!]?.managed).toBe(
+          state === 'withdrawn-with-user' ? undefined : true,
+        );
+        if (state !== 'withdrawn-with-user') {
+          const refused = await auth(
+            request(h.app).delete(`/extensions/${userId}`),
+          );
+          expect(refused.status).toBe(202);
+          await expect(
+            pollOperation(h.app, refused.body.operationId),
+          ).resolves.toMatchObject({
+            status: 'failed',
+            code: 'extension_managed_read_only',
+          });
+          if (state === 'unavailable-with-user') {
+            await fsp.rename(`${managedRoot}-offline`, managedRoot);
+          }
+          await fsp.rm(deployed, { recursive: true });
+        }
+        const recovery = await auth(
+          request(h.app).delete(`/extensions/${userId}`),
+        );
+        expect(recovery.status).toBe(202);
+        await expect(
+          pollOperation(h.app, recovery.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'succeeded',
+          result: { status: 'uninstalled', name: 'demo' },
+        });
+        await expect(fsp.access(userPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        expect(
+          (await manager.getExtensionStoreSnapshot()).extensions[userId!],
+        ).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rejects singular and batch activation on an untrusted target', async () => {
     const h = await makeHarness({ secondaryTrusted: false });

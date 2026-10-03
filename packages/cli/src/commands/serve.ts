@@ -41,6 +41,8 @@ import {
   type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
+import { TOP_LEVEL_GLOBAL_OPTIONS } from '../config/top-level-options.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 
 /**
@@ -194,6 +196,7 @@ export async function maybeOpenWebShellBrowser(
 }
 
 interface ServeArgs {
+  'managed-extensions'?: string;
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
@@ -277,6 +280,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   builder: (yargs: Argv) =>
     yargs
+      .option('managed-extensions', {
+        ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+        coerce: resolveManagedExtensionsDir,
+      })
       .option('port', {
         type: 'number',
         default: 4170,
@@ -992,6 +999,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
+        managedExtensions: argv['managed-extensions'],
         // A joined runtime is a worker too: it runs work for the coordinator
         // and must not also host its own collaboration routes.
         agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),

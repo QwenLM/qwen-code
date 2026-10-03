@@ -37,11 +37,12 @@ interface McpConnectionResult {
   timedOut: boolean;
 }
 
-async function getMcpServersFromConfig(): Promise<
-  Record<string, MCPServerConfig>
-> {
+async function getMcpServersFromConfig(
+  managedExtensionsDir?: string,
+): Promise<Record<string, MCPServerConfig>> {
   const settings = loadSettings();
   const extensionManager = new ExtensionManager({
+    managedExtensionsDir,
     isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
     telemetrySettings: settings.merged.telemetry,
     locale: getCurrentLanguage(),
@@ -121,8 +122,10 @@ async function getServerStatus(
   return await testMCPConnection(serverName, server);
 }
 
-export async function listMcpServers(): Promise<void> {
-  const mcpServers = await getMcpServersFromConfig();
+export async function listMcpServers(
+  managedExtensionsDir?: string,
+): Promise<void> {
+  const mcpServers = await getMcpServersFromConfig(managedExtensionsDir);
   const serverNames = Object.keys(mcpServers);
 
   if (serverNames.length === 0) {
@@ -195,7 +198,7 @@ export async function listMcpServers(): Promise<void> {
 export const listCommand: CommandModule = {
   command: 'list',
   describe: 'List all configured MCP servers',
-  handler: async () => {
-    await listMcpServers();
+  handler: async (argv) => {
+    await listMcpServers(argv['managed-extensions'] as string | undefined);
   },
 };

@@ -106,6 +106,7 @@ describe('ReadFileTool', () => {
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
         ...storage,
       },
+      getManagedExtensionsDir: () => undefined,
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({ modalities: { ...allModalities } }),
@@ -421,6 +422,43 @@ describe('ReadFileTool', () => {
     ])('%s', async (_title, file, expected) => {
       const invocation = tool.build({ file_path: inRoot(file) });
       expect(await invocation.getDefaultPermission()).toBe(expected);
+    });
+
+    it('should return allow for paths within the managed extensions directory', async () => {
+      // Outside the workspace: without the managed-root allowlist entry this
+      // read would need a confirmation prompt.
+      // realpath so the lexical root matches the canonicalized candidate on
+      // platforms where os.tmpdir() sits behind a symlink (macOS /var).
+      const managedRoot = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-read-managed-')),
+      );
+      try {
+        const managedConfig = makeConfig(
+          {
+            getManagedExtensionsDir: () => managedRoot,
+            getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
+          },
+          {
+            getWorkflowRunsDir: () => path.join(tempRootDir, '.workflow-runs'),
+          },
+        );
+        const managedTool = new ReadFileTool(managedConfig);
+        const params: ReadFileToolParams = {
+          file_path: path.join(
+            managedRoot,
+            'demo',
+            'skills',
+            'x',
+            'references',
+            'template.md',
+          ),
+        };
+        const invocation = managedTool.build(params);
+        const permission = await invocation.getDefaultPermission();
+        expect(permission).toBe('allow');
+      } finally {
+        await fsp.rm(managedRoot, { recursive: true, force: true });
+      }
     });
   });
 
