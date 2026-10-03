@@ -5804,12 +5804,10 @@ jobs:
           REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
           FIRST_SELF_REVIEW: '${{ steps.verify.outputs.self_review }}'
           REPAIR_SELF_REVIEW: '${{ steps.verify_repair.outputs.self_review }}'
-          # The pass conclusions are the tamper-evident seal on the output
-          # claims below: a gate that reached fixed/noop EXITED 0, and a
-          # step killed mid-check (whose output file stays discoverable and
-          # appendable under $RUNNER_TEMP) never concludes success.
-          FIRST_CONCLUSION: '${{ steps.verify.conclusion }}'
-          REPAIR_CONCLUSION: '${{ steps.verify_repair.conclusion }}'
+          # The raw step outcomes seal the output claims below. Both gates
+          # use continue-on-error, so a failed step can conclude success.
+          FIRST_STEP_OUTCOME: '${{ steps.verify.outcome }}'
+          REPAIR_STEP_OUTCOME: '${{ steps.verify_repair.outcome }}'
           FIRST_KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
           REPAIR_KISS_AUDIT: '${{ steps.verify_repair.outputs.kiss_audit }}'
         run: |-
@@ -5819,7 +5817,7 @@ jobs:
           AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
           SELF_REVIEW="${FIRST_SELF_REVIEW}"
           KISS_AUDIT="${FIRST_KISS_AUDIT}"
-          PASS_CONCLUSION="${FIRST_CONCLUSION}"
+          PASS_STEP_OUTCOME="${FIRST_STEP_OUTCOME}"
           # The flag travels WITH the attempt whose outcome is selected: the
           # first pass can fail a round-caused check, the repair fixes it, and
           # the repair verification can then hit a pre-existing failure — that
@@ -5829,9 +5827,6 @@ jobs:
           PREEXISTING="${FIRST_PREEXISTING}"
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
             PREEXISTING="${REPAIR_PREEXISTING}"
-          fi
-          if [[ "${PREEXISTING}" == 'true' ]]; then
-            echo "preexisting=true" >> "${GITHUB_OUTPUT}"
           fi
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
             OUTCOME="${REPAIR_OUTCOME}"
@@ -5847,22 +5842,26 @@ jobs:
             AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
             SELF_REVIEW="${REPAIR_SELF_REVIEW:-${FIRST_SELF_REVIEW}}"
             KISS_AUDIT="${REPAIR_KISS_AUDIT:-${FIRST_KISS_AUDIT}}"
-            PASS_CONCLUSION="${REPAIR_CONCLUSION}"
+            PASS_STEP_OUTCOME="${REPAIR_STEP_OUTCOME}"
           fi
-          # Conclusion gate: fixed/noop are the ONLY outcomes that release
+          # Outcome gate: fixed/noop are the ONLY outcomes that release
           # the PAT push.
           # Full rationale → qwen-autofix.md#af-129
           if [[ "${OUTCOME}" == 'fixed' || "${OUTCOME}" == 'noop' ]] &&
-            [[ "${PASS_CONCLUSION}" != 'success' ]]; then
-            echo "::error::verify pass claims outcome=${OUTCOME} but concluded '${PASS_CONCLUSION:-<none>}' — discarding the claim (forged or crashed-gate outputs); NOT pushing"
+            [[ "${PASS_STEP_OUTCOME}" != 'success' ]]; then
+            echo "::error::verify pass claims outcome=${OUTCOME} but exited '${PASS_STEP_OUTCOME:-<none>}' — discarding the claim (forged or crashed-gate outputs); NOT pushing"
             OUTCOME=''
             COMMITTED=''
             VERIFIED_HEAD=''
             AUDIT_VERDICT=''
             SELF_REVIEW=''
             KISS_AUDIT=''
+            PREEXISTING=''
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
+          if [[ "${PREEXISTING}" == 'true' ]]; then
+            echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+          fi
           if [[ -n "${COMMITTED}" ]]; then
             echo "committed=${COMMITTED}" >> "${GITHUB_OUTPUT}"
           fi
