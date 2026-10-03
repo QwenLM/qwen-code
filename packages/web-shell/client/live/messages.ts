@@ -16,6 +16,15 @@ type LiveMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
+  'live.feed.unsupported': 'On-demand screenshots only',
+  'live.feed.idle': 'Screen ready for your call',
+  'live.feed.starting': 'Connecting live screen…',
+  'live.feed.streaming': 'Live screen · ask about what you see',
+  'live.feed.stopped': 'Live screen stopped',
+  'live.feed.error': 'Screen feed failed. Share again to retry.',
+  'live.more': 'More',
+  'live.captions': 'Captions',
+  'live.feed.keepOpen': 'Keep this page and call open for live screen sharing.',
   'live.title': 'Live Voice',
   'live.open': 'Open Live Voice',
   'live.manage': 'Manage active Live Voice',
@@ -46,9 +55,8 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     'Headphones give the best result: they keep the reply out of the microphone.',
   'live.browser.startScreenShare': 'Share screen',
   'live.browser.stopScreenShare': 'Stop sharing screen',
-  'live.browser.sharing': 'Sharing your screen. Qwen looks only when asked.',
-  'live.browser.sharingNamed': (v) =>
-    `Sharing ${v?.target ?? ''}. Qwen looks only when asked.`,
+  'live.browser.sharing': 'Screen shared',
+  'live.browser.sharingNamed': (v) => `${v?.target ?? 'Screen'}`,
   'live.browser.screenRequested':
     'Qwen asked to see your screen. Share one to let it look.',
   'live.browser.lookedAtScreen': 'Qwen looked at your screen.',
@@ -133,7 +141,7 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'live.unmuteOutput': 'Unmute speaker',
   'live.state.unavailable': 'Voice chat unavailable',
   'live.state.idle': 'Ready for voice chat',
-  'live.state.starting': 'Starting voice chat…',
+  'live.state.starting': 'Preparing voice chat…',
   'live.state.listening': 'Listening',
   'live.state.thinking': 'Thinking',
   'live.state.speaking': 'Speaking',
@@ -156,6 +164,15 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
 };
 
 export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
+  'live.feed.unsupported': '仅支持按需截图',
+  'live.feed.idle': '画面就绪，等待通话',
+  'live.feed.starting': '正在连接实时画面…',
+  'live.feed.streaming': '实时画面已连接，可直接询问',
+  'live.feed.stopped': '实时画面已停止',
+  'live.feed.error': '画面连接失败，请重新共享。',
+  'live.more': '更多',
+  'live.captions': '字幕',
+  'live.feed.keepOpen': '实时共享画面时，请保持页面和通话开启。',
   'live.title': '实时语音',
   'live.open': '打开实时语音',
   'live.manage': '管理正在进行的实时语音',
@@ -183,9 +200,8 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
     '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
   'live.browser.startScreenShare': '共享屏幕',
   'live.browser.stopScreenShare': '停止共享屏幕',
-  'live.browser.sharing': '正在共享屏幕，Qwen 只在需要时查看。',
-  'live.browser.sharingNamed': (v) =>
-    `正在共享${v?.target ?? ''}，Qwen 只在需要时查看。`,
+  'live.browser.sharing': '正在共享屏幕',
+  'live.browser.sharingNamed': (v) => `${v?.target ?? '屏幕'}`,
   'live.browser.screenRequested': 'Qwen 想看你的屏幕，共享后它才能查看。',
   'live.browser.lookedAtScreen': 'Qwen 查看了你的屏幕。',
   'live.browser.closed.occupied': '已有其他实时语音端连接。',
@@ -266,7 +282,7 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'live.unmuteOutput': '取消扬声器静音',
   'live.state.unavailable': '实时语音不可用',
   'live.state.idle': '可以开始语音对话',
-  'live.state.starting': '正在开始语音对话…',
+  'live.state.starting': '正在准备语音对话…',
   'live.state.listening': '正在聆听',
   'live.state.thinking': '思考中',
   'live.state.speaking': '正在回答',

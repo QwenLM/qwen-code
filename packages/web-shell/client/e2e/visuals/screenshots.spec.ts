@@ -540,6 +540,26 @@ for (const theme of THEMES) {
       await expect(page.getByTestId('trajectory-range')).toBeVisible();
       await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
       await captureScreenshot(page, `trajectory-range-${theme}`);
+
+      // Zoomed in on the middle of the run, the selection still drawn.
+      await page.mouse.move(plot!.x + plot!.width * 0.5, y);
+      await page.mouse.wheel(0, -900);
+      await expect(page.getByTestId('trajectory-domain')).toHaveAttribute(
+        'data-zoomed',
+        'true',
+      );
+      await captureScreenshot(page, `trajectory-zoom-${theme}`);
+
+      // The whole run again, over real time: the wait before the retry and
+      // the pause between turns stay on the axis. Switching drops the zoom
+      // and the selection, which belong to the other axis.
+      const clock = page.getByTestId('trajectory-mode-clock');
+      await clock.click();
+      await expect(clock).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('trajectory-domain')).not.toHaveAttribute(
+        'data-zoomed',
+      );
+      await captureScreenshot(page, `trajectory-clock-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
@@ -1730,6 +1750,92 @@ for (const theme of THEMES) {
       await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
       await expect(page.getByTestId('model-management')).toBeVisible();
       await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test('settings panel with model management disabled', async ({
+      page,
+    }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      scenario.providers.providers.push({
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'managed-test-model',
+            configurationKey: 'managed-test-key',
+            baseModelId: 'managed-test-model',
+            name: 'Managed Test Model',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({
+            json: {
+              models: [
+                {
+                  key: 'managed-test-key',
+                  authType: 'openai',
+                  modelId: 'managed-test-model',
+                  name: 'Managed Test Model',
+                  purpose: 'chat',
+                  contextWindowSize: 131072,
+                },
+              ],
+            },
+          });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [], {
+        allowAdd: false,
+        allowDelete: false,
+      });
+      await openSettingsPanel(page);
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: /^Model/ })
+        .click();
+      const models = page.getByTestId('model-management');
+      await expect(
+        models.getByText('Managed Test Model', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        models.getByText('Qwen Test', { exact: true }),
+      ).toBeVisible();
+      await expect(models.getByText('Current', { exact: true })).toBeVisible();
+      await expect(
+        models.getByRole('button', { name: '+ Add Model', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', { name: /^Delete / }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', {
+          name: 'Set current Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        models.getByRole('button', {
+          name: 'Edit context window Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `settings-panel-model-management-disabled-${theme}`,
+      );
     });
 
     test(`settings panel with host exclusions`, async ({ page }, testInfo) => {

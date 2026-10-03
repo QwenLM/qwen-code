@@ -4,12 +4,87 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { invalidateModelCatalog } from '../models/model-catalog.js';
 import {
   defaultModalities,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from './modalityDefaults.js';
+import type { InputModalities } from './contentGenerator.js';
+
+type Check = (model: string) => void;
+
+/** The model's modalities equal `expected` exactly (one assertion). */
+const equals =
+  (expected: InputModalities): Check =>
+  (model) =>
+    expect(defaultModalities(model)).toEqual(expected);
+
+/** One assertion per listed modality; `undefined` means absent. */
+const has =
+  (spec: { [K in keyof InputModalities]: true | undefined }): Check =>
+  (model) => {
+    const m = defaultModalities(model);
+    for (const [key, value] of Object.entries(spec)) {
+      expect(m[key as keyof InputModalities]).toBe(value);
+    }
+  };
+
+const FULL = equals({ image: true, pdf: true, audio: true, video: true });
+const TEXT_ONLY = equals({});
+const IMAGE_VIDEO = equals({ image: true, video: true });
+const IMAGE = has({ image: true });
+const IMAGE_NO_PDF = has({ image: true, pdf: undefined });
+const IMAGE_PDF = has({ image: true, pdf: true });
+const ONLY_IMAGE_VIDEO = has({
+  image: true,
+  video: true,
+  pdf: undefined,
+  audio: undefined,
+});
+
+type Case = [label: string, check: Check, model?: string];
+
+/** One case per row, titled `${prefix} ${label}`; the model id defaults to
+ * the label. */
+const casesFor = (prefix: string, rows: Case[]) =>
+  it.each(rows)(`${prefix} %s`, (label, check, model) => check(model ?? label));
+
+// Run against the real bundled catalog (the production default). QWEN_HOME is
+// pinned to an empty dir so a host's refreshed cache cannot replace the
+// bundle, and deleting the kill-switch opts back out of the test-setup's
+// regex-only default.
+let tempDir: string;
+let previousHome: string | undefined;
+let previousSwitch: string | undefined;
+
+beforeAll(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'modality-defaults-'));
+  previousHome = process.env['QWEN_HOME'];
+  previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+  process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
+  delete process.env['QWEN_CODE_MODELS_DEV'];
+  invalidateModelCatalog();
+});
+
+afterAll(() => {
+  if (previousHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = previousHome;
+  }
+  if (previousSwitch === undefined) {
+    delete process.env['QWEN_CODE_MODELS_DEV'];
+  } else {
+    process.env['QWEN_CODE_MODELS_DEV'] = previousSwitch;
+  }
+  invalidateModelCatalog();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
 
 describe('defaultModalities', () => {
   it('does not infer modalities for an unrecognized batch route', () => {
@@ -17,135 +92,73 @@ describe('defaultModalities', () => {
   });
 
   describe('Google Gemini', () => {
-    it('returns full multimodal for gemini-3-pro', () => {
-      expect(defaultModalities('gemini-3-pro-preview')).toEqual({
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      });
-    });
-
-    it('returns full multimodal for gemini-3-flash', () => {
-      expect(defaultModalities('gemini-3-flash-preview')).toEqual({
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      });
-    });
-
-    it('returns full multimodal for gemini-3.1-pro', () => {
-      expect(defaultModalities('gemini-3.1-pro-preview')).toEqual({
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      });
-    });
-
-    it('returns full multimodal for gemini-2.5-pro', () => {
-      expect(defaultModalities('gemini-2.5-pro')).toEqual({
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      });
-    });
-
-    it('returns full multimodal for gemini-1.5-flash', () => {
-      expect(defaultModalities('gemini-1.5-flash')).toEqual({
-        image: true,
-        pdf: true,
-        audio: true,
-        video: true,
-      });
-    });
+    casesFor('returns full multimodal for', [
+      ['gemini-3-pro', FULL, 'gemini-3-pro-preview'],
+      ['gemini-3-flash', FULL, 'gemini-3-flash-preview'],
+      ['gemini-3.1-pro', FULL, 'gemini-3.1-pro-preview'],
+      ['gemini-2.5-pro', FULL],
+      ['gemini-1.5-flash', FULL],
+    ]);
   });
 
   describe('OpenAI', () => {
-    it('returns image for gpt-5.2', () => {
-      const m = defaultModalities('gpt-5.2');
-      expect(m.image).toBe(true);
-      expect(m.audio).toBeUndefined();
-      expect(m.pdf).toBeUndefined();
-      expect(m.video).toBeUndefined();
-    });
-
-    it('returns image for gpt-5-mini', () => {
-      expect(defaultModalities('gpt-5-mini').image).toBe(true);
-    });
-
-    it('returns image for gpt-4o', () => {
-      expect(defaultModalities('gpt-4o').image).toBe(true);
-    });
-
-    it('returns image for o3', () => {
-      expect(defaultModalities('o3').image).toBe(true);
-    });
+    casesFor('returns image for', [
+      [
+        'gpt-5.2',
+        has({
+          image: true,
+          audio: undefined,
+          pdf: undefined,
+          video: undefined,
+        }),
+      ],
+      ['gpt-5-mini', IMAGE],
+      ['gpt-4o', IMAGE],
+      ['o3', IMAGE],
+    ]);
   });
 
   describe('Anthropic Claude', () => {
-    it('returns image + pdf for claude-opus-4-6', () => {
-      const m = defaultModalities('claude-opus-4-6');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBe(true);
-      expect(m.audio).toBeUndefined();
-      expect(m.video).toBeUndefined();
-    });
-
-    it('returns image + pdf for claude-sonnet-4-6', () => {
-      const m = defaultModalities('claude-sonnet-4-6');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBe(true);
-    });
-
-    it('returns image + pdf for claude-sonnet-4', () => {
-      const m = defaultModalities('claude-sonnet-4');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBe(true);
-    });
-
-    it('returns image + pdf for claude-3.5-sonnet', () => {
-      const m = defaultModalities('claude-3.5-sonnet');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBe(true);
-    });
+    casesFor('returns image + pdf for', [
+      [
+        'claude-opus-4-6',
+        has({ image: true, pdf: true, audio: undefined, video: undefined }),
+      ],
+      ['claude-sonnet-4-6', IMAGE_PDF],
+      ['claude-sonnet-4', IMAGE_PDF],
+      ['claude-3.5-sonnet', IMAGE_PDF],
+    ]);
   });
 
   describe('Qwen', () => {
-    it('returns image + video for qwen-vl-max', () => {
-      const m = defaultModalities('qwen-vl-max');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
+    casesFor('returns image + video for', [
+      ['qwen-vl-max', ONLY_IMAGE_VIDEO],
+      ['qwen3-vl-plus', has({ image: true, video: true })],
+      ['coder-model (same as qwen3.5-plus)', IMAGE_VIDEO, 'coder-model'],
+      ['qwen3.5-plus', ONLY_IMAGE_VIDEO],
+      ['qwen3.7-plus', ONLY_IMAGE_VIDEO],
+      // [Regression] issue-10194 — qwen3.8-flash/plus were classified as text-only
+      ['qwen3.8-flash', IMAGE_VIDEO],
+      ['qwen3.8-plus', IMAGE_VIDEO],
+      ['qwen3.6-35b variants', ONLY_IMAGE_VIDEO, 'qwen3.6-35b-a3b-nvfp4'],
+      // The bundled catalog adds video; its pdf stays endpoint-gated by the
+      // lookupModelCatalog correction.
+      ['qwen3.8-max', IMAGE_VIDEO],
+    ]);
 
-    it('returns image + video for qwen3-vl-plus', () => {
-      const m = defaultModalities('qwen3-vl-plus');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-    });
+    casesFor('returns text-only for', [
+      ['qwen3-coder-plus', TEXT_ONLY],
+      ['qwen3.7-max', TEXT_ONLY],
+      ['qwen-turbo', TEXT_ONLY],
+    ]);
 
-    it('returns text-only for qwen3-coder-plus', () => {
-      expect(defaultModalities('qwen3-coder-plus')).toEqual({});
-    });
-
-    it('returns image + video for coder-model (same as qwen3.5-plus)', () => {
-      expect(defaultModalities('coder-model')).toEqual({
-        image: true,
-        video: true,
-      });
-    });
-
-    it('returns image + video for qwen3.5-plus', () => {
-      const m = defaultModalities('qwen3.5-plus');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
+    casesFor('returns image for', [
+      [
+        'qwen3.8-max-preview (provider-prefixed)',
+        IMAGE,
+        'bailian-token-plan/qwen3.8-max-preview',
+      ],
+    ]);
 
     it('returns full multimodal for qwen omni models', () => {
       for (const model of [
@@ -153,197 +166,87 @@ describe('defaultModalities', () => {
         'qwen3-omni-flash',
         'qwen-omni-turbo',
       ]) {
-        expect(defaultModalities(model)).toEqual({
-          image: true,
-          pdf: true,
-          audio: true,
-          video: true,
-        });
+        FULL(model);
       }
-    });
-
-    it('returns image + video for qwen3.7-plus', () => {
-      const m = defaultModalities('qwen3.7-plus');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
-
-    it('returns text-only for qwen3.7-max', () => {
-      expect(defaultModalities('qwen3.7-max')).toEqual({});
-    });
-
-    it('returns image for qwen3.8-max', () => {
-      const m = defaultModalities('qwen3.8-max');
-      expect(m.image).toBe(true);
-      expect(m.video).toBeUndefined();
-    });
-
-    it('returns image for qwen3.8-max-preview (provider-prefixed)', () => {
-      const m = defaultModalities('bailian-token-plan/qwen3.8-max-preview');
-      expect(m.image).toBe(true);
-    });
-
-    // [Regression] issue-10194 — qwen3.8-flash/plus were classified as text-only
-    it('returns image + video for qwen3.8-flash', () => {
-      expect(defaultModalities('qwen3.8-flash')).toEqual({
-        image: true,
-        video: true,
-      });
-    });
-
-    it('returns image + video for qwen3.8-plus', () => {
-      expect(defaultModalities('qwen3.8-plus')).toEqual({
-        image: true,
-        video: true,
-      });
-    });
-
-    it('returns image + video for qwen3.6-35b variants', () => {
-      const m = defaultModalities('qwen3.6-35b-a3b-nvfp4');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
-
-    it('returns text-only for qwen-turbo', () => {
-      expect(defaultModalities('qwen-turbo')).toEqual({});
     });
   });
 
   describe('DeepSeek', () => {
-    it('returns text-only for deepseek-chat', () => {
-      expect(defaultModalities('deepseek-chat')).toEqual({});
-    });
-
-    it('returns text-only for deepseek-reasoner', () => {
-      expect(defaultModalities('deepseek-reasoner')).toEqual({});
-    });
-
-    // (QwenLM/qwen-code#10270)
-    it('returns text-only for non-vision deepseek-v4-flash', () => {
-      expect(defaultModalities('deepseek-v4-flash')).toEqual({});
-    });
+    casesFor('returns text-only for', [
+      ['deepseek-chat', TEXT_ONLY],
+      ['deepseek-reasoner', TEXT_ONLY],
+      // (QwenLM/qwen-code#10270)
+      ['non-vision deepseek-v4-flash', TEXT_ONLY, 'deepseek-v4-flash'],
+    ]);
 
     it('returns image for deepseek-v4-flash-vision-exp', () => {
-      const m = defaultModalities('deepseek-v4-flash-vision-exp');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
+      IMAGE_NO_PDF('deepseek-v4-flash-vision-exp');
     });
   });
 
   describe('Zhipu GLM', () => {
-    it('returns image for glm-4.5v', () => {
-      const m = defaultModalities('glm-4.5v');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
-    });
+    casesFor('returns image for', [
+      ['glm-4.5v', IMAGE_NO_PDF],
+      // (QwenLM/qwen-code#10270)
+      ['glm-4.6v', IMAGE_NO_PDF],
+      ['glm-5v-turbo', IMAGE_NO_PDF],
+      ['glm-5.3-flash', IMAGE_NO_PDF],
+    ]);
 
-    // (QwenLM/qwen-code#10270)
-    it('returns image for glm-4.6v', () => {
-      const m = defaultModalities('glm-4.6v');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
-    });
-
-    it('returns image for glm-5v-turbo', () => {
-      const m = defaultModalities('glm-5v-turbo');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
-    });
-
-    it('returns image for glm-5.3-flash', () => {
-      const m = defaultModalities('glm-5.3-flash');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
-    });
-
-    it('returns text-only for glm-5', () => {
-      expect(defaultModalities('glm-5')).toEqual({});
-    });
-
-    it('returns text-only for glm-4.7', () => {
-      expect(defaultModalities('glm-4.7')).toEqual({});
-    });
-
-    it('returns text-only for glm-4.6 (no v suffix)', () => {
-      expect(defaultModalities('glm-4.6')).toEqual({});
-    });
+    casesFor('returns text-only for', [
+      ['glm-5', TEXT_ONLY],
+      ['glm-4.7', TEXT_ONLY],
+      ['glm-4.6 (no v suffix)', TEXT_ONLY, 'glm-4.6'],
+    ]);
   });
 
   describe('MiniMax', () => {
     it('returns image + video for MiniMax-M3', () => {
-      const m = defaultModalities('MiniMax-M3');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
+      ONLY_IMAGE_VIDEO('MiniMax-M3');
     });
 
     it('returns text-only for MiniMax-M2.5', () => {
-      expect(defaultModalities('MiniMax-M2.5')).toEqual({});
+      TEXT_ONLY('MiniMax-M2.5');
     });
   });
 
   describe('Kimi', () => {
-    it('returns image + video for kimi-k3', () => {
-      const m = defaultModalities('kimi-k3');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
-
-    it('returns image + video for kimi-k2.5', () => {
-      const m = defaultModalities('kimi-k2.5');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-      expect(m.pdf).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
+    casesFor('returns image + video for', [
+      ['kimi-k3', ONLY_IMAGE_VIDEO],
+      ['kimi-k2.5', ONLY_IMAGE_VIDEO],
+    ]);
 
     it('returns text-only for kimi-k2', () => {
-      expect(defaultModalities('kimi-k2')).toEqual({});
+      TEXT_ONLY('kimi-k2');
     });
   });
 
   describe('ByteDance Doubao', () => {
-    it('returns image for doubao-seed-2.0-pro (issue #4876)', () => {
-      const m = defaultModalities('doubao-seed-2.0-pro');
-      expect(m.image).toBe(true);
-      expect(m.video).toBeUndefined();
-      expect(m.audio).toBeUndefined();
-    });
+    casesFor('returns image for', [
+      [
+        'doubao-seed-2.0-pro (issue #4876)',
+        has({ image: true, video: undefined, audio: undefined }),
+        'doubao-seed-2.0-pro',
+      ],
+      ['doubao-seed-1.6', IMAGE],
+      ['doubao-1.5-vision-pro', IMAGE],
+      ['doubao-vision', IMAGE],
+    ]);
 
-    it('returns image for doubao-seed-1.6', () => {
-      expect(defaultModalities('doubao-seed-1.6').image).toBe(true);
-    });
-
-    it('returns image for doubao-1.5-vision-pro', () => {
-      expect(defaultModalities('doubao-1.5-vision-pro').image).toBe(true);
-    });
-
-    it('returns image for doubao-vision', () => {
-      expect(defaultModalities('doubao-vision').image).toBe(true);
-    });
-
-    it('returns text-only for doubao-seedance (text→video generation model)', () => {
-      expect(defaultModalities('doubao-seedance-1.0-pro')).toEqual({});
-    });
-
-    it('returns text-only for doubao-seedream (text→image generation model)', () => {
-      expect(defaultModalities('doubao-seedream-3.0')).toEqual({});
-    });
-
-    it('returns text-only for doubao-pro-32k', () => {
-      expect(defaultModalities('doubao-pro-32k')).toEqual({});
-    });
-
-    it('returns text-only for doubao-lite-4k', () => {
-      expect(defaultModalities('doubao-lite-4k')).toEqual({});
-    });
+    casesFor('returns text-only for', [
+      [
+        'doubao-seedance (text→video generation model)',
+        TEXT_ONLY,
+        'doubao-seedance-1.0-pro',
+      ],
+      [
+        'doubao-seedream (text→image generation model)',
+        TEXT_ONLY,
+        'doubao-seedream-3.0',
+      ],
+      ['doubao-pro-32k', TEXT_ONLY],
+      ['doubao-lite-4k', TEXT_ONLY],
+    ]);
   });
 
   describe('unknown models', () => {

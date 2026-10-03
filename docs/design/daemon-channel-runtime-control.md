@@ -82,7 +82,8 @@ time this daemon sees it — recorded as soon as it asks for anything — becaus
 later removal and re-registration, or a trust re-materialization, must not undo
 an operator who stopped one of those channels in between. Late restores run one
 at a time, each adding its names to the committed selection in one change, so
-one name it cannot attribute costs that workspace its whole list, unlike boot.
+one name it cannot attribute costs that workspace its whole list, unlike boot;
+each name left down is reported as described below.
 After `DELETE /workspace/channel` has stopped hosting, a registration restores
 nothing, because registering a workspace is not an instruction to turn hosting
 back on; that waits for a `PUT /workspace/channel` that commits, or the next
@@ -114,9 +115,27 @@ unconfirmed worker stops retain the existing startup-failure behavior. The
 service lease remains held while worker termination is unconfirmed.
 
 Channel management reports persisted startup settings and actual runtime state.
-Skipped or failed automatic restores are diagnosed through the daemon log;
-they do not replace the configured instances or startup toggles with a retained
-boot-failure snapshot.
+Three ways a `serve.channels` name can stay unhosted are reported rather than
+only logged: a configured selection whose worker failed to start on the boot
+path that keeps the daemon serving, a name the boot ownership resolver dropped
+(reported against every workspace that listed it), and every name still
+unhosted after a late restore failed. Such a name never reaches the committed
+selection, so no worker snapshot carries it and the channel list would
+otherwise call it `stopped`. The daemon keeps an in-memory record per workspace
+and channel; daemon status raises one `channel_restore_failed` warning per
+workspace and is the complete surface, while the channel list reports the
+channel as `error` with the recorded `lastError` for the names that
+workspace's own settings scope defines. The record changes only the runtime
+state: the configured instances and startup toggles are still read from
+settings.
+
+A record retires from current state rather than from an event: it is dropped
+once the channel is hosted — by this workspace or by a later restore from
+another — or once its workspace is no longer registered. Reads apply that rule
+and prune, so a runtime replaced by a trust reconcile cannot erase a failure
+that is still true, and a restore that settles after its workspace was removed
+cannot strand one. On top of that, an operator acting on the channel, or on the
+whole selection with a change that stops something, clears it.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

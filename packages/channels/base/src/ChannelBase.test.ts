@@ -581,6 +581,167 @@ describe('ChannelBase', () => {
     ).toBe('/tmp/channel-state');
   });
 
+  describe('message routes', () => {
+    const messageRoutes = { '/review': 'Review only.', '/QA': 'Answer only.' };
+
+    it('retains route instructions and the session when a scheduled loop runs first', async () => {
+      const ch = createChannel({ messageRoutes });
+      ch.proactiveSupported = true;
+      await ch.runLoopPrompt({
+        id: 'route-loop',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          messageRoute: '/review',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'review updates',
+        label: 'review',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await ch.handleInbound(envelope({ text: '/review next' }));
+      const calls = vi.mocked(bridge.prompt).mock.calls;
+      expect(calls[0]![1]).toContain('Review only.');
+      expect(calls[1]![0]).toBe(calls[0]![0]);
+      expect(calls[1]![1]).toBe('next');
+    });
+
+    it('filters unrelated ambient history and keeps route histories separate', async () => {
+      const ch = createChannel(
+        {
+          messageRoutes,
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, text: 'unrelated history' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, text: '/review review history' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, text: '/QA qa history' }),
+      );
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '/review 123' }),
+      );
+      const firstPrompt = vi.mocked(bridge.prompt).mock.calls[0]![1];
+      expect(firstPrompt).toContain('review history');
+      expect(firstPrompt).not.toContain('qa history');
+      expect(firstPrompt).not.toContain('unrelated history');
+      await ch.handleInbound(
+        envelope({ isGroup: true, isMentioned: true, text: '/QA question' }),
+      );
+      expect(vi.mocked(bridge.prompt).mock.calls[1]![1]).toContain(
+        'qa history',
+      );
+    });
+
+    it('drains collected route messages into the same session without rematching', async () => {
+      let finish!: (result: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const ch = createChannel({ messageRoutes, dispatchMode: 'collect' });
+      const first = ch.handleInbound(envelope({ text: '/review 123' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      await ch.handleInbound(envelope({ text: '/review 456' }));
+      await ch.handleInbound(envelope({ text: '/QA question' }));
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      finish('done');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+      const calls = vi.mocked(bridge.prompt).mock.calls;
+      expect(calls[2]![0]).toBe(calls[0]![0]);
+      expect(calls[2]![1]).toBe('456');
+    });
+
+    it('isolates route sessions and injects instructions only on the first turn', async () => {
+      const ch = createChannel({ messageRoutes, instructions: 'Be brief.' });
+      await ch.handleInbound(envelope({ text: '/review 123' }));
+      await ch.handleInbound(envelope({ text: '/QA question' }));
+      await ch.handleInbound(envelope({ text: '/review 456' }));
+      const calls = vi.mocked(bridge.prompt).mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[0]![0]).not.toBe(calls[1]![0]);
+      expect(calls[2]![0]).toBe(calls[0]![0]);
+      expect(calls[0]![1]).toContain('Review only.');
+      expect(calls[0]![1]).toContain('Be brief.');
+      expect(calls[0]![1]).not.toContain('/review');
+      expect(calls[1]![1]).toContain('Answer only.');
+      expect(calls[1]![1]).not.toContain('Review only.');
+      expect(calls[2]![1]).toBe('456');
+    });
+
+    it('filters unprefixed commands and memory intents before side effects', async () => {
+      const channelMemory = createChannelMemory();
+      const ch = createChannel({ messageRoutes }, { channelMemory });
+      await ch.handleInbound(envelope({ text: '/clear' }));
+      await ch.handleInbound(envelope({ text: 'remember that I like tests' }));
+      expect(bridge.newSession).not.toHaveBeenCalled();
+      expect(channelMemory.addChannelMemoryEntries).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('uses the default route session for ordinary messages', async () => {
+      const ch = createChannel({ messageRoutes, defaultMessageRoute: '/QA' });
+      await ch.handleInbound(envelope({ text: 'question' }));
+      await ch.handleInbound(envelope({ text: '/QA another question' }));
+      const calls = vi.mocked(bridge.prompt).mock.calls;
+      expect(calls[0]![0]).toBe(calls[1]![0]);
+      expect(calls[0]![1]).toContain('Answer only.');
+      expect(calls[1]![1]).toBe('another question');
+    });
+
+    it('clears only the selected route', async () => {
+      const ch = createChannel({ messageRoutes });
+      await ch.handleInbound(envelope({ text: '/review 123' }));
+      await ch.handleInbound(envelope({ text: '/QA question' }));
+      const reviewSession = vi.mocked(bridge.prompt).mock.calls[0]![0];
+      await ch.handleInbound(envelope({ text: '/review /clear' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(reviewSession);
+      await ch.handleInbound(envelope({ text: '/QA next' }));
+      const calls = vi.mocked(bridge.prompt).mock.calls;
+      expect(calls[2]![0]).toBe(calls[1]![0]);
+      expect(calls[2]![1]).toBe('next');
+    });
+
+    it('allows explicitly bypassed provider events', async () => {
+      const ch = createChannel({ messageRoutes });
+      await ch.handleInbound(
+        envelope({ text: 'Document updated', bypassMessageRoutes: true }),
+      );
+      expect(bridge.prompt).toHaveBeenCalledOnce();
+      expect(vi.mocked(bridge.prompt).mock.calls[0]![1]).toBe(
+        'Document updated',
+      );
+    });
+
+    it('rejects invalid default routes and named-session combinations', () => {
+      expect(() =>
+        createChannel({ messageRoutes, defaultMessageRoute: '/missing' }),
+      ).toThrow('defaultMessageRoute');
+      expect(() =>
+        createChannel({ messageRoutes, multiSession: true }),
+      ).toThrow('multiSession');
+    });
+  });
+
   it('fails closed when named sessions lack daemon state or user scope', () => {
     expect(() => createChannel({ multiSession: true })).toThrow(
       'only in daemon-managed mode',
@@ -3133,6 +3294,7 @@ describe('ChannelBase', () => {
           chatId: 'chat1',
         })),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -12120,6 +12282,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12153,6 +12316,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12202,6 +12366,7 @@ describe('ChannelBase', () => {
           .mockReturnValue(undefined),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12233,6 +12398,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12265,6 +12431,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12309,6 +12476,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12353,6 +12521,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -12376,6 +12545,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
       const newBridge = createBridge();
@@ -12417,6 +12587,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -15972,6 +16143,46 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       await ch.handleInbound(envelope());
       expect(bridge.newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts a fresh session after the configured routed-message bound', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      expect(vi.mocked(bridge.prompt).mock.calls.map(([id]) => id)).toEqual([
+        's-1',
+        's-1',
+        's-2',
+      ]);
+      expect(ch.retiringSessions).toContain('s-1');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+      expect(ch.threadMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining('fresh session'),
+          }),
+        ]),
+      );
+    });
+
+    it('announces a shared-session rotation in the chat that triggered it', async () => {
+      const ch = createChannel({
+        sessionScope: 'single',
+        sessionRotation: { maxTurns: 1 },
+      });
+      await ch.handleInbound(envelope({ chatId: 'first-chat' }));
+      await ch.handleInbound(envelope({ chatId: 'second-chat' }));
+
+      expect(ch.threadMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chatId: 'second-chat',
+            text: expect.stringContaining('fresh session'),
+          }),
+        ]),
+      );
     });
 
     it('creates separate sessions for different senders', async () => {

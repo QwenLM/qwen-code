@@ -28,17 +28,40 @@ export function stripExportMeta(source: string): string {
 }
 
 /**
- * Locate the `export const meta = {...}` declaration's bounds in the source.
+ * Walk past leading whitespace and comments in `source` starting at
+ * `from`, and return the resulting offset. Used by `findMetaBlockBounds`
+ * to position the meta anchor.
  *
- * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
- * start (no `/m` flag — see T33 comment below); walks the brace block while
- * skipping over comment / regex / string contexts; throws on unbalanced
- * braces rather than returning a truncated string (T9/T17 — silently
- * deleting the script body is the worst-case failure mode).
- *
- * Returns null when no meta declaration is present at the file start —
- * callers treat this as "no meta", not an error.
+ * Why a walk, not a regex: a single-pass regex that skips leading
+ * whitespace, line and block comments in one expression either lets the
+ * inner quantifiers compete over trailing whitespace (K+1^N backtrack
+ * paths on K-space × N-comment input — a ReDoS vector), or silently
+ * extends a leading block comment past the comment terminator that lives
+ * inside a template literal (the T33-class false match). A walk consumes
+ * characters only from where it stands, so neither hazard is reachable.
  */
+const LINE_TERMINATORS = new Set(['\n', '\r', '\u2028', '\u2029']);
+const isLineTerminator = (ch: string) => LINE_TERMINATORS.has(ch);
+
+function skipTrivia(source: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < source.length && /\s/.test(source[i]!)) i++;
+    if (source.startsWith('//', i)) {
+      i += 2;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end === -1) return source.length; // unterminated — let the anchor check fail
+      i = end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
 function findMetaBlockBounds(source: string): {
   /** Start offset of the `export const meta` match. */
   exportIdx: number;
@@ -49,25 +72,40 @@ function findMetaBlockBounds(source: string): {
   /** Offset past meta + any trailing whitespace + optional `;`. */
   afterMeta: number;
 } | null {
-  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's FIRST statement.
-  // With `/m`, the regex matched every line-start occurrence — including
-  // inside template literals — and the brace-walker then ripped content
-  // out of the string body, silently corrupting the script.
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
-  const match = re.exec(source);
-  if (!match) return null;
-  const exportIdx = match.index;
-  const startBrace = source.indexOf('{', exportIdx);
+  // T33 (PR #4732 R4): the meta declaration must be the first
+  // non-trivia token of the script. Walk past leading whitespace and
+  // comments rather than regex-matching the whole shape — see `skipTrivia`
+  // for the rationale. Once we are at the first non-trivia character,
+  // the anchor matches `export const meta = {` with whitespace tolerance
+  // (any number of spaces/tabs/newlines between the tokens), so:
+  //  - A `{` inside a leading comment cannot be confused with the meta
+  //    `{` (the brace-walker starts at the `=` after `meta`, not at index 0,
+  //    so it never scans characters before `exportIdx`).
+  //  - A template literal inside a leading block comment cannot
+  //    contribute to a false match: the walk consumes the comment
+  //    wholesale, including any `export const meta = {...}` it
+  //    contains, then continues.
+  const exportIdx = skipTrivia(source, 0);
+  // Match the meta anchor at the trivia offset. The walk already skipped
+  // leading whitespace and comments, so this is anchored at a single
+  // position and cannot extend through a `*/` inside a template
+  // literal. Whitespace between `export`/`const`/`meta`/`=`/`{` is
+  // tolerated to match the spellings Claude Code accepts.
+  const anchor = /^export\s+const\s+meta\s*=\s*\{/.exec(
+    source.slice(exportIdx),
+  );
+  if (!anchor) return null;
+  const startBrace = exportIdx + anchor[0].length - 1;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
     const ch = source[i];
     const next = source[i + 1];
-    // Single-line comment: skip to newline (T16).
+    // Single-line comment: skip to end-of-line (all four ECMAScript
+    // LineTerminators — T16 plus CR, LS, PS).
     if (ch === '/' && next === '/') {
       i += 2;
-      while (i < source.length && source[i] !== '\n') i++;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
       continue;
     }
     // Block comment: skip to closing `*/` (T16).
@@ -87,7 +125,7 @@ function findMetaBlockBounds(source: string): {
       while (
         i < source.length &&
         (inClass || source[i] !== '/') &&
-        source[i] !== '\n'
+        !isLineTerminator(source[i]!)
       ) {
         if (source[i] === '\\') i += 2;
         else if (source[i] === '[') {
@@ -220,11 +258,12 @@ function wrapWorkflowBody(strippedSource: string): string {
  * Parse `export const meta`, strip it, and compile the remaining body.
  *
  * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
- * compile through one function rather than two lookalikes. Throws exactly what
- * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
- * literal, and V8's `SyntaxError` for a body that does not parse. The compile
- * copy masks the meta declaration instead of deleting it so V8's source lines
- * still match the author's original script.
+ * compile through one function rather than two lookalikes. Throws
+ * `extractAndStripMeta`'s errors for a malformed meta literal, V8's
+ * `SyntaxError` for a body that does not parse, and
+ * `WorkflowUnsupportedSyntaxError` for a body that uses dynamic `import()`.
+ * The compile copy masks the meta declaration instead of deleting it so V8's
+ * source lines still match the author's original script.
  */
 export function compileWorkflowScript(scriptSource: string): {
   script: vm.Script;
@@ -239,9 +278,11 @@ export function compileWorkflowScript(scriptSource: string): {
         .replace(/[^\r\n\u2028\u2029]/g, ' ') +
       scriptSource.slice(bounds.afterMeta)
     : stripped;
-  const script = new vm.Script(wrapWorkflowBody(compilable), {
+  const wrapped = wrapWorkflowBody(compilable);
+  const script = new vm.Script(wrapped, {
     filename: WORKFLOW_SCRIPT_FILENAME,
   });
+  assertNoDynamicImport(wrapped);
   return { script, meta };
 }
 
@@ -455,6 +496,7 @@ import {
 } from './workflow-agent-tools.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
+import { assertNoDynamicImport } from './workflow-script-validation.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -757,6 +799,24 @@ const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
  * pinned to this value.
  */
 export const WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Most entries each list of one `parallel()` or `pipeline()` call may hold:
+ * the thunks, the items, and the stages are each bounded separately. A longer
+ * list rejects the whole call; it is never truncated. Exported so the
+ * authoring reference's statement of it is pinned to this value.
+ */
+export const WORKFLOW_BATCH_LIMIT = 4096;
+
+/** The rejection message for a `parallel()` / `pipeline()` list over the limit. */
+export function describeOversizedBatch(list: string, length: number): string {
+  return (
+    `${list}: ${length} entries, over the limit of ` +
+    `${WORKFLOW_BATCH_LIMIT} per call. Nothing in this call ran. Split the ` +
+    `input into batches of at most ${WORKFLOW_BATCH_LIMIT}, await each ` +
+    'batch in turn, and concatenate the results in order.'
+  );
+}
 
 function resolveMaxWallClockMs(opts: SandboxOptions): number {
   if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
@@ -1150,6 +1210,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
+    batchLimit: WORKFLOW_BATCH_LIMIT,
+    describeOversizedBatch,
     hostWorkflow: (
       ref: string | { scriptPath: string },
       args: unknown,
@@ -1599,9 +1661,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
         // "isolation:'remote' is not available in this build", parent-dirty
-        // refuse, worktree creation failures, and StructuredOutput contract
-        // violations ("completed without calling StructuredOutput after 2
-        // in-conversation nudges").
+        // refuse, worktree creation failures, schemas refused before dispatch,
+        // and structured_output contract violations (no valid result after
+        // the failed submissions it names).
         if (
           agentOpts.isolation !== undefined &&
           agentOpts.isolation !== 'worktree' &&
@@ -1839,6 +1901,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       }
       if (__b.hasPipeline) {
         const callPipeline = vmAsync(function (items) {
+          // Refuse before copying an oversized stage list; the host checks
+          // the final list again.
+          if (arguments.length - 1 > __b.batchLimit) {
+            throw new Error(
+              __b.describeOversizedBatch('pipeline() stages', arguments.length - 1)
+            );
+          }
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));

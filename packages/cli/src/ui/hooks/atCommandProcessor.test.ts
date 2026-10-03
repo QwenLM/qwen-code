@@ -116,6 +116,7 @@ describe('handleAtCommand', () => {
       }),
       getFileSystemService: () => new StandardFileSystemService(),
       getEnableRecursiveFileSearch: vi.fn(() => true),
+      getMemoryRecallMode: () => 'legacy',
       getWorkspaceContext: () => ({
         isPathWithinWorkspace: () => true,
         getDirectories: () => [testRootDir],

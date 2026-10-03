@@ -3,6 +3,36 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## Managed 工具结果
+
+`ManagedAgentWebShell` 与 `createJavaManagedAgentProvider` 支持 Java O3 工具结果。
+只有 Session 返回 `capabilities.artifacts: true` 时才提供输出入口；它不启用
+Shell 执行。卡片区分执行、捕获与交付状态，面板按固定版本分页读取原始 bytes，
+当前账号的内容读取权由 metadata 响应独立决定。此路径不使用 daemon 文件 API。
+
+宿主应提供包含租户及账号身份的 `productScope`，身份切换时同步更新它；刷新同一
+账号的短期 token 则继续使用动态 `getHeaders`。所有 metadata、range 和下载请求
+都经过注入的 `fetch`、`getHeaders` 与 `credentials`。跨源 gateway 需要允许带
+`Range`/`If-Match` 的鉴权 GET，并向浏览器暴露 `ETag`、`Content-Range` 和
+`Content-Length`；不要对 bytes 响应重新压缩或变换。
+
+支持 `showSaveFilePicker` 的浏览器默认把下载流直接写入用户选择的文件。其他宿主
+可提供 `saveArtifact(artifact, { signal, openStream })` 回调，在用户操作中取得
+可写目标后调用 `openStream()`，再用带 `signal` 的 `pipeTo` 保存。导出的
+`ManagedArtifactSave` 定义这一接口。回调必须传播取消和失败，并保持背压；不要用
+`blob()`/`arrayBuffer()` 聚合完整下载，也不要把 token 放进 URL。没有流式保存能力
+时只提供有界读取，并明确显示下载不可用。
+
+## 更新
+
+支持更新的服务会在后台检查并下载新版本，准备好后才在侧栏左下角版本号旁显示
+「更新」按钮。点击后应用更新并重启服务，连接恢复后自动刷新当前任务页面。
+重启会结束正在运行的工作。更新目标是连接的服务，远程连接时也是远程机器上的安装。
+
+支持具备进程替换能力的 macOS/Linux CLI 服务，以及独立安装或受管理的全局 npm
+安装。关闭 `general.enableAutoUpdate`、旧服务、桌面 shell、不支持的安装及嵌入式
+服务不显示按钮。临时配对连接也不提供更新入口。使用自定义 `sidebar.footer.items` 时，通过 `update` 项控制此功能。
+
 ## 开发网页预览
 
 独立 Web Shell 的右侧面板提供「网页预览」。先通过终端启动开发服务器，
@@ -45,6 +75,70 @@ iframe 仍需宿主的防嵌入策略保护。
 daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程开发目前需要
 浏览器可访问的地址或已有端口转发；预览不会自动把浏览器的 `localhost`
 转成远程 daemon 地址，也不会转发 daemon 凭据。
+
+## 宿主接管产物与代码高亮
+
+`onRightPanelOpen` 同步返回 `false` 时继续 Web Shell 原生打开逻辑；返回
+`true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
+未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
+该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+
+`filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
+产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
+它不删除产物记录、不改变会话产物同步结果，也不隐藏文件变更卡片。
+
+```tsx
+<WebShell
+  {...connectionProps}
+  onRightPanelOpen={(request) => {
+    if (request.kind !== 'artifact') return false;
+    openHostPreview(request);
+    return true;
+  }}
+  filterArtifact={(artifact) => artifact.id !== hiddenArtifactId}
+/>
+```
+
+预览组件可从独立入口复用高亮服务，无需导入聊天 UI 或样式：
+
+```ts
+import { highlightCode } from '@qwen-code/web-shell/code-highlighter';
+
+const html = await highlightCode({
+  code: 'SELECT id FROM orders',
+  language: 'sql',
+  theme: 'dark', // 或 'light'
+});
+```
+
+返回高亮 HTML；未知语言、纯文本、超出已有大小限制或高亮失败返回 `null`，
+宿主应回退为转义的纯文本。服务复用同一模块实例的 Shiki、语言加载和缓存，
+不暴露可变的高亮器实例。独立 JavaScript realm 或重复打包的模块不共享实例。
+样式和 HTML 的安全渲染由宿主负责。
+
+## 实时语音中的屏幕共享
+
+无需启动原生 Live Host。在 Web Shell 设置中启用 Live Voice 并配置支持图像输入的
+实时模型，点击 Live Voice 后会直接接入新的语音会话，再点击「共享屏幕」。
+浏览器需要支持屏幕共享，
+并通过 HTTPS 或 localhost 等安全上下文访问；共享范围由浏览器选择器决定。
+
+共享后画面自动作为当前语音对话的持续上下文，无需填写目标或额外开始观察。
+可直接问「这个是什么意思」「下一步怎么做」。画面与麦克风进入同一条模型连接，
+画面到达本身不会请求模型回复，也不会启动单独的目标监控模型。
+画面中的文字仅作观察证据；用户要求执行操作时仍由执行 Agent 处理。
+
+默认每秒采样一帧，包括内容未变的画面；单帧最多 190 KiB，网络拥塞时丢弃过期帧，
+不会累积截图队列。每张图像紧随新的音频帧发送；麦克风静音或音频暂停期间仅保留最新画面，恢复音频后继续。
+这是近实时画面上下文，不是逐帧视频分析。模型需要支持所选实时接口的图像输入，
+图像输入会产生对应的模型用量。截图不会由 Live Feed 保存为图片文件。
+
+停止共享会立即停止后续图像输入，语音可以继续。挂断会关闭面板并释放浏览器麦克风；
+再次点击 Live Voice 会创建新会话。关闭页面或断开连接也会
+停止共享。请保持页面和通话开启；浏览器后台节流或休眠可能中断采样，连续 15 秒
+没有收到画面会停止 Live Feed 并提示重新共享。旧 daemon 继续支持按需截图，
+界面会明确提示不支持实时画面。停止共享后的历史画面仍可能属于对话上下文，
+不能当作当前屏幕。默认不会自动解说或主动提醒。
 
 ## 环境要求
 
@@ -371,6 +465,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
 | `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `modelManagement`      | `WebShellModelManagementOptions`      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
 
 ### Workspace 会话创建超时
 
@@ -419,6 +514,10 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
 | `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `showToolCalls`            | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                        |
+| `modelManagement`          | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
+
+移动访问二维码入口由 `header.showMobileAccess?: boolean` 控制，默认隐藏，适用于主聊天和分屏页头。独立入口 `main.tsx` 显式设为 `true`，保留本地 Qwen Code 用户的入口。
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：
@@ -594,6 +693,24 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 **呈现限制不是访问控制。** 白名单与排除列表只影响原生设置页展示，不启用或关闭底层功能，不改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供作用域策略、字段覆盖或条目级深链。
 
 设计与验证范围见 [English](../../docs/design/web-shell-settings-allowlists.md) / [简体中文](../../docs/design/web-shell-settings-allowlists.zh-CN.md)。
+
+## 模型增删交互
+
+宿主可以保留模型列表和切换，同时关闭 WebShell 内的新增与删除入口：
+
+```tsx
+<WebShellWithProviders
+  modelManagement={{ allowAdd: false, allowDelete: false }}
+/>
+```
+
+公共类型 `WebShellModelManagementOptions` 的两个字段独立控制，省略均为 `true`。
+`allowAdd: false` 隐藏新增按钮和 `/auth` 建议，并在主窗口、欢迎页、分屏和侧任务中拦截手动输入的 `/auth` 及其别名 `/connect`、`/login`。输入框提交时，拦截位于宿主 `onSlashCommand` 回调之后、隐藏命令转发之前，宿主回调返回 `true` 即可接管；消息编辑、重试和侧任务初始发送不调用该回调。命令快照就绪后，daemon 命令按解析身份判断，同名项目/用户命令可保留；App 本地 `/auth` 路由仍是配置弹框入口。快照未就绪时，输入框保守拒绝配置命令名称；侧任务保留这类初始提示词等待加载，五秒后提示等待状态，信息到达后重新检查。添加模型弹框无法打开或保存。
+`allowDelete: false` 隐藏模型删除按钮并阻止删除动作。模型列表、当前标识、选择、`/model`、参数编辑及会话 `/delete` 保持原行为。
+
+动态收紧策略会关闭相关弹框或确认，之后的浏览器队列发送读取最新策略。已交给 SDK/daemon 的请求不能由 props 撤销。恢复允许不会重新打开旧弹框。
+
+这仅用于界面防误操作，不是安全权限。daemon API、CLI、配置文件写入和外部模型下发不受影响；`settings.excludeItems` 的呈现策略仍独立生效。
 
 ## Markdown 图表接入
 

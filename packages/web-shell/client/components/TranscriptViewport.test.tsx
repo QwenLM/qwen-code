@@ -10,6 +10,7 @@ import {
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle, MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
@@ -34,6 +35,7 @@ vi.mock('./MessageList', () => ({
   MessageList: forwardRef<MessageListHandle, MessageListProps>(
     function List(props, ref) {
       observed.props = props;
+      const open = useOpenTurnCalls();
       useImperativeHandle(
         ref,
         () => ({ scrollToBottom: vi.fn(), scrollToMessage: () => true }),
@@ -48,6 +50,15 @@ vi.mock('./MessageList', () => ({
               data-source-block-ids={message.sourceBlockIds?.join(',')}
             >
               {message.id}
+              {message.role === 'user' && (
+                <button
+                  onClick={() =>
+                    open?.(message.sourceBlockIds?.[0] ?? message.id)
+                  }
+                >
+                  Open calls
+                </button>
+              )}
               {message.role === 'tool_group' &&
                 message.tools.map((tool) => (
                   <div
@@ -189,6 +200,31 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
 }
 
 describe('TranscriptViewport', () => {
+  it('passes the historical record UUID from its own page to the tool calls handler', async () => {
+    const { props, click } = await setup();
+    const onOpen = vi.fn();
+    act(() =>
+      root!.render(
+        <TurnCallsProvider onOpen={onOpen}>
+          <TranscriptViewport {...props} />
+        </TurnCallsProvider>,
+      ),
+    );
+    await click('history.openEarlier');
+    const historicalUser = observed.props!.messages.find(
+      (message) => message.role === 'user',
+    )!;
+    expect(historicalUser.sourceBlockIds?.[0]).not.toBe('old');
+    act(() =>
+      [...container!.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Open calls')!
+        .click(),
+    );
+    expect(onOpen).toHaveBeenCalledWith(
+      historicalUser.sourceBlockIds![0],
+      'old',
+    );
+  });
   it('keeps an open search and its query when the navigation host changes', async () => {
     const { store, props, ref } = await setup(true, false, 4);
     const renderSearch = (hidden = false, sessionKey = 'session') =>

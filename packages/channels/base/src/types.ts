@@ -50,6 +50,11 @@ export interface GroupConfig {
   allowedUsers?: string[];
 }
 
+export interface SessionRotationConfig {
+  maxTurns?: number;
+  maxAgeHours?: number;
+}
+
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -61,11 +66,16 @@ export interface ChannelConfig {
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  sessionRotation?: SessionRotationConfig;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  /** Exact message prefixes mapped to first-turn session instructions. */
+  messageRoutes?: Record<string, string>;
+  /** Configured route used for messages without a matching prefix. */
+  defaultMessageRoute?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
@@ -110,6 +120,10 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** Selected by the channel's route matcher, never by the remote sender. */
+  messageRoute?: string;
+  /** Internal provider events that are not user-authored messages. */
+  bypassMessageRoutes?: true;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
@@ -165,6 +179,7 @@ export interface Envelope {
 
 export interface SessionTarget {
   channelName: string;
+  messageRoute?: string;
   senderId: string;
   chatId: string;
   threadId?: string;

@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
   estimateTextTokens,
@@ -1927,11 +1928,56 @@ export function convertOpenAIChunkToLlm(
     }
 
     // If tool call JSON was truncated, override to "length" so downstream
-    // (turn.ts) correctly sets wasOutputTruncated=true.
+    // (turn.ts) correctly sets wasOutputTruncated=true. Brace depth alone
+    // does not prove truncation: providers can emit malformed (e.g. fused)
+    // tool-call arguments that end incomplete without any token-limit cut,
+    // and the override then misdiagnoses the schema-validation failure as
+    // max_tokens truncation (QwenLM/qwen-code#12970). Only apply it when
+    // the reported usage cannot disprove truncation.
+    const suspectTruncation =
+      toolCallsTruncated && choice.finish_reason !== 'length';
+    const usageVerdict = corroborateTruncationFromCompletionTokens(
+      chunk.usage?.completion_tokens,
+      requestContext.maxOutputTokens,
+    );
+    if (suspectTruncation) {
+      // This rewrite decides whether a file-modifying call is rejected and
+      // whether the max_tokens recovery loop runs, and the heuristic has been
+      // wrong in both directions (#4964 missed a real cut, #12970 invented
+      // one), so the two numbers it was decided from have to be recoverable
+      // from a log rather than re-derived from source.
+      debugLogger.debug('Truncated tool-call finish_reason override', {
+        providerFinishReason: choice.finish_reason,
+        completionTokens: chunk.usage?.completion_tokens ?? null,
+        maxOutputTokens: requestContext.maxOutputTokens ?? null,
+        verdict: usageVerdict,
+        overrideApplied: usageVerdict !== 'disproved',
+      });
+    }
     const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+      suspectTruncation && usageVerdict !== 'disproved'
         ? 'length'
         : choice.finish_reason;
+    if (suspectTruncation && usageVerdict === 'unknown') {
+      // This chunk carried no usable usage, which is the normal case rather
+      // than an edge one: the pipeline requests `stream_options.include_usage`
+      // (pipeline.ts) and under that convention the finish chunk reports
+      // `usage: null` while the totals land on a later `choices: []` chunk.
+      // Hand the provider's own reason to the pipeline so it can settle the
+      // rewrite on the parked finish response, where the delayed evidence is
+      // merged in before the response is ever yielded.
+      requestContext.pendingTruncationOverride = {
+        finishReason: mapOpenAIFinishReasonToLlm(choice.finish_reason),
+      };
+    }
+    if (suspectTruncation && usageVerdict === 'disproved') {
+      // The token-limit diagnosis is withdrawn, so `wasOutputTruncated` will
+      // not be set downstream — but the arguments really did arrive
+      // unterminated and were repaired into shape. Mark them so the
+      // scheduler's reject-incomplete-file-writes guard stays armed and only
+      // the wording follows the corrected diagnosis (#12970).
+      markToolCallArgumentsIncomplete(parts);
+    }
 
     // Only include finishReason key if finish_reason is present
     const candidate: Candidate = {
@@ -2018,6 +2064,63 @@ export function convertOpenAIChunkToLlm(
   }
 
   return response;
+}
+
+/**
+ * Fraction of the output budget a response must have consumed before
+ * incomplete tool-call JSON may be attributed to max_tokens truncation.
+ * Deliberately conservative: genuine truncation lands at ~100% of the budget,
+ * so 50% keeps the heuristic for plausible cuts while clearing it for
+ * responses that ended far below the ceiling.
+ */
+const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
+
+/** What reported usage says about a suspected token-limit cut. */
+export type TruncationUsageVerdict =
+  /** Consumption reached the threshold, so a real cut is plausible. */
+  | 'corroborated'
+  /** Consumption is decisively below the ceiling: not a token-limit cut. */
+  | 'disproved'
+  /** No usable evidence either way; the legacy brace-depth inference stands. */
+  | 'unknown';
+
+/**
+ * The truncated-tool-call finish_reason override exists for providers that
+ * report "stop"/"tool_calls" for output actually cut by the token limit
+ * (QwenLM/qwen-code#4964). A genuine cut means the model generated (very
+ * nearly) the full output budget, so usage reporting completion tokens well
+ * below the ceiling disproves truncation — the incomplete tool-call JSON then
+ * comes from malformed generation instead (QwenLM/qwen-code#12970). When
+ * usage or the ceiling is unavailable the check is inconclusive and the
+ * legacy inference stands.
+ *
+ * A count that is missing, non-numeric or non-positive is *not* a disproof.
+ * Callers only consult this once the parser found incomplete tool-call JSON,
+ * so output existed and merely went uncounted: providers that zero-fill usage
+ * on the finish chunk and send the real totals on a trailing `choices: []`
+ * chunk (ModelScope) would otherwise read as proof against truncation, which
+ * suppresses the #4964 recovery and disarms the scheduler's
+ * reject-file-writes-while-truncated guard on exactly the responses it exists
+ * for. Such a count returns `unknown` so the delayed totals can still settle
+ * it (see RequestContext.pendingTruncationOverride).
+ */
+export function corroborateTruncationFromCompletionTokens(
+  completionTokens: number | null | undefined,
+  maxOutputTokens: number | undefined,
+): TruncationUsageVerdict {
+  if (
+    typeof completionTokens !== 'number' ||
+    !Number.isFinite(completionTokens) ||
+    completionTokens <= 0 ||
+    maxOutputTokens === undefined ||
+    maxOutputTokens <= 0
+  ) {
+    return 'unknown';
+  }
+  return completionTokens >=
+    maxOutputTokens * TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD
+    ? 'corroborated'
+    : 'disproved';
 }
 
 function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {

@@ -13,7 +13,13 @@ import {
   useRef,
   useState,
 } from 'react';
-import { CornerDownRightIcon, RefreshCwIcon, XIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  ChevronDownIcon,
+  CornerDownRightIcon,
+  RefreshCwIcon,
+  XIcon,
+} from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonTranscriptBlock,
@@ -34,14 +40,26 @@ import type {
 } from '../../trajectory/types';
 import {
   buildTimeline,
+  type TimelineMode,
   type TimelineSpan,
 } from '../../trajectory/buildTimeline';
 import {
   rowKeysInRange,
   type TimelineRange,
 } from '../../trajectory/timelineRange';
+import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
 import { TrajectoryOverview } from './TrajectoryOverview';
+import { TrajectoryInspector } from './TrajectoryInspector';
 import styles from './TrajectoryPanel.module.css';
+import {
+  buildTrajectoryLayout,
+  type TrajectoryLayout,
+  trajectoryRowsInRange,
+  visibleTrajectoryRows,
+  visibleTrajectoryAncestor,
+} from '../../trajectory/buildTrajectoryLayout';
+import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
+import { TrajectoryWaterfallCell } from './TrajectoryWaterfallCell';
 
 /** Every row is one line and every row is this tall, turn headers included. */
 const ROW_HEIGHT = 34;
@@ -53,10 +71,6 @@ export interface TrajectoryPanelProps {
    */
   loadPage?: TrajectoryPageLoader;
 }
-
-type VisualRow =
-  | { kind: 'turn'; key: string; turn: TrajectoryTurn }
-  | { kind: 'row'; key: string; row: TrajectoryRow };
 
 /**
  * Thresholds are the rounded boundary, not the raw one: 999,950 tokens is
@@ -199,7 +213,7 @@ function labelOf(
       return {
         badge: row.block.toolName ?? t('trajectory.badge.tool'),
         ...(toolStatusTone(row) ? { badgeTone: toolStatusTone(row)! } : {}),
-        text: row.block.title || (row.block.toolName ?? ''),
+        text: `${row.block.title || (row.block.toolName ?? '')}${toolStatusTone(row) === styles.toneError ? ` · ${t('trajectory.toolFailed')}` : ''}`,
       };
     default:
       return otherLabel(row.block, t);
@@ -282,6 +296,14 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
+  const [inspectorSelection, setInspectorSelection] = useState<
+    { of: Trajectory; loader: TrajectoryPageLoader; key: string } | undefined
+  >();
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  useEffect(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
+  }, [loadPage]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const settledOnceRef = useRef(false);
   /** Last offset this panel knows the reader at; see the resize effect. */
@@ -302,32 +324,47 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     scrollTopRef.current = element.scrollTop;
   }, []);
 
+  const pendingAnchorRef = useRef<{ key: string; offset: number } | undefined>(
+    undefined,
+  );
+  const [mode, setMode] = useState<TimelineMode>('active');
   const timeline = useMemo(
-    () => (trajectory ? buildTimeline(trajectory) : undefined),
-    [trajectory],
+    () => (trajectory ? buildTimeline(trajectory, { mode }) : undefined),
+    [trajectory, mode],
   );
 
-  // The selection belongs to the window it was drawn on. A refresh or another
-  // session re-lays the compressed time axis, so the same numbers would name a
-  // different stretch of the run; holding the window alongside the range lets
-  // the range lapse in the same render the window changes, with no frame in
-  // which the new table is filtered by the old one.
+  const viewportControl = useTimelineViewport(timeline);
+  const spansByKey = useMemo(
+    () => new Map(timeline?.spans.map((span) => [span.row.key, span])),
+    [timeline],
+  );
+
+  // The selection belongs to the axis it was drawn on. A refresh, another
+  // session, or a switch between active and real time lays the axis out
+  // afresh, so the same numbers would name a different stretch of the run;
+  // holding what the axis was built from alongside the range lets the range
+  // lapse in the same render the axis changes, with no frame in which the new
+  // table is filtered by the old one. Keyed on the window and the mode — the
+  // axis's inputs — rather than on the memoized axis itself, whose identity
+  // React keeps as an optimisation, not a promise.
   const [rangeState, setRangeState] = useState<
-    { range: TimelineRange; of: Trajectory } | undefined
+    { range: TimelineRange; of: Trajectory; mode: TimelineMode } | undefined
   >(undefined);
   const range =
-    rangeState !== undefined && rangeState.of === trajectory
+    rangeState !== undefined &&
+    rangeState.of === trajectory &&
+    rangeState.mode === mode
       ? rangeState.range
       : undefined;
   const setRange = useCallback(
     (next: TimelineRange | undefined) => {
       setRangeState(
         next !== undefined && trajectory !== undefined
-          ? { range: next, of: trajectory }
+          ? { range: next, of: trajectory, mode }
           : undefined,
       );
     },
-    [trajectory],
+    [trajectory, mode],
   );
 
   /** Rows running in the selected time, or undefined when nothing is selected. */
@@ -336,32 +373,67 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [range, timeline],
   );
 
-  const visualRows = useMemo<VisualRow[]>(() => {
-    if (!trajectory) return [];
-    const byKey = new Map(trajectory.rows.map((row) => [row.key, row]));
-    const out: VisualRow[] = [];
-    for (const turn of trajectory.turns) {
-      // Under a time selection a turn stays only if something in it ran in
-      // that time, and then keeps its header and prompt so the rows that
-      // survive still say which turn and which ask they answered.
-      if (inRange && !turn.rowKeys.some((key) => inRange.has(key))) continue;
-      // Named after the prompt that opened the turn, so a refresh that adds
-      // newer turns leaves the selection on the turn it was on. Turn numbers
-      // are window-relative and shift under exactly that. A turn the window
-      // starts in the middle of has no prompt to name it and falls back to its
-      // number, which is the case the fallback exists for.
-      const turnKey = turn.userRowKey ?? `ordinal:${turn.index}`;
-      out.push({ kind: 'turn', key: `turn:${turnKey}`, turn });
-      for (const rowKey of turn.rowKeys) {
-        if (inRange && !inRange.has(rowKey) && rowKey !== turn.userRowKey) {
-          continue;
-        }
-        const row = byKey.get(rowKey);
-        if (row) out.push({ kind: 'row', key: rowKey, row });
-      }
+  const layout = useMemo(
+    () => (trajectory ? buildTrajectoryLayout(trajectory) : undefined),
+    [trajectory],
+  );
+  const [collapseState, setCollapseState] = useState<{
+    of: TrajectoryLayout;
+    loader: TrajectoryPageLoader | undefined;
+    keys: Set<string>;
+  }>();
+  const collapsed = useMemo(() => {
+    if (!layout || !collapseState || collapseState.loader !== loadPage)
+      return new Set<string>();
+    if (collapseState.of === layout) return collapseState.keys;
+    return new Set(
+      [...collapseState.keys].filter((key) => {
+        const identity = layout.groupIdentities.get(key);
+        return (
+          identity !== undefined &&
+          identity === collapseState.of.groupIdentities.get(key)
+        );
+      }),
+    );
+  }, [collapseState, layout, loadPage]);
+  useEffect(() => {
+    if (
+      collapseState &&
+      (collapseState.of !== layout || collapseState.loader !== loadPage)
+    )
+      setCollapseState(
+        layout ? { of: layout, loader: loadPage, keys: collapsed } : undefined,
+      );
+  }, [collapseState, layout, loadPage, collapsed]);
+  const rangeRows = useMemo(
+    () => (layout ? trajectoryRowsInRange(layout, inRange) : []),
+    [layout, inRange],
+  );
+  const rangeKeys = useMemo(
+    () => new Set(rangeRows.map((entry) => entry.key)),
+    [rangeRows],
+  );
+  const visualRows = useMemo(
+    () => (layout ? visibleTrajectoryRows(layout, rangeRows, collapsed) : []),
+    [layout, rangeRows, collapsed],
+  );
+  const visibleKeys = useMemo(
+    () => new Set(visualRows.map((entry) => entry.key)),
+    [visualRows],
+  );
+  const activeVisualKey =
+    layout && selectedKey
+      ? visibleTrajectoryAncestor(layout, selectedKey, visibleKeys)
+      : undefined;
+  const hiddenCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of rangeRows) {
+      if (entry.kind !== 'row') continue;
+      for (const parent of layout?.ancestors.get(entry.key) ?? [])
+        counts.set(parent, (counts.get(parent) ?? 0) + 1);
     }
-    return out;
-  }, [trajectory, inRange]);
+    return counts;
+  }, [layout, rangeRows]);
 
   const virtualizer = useVirtualizer({
     count: visualRows.length,
@@ -370,6 +442,41 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
   });
+
+  const toggleGroup = useCallback(
+    (key: string) => {
+      if (!trajectory || !layout?.groups.has(key)) return;
+      const element = scrollRef.current;
+      if (element) {
+        const index = Math.min(
+          visualRows.length - 1,
+          Math.floor(element.scrollTop / ROW_HEIGHT),
+        );
+        const entry = visualRows[index];
+        if (entry)
+          pendingAnchorRef.current = {
+            key: entry.key,
+            offset: element.scrollTop - index * ROW_HEIGHT,
+          };
+      }
+      const keys = new Set(collapsed);
+      if (keys.has(key)) keys.delete(key);
+      else keys.add(key);
+      setCollapseState({ of: layout, loader: loadPage, keys });
+      scrollRef.current?.focus({ preventScroll: true });
+    },
+    [trajectory, layout, visualRows, collapsed, loadPage],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current;
+    if (!anchor || !layout || !scrollRef.current) return;
+    pendingAnchorRef.current = undefined;
+    const key = visibleTrajectoryAncestor(layout, anchor.key, visibleKeys);
+    const index = visualRows.findIndex((entry) => entry.key === key);
+    if (index >= 0)
+      scrollTo(scrollRef.current, index * ROW_HEIGHT + anchor.offset);
+  }, [layout, visualRows, visibleKeys, scrollTo]);
 
   // Hiding an element resets its scroll offset to zero without a scroll event,
   // and the right panel's fullscreen toggle does exactly that to the dock on
@@ -413,20 +520,35 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const selectedIndex = useMemo(
     () =>
-      selectedKey === undefined
+      activeVisualKey === undefined
         ? -1
-        : visualRows.findIndex((row) => row.key === selectedKey),
-    [selectedKey, visualRows],
+        : visualRows.findIndex((row) => row.key === activeVisualKey),
+    [activeVisualKey, visualRows],
   );
+
+  const activeIndexRef = useRef(selectedIndex);
+  activeIndexRef.current = selectedIndex;
+  useLayoutEffect(() => {
+    const selectedIndex = activeIndexRef.current;
+    if (!inspectorOpen || selectedIndex < 0) return;
+    const frame = requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inspectorOpen, virtualizer]);
 
   const moveSelection = useCallback(
     (nextIndex: number) => {
       if (visualRows.length === 0) return;
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
-      setSelectedKey(visualRows[clamped]!.key);
+      const key = visualRows[clamped]!.key;
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
       virtualizer.scrollToIndex(clamped, { align: 'auto' });
     },
-    [virtualizer, visualRows],
+    [inspectorOpen, loadPage, trajectory, virtualizer, visualRows],
   );
 
   /**
@@ -434,8 +556,35 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
    * click has to hand focus back to it: the rows themselves are not focusable,
    * and leaving focus on the document would strand the arrow keys.
    */
-  const selectRow = useCallback((key: string) => {
-    setSelectedKey(key);
+  const selectRow = useCallback(
+    (key: string) => {
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
+      scrollRef.current?.focus({ preventScroll: true });
+    },
+    [inspectorOpen, trajectory, loadPage],
+  );
+
+  const openInspector = useCallback(
+    (key = selectedKey) => {
+      if (!trajectory || !loadPage || !key) return;
+      if (!trajectory.rowIndexByKey.has(key)) return;
+      setInspectorSelection({
+        of: trajectory,
+        loader: loadPage,
+        key,
+      });
+      setSelectedKey(key);
+      setInspectorOpen(true);
+    },
+    [trajectory, loadPage, selectedKey],
+  );
+
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
     scrollRef.current?.focus({ preventScroll: true });
   }, []);
 
@@ -451,6 +600,26 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         return;
       }
       if (visualRows.length === 0) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (activeVisualKey) {
+          selectRow(activeVisualKey);
+          openInspector(activeVisualKey);
+        }
+        return;
+      }
+      if (
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        activeVisualKey &&
+        layout?.groups.has(activeVisualKey)
+      ) {
+        const wantsCollapsed = event.key === 'ArrowLeft';
+        if (collapsed.has(activeVisualKey) !== wantsCollapsed) {
+          event.preventDefault();
+          toggleGroup(activeVisualKey);
+        }
+        return;
+      }
       const current = selectedIndex < 0 ? -1 : selectedIndex;
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -466,34 +635,81 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         moveSelection(visualRows.length - 1);
       }
     },
-    [moveSelection, range, selectedIndex, setRange, visualRows],
+    [
+      moveSelection,
+      openInspector,
+      selectRow,
+      range,
+      selectedIndex,
+      setRange,
+      visualRows,
+      activeVisualKey,
+      layout,
+      collapsed,
+      toggleGroup,
+    ],
   );
 
-  const totals = useMemo(() => {
-    if (!trajectory) return undefined;
-    let requests = 0;
-    let tools = 0;
-    let durationMs = 0;
-    for (const turn of trajectory.turns) {
-      requests += turn.requestCount;
-      tools += turn.toolCount;
-      durationMs += turn.requestMs;
-    }
-    return { turns: trajectory.turns.length, requests, tools, durationMs };
-  }, [trajectory]);
+  const summary = useMemo(
+    () => (trajectory ? summarizeTrajectory(trajectory) : undefined),
+    [trajectory],
+  );
+  const selectedEntry = layout?.rows.find((entry) => entry.key === selectedKey);
+  const inspectorCurrent =
+    inspectorSelection !== undefined &&
+    inspectorSelection.of === trajectory &&
+    inspectorSelection.loader === loadPage;
+  const inspectorIndex = inspectorCurrent
+    ? trajectory?.rowIndexByKey.get(inspectorSelection.key)
+    : undefined;
+  const inspectorRow =
+    inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
+  const selectedTitle = selectedEntry
+    ? selectedEntry.kind === 'turn'
+      ? t('trajectory.turn', { index: selectedEntry.turn.index })
+      : labelOf(selectedEntry.row, t).text
+    : t('trajectory.selected.none');
+  const selectedTiming =
+    selectedEntry?.kind === 'row' &&
+    (selectedEntry.row.kind === 'request' || selectedEntry.row.kind === 'tool')
+      ? selectedEntry.row.timing
+      : undefined;
+  const selectedTtft =
+    selectedEntry?.kind === 'row' && selectedEntry.row.kind === 'request'
+      ? selectedTiming?.ttftMs
+      : undefined;
+  const selectedMeta = selectedEntry
+    ? selectedEntry.kind === 'turn'
+      ? t('trajectory.turnSummary', {
+          requests: selectedEntry.turn.requestCount,
+          tools: selectedEntry.turn.toolCount,
+          duration:
+            selectedEntry.turn.requestCount > 0
+              ? formatDuration(selectedEntry.turn.requestMs)
+              : t('trajectory.unrecorded'),
+        })
+      : selectedEntry.row.kind === 'request' ||
+          selectedEntry.row.kind === 'tool'
+        ? `${selectedTiming === undefined ? t('trajectory.unrecorded') : formatDuration(selectedTiming.durationMs)}${selectedTtft === undefined ? '' : ` · ${t('trajectory.ttft', { duration: formatDuration(selectedTtft) })}`}`
+        : t('trajectory.selected.noTiming')
+    : undefined;
 
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
     trajectory.rows.length > 0 &&
     !hasAnyTiming(trajectory);
+  const allStartsMissing =
+    summary !== undefined &&
+    summary.plottedCount === 0 &&
+    summary.missingStartCount > 0;
   const rangeCounts = useMemo(() => {
-    if (!range || !trajectory) return undefined;
+    if (!trajectory || (!range && collapsed.size === 0)) return undefined;
     return {
       shown: visualRows.filter((row) => row.kind === 'row').length,
       total: trajectory.rows.length,
     };
-  }, [range, trajectory, visualRows]);
+  }, [range, trajectory, visualRows, collapsed]);
 
   const olderFailureText =
     olderFailure === undefined
@@ -512,17 +728,30 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const selectSpan = useCallback(
     (rowKey: string) => {
       const index = visualRows.findIndex((row) => row.key === rowKey);
-      if (index < 0) {
-        if (range === undefined) return;
+      if (index < 0 && trajectory && layout) {
         pendingRevealRef.current = rowKey;
-        setRange(undefined);
+        if (!rangeKeys.has(rowKey)) setRange(undefined);
+        const keys = new Set(collapsed);
+        for (const parent of layout.ancestors.get(rowKey) ?? [])
+          keys.delete(parent);
+        setCollapseState({ of: layout, loader: loadPage, keys });
         selectRow(rowKey);
         return;
       }
       selectRow(rowKey);
-      virtualizer.scrollToIndex(index, { align: 'auto' });
+      if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
     },
-    [range, selectRow, setRange, virtualizer, visualRows],
+    [
+      trajectory,
+      layout,
+      rangeKeys,
+      collapsed,
+      loadPage,
+      selectRow,
+      setRange,
+      virtualizer,
+      visualRows,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -541,6 +770,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const describeSpan = useCallback(
     (span: TimelineSpan) => {
       const parts = [labelOf(span.row, t).text];
+      const startedAt =
+        span.row.kind === 'request' || span.row.kind === 'tool'
+          ? span.row.timing?.startedAt
+          : undefined;
+      if (startedAt !== undefined) {
+        parts.push(
+          `${new Date(startedAt).toLocaleString()}–${new Date(startedAt + span.end - span.start).toLocaleString()}`,
+        );
+      }
       parts.push(formatDuration(span.end - span.start));
       if (span.ttftEnd !== undefined) {
         parts.push(
@@ -558,20 +796,12 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
         <div className={styles.summary}>
-          {rangeCounts ? (
-            <span data-testid="trajectory-range-status" role="status">
-              {t('trajectory.range.status', rangeCounts)}
-            </span>
-          ) : totals ? (
+          {summary ? (
             <span data-testid="trajectory-totals">
               {t('trajectory.totals', {
-                turns: totals.turns,
-                requests: totals.requests,
-                tools: totals.tools,
-                duration:
-                  totals.durationMs > 0
-                    ? formatDuration(totals.durationMs)
-                    : '—',
+                turns: summary.turnCount,
+                requests: summary.requestCount,
+                tools: summary.toolCount,
               })}
             </span>
           ) : (
@@ -604,43 +834,200 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
+      <div className={styles.overviewMetrics} data-testid="trajectory-metrics">
+        {(
+          [
+            ['elapsed', summary?.elapsedMs],
+            ['active', summary?.activeMs],
+            ['main', summary?.mainRequestMs],
+          ] as const
+        ).map(([key, value]) => (
+          <div className={styles.metric} key={key}>
+            <span>{t(`trajectory.metric.${key}`)}</span>
+            <strong
+              aria-label={
+                value === undefined ? t('trajectory.unrecorded') : undefined
+              }
+              title={
+                value === undefined ? t('trajectory.unrecorded') : undefined
+              }
+            >
+              {value === undefined ? '—' : formatDuration(value)}
+            </strong>
+          </div>
+        ))}
+        <div
+          className={styles.failureCounts}
+          data-has-failures={
+            summary && summary.requestFailures + summary.toolFailures > 0
+              ? 'true'
+              : undefined
+          }
+        >
+          {summary
+            ? t('trajectory.failures', {
+                requests: summary.requestFailures,
+                tools: summary.toolFailures,
+              })
+            : '—'}
+        </div>
+        <details className={styles.metricHelp}>
+          <summary>{t('trajectory.metric.help')}</summary>
+          <div className={styles.metricHelpContent}>
+            <p>{t('trajectory.metric.scope')}</p>
+            <p>{t('trajectory.metric.elapsed.help')}</p>
+            <p>{t('trajectory.metric.active.help')}</p>
+            <p>{t('trajectory.metric.main.help')}</p>
+            <p>{t('trajectory.metric.missing.help')}</p>
+          </div>
+        </details>
+      </div>
+
       {/* Mounted from the start at a fixed height, whatever it holds: it is a
           flex sibling of the scrolled rows, so a box that appeared or grew
           would move every row under the reader. The no-timing notice lives
           inside it for the same reason. */}
       <TrajectoryOverview
         model={timeline}
-        {...(timingAbsent ? { notice: t('trajectory.noTiming') } : {})}
+        viewportControl={viewportControl}
+        {...(timingAbsent || allStartsMissing
+          ? {
+              notice: t(
+                allStartsMissing ? 'trajectory.noStart' : 'trajectory.noTiming',
+              ),
+            }
+          : {})}
         selectedKey={selectedKey}
         onSelect={selectSpan}
         describe={describeSpan}
         {...(range !== undefined ? { range } : {})}
         onRangeChange={setRange}
+        onModeChange={setMode}
       />
 
-      {error !== undefined && (
-        <div className={styles.error} role="alert">
-          <span>
-            {error.kind === 'partial'
-              ? t('trajectory.partial')
-              : t('trajectory.loadFailed', { message: error.message })}
-          </span>
+      <div className={styles.context}>
+        <div className={styles.selectedLine}>
+          <div
+            className={styles.selectedInfo}
+            data-testid="trajectory-selected"
+            aria-live="polite"
+          >
+            <span className={styles.selectedLabel}>
+              {t('trajectory.selected.label')}
+            </span>
+            <span className={styles.selectedName} title={selectedTitle}>
+              {selectedTitle}
+            </span>
+            {selectedMeta && (
+              <span className={styles.selectedMeta} title={selectedMeta}>
+                {selectedMeta}
+              </span>
+            )}
+          </div>
           <button
             type="button"
-            className={styles.headerButton}
-            onClick={refresh}
-            disabled={status === 'loading'}
+            className={styles.detailsButton}
+            onClick={() => openInspector()}
+            disabled={
+              !trajectory ||
+              !loadPage ||
+              !selectedKey ||
+              !trajectory.rowIndexByKey.has(selectedKey)
+            }
           >
-            {t('common.retry')}
+            {t('trajectory.inspector.open')}
+            <ChevronRightIcon size={13} aria-hidden="true" />
           </button>
         </div>
-      )}
+        <div
+          className={styles.contextNotice}
+          data-testid="trajectory-context-notice"
+          title={[
+            summary?.missingStartCount
+              ? t('trajectory.missingStart', {
+                  count: summary.missingStartCount,
+                })
+              : '',
+            summary?.missingTimingCount
+              ? t('trajectory.missingTiming', {
+                  count: summary.missingTimingCount,
+                })
+              : '',
+            truncated ? t('trajectory.truncated') : '',
+            error && trajectory ? t('trajectory.refreshStale') : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        >
+          {rangeCounts && (
+            <span data-testid="trajectory-range-status" role="status">
+              {t('trajectory.range.status', rangeCounts)}
+            </span>
+          )}
+          {rangeCounts ? ' · ' : ''}
+          {[
+            olderFailureText,
+            error && trajectory ? t('trajectory.refreshStale') : '',
+            truncated && !olderFailureText ? t('trajectory.truncated') : '',
+            summary &&
+            (summary.missingStartCount > 0 || summary.missingTimingCount > 0)
+              ? t('trajectory.unplotted', {
+                  starts: summary.missingStartCount,
+                  timing: summary.missingTimingCount,
+                })
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || (rangeCounts ? '' : '\u00a0')}
+        </div>
+      </div>
+      <div className={styles.errorSlot}>
+        {error !== undefined && (
+          <div className={styles.error} role="alert">
+            <span>
+              {trajectory ? `${t('trajectory.refreshStale')} · ` : ''}
+              {error.kind === 'partial'
+                ? t('trajectory.partial')
+                : t('trajectory.loadFailed', { message: error.message })}
+            </span>
+            <button
+              type="button"
+              className={styles.headerButton}
+              onClick={refresh}
+              disabled={status === 'loading'}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
+        )}
+      </div>
 
-      <div className={styles.tableWrap}>
+      <div
+        className={`${styles.tableWrap} ${inspectorOpen ? styles.tableWrapWithInspector : ''}`}
+      >
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
-          status === 'error' ? null : (
+          status === 'error' ? null : range !== undefined ? (
+            // Real time keeps the gaps between turns on the axis, and a
+            // stretch dragged inside one has nothing in it. Said here, with
+            // the way back beside it, rather than left as a blank table. Not
+            // a live region: the header's row count, which changes in the
+            // same render, already says it, and two would say it twice.
+            <div
+              className={styles.placeholder}
+              data-testid="trajectory-range-empty"
+            >
+              <span>{t('trajectory.range.empty')}</span>{' '}
+              <button
+                type="button"
+                className={styles.headerButton}
+                onClick={() => setRange(undefined)}
+              >
+                {t('trajectory.range.clear')}
+              </button>
+            </div>
+          ) : (
             <div className={styles.placeholder} role="status">
               {empty
                 ? t('trajectory.empty')
@@ -703,7 +1090,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
               aria-label={t('trajectory.title')}
               aria-rowcount={visualRows.length}
               aria-activedescendant={
-                selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
+                virtualizer
+                  .getVirtualItems()
+                  .some((item) => item.index === selectedIndex)
+                  ? rowDomId(selectedIndex)
+                  : undefined
               }
               onKeyDown={handleKeyDown}
               onScroll={(event) => {
@@ -732,13 +1123,45 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
                       {entry.kind === 'turn' ? (
                         <TurnHeaderRow
                           turn={entry.turn}
-                          selected={entry.key === selectedKey}
+                          prompt={
+                            entry.turn.userRowKey
+                              ? trajectory?.rows[
+                                  trajectory.rowIndexByKey.get(
+                                    entry.turn.userRowKey,
+                                  ) ?? -1
+                                ]
+                              : undefined
+                          }
+                          collapsed={collapsed.has(entry.key)}
+                          hiddenCount={hiddenCounts.get(entry.key) ?? 0}
+                          onToggle={() => toggleGroup(entry.key)}
+                          selected={entry.key === activeVisualKey}
                           onSelect={() => selectRow(entry.key)}
                         />
                       ) : (
                         <RecordRow
                           row={entry.row}
-                          selected={entry.key === selectedKey}
+                          grouped={
+                            (layout?.ancestors.get(entry.key)?.length ?? 0) > 1
+                          }
+                          unresolvedParent={
+                            layout?.unresolvedParents.has(entry.key) ?? false
+                          }
+                          fold={
+                            layout?.groups.has(entry.key)
+                              ? {
+                                  collapsed: collapsed.has(entry.key),
+                                  hiddenCount: hiddenCounts.get(entry.key) ?? 0,
+                                  onToggle: () => toggleGroup(entry.key),
+                                }
+                              : undefined
+                          }
+                          span={spansByKey.get(entry.key)}
+                          total={timeline?.total ?? 0}
+                          viewport={viewportControl.viewport}
+                          range={range}
+                          context={!!inRange && !inRange.has(entry.key)}
+                          selected={entry.key === activeVisualKey}
                           onSelect={() => selectRow(entry.key)}
                         />
                       )}
@@ -750,16 +1173,50 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           </>
         )}
       </div>
+      {inspectorOpen &&
+        inspectorSelection !== undefined &&
+        inspectorSelection.loader === loadPage && (
+          <TrajectoryInspector
+            row={inspectorRow}
+            stale={!inspectorCurrent}
+            turnSelected={selectedEntry?.kind === 'turn'}
+            title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}
+            hiddenByRange={
+              !!(range && inspectorRow && !rangeKeys.has(inspectorRow.key))
+            }
+            hiddenByCollapse={
+              !!(
+                inspectorRow &&
+                layout?.ancestors
+                  .get(inspectorRow.key)
+                  ?.some((key) => collapsed.has(key))
+              )
+            }
+            onReveal={() => {
+              if (inspectorRow) selectSpan(inspectorRow.key);
+            }}
+            onClearRange={() => setRange(undefined)}
+            onClose={closeInspector}
+          />
+        )}
     </div>
   );
 }
 
 function TurnHeaderRow({
   turn,
+  prompt,
+  collapsed,
+  hiddenCount,
+  onToggle,
   selected,
   onSelect,
 }: {
   turn: TrajectoryTurn;
+  prompt?: TrajectoryRow;
+  collapsed: boolean;
+  hiddenCount: number;
+  onToggle: () => void;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -777,16 +1234,35 @@ function TurnHeaderRow({
       role="gridcell"
       data-testid="trajectory-turn"
     >
+      <FoldButton
+        collapsed={collapsed}
+        name={t('trajectory.turn', { index: turn.index })}
+        onToggle={onToggle}
+      />
       <span className={styles.turnTitle}>
         {turn.partial
           ? t('trajectory.turnPartial', { index: turn.index })
           : t('trajectory.turn', { index: turn.index })}
       </span>
+      {prompt?.kind === 'user' && (
+        <span
+          className={styles.turnPrompt}
+          title={firstLine(prompt.block.text)}
+        >
+          {firstLine(prompt.block.text).slice(0, 160)}
+        </span>
+      )}
+      {collapsed && (
+        <span className={styles.foldCount}>
+          {t('trajectory.collapsed', { count: hiddenCount })}
+        </span>
+      )}
       <span className={styles.turnSummary}>
         {t('trajectory.turnSummary', {
           requests: turn.requestCount,
           tools: turn.toolCount,
-          duration: turn.requestMs > 0 ? formatDuration(turn.requestMs) : '—',
+          duration:
+            turn.requestCount > 0 ? formatDuration(turn.requestMs) : '—',
         })}
       </span>
     </div>
@@ -795,10 +1271,26 @@ function TurnHeaderRow({
 
 function RecordRow({
   row,
+  grouped,
+  unresolvedParent,
+  fold,
+  span,
+  total,
+  viewport,
+  range,
+  context,
   selected,
   onSelect,
 }: {
   row: TrajectoryRow;
+  grouped: boolean;
+  unresolvedParent: boolean;
+  fold?: { collapsed: boolean; hiddenCount: number; onToggle: () => void };
+  span?: TimelineSpan;
+  total: number;
+  viewport?: { start: number; end: number };
+  range?: TimelineRange;
+  context: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -814,7 +1306,19 @@ function RecordRow({
       onClick={onSelect}
       data-testid={`trajectory-row-${row.kind}`}
       data-depth={row.depth}
+      data-grouped={grouped || undefined}
+      data-context={context || undefined}
+      data-row-key={row.key}
     >
+      {fold ? (
+        <FoldButton
+          collapsed={fold.collapsed}
+          name={label.text}
+          onToggle={fold.onToggle}
+        />
+      ) : (
+        <span className={styles.foldSpacer} />
+      )}
       {row.depth > 0 && (
         <CornerDownRightIcon
           size={12}
@@ -829,9 +1333,71 @@ function RecordRow({
       <span className={`${styles.text} ${label.faint ? styles.faint : ''}`}>
         {label.text}
       </span>
-      <span className={styles.metrics} data-testid="trajectory-row-metrics">
+      {unresolvedParent && (
+        <span
+          className={styles.parentNotice}
+          title={t('trajectory.parentUnresolved')}
+        >
+          {t('trajectory.parentUnresolved')}
+        </span>
+      )}
+      {context && (
+        <span className={styles.foldCount}>{t('trajectory.contextRow')}</span>
+      )}
+      {fold?.collapsed && (
+        <span className={styles.foldCount}>
+          {t('trajectory.collapsed', { count: fold.hiddenCount })}
+        </span>
+      )}
+      <span className={styles.waterfallSlot}>
+        <TrajectoryWaterfallCell
+          span={span}
+          total={total}
+          viewport={viewport}
+          range={range}
+          title={metrics.join(' · ')}
+        />
+      </span>
+      <span
+        className={styles.rowMetrics}
+        data-testid="trajectory-row-metrics"
+        title={metrics.length > 0 ? metrics.join(' · ') : undefined}
+      >
         {metrics.length > 0 ? metrics.join(' · ') : '—'}
       </span>
     </div>
+  );
+}
+
+function FoldButton({
+  collapsed,
+  name,
+  onToggle,
+}: {
+  collapsed: boolean;
+  name: string;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      className={styles.foldButton}
+      aria-expanded={!collapsed}
+      aria-label={t(collapsed ? 'trajectory.expand' : 'trajectory.collapse', {
+        name,
+      })}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle();
+      }}
+    >
+      {collapsed ? (
+        <ChevronRightIcon size={13} aria-hidden="true" />
+      ) : (
+        <ChevronDownIcon size={13} aria-hidden="true" />
+      )}
+    </button>
   );
 }
