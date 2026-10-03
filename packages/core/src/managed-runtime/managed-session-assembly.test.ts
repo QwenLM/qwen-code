@@ -13,6 +13,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import {
   ManagedSessionAlreadyExistsError,
+  ManagedSessionConflictError,
   ManagedSessionNotFoundError,
 } from './managed-session-authority.js';
 import {
@@ -382,6 +383,29 @@ describe('managed session assembly', () => {
     expect(messages[1]?.subject).toMatchObject({
       type: 'activation',
       activationId: replaced.activationId,
+    });
+    await session.close();
+  });
+
+  it('keeps the current activation when a named successor repeats an ID', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    await session.replaceActivation(undefined, 'named-1');
+    const current = await session.replaceActivation();
+    const committed = session.authority.committedSequence;
+
+    await expect(
+      session.replaceActivation(undefined, 'named-1'),
+    ).rejects.toThrow(
+      new ManagedSessionConflictError(
+        'activation named-1 was already installed.',
+      ),
+    );
+    expect(session.authority.committedSequence).toBe(committed);
+    expect(session.activation).toEqual(current);
+    expect(session.authority.currentActivation).toMatchObject({
+      ...current,
+      phase: 'active',
     });
     await session.close();
   });

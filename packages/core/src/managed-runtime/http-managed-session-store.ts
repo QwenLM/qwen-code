@@ -1012,7 +1012,7 @@ class ManagedSessionStoreHttpClient {
   }
 }
 
-function describeTransaction(
+export function describeTransaction(
   records: readonly unknown[],
   bytes: Buffer,
   currentActivationEpoch: number,
@@ -1198,7 +1198,7 @@ function envelope(value: unknown, label: string): Record<string, unknown> {
   return asRecord(parsed, label);
 }
 
-interface StoredTransaction {
+export interface StoredTransaction {
   readonly journalRevision: number;
   readonly transactionId: string;
   readonly operation: string;
@@ -1217,7 +1217,7 @@ interface StoredTransaction {
   readonly recordDigest: string;
 }
 
-function parseStoredTransaction(value: unknown): StoredTransaction {
+export function parseStoredTransaction(value: unknown): StoredTransaction {
   const record = asRecord(value, 'stored transaction');
   if (string(record['recordEncoding'], 'recordEncoding') !== 'identity') {
     throw corrupt('stored transaction encoding is not supported.');
@@ -1248,7 +1248,7 @@ function parseStoredTransaction(value: unknown): StoredTransaction {
   };
 }
 
-function requireStoredTransactionMatches(
+export function requireStoredTransactionMatches(
   stored: StoredTransaction,
   descriptor: TransactionDescriptor,
 ): void {
