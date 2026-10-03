@@ -178,15 +178,15 @@ function spyRootUnmountStates() {
   const proto = Object.getPrototypeOf(root!) as Root;
   const realUnmount = proto.unmount;
   const states: number[] = [];
-  const spy = vi
-    .spyOn(proto, 'unmount')
-    .mockImplementation(function (this: Root) {
-      const view = latest?.viewRef.current;
-      if (view) {
-        states.push((view as unknown as ViewWithUpdateState).updateState);
-      }
-      return realUnmount.call(this);
-    });
+  const spy = vi.spyOn(proto, 'unmount').mockImplementation(function (
+    this: Root,
+  ) {
+    const view = latest?.viewRef.current;
+    if (view) {
+      states.push((view as unknown as ViewWithUpdateState).updateState);
+    }
+    return realUnmount.call(this);
+  });
   return { states, restore: () => spy.mockRestore() };
 }
 
