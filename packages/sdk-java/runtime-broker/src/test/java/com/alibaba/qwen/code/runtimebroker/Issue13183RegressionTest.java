@@ -1078,12 +1078,14 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * Provisions a wedged worker, races provisions against close(), and
-     * returns the guard error one of them hit — null when the race never
-     * reached the guard. The lingering-children check lives here because it
-     * is the platform-independent half of the invariant.
+     * Provisions a wedged worker, races provisions of {@code racing} against
+     * close(), and returns the guard error one of them hit — null when the
+     * race never reached the guard. The lingering-children check lives here
+     * because it is the platform-independent half of the invariant.
      */
-    private static RuntimeBrokerException raceProvisionsAgainstClose()
+    private static RuntimeBrokerException raceProvisionsAgainstClose(
+            RuntimeProvisionRequest racing,
+            java.util.function.IntFunction<RuntimeProvisionSeed> racingSeeds)
             throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
         Set<Long> before = ProcessTrees.childPids();
@@ -1094,13 +1096,9 @@ class Issue13183RegressionTest {
                         List.of("node", script.toString(), "--ignore-term"),
                         Path.of(".").toAbsolutePath(),
                         new HttpRuntimeTransport());
-        // A plain (non-managed) request keeps the guard's error intact —
-        // managed-context failures are retyped by the startup path.
-        RuntimeProvisionRequest plain = new RuntimeProvisionRequest(
-                new RuntimeScope("tenant-race", "workspace", "1",
-                        "/workspace", "sha256:" + "a".repeat(64),
-                        "workspace"),
-                null, "local-process");
+        // A plain (non-managed) request keeps the wedge provision's own
+        // startup path out of the way.
+        RuntimeProvisionRequest plain = raceRequest();
         // A wedged worker stretches close()'s grace window, so the race
         // window is seconds wide instead of nanoseconds.
         provisioner.provision(plain, ManagedContextProtocolTest.seed())
@@ -1113,8 +1111,7 @@ class Issue13183RegressionTest {
         while (refused == null && closer.isAlive()
                 && Instant.now().isBefore(giveUp)) {
             try {
-                provisioner.provision(plain, RuntimeProvisionSeed
-                        .create("racing-" + attempt++, 1))
+                provisioner.provision(racing, racingSeeds.apply(attempt++))
                         .toCompletableFuture().join();
             } catch (CompletionException failure) {
                 // Match the guard's exact message; a worker killed
@@ -1143,6 +1140,18 @@ class Issue13183RegressionTest {
         return refused;
     }
 
+    /** The plain request the race fixture provisions with. */
+    private static RuntimeProvisionRequest raceRequest() {
+        return new RuntimeProvisionRequest(
+                new RuntimeScope("tenant-race", "workspace", "1", "/workspace",
+                        "sha256:" + "a".repeat(64), "workspace"),
+                null, "local-process");
+    }
+
+    private static RuntimeProvisionSeed raceSeed(int attempt) {
+        return RuntimeProvisionSeed.create("racing-" + attempt, 1);
+    }
+
     /**
      * A provision racing close() leaves no worker behind, whichever way the
      * race resolves: refused by the terminated guard, or spawned before it
@@ -1154,7 +1163,8 @@ class Issue13183RegressionTest {
      */
     @Test
     void provisionDuringCloseNeverOrphansAWorker() throws Exception {
-        raceProvisionsAgainstClose();
+        raceProvisionsAgainstClose(raceRequest(),
+                Issue13183RegressionTest::raceSeed);
     }
 
     /**
@@ -1170,8 +1180,36 @@ class Issue13183RegressionTest {
         assumeTrue(DESTROY_IS_SIGTERM,
                 "destroy() terminates outright here, so close() finishes"
                         + " before the race can reach the guard");
-        assertNotNull(raceProvisionsAgainstClose(),
+        RuntimeBrokerException refused = raceProvisionsAgainstClose(
+                raceRequest(), Issue13183RegressionTest::raceSeed);
+        assertNotNull(refused,
                 "a provision racing the close must hit the closed guard");
+        assertEquals("Managed Runtime provisioner is closed.",
+                refused.getMessage());
+    }
+
+    /**
+     * The same refusal must survive managed-context retyping: start()'s catch
+     * turns every other failure into a non-retryable "recovery is blocked"
+     * 503, which would permanently fail a turn that merely raced a rolling
+     * restart instead of letting the caller retry it.
+     */
+    @Test
+    void provisionRacingCloseStaysRetryableForManagedContext()
+            throws Exception {
+        assumeTrue(DESTROY_IS_SIGTERM,
+                "destroy() terminates outright here, so close() finishes"
+                        + " before the race can reach the guard");
+        RuntimeBrokerException refused = raceProvisionsAgainstClose(
+                ManagedContextProtocolTest.request(),
+                ignored -> ManagedContextProtocolTest.seed());
+        assertNotNull(refused,
+                "a managed-context provision racing the close must hit the"
+                        + " closed guard, not be retyped by the startup path");
+        assertEquals("Managed Runtime provisioner is closed.",
+                refused.getMessage());
+        assertTrue(refused.isRetryable(),
+                "a closed provisioner is a restart, not blocked recovery");
     }
 
     private static RuntimeBrokerService v3Service(V3Transport transport,

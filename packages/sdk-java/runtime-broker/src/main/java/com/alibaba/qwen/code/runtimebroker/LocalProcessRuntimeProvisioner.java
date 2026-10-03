@@ -456,6 +456,7 @@ public final class LocalProcessRuntimeProvisioner
         }
         OwnedProcess ownedProcess = null;
         boolean adopted = false;
+        RuntimeBrokerException closedRefusal = null;
         try {
             RuntimeProvisionSeed seed = provided != null
                     ? provided : newSeed();
@@ -464,7 +465,9 @@ public final class LocalProcessRuntimeProvisioner
             Process process;
             synchronized (lifecycle) {
                 if (terminated) {
-                    throw failed("Managed Runtime provisioner is closed.");
+                    closedRefusal = failed(
+                            "Managed Runtime provisioner is closed.");
+                    throw closedRefusal;
                 }
                 process = new ProcessBuilder(command)
                         .directory(workingDirectory.toFile())
@@ -493,6 +496,12 @@ public final class LocalProcessRuntimeProvisioner
             adopted = true;
             return lease;
         } catch (IOException | RuntimeException exception) {
+            if (exception == closedRefusal) {
+                // A closed provisioner is not a managed-context startup
+                // failure. Keep the refusal retryable, so a rolling restart
+                // does not permanently fail the turn that raced it.
+                throw closedRefusal;
+            }
             if (request.isManagedContext()) {
                 throw new RuntimeBrokerException(503, "runtime_provision_failed",
                         "Managed context startup failed; recovery is blocked.",

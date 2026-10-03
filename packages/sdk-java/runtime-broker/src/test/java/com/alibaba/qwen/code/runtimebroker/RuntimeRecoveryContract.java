@@ -201,8 +201,12 @@ final class RuntimeRecoveryContract {
     }
 
     /**
-     * Contract for the atomic release decision (#13183 item 1): the RELEASING
-     * transition and the no-active-execution check are one decision.
+     * Contract for the release decision's outcomes (#13183 item 1). Every leg
+     * is single-threaded, so this pins the state machine and the refusals,
+     * not the atomicity itself: the evidence that the no-active-execution
+     * check and the RELEASING transition commit as one decision under the
+     * Session row lock is the cross-process race in
+     * {@code Issue13183AdversarialTest}.
      */
     static void verifyBeginSessionRelease(RuntimeBindingRepository bindings,
             RuntimeSessionRepository sessions,
@@ -234,6 +238,30 @@ final class RuntimeRecoveryContract {
         assertEquals(RuntimeSessionRecord.State.READY,
                 sessions.findById(busy.session.getSession().getScope(),
                         busy.session.getRuntimeSessionId()).getState());
+
+        // The predicate is session-scoped, not binding-scoped: a sibling
+        // session on the same binding, with no execution of its own, still
+        // releases while the busy one stays refused. Widening it to the
+        // binding would make every healthy session on a busy binding
+        // unreleasable, and a single-session fixture cannot tell.
+        RuntimeSessionRecord siblingAcquiring = bindings.admitSession(sessions,
+                new RuntimeSessionRecord(new RuntimeSession(busy.id + "-harness",
+                        busy.session.getRuntimeSessionId() + "-sibling",
+                        "bootstrap", busy.binding.getRequest().getScope()),
+                        busy.binding.getBindingId(),
+                        busy.binding.getGeneration(),
+                        RuntimeSessionRecord.State.ACQUIRING, 0,
+                        Instant.now()));
+        RuntimeSessionRecord sibling = sessions.compareAndSet(
+                siblingAcquiring, siblingAcquiring.withState(
+                        RuntimeSessionRecord.State.READY, Instant.now()));
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                bindings.beginSessionRelease(sessions, executions, sibling)
+                        .getState());
+        assertEquals("runtime_session_busy", assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                busy.session)).getCode());
 
         // ACQUIRING transitions (a broker that died mid-acquire).
         Fixture acquiring = new Fixture(bindings, sessions, executions,
