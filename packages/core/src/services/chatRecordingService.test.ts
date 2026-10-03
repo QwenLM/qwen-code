@@ -665,16 +665,14 @@ describe('ChatRecordingService', () => {
           },
         },
       ];
-      chatRecordingService.recordUserMessage(
+      svc.recordUserMessage(
         '',
         undefined,
         { displayText: '', hookContext: '', embeddedResources },
         undefined,
         'embedded-prompt',
       );
-      await chatRecordingService.flush();
-
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const record = await flushed();
       expect(record.daemonPromptId).toBe('embedded-prompt');
       expect(record.systemPayload).toEqual({
         displayText: '',
