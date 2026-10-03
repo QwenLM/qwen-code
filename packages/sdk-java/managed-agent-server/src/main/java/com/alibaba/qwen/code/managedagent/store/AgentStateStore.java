@@ -133,9 +133,12 @@ public interface AgentStateStore {
 
     /**
      * Marks a claimed cwd change terminally failed with its public failure
-     * code; a contested claim is ignored.
+     * code.
+     *
+     * @return false when the claim is no longer current — the write was
+     *         skipped and the caller must not report a terminal refusal
      */
-    void failCwdChangeOperation(String tenantId, String sessionId,
+    boolean failCwdChangeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode);
 

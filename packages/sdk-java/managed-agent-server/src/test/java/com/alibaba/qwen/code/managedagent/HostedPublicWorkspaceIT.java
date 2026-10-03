@@ -312,6 +312,19 @@ class HostedPublicWorkspaceIT {
         assertThat(read.at("/workspace/context_revision").asLong())
                 .isEqualTo(3);
 
+        // The WebShell twin's failed projection must carry failureCode too —
+        // the contract condition requires it, and generated clients read it.
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode polled = request("POST",
+                    "/api/agent/web-shell/v1/operations/query",
+                    Map.of("sessionId", session,
+                            "operationId", missingOperation),
+                    null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("failed");
+            assertThat(polled.path("failureCode").asText())
+                    .isEqualTo("workspace_unavailable");
+        });
+
         // The Session is not wedged: the next admitted change completes.
         String recovered = request("POST",
                 "/v1/agents/sessions/" + session + "/cwd",

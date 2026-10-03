@@ -74,19 +74,6 @@ public class SessionLifecycleService {
                 admission.replayed());
     }
 
-    // Reading an operation is not a replay.
-    public PublicCommandOperation getPublic(String tenantId, String actorId,
-            String sessionId, String operationId) {
-        return publicOperation(operation(tenantId, actorId, sessionId,
-                operationId), false);
-    }
-
-    public WebShellCommandOperation getWebShell(String tenantId,
-            String actorId, String sessionId, String operationId) {
-        return webShellOperation(operation(tenantId, actorId, sessionId,
-                operationId), false);
-    }
-
     // The read-back shape is chosen by kind: a cwd change answers with its
     // own contract, every other kind with the command operation.
     public Object getPublicOperation(String tenantId, String actorId,

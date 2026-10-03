@@ -142,7 +142,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the same admission order and refusal vocabulary; the idempotency key travels in the request body (a key over 128 characters is refused during request validation with 400 invalid_request before the service's invalid_idempotency_key check, so the surfaces classify over-length keys differently). Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with one documented divergence: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, so the surfaces classify over-length keys differently; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown or unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 workspace_unavailable, 409 idempotency_conflict, 409 session_state_conflict, 409 context_revision_conflict and 409 session_context_busy exactly like the public surface. Poll the operation or await session.context.changed; do not treat 202 as activation. */
         post: operations["webShellChangeCwd"];
         delete?: never;
         options?: never;

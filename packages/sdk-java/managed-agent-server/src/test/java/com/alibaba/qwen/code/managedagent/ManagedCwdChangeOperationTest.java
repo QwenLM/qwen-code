@@ -154,6 +154,13 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
+        // The deployment gate opens only after the actor check: a stranger
+        // must not read the flag from its refusal either.
+        assertThatThrownBy(() -> begin(disabled, gatedId, "key", "digest",
+                "a", 1, "stranger", "digest-stranger"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.NOT_FOUND,
+                                "session_not_found"));
 
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
@@ -180,6 +187,27 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
+    }
+
+    // A revoked read grant must also close the replay path: the actor
+    // lookup precedes the idempotency replay, so a caller whose grants are
+    // gone learns nothing about a key or an operation it once knew.
+    @Test
+    void aRevokedReadGrantMakesTheReplayInvisible() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1);
+        assertThat(admitted.replayed()).isFalse();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET"
+                + " can_read = FALSE WHERE tenant_id = ? AND"
+                + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
+                "services/b", 1))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.NOT_FOUND,
+                                "session_not_found"));
     }
 
     @Test
@@ -293,10 +321,14 @@ class ManagedCwdChangeOperationTest {
                 "digest", "services/b", 1);
         OperationRecord claimed = claim(fixture, sessionId,
                 admission.operation().operationId(), "owner");
-        CwdChangeOutcome outcome = fixture.store
-                .completeCwdChangeOperation(TENANT, sessionId,
-                        claimed.operationId(), "owner",
-                        claimed.claimGeneration());
+        // The commit runs in one transaction, as production's Spring proxy
+        // runs the annotated store — not one auto-commit per write.
+        CwdChangeOutcome outcome = new TransactionTemplate(
+                new DataSourceTransactionManager(
+                        fixture.jdbc.getDataSource()))
+                .execute(status -> fixture.store.completeCwdChangeOperation(
+                        TENANT, sessionId, claimed.operationId(), "owner",
+                        claimed.claimGeneration()));
         assertThat(outcome.completed()).isTrue();
         assertThat(outcome.resultContextRevision()).isEqualTo(2);
 
@@ -498,8 +530,24 @@ class ManagedCwdChangeOperationTest {
                                 "session_not_found"));
     }
 
-    // A settled operation is final: a stale owner's claim-flipping write is
-    // guarded by (LEASED, owner, generation), on both terminal shapes.
+    // The busy barrier is symmetric: an open cwd operation refuses a
+    // lifecycle admission the way an open lifecycle operation refuses cwd.
+    @Test
+    void anOpenOperationBlocksALifecycleAdmission() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        begin(fixture, sessionId, "key", "digest", "services/b", 1);
+        assertThatThrownBy(() -> fixture.store.beginWorkspaceLifecycle(TENANT,
+                sessionId, OperationKind.CLOSE, ACTOR, ACTOR_DIGEST, "close",
+                "close-digest", true))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_operation_active"));
+    }
+
+    // A settled operation is final on both terminal shapes, and each of
+    // failCwdChangeOperation's four fence conjuncts — delivery state,
+    // owner, generation, live lease — refuses the stale write alone.
     @Test
     void aStaleOwnersFailureCannotRewriteASettledOperation() {
         Fixture fixture = fixture(true);
@@ -520,35 +568,51 @@ class ManagedCwdChangeOperationTest {
         assertThat(fixture.store.completeCwdChangeOperation(TENANT,
                 sessionId, operationId, "owner",
                 alive.claimGeneration()).completed()).isTrue();
-        fixture.store.failCwdChangeOperation(TENANT, sessionId, operationId,
-                "dead-owner", dead.claimGeneration(), "workspace_unavailable");
+        // A CONFIRMED row laughs at a stale owner's write: the delivery
+        // conjunct alone refuses it.
+        assertThat(fixture.store.failCwdChangeOperation(TENANT, sessionId,
+                operationId, "dead-owner", dead.claimGeneration(),
+                "context_revision_conflict")).isFalse();
         OperationRecord settled = fixture.store.findOperation(TENANT,
                 sessionId, operationId).orElseThrow();
         assertThat(settled.state()).isEqualTo("COMPLETED");
         assertThat(settled.failureCode()).isNull();
         assertThat(settled.resultContextRevision()).isEqualTo(2);
 
+        // On a live, unsettled row, owner and generation each refuse alone.
         String secondId = fixture.createBoundSession(TENANT, WS);
         String secondOp = begin(fixture, secondId, "key", "digest", "a",
                 1).operation().operationId();
-        OperationRecord secondDead = fixture.store.claimOperation(TENANT,
-                secondId, secondOp, "dead-owner", Duration.ofMillis(100))
-                .orElseThrow();
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
-                + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
-                + " AND operation_id = ?", TENANT, secondId, secondOp);
-        OperationRecord secondAlive = fixture.store.claimOperation(TENANT,
+        OperationRecord live = fixture.store.claimOperation(TENANT,
                 secondId, secondOp, "owner", Duration.ofMillis(60_000))
                 .orElseThrow();
-        fixture.store.failCwdChangeOperation(TENANT, secondId, secondOp,
-                "owner", secondAlive.claimGeneration(),
-                "workspace_unavailable");
-        fixture.store.failCwdChangeOperation(TENANT, secondId, secondOp,
-                "dead-owner", secondDead.claimGeneration(),
-                "context_revision_conflict");
+        assertThat(fixture.store.failCwdChangeOperation(TENANT, secondId,
+                secondOp, "other", live.claimGeneration(),
+                "context_revision_conflict")).isFalse();
+        assertThat(fixture.store.failCwdChangeOperation(TENANT, secondId,
+                secondOp, "owner", live.claimGeneration() + 1,
+                "context_revision_conflict")).isFalse();
+        // Neither refusal touched the claim: the rightful owner settles.
+        assertThat(fixture.store.failCwdChangeOperation(TENANT, secondId,
+                secondOp, "owner", live.claimGeneration(),
+                "workspace_unavailable")).isTrue();
         assertThat(fixture.store.findOperation(TENANT, secondId, secondOp)
                 .orElseThrow().failureCode())
                 .isEqualTo("workspace_unavailable");
+
+        // An expired lease alone refuses, until a fresh claimant arrives.
+        String thirdId = fixture.createBoundSession(TENANT, WS);
+        String thirdOp = begin(fixture, thirdId, "key", "digest", "a",
+                1).operation().operationId();
+        OperationRecord expiring = fixture.store.claimOperation(TENANT,
+                thirdId, thirdOp, "owner", Duration.ofMillis(60_000))
+                .orElseThrow();
+        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+                + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_id = ?", TENANT, thirdId, thirdOp);
+        assertThat(fixture.store.failCwdChangeOperation(TENANT, thirdId,
+                thirdOp, "owner", expiring.claimGeneration(),
+                "workspace_unavailable")).isFalse();
     }
 
     // The #13112 handshake from the W2 side: an open cwd operation is a
@@ -575,6 +639,33 @@ class ManagedCwdChangeOperationTest {
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn", "digest", sessionId, List.of(), "payload");
         assertThat(admitted.turnId()).isNotBlank();
+    }
+
+    // A Workspace detached between admission and settlement is a typed
+    // terminal refusal — the coordinator's null-binding guard converts it
+    // to workspace_unavailable instead of an NPE retry loop.
+    @Test
+    void settlementFailsTerminallyWhenTheBindingDisappears() {
+        Fixture fixture = fixture(true);
+        SessionLifecycleCoordinator coordinator = fixture.coordinator(
+                new StubWarmer());
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        fixture.jdbc.update("UPDATE managed_agent_session SET"
+                + " workspace_id = NULL, workspace_generation = NULL,"
+                + " workspace_storage_id = NULL, cwd_relative = NULL,"
+                + " context_config_ref = NULL, context_revision = NULL,"
+                + " workspace_config_ref = NULL, workspace_policy_ref ="
+                + " NULL WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        coordinator.dispatch(TENANT, sessionId, operationId);
+        assertFailed(fixture, sessionId, operationId,
+                "workspace_unavailable");
+        OperationRecord failed = fixture.store.findOperation(TENANT,
+                sessionId, operationId).orElseThrow();
+        assertThat(failed.attemptCount()).isZero();
+        assertThat(fixture.store.findDeliverableOperations(0, 10)).isEmpty();
     }
 
     // A warmer with no Workspace Runtime cannot answer the probe: the
@@ -657,6 +748,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(fixture.store.findOperation(TENANT, sessionId, first)
                 .orElseThrow().state()).isEqualTo("COMPLETED");
         assertThat(warmer.verified).containsExactly("services/b");
+        assertThat(warmer.bindings.get(0).getWorkspaceId()).isEqualTo(WS);
 
         warmer.refuse(WorkspaceExecutionProbe.unavailable());
         String secondId = fixture.createBoundSession(TENANT, WS);
@@ -684,11 +776,12 @@ class ManagedCwdChangeOperationTest {
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
         assertThat(waiting.attemptCount()).isEqualTo(1);
         // The claim gate reads database time; make the backoff elapsed
-        // instead of advancing the fixture clock.
+        // instead of advancing the fixture clock, and let the recovery scan
+        // — not a manual dispatch — rediscover the retried operation.
         fixture.jdbc.update("UPDATE managed_agent_operation SET"
                 + " available_at = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, thirdId, third);
-        coordinator.dispatch(TENANT, thirdId, third);
+        coordinator.recoverOperations();
         assertThat(fixture.store.findOperation(TENANT, thirdId, third)
                 .orElseThrow().state()).isEqualTo("COMPLETED");
         assertThat(fixture.store.requireSession(TENANT, thirdId)
@@ -710,7 +803,10 @@ class ManagedCwdChangeOperationTest {
         fixture.jdbc.update("UPDATE managed_agent_operation SET"
                 + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
-        coordinator.dispatch(TENANT, sessionId, operationId);
+        // The recovery scan itself must see an expired cwd claim: a row it
+        // cannot see would strand the Session behind session_context_busy
+        // and session_operation_active forever.
+        coordinator.recoverOperations();
         OperationRecord settled = fixture.store.findOperation(TENANT,
                 sessionId, operationId).orElseThrow();
         assertThat(settled.state()).isEqualTo("COMPLETED");
@@ -915,6 +1011,8 @@ class ManagedCwdChangeOperationTest {
         private final java.util.Queue<RuntimeException> behaviors =
                 new ConcurrentLinkedQueue<>();
         private final List<String> verified = new CopyOnWriteArrayList<>();
+        private final List<ContextBinding> bindings =
+                new CopyOnWriteArrayList<>();
 
         @Override
         public boolean isEnabled() {
@@ -935,6 +1033,7 @@ class ManagedCwdChangeOperationTest {
         public void verifyWorkspaceCwdTarget(ContextBinding binding,
                 String targetCwdRelative) {
             verified.add(targetCwdRelative);
+            bindings.add(binding);
             RuntimeException behavior = behaviors.poll();
             if (behavior != null) {
                 throw behavior;

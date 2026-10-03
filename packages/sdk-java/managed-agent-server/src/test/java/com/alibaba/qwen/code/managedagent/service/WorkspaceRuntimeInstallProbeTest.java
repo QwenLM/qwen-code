@@ -86,12 +86,15 @@ class WorkspaceRuntimeInstallProbeTest {
     }
 
     // When verified recovery is enabled, the probe re-runs the storage
-    // guard's mount verification, exactly as `resolve()` does.
+    // guard's mount verification of the Session's binding, exactly as
+    // `resolve()` does — the target directory differs from it here, so the
+    // guard call cannot be satisfied by the target instead.
     @Test
     void aGuardedMountVerifiesTheProbeTarget() throws Exception {
         Path root = Files.createDirectory(temporary.resolve("mount"))
                 .toRealPath();
         Files.createDirectories(root.resolve("services/api"));
+        Files.createDirectories(root.resolve("services/b"));
         WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
         when(guard.enabled()).thenReturn(true);
         var dataSource = new DriverManagerDataSource(
@@ -103,18 +106,17 @@ class WorkspaceRuntimeInstallProbeTest {
                         new DataSourceTransactionManager(dataSource), guard),
                 mountProperties(root));
 
-        assertThatCode(() -> guarded.verifyInstallable(
-                binding("services/api"), "services/api"))
+        ContextBinding bound = binding("services/api");
+        assertThatCode(() -> guarded.verifyInstallable(bound, "services/b"))
                 .doesNotThrowAnyException();
-        org.mockito.Mockito.verify(guard).verify(
-                org.mockito.ArgumentMatchers.any(ContextBinding.class));
+        org.mockito.Mockito.verify(guard).verify(bound);
 
         org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
                 .when(guard).verify(
                         org.mockito.ArgumentMatchers.any(
                                 ContextBinding.class));
-        assertThatThrownBy(() -> guarded.verifyInstallable(
-                binding("services/api"), "services/api"))
+        assertThatThrownBy(() -> guarded.verifyInstallable(bound,
+                "services/b"))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
                         error -> org.assertj.core.api.Assertions.assertThat(
                                 error.getCode())

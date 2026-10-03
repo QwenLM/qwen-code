@@ -801,6 +801,11 @@ public class ManagedAgentStore implements AgentStateStore {
                     "unsupported_feature",
                     "The Session has no Workspace context.");
         }
+        // Invisibility comes before the deployment gate and the replay
+        // lookup, exactly as the sibling lifecycle admission: a caller
+        // without read access must not learn that a Session or a key
+        // exists, and must not read the deployment flag from its refusal.
+        requireCwdChangeActor(session, actorId);
         if (!workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -826,7 +831,6 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
         }
-        requireCwdChangeActor(session, actorId);
         if (!"ACTIVE".equals(session.status())) {
             throw sessionStateConflict(session.status());
         }
@@ -887,7 +891,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 || operation.claimGeneration() != claimGeneration) {
             return null;
         }
-        long now = clock.millis();
+        long now = lifecycleDatabaseTime();
         ContextBinding binding = session.workspace();
         long expected = operation.expectedContextRevision() == null ? -1
                 : operation.expectedContextRevision();
@@ -941,20 +945,20 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void failCwdChangeOperation(String tenantId, String sessionId,
+    public boolean failCwdChangeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode) {
-        long now = clock.millis();
-        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
-                        + " delivery_state = 'CONFIRMED', error_code = ?,"
-                        + " lease_owner = NULL, lease_until = NULL,"
-                        + " updated_at = ?, completed_at = ? WHERE"
-                        + " tenant_id = ? AND session_id = ? AND"
-                        + " operation_id = ? AND delivery_state = 'LEASED'"
-                        + " AND lease_owner = ? AND claim_generation = ?"
-                        + " AND lease_until > ?",
+        long now = lifecycleDatabaseTime();
+        return jdbc.update("UPDATE managed_agent_operation SET state ="
+                        + " 'FAILED', delivery_state = 'CONFIRMED',"
+                        + " error_code = ?, lease_owner = NULL,"
+                        + " lease_until = NULL, updated_at = ?,"
+                        + " completed_at = ? WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ? AND"
+                        + " delivery_state = 'LEASED' AND lease_owner = ?"
+                        + " AND claim_generation = ? AND lease_until > ?",
                 failureCode, now, now, tenantId, sessionId, operationId,
-                owner, claimGeneration, lifecycleDatabaseTime());
+                owner, claimGeneration, now) == 1;
     }
 
     // Only the creation actor may move the Session's directory, matching
