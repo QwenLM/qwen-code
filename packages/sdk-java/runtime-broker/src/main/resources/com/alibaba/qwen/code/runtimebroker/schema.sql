@@ -146,3 +146,12 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (
     harness_session_id VARCHAR(512) NOT NULL,
     PRIMARY KEY (tenant_key, harness_key)
 );
+
+CREATE TABLE IF NOT EXISTS qwen_runtime_storage_fence (
+    tenant_key VARCHAR(64) NOT NULL,
+    storage_key VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(512) NOT NULL,
+    operation_id VARCHAR(36) NOT NULL,
+    PRIMARY KEY (tenant_key, storage_key)
+);

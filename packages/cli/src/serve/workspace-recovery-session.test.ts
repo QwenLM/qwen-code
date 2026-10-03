@@ -39,7 +39,7 @@ const KEY = {
 const hash = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture(definition: Record<string, unknown> = {}) {
   const resources = new Map<string, Buffer>();
   const refs = new Map<string, ManagedSessionDurableRef>();
   const complete = new Set<string>();
@@ -205,6 +205,7 @@ function fixture() {
           engine: 'managed',
           sessionId: SESSION,
           toolProfile: 'hosted-workspace-files/1',
+          ...definition,
         }),
         rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
         createdBy: 'hosted-harness',
@@ -698,14 +699,17 @@ const HISTORY_RECEIPT = {
   conflict: false,
 };
 
-function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
+function hostedHistoryFixture(
+  fields: Record<string, unknown> = {},
+  filePath = 'absent.txt',
+) {
   const f = fixture();
   const snapshots = [
     {
       promptId: HISTORY_PROMPT,
       timestamp: '2026-10-01T00:00:00.000Z',
       trackedFileBackups: {
-        'absent.txt': {
+        [filePath]: {
           backupFileName: null,
           version: 0,
           backupTime: '2026-10-01T00:00:00.000Z',
@@ -721,11 +725,11 @@ function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
     state: {
       ownerSessionId: SESSION,
       snapshots,
-      files: { 'absent.txt': null },
+      files: { [filePath]: null },
     },
     pendingTurn: null,
     pendingUndo: null,
-    undoReceipts: [HISTORY_RECEIPT],
+    undoReceipts: [{ ...HISTORY_RECEIPT, filesChanged: [filePath] }],
     ...fields,
     record: f.record('file_history_snapshot', { snapshots }),
   });
@@ -739,6 +743,25 @@ function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
   ]);
   return { ...f, historyRef };
 }
+
+describe('migration profile evidence', () => {
+  it('refuses absolute Hosted history during migration', async () => {
+    const f = hostedHistoryFixture({}, '/original/cwd/absent.txt');
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow();
+  });
+  it.each([
+    { toolProfile: 'hosted-workspace-shell/1' },
+    { hookCatalog: {} },
+    { captureBytes: 1024 },
+  ])('rejects unsupported frozen definition %j', async (definition) => {
+    const f = fixture(definition);
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow();
+  });
+});
 
 describe('verifyRecoverySession', () => {
   it.each([
@@ -1422,5 +1445,17 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(other.source, other.io)).rejects.toThrow(
       'invalid reader-facing record',
     );
+  });
+});
+
+describe('migration profile eligibility', () => {
+  it('accepts settled files and refuses an uninitialized retained member', async () => {
+    const f = fixture();
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).resolves.toBeDefined();
+    await expect(
+      verifyRecoverySession({ ...f.source, head: null }, f.io, 'migration'),
+    ).rejects.toThrow('uninitialized migration member');
   });
 });

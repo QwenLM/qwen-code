@@ -245,8 +245,10 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, true);
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         if (!input.isEmpty()
                 && (!"qwen-code".equals(agentId)
                         || !WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
@@ -598,6 +600,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!workspaces.canRead(tenantId, actorId, session.workspace().getWorkspaceId())) {
@@ -624,6 +627,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing.get(), true);
+        }
+        if (session.workspace() != null) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",

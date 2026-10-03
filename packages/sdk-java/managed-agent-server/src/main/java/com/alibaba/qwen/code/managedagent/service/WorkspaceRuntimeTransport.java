@@ -33,6 +33,7 @@ import java.util.concurrent.CompletableFuture;
 final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final HttpRuntimeTransport delegate;
     private final WorkspaceRuntimeResolver resolver;
+    private final java.util.function.Function<String, ContextBinding> savedBindings;
     private final WorkspaceExecutionStore ownership;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
@@ -42,9 +43,21 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             RuntimeSessionRepository sessions) {
         this.delegate = delegate;
         this.resolver = resolver;
+        this.savedBindings = resolver::savedBinding;
         this.ownership = ownership;
         this.bindings = bindings;
         this.sessions = sessions;
+    }
+
+    WorkspaceRuntimeTransport(HttpRuntimeTransport delegate, WorkspaceExecutionStore ownership,
+            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            java.util.function.Function<String, ContextBinding> savedBindings) {
+        this.delegate = delegate;
+        this.resolver = null;
+        this.ownership = ownership;
+        this.bindings = bindings;
+        this.sessions = sessions;
+        this.savedBindings = savedBindings;
     }
 
     @Override
@@ -341,7 +354,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             }
             binding = resolved.binding();
         } else {
-            binding = resolver.savedBinding(session.getHarnessSessionId());
+            binding = savedBindings.apply(session.getHarnessSessionId());
         }
         RuntimeSessionRecord record = sessions.findById(session.getScope(), session.getRuntimeSessionId());
         RuntimeBindingRecord runtime = record == null ? null : bindings.findById(record.getBindingId());

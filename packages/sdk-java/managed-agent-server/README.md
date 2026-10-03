@@ -675,3 +675,15 @@ credentials. The runner removes that file, the MySQL data directory,
 workspaces, and child processes on exit. Override the source with
 `--settings /path/to/settings.json`; credentials are never printed by the
 runner.
+
+### W1c offline Workspace migration
+
+See the [English design](../../../docs/design/workspace-storage-migration.md) and [Chinese design](../../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Keep the original absolute `QWEN_HOME` and its `file-history` volume; do not move it with the Workspace.
+
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full version-1 request file contains `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+
+Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. Both verify sealed content, live source, target, retained history and original physical identities. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything.
+
+Promotion increments mount revision once. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
+
+The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.

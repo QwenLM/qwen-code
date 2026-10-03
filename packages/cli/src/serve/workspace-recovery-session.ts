@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -281,6 +282,7 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
 export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
+  purpose: 'recovery' | 'migration' = 'recovery',
 ): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
   encodeManagedContextBinding(source.binding);
   const head = source.head;
@@ -306,6 +308,9 @@ export async function verifyRecoverySession(
             head.writerLeaseUntil === null))),
     'invalid pinned retirement',
   );
+  if (purpose === 'migration') {
+    requireValue(Boolean(head || retirement), 'uninitialized migration member');
+  }
   let revision = 0;
   let sequence = 0;
   let commitDigest: string | null = null;
@@ -369,6 +374,14 @@ export async function verifyRecoverySession(
       for (const [filePath, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
+        if (purpose === 'migration') {
+          requireValue(
+            !path.isAbsolute(filePath) &&
+              path.normalize(filePath) === filePath &&
+              filePath !== '.',
+            'external migration history path',
+          );
+        }
         requireValue(!backup.failed, 'file history backup failed');
         if (backup.backupFileName !== null) {
           await io.verifyBackup({
@@ -750,6 +763,15 @@ export async function verifyRecoverySession(
             )),
         'unsupported Hosted profile',
       );
+      if (purpose === 'migration') {
+        requireValue(
+          definition['toolProfile'] === 'hosted-workspace-files/1' &&
+            definition['hookCatalog'] === undefined &&
+            definition['mcpServers'] === undefined &&
+            definition['captureBytes'] === undefined,
+          'unsupported migration profile',
+        );
+      }
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||

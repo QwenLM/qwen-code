@@ -59,6 +59,18 @@ public final class InMemoryRuntimeSessionRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId) {
+        var matches = records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(record -> tenantId.equals(record.getSession().getScope().getTenantId())
+                        && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                        && runtimeSessionId.equals(record.getRuntimeSessionId())).limit(2).toList();
+        if (matches.size() > 1) {
+            throw new IllegalStateException("Historical Runtime Session is ambiguous");
+        }
+        return matches.isEmpty() ? null : matches.getFirst();
+    }
+
+    @Override
     public synchronized RuntimeSessionRecord compareAndSet(
             RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
