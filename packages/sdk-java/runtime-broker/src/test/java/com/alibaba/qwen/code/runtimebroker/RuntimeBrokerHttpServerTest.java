@@ -779,6 +779,73 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void settledExecutionServesTheFullWireEnvelope() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord record = fixture.service.prepareExecution("harness", "runtime", "key",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                    .toCompletableFuture().join();
+            fixture.service.cancelExecution("harness", "runtime", record.getExecutionCallId()).toCompletableFuture().join();
+            fixture.service.startExecution("harness", "runtime", record.getExecutionCallId(), payload)
+                    .toCompletableFuture().join();
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + record.getExecutionCallId()
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> settled = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, settled.statusCode(), settled.body());
+            var body = JSON.parseObject(settled.body());
+            assertEquals(Set.of("protocolVersion", "harnessSessionId", "runtimeSessionId",
+                    "executionCallId", "status", "runtimeBindingId", "bindingGeneration"), body.keySet());
+            assertEquals(1, body.getIntValue("protocolVersion"));
+            assertEquals("harness", body.getString("harnessSessionId"));
+            assertEquals("runtime", body.getString("runtimeSessionId"));
+            assertEquals(record.getExecutionCallId(), body.getString("executionCallId"));
+            var status = body.getJSONObject("status");
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
+                    "progress", "result"), status.keySet());
+            assertEquals("settled", status.getString("state"));
+            assertEquals("cancelled", status.getJSONObject("result").getString("executionStatus"));
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsInvalidAfterSeqAndDuplicateQueryFields() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            for (String query : new String[] {"afterSeq=abc", "afterSeq=-1"}) {
+                HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                                + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&" + query))
+                        .header("Authorization", "Bearer secret").GET().build();
+                HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                assertEquals(400, response.statusCode(), response.body());
+                assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+            }
+            HttpRequest duplicate = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=1&afterSeq=2"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> duplicated = fixture.client.send(duplicate, HttpResponse.BodyHandlers.ofString());
+            assertEquals(400, duplicated.statusCode(), duplicated.body());
+            assertTrue(duplicated.body().contains("runtime_broker_invalid_request"), duplicated.body());
+        }
+    }
+
+    @Test
+    void rejectsOversizedRequestBodies() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            HttpResponse<String> response = fixture.post("/tool-sessions:acquire", Map.of(
+                    "protocolVersion", 1, "requestId", "acquire",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                    "turnKind", "bootstrap", "padding", "x".repeat(9 * 1024 * 1024)));
+            assertEquals(413, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_broker_request_too_large"), response.body());
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");

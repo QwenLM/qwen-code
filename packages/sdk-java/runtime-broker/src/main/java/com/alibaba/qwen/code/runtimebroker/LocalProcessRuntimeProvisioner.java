@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,7 +55,9 @@ public final class LocalProcessRuntimeProvisioner
             });
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
-    private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
+    // Tombstones need only equality: store the SHA-256 of the canonical
+    // identity encoding rather than the lease material itself.
+    private final Set<String> issued = ConcurrentHashMap.newKeySet();
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -358,7 +361,7 @@ public final class LocalProcessRuntimeProvisioner
             List<Object> key = ownershipKey(lease);
             // A dead worker's port can be reused, but its old lease may still
             // arrive for release. Never issue that identity again.
-            if (!issued.add(key)) {
+            if (!issued.add(tombstone(key))) {
                 throw new RuntimeBrokerException(409,
                         "runtime_broker_resource_conflict",
                         "Managed Runtime lease identity was already issued.",
@@ -630,7 +633,8 @@ public final class LocalProcessRuntimeProvisioner
         if (store != null) {
             return observeDurable(request, seed, handle, lastLease);
         }
-        if (handle != null && !KIND.equals(handle.getKind())) {
+        if (handle != null && (!KIND.equals(handle.getKind())
+                || handle.getVersion() != 1)) {
             return RuntimeObservation.conflict(handle);
         }
         if (lastLease == null || seed == null) {
@@ -644,6 +648,9 @@ public final class LocalProcessRuntimeProvisioner
             return RuntimeObservation.conflict(handle);
         }
         if (!process.process.isAlive()) {
+            // The worker is provably gone; holding its entry would leak the
+            // ownership record for the broker's lifetime.
+            owned.remove(ownershipKey(lastLease), process);
             if (handle == null) {
                 return RuntimeObservation.notFound();
             }
@@ -698,6 +705,21 @@ public final class LocalProcessRuntimeProvisioner
         // distinct workers. The attested endpoint distinguishes those attempts.
         return List.of(lease.getRuntimeInstanceId(), lease.getEndpoint(),
                 lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+    }
+
+    private static String tombstone(List<Object> key) {
+        StringBuilder canonical = new StringBuilder();
+        for (Object component : key) {
+            canonical.append(String.valueOf(component)).append('\0');
+        }
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(canonical.toString()
+                                    .getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private void attest(RuntimeProvisionRequest request,

@@ -26,6 +26,10 @@ import java.util.function.Function;
  *
  * <p>Immediate raw-tool dispatch and durable raw-tool or provider dispatch
  * share the original execution journal. Operator resolution is unavailable.
+ * Progress streaming is also unavailable: the GET-execution {@code afterSeq}
+ * parameter is validated but never honored, and every status answers an empty
+ * {@code progress} list with {@code firstAvailableSeq} equal to
+ * {@code lastSeq}.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
