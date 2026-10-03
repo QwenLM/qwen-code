@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { buildManagedAutoMemoryIndex } from './indexer.js';
 import {
   buildManagedAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
@@ -164,6 +165,132 @@ describe('managed auto-memory prompt helpers', () => {
       'WARNING: MEMORY.md is 250 lines (limit: 200). Only part of it was loaded.',
     );
     expect(result.split('\n').length).toBeLessThan(400);
+  });
+
+  it.each(['project', 'user', 'team'] as const)(
+    'drops an oversized %s index entry whole and retains subsequent complete links',
+    (scope) => {
+      const oversizedEntry = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)`;
+      const retainedEntry = '- [Retained](reference/kept%28note%29.md)';
+      const index = `${oversizedEntry}\n${retainedEntry}`;
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/project/.qwen/memory',
+        scope === 'project' ? index : null,
+        scope === 'user'
+          ? { memoryDir: '/home/u/.qwen/memories', indexContent: index }
+          : undefined,
+        scope === 'team'
+          ? { memoryDir: '/tmp/project/.qwen/team-memory', indexContent: index }
+          : undefined,
+      );
+
+      expect(result).not.toContain('- [Oversized](');
+      expect(result).toContain(retainedEntry);
+      expect(result).toContain('Only part of it was loaded.');
+    },
+  );
+
+  it('does not load a partial link from an oversized index with no newline', () => {
+    const index = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)`;
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      index,
+    );
+
+    expect(result).not.toContain('- [Oversized](');
+    expect(result).toContain('Only part of it was loaded.');
+  });
+
+  it.each([
+    ['project', '\n'],
+    ['user', '\n'],
+    ['team', '\n'],
+    ['project', '\r\n'],
+    ['user', '\r\n'],
+    ['team', '\r\n'],
+  ] as const)(
+    'keeps every writer-retained entry in the %s prompt with %j line endings',
+    (scope, newline) => {
+      const doc = (relativePath: string, title: string) => ({
+        scope: 'project' as const,
+        type: 'reference' as const,
+        relativePath,
+        filePath: `/tmp/memory/${relativePath}`,
+        filename: relativePath.slice(relativePath.lastIndexOf('/') + 1),
+        title,
+        description: 'h'.repeat(150),
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      });
+      // Legal path components can expand into long percent-encoded targets.
+      const longDocs = ['A', 'B', 'C'].map((label) =>
+        doc(
+          `reference/${[
+            ...Array.from(
+              { length: 14 },
+              (_, i) => `${label}${' '.repeat(253)}${i % 10}`,
+            ),
+            `${label}${' '.repeat(250)}b.md`,
+          ].join('/')}`,
+          label.repeat(120),
+        ),
+      );
+      const ordinaryDocs = Array.from({ length: 12 }, (_, i) =>
+        doc(`reference/normal-${i}.md`, `Normal ${i}`),
+      );
+      const generated = buildManagedAutoMemoryIndex([
+        ...longDocs,
+        ...ordinaryDocs,
+      ]);
+      const entries = generated
+        .split('\n')
+        .filter((line) => line.startsWith('- ['));
+      expect(entries).toHaveLength(14);
+      expect(generated.length).toBeGreaterThan(25_000);
+      expect(generated).toContain('only part of it was written.');
+      const index = generated.replaceAll('\n', newline);
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/project/.qwen/memory',
+        scope === 'project' ? index : null,
+        scope === 'user'
+          ? { memoryDir: '/home/u/.qwen/memories', indexContent: index }
+          : undefined,
+        scope === 'team'
+          ? { memoryDir: '/tmp/project/.qwen/team-memory', indexContent: index }
+          : undefined,
+      );
+
+      for (const entry of entries) {
+        expect(result).toContain(entry);
+      }
+      expect(result).toContain('Only part of it was loaded.');
+    },
+  );
+
+  it('keeps all 200 writer-retained entries when the notice exceeds the line limit', () => {
+    const entries = Array.from(
+      { length: 200 },
+      (_, i) => `- [Memory ${i}](memory-${i}.md)`,
+    );
+    const index = `${entries.join('\n')}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+
+    for (const entry of entries) {
+      expect(result).toContain(entry);
+    }
+    expect(result).toContain('202 lines (limit: 200)');
+  });
+
+  it('does not strip handwritten warning-like text from an over-budget index', () => {
+    const retained = '> WARNING: a handwritten memory note';
+    const index = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)\n\n${retained}`;
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+
+    expect(result).toContain(retained);
+    expect(result).not.toContain('- [Oversized](');
   });
 
   it('condensed prompt with empty indexes is significantly shorter than full', () => {
