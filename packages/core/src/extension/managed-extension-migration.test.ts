@@ -308,7 +308,7 @@ describe('managed extension activation migration', () => {
     const installedFiles = inventory(installed.path);
     await expect(
       user.uninstallExtensionById(managedId, false),
-    ).resolves.toEqual(after);
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
     expect(inventory(installed.path)).toEqual(installedFiles);
     expect(await user.getExtensionStoreSnapshot()).toEqual(after);
   });
@@ -415,8 +415,11 @@ describe('managed extension activation migration', () => {
     expect(snapshot.extensions[managed.id]).toBeUndefined();
     expect(snapshot.extensions[installed.id]).not.toHaveProperty('managed');
     const installedFiles = inventory(userDirectory);
-    await deployed.uninstallExtensionById(managed.id, false);
+    await expect(
+      deployed.uninstallExtensionById(managed.id, false),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
     expect(inventory(userDirectory)).toEqual(installedFiles);
+    expect(await deployed.getExtensionStoreSnapshot()).toEqual(snapshot);
   });
 
   it('releases a withdrawn managed policy and its settings on explicit uninstall', async () => {

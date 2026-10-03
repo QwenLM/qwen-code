@@ -36,7 +36,7 @@ import {
   type ExtensionConfig,
   type ExtensionManagerOptions,
 } from './extensionManager.js';
-import { ExtensionStore } from './extension-store.js';
+import { ExtensionConflictError, ExtensionStore } from './extension-store.js';
 import { Config } from '../config/config.js';
 import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
@@ -943,6 +943,62 @@ describe('managed extensions', () => {
     );
     expect(await subject.getExtensionStoreSnapshot()).toEqual(after);
   });
+
+  it.each(['withdrawn', 'unavailable', 'manifestless', 'unconfigured'])(
+    'rejects a stale managed id after a %s refresh rekeys its policy',
+    async (state) => {
+      const userPath = writeExtension(user, 'portable', { version: 'user' });
+      const managedPath = writeExtension(managed, 'bundle', {
+        name: 'portable',
+      });
+      const deployed = manager();
+      await deployed.refreshCache();
+      const managedId = deployed.getLoadedExtensions()[0].id;
+      if (state === 'withdrawn') {
+        fs.rmSync(managedPath, { recursive: true });
+      } else if (state === 'unavailable') {
+        fs.renameSync(managed, `${managed}-offline`);
+      } else if (state === 'manifestless') {
+        fs.rmSync(path.join(managedPath, EXTENSIONS_CONFIG_FILENAME));
+      }
+      const subject =
+        state === 'unconfigured'
+          ? manager({ managedExtensionsDir: undefined })
+          : manager();
+      await subject.refreshCache();
+      const [userCopy] = subject.getLoadedExtensions();
+      expect(userCopy.source).toBe('user');
+      expect(userCopy.id).not.toBe(managedId);
+      const before = await subject.getExtensionStoreSnapshot();
+      expect(before.extensions[managedId]).toBeUndefined();
+      expect(before.extensions[userCopy.id]?.managed).toBe(
+        state === 'withdrawn' ? undefined : true,
+      );
+
+      await expect(
+        subject.uninstallExtensionById(managedId, false),
+      ).rejects.toBeInstanceOf(
+        state === 'withdrawn'
+          ? ExtensionConflictError
+          : ManagedExtensionReadOnlyError,
+      );
+      expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+      expect(fs.existsSync(userPath)).toBe(true);
+      await expect(
+        subject.uninstallExtensionById('f'.repeat(64), false),
+      ).resolves.toEqual(before);
+
+      if (state === 'withdrawn') {
+        await subject.uninstallExtensionById(userCopy.id, false);
+        expect(fs.existsSync(userPath)).toBe(false);
+      } else {
+        await expect(
+          subject.uninstallExtensionById(userCopy.id, false),
+        ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+        expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+      }
+    },
+  );
 
   it('releases a withdrawn managed policy by name when nothing is loaded', async () => {
     writeExtension(managed, 'portable');

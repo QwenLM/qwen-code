@@ -2339,14 +2339,6 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.getExtensionStoreSnapshot();
         const policy = snapshot.extensions[extensionId];
-        // The per-request manager starts with an empty cache, so refresh
-        // before the uninstall can tell a still-deployed package (read-only,
-        // rejected by the manager) from a withdrawn one (whose retained
-        // policy the uninstall releases). Managed policies are the rare
-        // case.
-        if (policy?.managed === true && !policy.declarationOnly) {
-          await manager.refreshCacheWithSnapshot();
-        }
         if (!policy || policy.declarationOnly) {
           res.status(204).end();
           return;

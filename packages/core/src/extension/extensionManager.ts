@@ -3841,6 +3841,23 @@ export class ExtensionManager {
     try {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
+      if (!policy) {
+        // A queued refresh can re-key the retained managed policy onto a
+        // same-name user copy. The old id must not report that copy removed.
+        const currentPolicy = Object.values(snapshot.extensions).find(
+          (candidate) =>
+            !candidate.declarationOnly &&
+            getManagedExtensionId(candidate.name) === extensionId,
+        );
+        if (currentPolicy?.managed) {
+          throw new ManagedExtensionReadOnlyError(currentPolicy.name);
+        }
+        if (currentPolicy) {
+          throw new ExtensionConflictError(
+            `Extension "${currentPolicy.name}" now has a different identity. Refresh the extension list before uninstalling it.`,
+          );
+        }
+      }
       const extension =
         this.getLoadedExtensions().find(
           (candidate) => candidate.id === extensionId,

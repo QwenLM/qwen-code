@@ -29,6 +29,7 @@ import {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { KeychainTokenStorage } from '@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js';
 import * as settingsModule from '../../config/settings.js';
 
 const extensionId = 'a'.repeat(64);
@@ -3052,9 +3053,6 @@ describe('extension management v2 REST', () => {
     vi.mocked(
       ExtensionManager.prototype.getExtensionStoreSnapshot,
     ).mockResolvedValue(retainedSnapshot);
-    vi.mocked(
-      ExtensionManager.prototype.refreshCacheWithSnapshot,
-    ).mockResolvedValue(retainedSnapshot);
     // The deployment root no longer holds the package.
     vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
       [],
@@ -3080,6 +3078,151 @@ describe('extension management v2 REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    'still-deployed',
+    'withdrawn-with-user',
+    'unavailable-with-user',
+    'manifestless-with-user',
+    'withdrawn-no-user',
+  ])(
+    'handles managed uninstall after %s through the real store',
+    async (state) => {
+      const root = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-managed-uninstall-')),
+      );
+      vi.stubEnv('QWEN_HOME', path.join(root, 'home'));
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+        false,
+      );
+      const managedRoot = path.join(root, 'deployment');
+      const deployed = path.join(managedRoot, 'bundle');
+      const userPath = path.join(root, 'home', 'extensions', 'demo');
+      const hasUser = state !== 'withdrawn-no-user';
+      const writePackage = async (directory: string) => {
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'qwen-extension.json'),
+          JSON.stringify({ name: 'demo', version: '1.0.0' }),
+        );
+      };
+      await fsp.mkdir(managedRoot);
+      const h = await makeHarness({
+        singleWorkspace: true,
+        managedExtensions: managedRoot,
+      });
+      try {
+        const manager = new ExtensionManager({
+          managedExtensionsDir: managedRoot,
+          workspaceDir: h.primary.workspaceCwd,
+          isWorkspaceTrusted: true,
+        });
+        let userId: string | undefined;
+        if (hasUser) {
+          await writePackage(userPath);
+          await manager.refreshCache();
+          const [userCopy] = manager.getLoadedExtensions();
+          expect(userCopy.source).toBe('user');
+          userId = userCopy.id;
+        }
+        await writePackage(deployed);
+        await manager.refreshCache();
+        const [managed] = manager.getLoadedExtensions();
+        expect(managed.source).toBe('managed');
+        const listed = await auth(request(h.app).get('/extensions'));
+        expect(listed.status).toBe(200);
+        expect(listed.body.extensions).toEqual([
+          expect.objectContaining({
+            id: managed.id,
+            extensionSource: 'managed',
+          }),
+        ]);
+        if (state.startsWith('withdrawn')) {
+          await fsp.rm(deployed, { recursive: true });
+        } else if (state === 'unavailable-with-user') {
+          await fsp.rename(managedRoot, `${managedRoot}-offline`);
+        } else if (state === 'manifestless-with-user') {
+          await fsp.rm(path.join(deployed, 'qwen-extension.json'));
+        }
+        expect(
+          (await manager.getExtensionStoreSnapshot()).extensions[managed.id]
+            ?.managed,
+        ).toBe(true);
+        const response = await auth(
+          request(h.app).delete(`/extensions/${managed.id}`),
+        );
+        expect(response.status).toBe(202);
+        const operation = await pollOperation(h.app, response.body.operationId);
+        const after = await manager.getExtensionStoreSnapshot();
+        if (state === 'withdrawn-no-user') {
+          expect(operation).toMatchObject({
+            status: 'succeeded',
+            result: { status: 'uninstalled', name: 'demo' },
+          });
+          expect(after.extensions[managed.id]).toBeUndefined();
+          expect(
+            (await auth(request(h.app).delete(`/extensions/${managed.id}`)))
+              .status,
+          ).toBe(204);
+          return;
+        }
+        await expect(fsp.access(userPath)).resolves.toBeUndefined();
+        expect(operation).toMatchObject({
+          status: 'failed',
+          code:
+            state === 'withdrawn-with-user'
+              ? 'extension_conflict'
+              : 'extension_managed_read_only',
+        });
+        if (state === 'still-deployed') {
+          expect(after.extensions[managed.id]?.managed).toBe(true);
+          await expect(fsp.access(deployed)).resolves.toBeUndefined();
+          return;
+        }
+        expect(after.extensions[managed.id]).toBeUndefined();
+        expect(after.extensions[userId!]?.managed).toBe(
+          state === 'withdrawn-with-user' ? undefined : true,
+        );
+        if (state !== 'withdrawn-with-user') {
+          const refused = await auth(
+            request(h.app).delete(`/extensions/${userId}`),
+          );
+          expect(refused.status).toBe(202);
+          await expect(
+            pollOperation(h.app, refused.body.operationId),
+          ).resolves.toMatchObject({
+            status: 'failed',
+            code: 'extension_managed_read_only',
+          });
+          if (state === 'unavailable-with-user') {
+            await fsp.rename(`${managedRoot}-offline`, managedRoot);
+          }
+          await fsp.rm(deployed, { recursive: true });
+        }
+        const recovery = await auth(
+          request(h.app).delete(`/extensions/${userId}`),
+        );
+        expect(recovery.status).toBe(202);
+        await expect(
+          pollOperation(h.app, recovery.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'succeeded',
+          result: { status: 'uninstalled', name: 'demo' },
+        });
+        await expect(fsp.access(userPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        expect(
+          (await manager.getExtensionStoreSnapshot()).extensions[userId!],
+        ).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rejects singular and batch activation on an untrusted target', async () => {
     const h = await makeHarness({ secondaryTrusted: false });
