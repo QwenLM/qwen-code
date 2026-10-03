@@ -2689,6 +2689,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     prompt: string,
     signal: AbortSignal,
     context?: BridgeClientRequestContext,
+    options?: {
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncIterable<BridgeGenerationStreamEvent>;
 
   /**
@@ -2948,6 +2952,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     prompt: string,
     signal: AbortSignal,
     originatorClientId: string | undefined,
+    options?: {
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncIterable<BridgeWorkspaceGenerationStreamEvent>;
 
   /**

@@ -6,6 +6,10 @@
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
+  isAutoLanguage,
+  isValidOutputLanguageLabel,
+} from '@qwen-code/qwen-code-core/utils/output-language.js';
+import {
   buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
@@ -11323,6 +11327,9 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart: {
         const requestId = params['requestId'];
         const prompt = params['prompt'];
+        const skipOutputLanguagePreference =
+          params['skipOutputLanguagePreference'];
+        const outputLanguageFallback = params['outputLanguageFallback'];
         if (typeof requestId !== 'string' || requestId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -11333,7 +11340,12 @@ class QwenAgent implements Agent {
           typeof prompt !== 'string' ||
           !prompt.trim() ||
           Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
-          params['purpose'] !== 'text'
+          params['purpose'] !== 'text' ||
+          (skipOutputLanguagePreference !== undefined &&
+            typeof skipOutputLanguagePreference !== 'boolean') ||
+          (outputLanguageFallback !== undefined &&
+            (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+              isAutoLanguage(outputLanguageFallback)))
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -11365,6 +11377,13 @@ class QwenAgent implements Agent {
             prompt.trim(),
             signal,
             emit,
+            {
+              skipOutputLanguagePreference:
+                skipOutputLanguagePreference === true,
+              ...(outputLanguageFallback !== undefined && {
+                outputLanguageFallback,
+              }),
+            },
           );
           return { requestId, ...result };
         } finally {
@@ -12786,12 +12805,20 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'];
         const requestId = params['requestId'];
         const prompt = params['prompt'];
+        const skipOutputLanguagePreference =
+          params['skipOutputLanguagePreference'];
+        const outputLanguageFallback = params['outputLanguageFallback'];
         if (
           typeof sessionId !== 'string' ||
           typeof requestId !== 'string' ||
           typeof prompt !== 'string' ||
           prompt.trim().length === 0 ||
-          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
+          (skipOutputLanguagePreference !== undefined &&
+            typeof skipOutputLanguagePreference !== 'boolean') ||
+          (outputLanguageFallback !== undefined &&
+            (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+              isAutoLanguage(outputLanguageFallback)))
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -12823,6 +12850,13 @@ class QwenAgent implements Agent {
                 'qwen/notify/session/generation/event',
                 { v: 1, sessionId, requestId, event },
               );
+            },
+            {
+              skipOutputLanguagePreference:
+                skipOutputLanguagePreference === true,
+              ...(outputLanguageFallback !== undefined && {
+                outputLanguageFallback,
+              }),
             },
           );
           return { sessionId, requestId, ...result };

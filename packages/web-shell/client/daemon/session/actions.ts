@@ -2667,7 +2667,11 @@ export function createDaemonSessionActions({
 
     async *generateSessionContent(
       prompt: string,
-      opts?: { signal?: AbortSignal },
+      opts?: {
+        signal?: AbortSignal;
+        skipOutputLanguagePreference?: boolean;
+        outputLanguageFallback?: string;
+      },
     ): AsyncGenerator<DaemonSessionGenerationEvent> {
       const session = requireSessionForAction(
         addNotice,
