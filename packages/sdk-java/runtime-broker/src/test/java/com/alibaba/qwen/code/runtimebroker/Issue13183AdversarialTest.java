@@ -41,12 +41,17 @@ class Issue13183AdversarialTest {
 
     /**
      * N rounds; in each round one thread admits an execution while another
-     * runs beginSessionRelease from a second repository stack, both
-     * released by one latch. The two outcomes must never contradict: a
+     * runs beginSessionRelease from a second repository stack. Half the
+     * rounds release both from one latch as a tight race; the other half
+     * hold the release until the admission has committed, so both
+     * directions are covered rather than whichever one the scheduler
+     * favours. The two outcomes must never contradict: a
      * committed admission forces runtime_session_busy; a committed
      * RELEASING transition forces runtime_admission_closed. The
      * contradictory end state - admission committed AND session RELEASING -
-     * must never occur, and neither call may hit a lock failure.
+     * must never occur, and neither call may hit a lock failure. Both
+     * interleavings must actually occur, so a one-sided schedule cannot pass
+     * the exact-error-code checks by never exercising one direction.
      */
     @Test
     void concurrentCrossProcessAdmitAndReleaseNeverContradict()
@@ -67,6 +72,8 @@ class Issue13183AdversarialTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         AtomicInteger contradictions = new AtomicInteger();
         AtomicInteger unexpected = new AtomicInteger();
+        AtomicInteger admitWins = new AtomicInteger();
+        AtomicInteger releaseWins = new AtomicInteger();
         StringBuilder surprises = new StringBuilder();
         try {
             for (int round = 0; round < rounds; round++) {
@@ -82,6 +89,13 @@ class Issue13183AdversarialTest {
                         fixture.binding.getRequest().getScope(),
                         fixture.session.getRuntimeSessionId());
                 CountDownLatch gate = new CountDownLatch(1);
+                // Half the rounds are a tight race; the other half hold the
+                // release until the admission has committed. The release
+                // reaches the session row first in a tight race often enough
+                // that racing alone would leave the committed-admission
+                // direction unexercised.
+                boolean raced = (round & 1) == 1;
+                CountDownLatch admitDone = new CountDownLatch(raced ? 0 : 1);
                 AtomicReference<Throwable> admitOutcome =
                         new AtomicReference<>();
                 AtomicReference<Throwable> releaseOutcome =
@@ -96,10 +110,13 @@ class Issue13183AdversarialTest {
                         admitted.set(Boolean.TRUE);
                     } catch (Throwable failure) {
                         admitOutcome.set(failure);
+                    } finally {
+                        admitDone.countDown();
                     }
                 });
                 Future<?> releaseThread = pool.submit(() -> {
                     await(gate);
+                    await(admitDone);
                     try {
                         bindingsB.beginSessionRelease(sessionsB, executionsB,
                                 expected);
@@ -122,6 +139,11 @@ class Issue13183AdversarialTest {
                 }
                 if (!admitCommitted && !releasing) {
                     contradictions.incrementAndGet();
+                }
+                if (admitCommitted) {
+                    admitWins.incrementAndGet();
+                } else {
+                    releaseWins.incrementAndGet();
                 }
                 if (admitCommitted && !(releaseOutcome
                         .get() instanceof RuntimeBrokerException failure
@@ -146,6 +168,13 @@ class Issue13183AdversarialTest {
                 "admission and release contradicted each other");
         assertEquals(0, unexpected.get(),
                 () -> "unexpected failure: " + surprises);
+        // Both interleavings must actually have occurred, or the exact
+        // error-code checks above only covered the direction the scheduler
+        // happened to favour.
+        assertTrue(admitWins.get() > 0 && releaseWins.get() > 0,
+                "the stress never exercised both interleavings: admission won "
+                        + admitWins.get() + " rounds, release won "
+                        + releaseWins.get() + " of " + rounds);
     }
 
     /**
@@ -268,8 +297,9 @@ class Issue13183AdversarialTest {
         // first site returns before any release (the loss evidence is not
         // yet written), then two sites drain 16 * 100 rows each, so the
         // ~1.6k that remain must stop the reclaim with LOST instead of
-        // looping. Each reclaiming service gets a lease long enough that
-        // the measured operation deadline stays ahead of the wall clock.
+        // looping. The budget answers in about 2s; the 10s lease (a 40s
+        // operation deadline) keeps a slow runner from answering on the
+        // deadline instead, which the previous 3s lease did.
         int sessionsToCreate = 3 * 16 * 100 + 1;
         for (int index = 0; index < sessionsToCreate; index++) {
             bindings.admitSession(sessions, new RuntimeSessionRecord(
@@ -410,10 +440,13 @@ class Issue13183AdversarialTest {
     /**
      * The exit hook must reclaim even a worker that is still in its ready
      * handshake when the JVM exits: it is registered in {@code starting}
-     * from spawn. This forks a broker JVM that exits mid-provision and then
-     * checks that the worker did not outlive it. Before the fix, the worker
-     * survived: it only entered {@code owned} after the handshake, which
-     * the exit never reached.
+     * from spawn. This forks a broker JVM that is signalled mid-provision
+     * and then checks that the worker did not outlive it. Before the fix,
+     * the worker survived: it only entered {@code owned} after the
+     * handshake, which the exit never reached. The forked worker obeys
+     * SIGTERM, so this covers the hook's {@code destroy()}; the forcible
+     * fallback on the exit path is exercised by the close() and release()
+     * escalation tests instead.
      */
     @Test
     void exitHookReclaimsAWorkerStillInStartup() throws Exception {
@@ -447,7 +480,14 @@ class Issue13183AdversarialTest {
             assertTrue(worker > 0,
                     "the harness never spawned a worker; harness log: "
                             + logTail(harnessLog));
-            harness.waitFor(20, TimeUnit.SECONDS);
+            // The test ends the harness JVM rather than waiting for a timer
+            // inside it: SIGTERM runs the same shutdown hooks a natural exit
+            // would, and the observation window above no longer has to fit
+            // inside the harness's own sleep.
+            harness.destroy();
+            assertTrue(harness.waitFor(20, TimeUnit.SECONDS),
+                    "the harness never exited; harness log: "
+                            + logTail(harnessLog));
             Thread.sleep(1000);
             boolean leaked = ProcessHandle.of(worker)
                     .map(ProcessHandle::isAlive).orElse(false);
@@ -477,7 +517,10 @@ class Issue13183AdversarialTest {
         }
     }
 
-    /** Harness JVM: starts provisioning a silent worker, exits mid-start. */
+    /**
+     * Harness JVM: starts provisioning a silent worker, stays in the ready
+     * handshake until the test ends the JVM, and so exits mid-start.
+     */
     public static final class ExitHarnessMain {
         public static void main(String[] args) throws Exception {
             LocalProcessRuntimeProvisioner provisioner =
@@ -487,7 +530,10 @@ class Issue13183AdversarialTest {
                             new HttpRuntimeTransport());
             provisioner.provision(ManagedContextProtocolTest.request(),
                     ManagedContextProtocolTest.seed());
-            Thread.sleep(2000);
+            // The worker never prints a ready line, so it stays in `starting`
+            // for as long as this JVM lives; the sleep only bounds an
+            // orphaned harness.
+            Thread.sleep(60_000);
             System.exit(0);
         }
     }

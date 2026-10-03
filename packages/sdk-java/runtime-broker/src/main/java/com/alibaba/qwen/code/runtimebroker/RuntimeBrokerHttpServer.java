@@ -388,8 +388,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     ExecutionReconciliation.Outcome.IN_FLIGHT, null));
         }
         // An explicit reconcile asks the Runtime every time, and a mutation's
-        // own response must describe the post-mutation truth; only pure
-        // polling reuses a cooled answer.
+        // own response never serves the cooldown cache; only pure polling
+        // reuses a cooled answer.
         CompletionStage<ExecutionReconciliation> observation =
                 reconcile || !coolable
                         ? service.reconcileExecution(harnessSessionId,

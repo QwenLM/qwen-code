@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -37,9 +38,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 /**
  * Regression coverage for the code-audit findings of issue #13183: the
@@ -203,6 +207,82 @@ class Issue13183RegressionTest {
             executing.complete(Map.of("executionStatus", "success"));
             service.close();
         }
+    }
+
+    /**
+     * close() must shut the renewal pool down, not only cancel its tasks: a
+     * renewal tick cancels itself once the service is closed, but a pool's
+     * threads exit only on shutdown, so a deployment that rebuilds the
+     * service would otherwise leak them per instance.
+     */
+    @Test
+    void closeStopsTheRenewalPool() throws Exception {
+        Set<Long> before =
+                liveThreadIds("qwen-runtime-broker-lease-renewal");
+        CompletableFuture<Map<String, Object>> executing =
+                new CompletableFuture<>();
+        NoopTransport transport = new NoopTransport() {
+            @Override
+            public CompletionStage<Map<String, Object>> execute(
+                    RuntimeLease lease, RuntimeSession session,
+                    Map<String, Object> reference) {
+                return executing;
+            }
+        };
+        String runtime = "550e8400-e29b-41d4-a716-446655440398";
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                harnessId -> CompletableFuture.completedFuture(SCOPE),
+                new StaticRuntimeProvisioner(new RuntimeLease("instance",
+                        URI.create("http://127.0.0.1:1234"), "token", "lease",
+                        1)),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                "broker", Duration.ofMinutes(1), Duration.ofSeconds(3));
+        Set<Long> started = new HashSet<>();
+        try {
+            service.acquire("harness", runtime, "bootstrap")
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            Map<String, Object> reference = Map.of("sessionId", runtime,
+                    "promptId", "turn", "callId", "call", "capabilityDigest",
+                    "a".repeat(64), "policyRevision", "policy",
+                    "invocationId", "invocation", "argsDigest",
+                    "b".repeat(64));
+            ToolExecutionRecord prepared = service.prepareExecution("harness",
+                    runtime, "key", reference).toCompletableFuture().join();
+            // The dispatch stays in flight, so its lease renewal ticks and
+            // the pool has a thread to shut down.
+            service.startExecution("harness", runtime,
+                    prepared.getExecutionCallId());
+            await(() -> !startedThreadIds(before,
+                    "qwen-runtime-broker-lease-renewal").isEmpty(),
+                    Duration.ofSeconds(10));
+            started.addAll(startedThreadIds(before,
+                    "qwen-runtime-broker-lease-renewal"));
+        } finally {
+            executing.complete(Map.of("executionStatus", "success"));
+            service.close();
+        }
+        await(() -> Thread.getAllStackTraces().keySet().stream()
+                .map(Thread::threadId).noneMatch(started::contains),
+                Duration.ofSeconds(10));
+    }
+
+    private static Set<Long> liveThreadIds(String name) {
+        Set<Long> ids = new HashSet<>();
+        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+            if (name.equals(thread.getName())) {
+                ids.add(thread.threadId());
+            }
+        }
+        return ids;
+    }
+
+    /** The live threads with this name that were not there before. */
+    private static Set<Long> startedThreadIds(Set<Long> before, String name) {
+        Set<Long> live = liveThreadIds(name);
+        live.removeAll(before);
+        return live;
     }
 
     /**
@@ -501,9 +581,13 @@ class Issue13183RegressionTest {
                     first.getRecord().getState());
 
             // Observer B arrives inside the cooldown holding its
-            // pre-settlement snapshot.
+            // pre-settlement snapshot, at the settled record's own version:
+            // the version comparison alone would then prefer B's UNKNOWN
+            // record, so only the "replay a settled cache whole" branch can
+            // keep the terminal answer off a stale record.
             ExecutionReconciliation second;
-            executions.stale = unknownSnapshot;
+            executions.stale = unknownSnapshot.withVersion(
+                    first.getRecord().getVersion());
             try {
                 second = harness.service
                         .observeExecution("harness", harness.runtime,
@@ -563,6 +647,56 @@ class Issue13183RegressionTest {
             }
             assertTrue(second.getRecord().isCancelRequested(),
                     "the fresher of the two UNKNOWN records must be served");
+            assertEquals(cancelled.getVersion(),
+                    second.getRecord().getVersion());
+        }
+    }
+
+    /**
+     * The other arm of the same rule: a cancel that lands after the cached
+     * lookup makes the caller's own re-read the fresher UNKNOWN record, so
+     * the replay must serve that record with the cached worker answer
+     * instead of serving the cache's older record.
+     */
+    @Test
+    void cooledObservationServesACancelThatLandsAfterTheCachedLookup()
+            throws Exception {
+        InMemoryToolExecutionRepository real =
+                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        StaleReadExecutions executions = new StaleReadExecutions(real);
+        try (UnknownObservationHarness harness =
+                new UnknownObservationHarness(executions)) {
+            String executionId = harness.prepared.getExecutionCallId();
+            // A observes first; the cached record carries no cancel.
+            ExecutionReconciliation first = harness.service
+                    .observeExecution("harness", harness.runtime, executionId)
+                    .toCompletableFuture().join();
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    first.getOutcome());
+            assertTrue(!first.getRecord().isCancelRequested());
+
+            // The cancel lands inside the cooldown, after that lookup. It
+            // keeps the record UNKNOWN, so the replay cannot take the
+            // settled-cache branch.
+            ToolExecutionRecord current =
+                    real.findByExecutionCallId(executionId);
+            ToolExecutionRecord cancelled = real.requestCancel(executionId,
+                    current.getVersion());
+            assertNotNull(cancelled);
+            assertTrue(cancelled.isCancelRequested());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    cancelled.getState());
+
+            // B observes with nothing injected: its own re-read is the
+            // fresher record and must win over the cache.
+            ExecutionReconciliation second = harness.service
+                    .observeExecution("harness", harness.runtime, executionId)
+                    .toCompletableFuture().join();
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    second.getOutcome(),
+                    "the cached worker answer is still the answer");
+            assertTrue(second.getRecord().isCancelRequested(),
+                    "a cancel after the cached lookup must stay visible");
             assertEquals(cancelled.getVersion(),
                     second.getRecord().getVersion());
         }
@@ -680,6 +814,16 @@ class Issue13183RegressionTest {
             assertTrue(executions.hasActiveByRuntimeSession(
                     after.getBindingId(), after.getRuntimeGeneration(),
                     "wiring-session"));
+            // The refused release must leave the session's release path
+            // usable: a retry re-runs the transition and answers the same
+            // 409 instead of replaying a half-set release slot.
+            CompletionException retry = assertThrows(
+                    CompletionException.class,
+                    () -> service.release("harness", "wiring-session")
+                            .toCompletableFuture().join());
+            assertTrue(retry.getCause() instanceof RuntimeBrokerException);
+            assertEquals("runtime_session_busy",
+                    ((RuntimeBrokerException) retry.getCause()).getCode());
         } finally {
             service.close();
         }
@@ -689,8 +833,9 @@ class Issue13183RegressionTest {
      * Finding 2 (v3 polling): result polling backs off exponentially from
      * 100ms instead of pinning two repository reads and one worker call at
      * 10/s for the whole window. Gaps are bounded both ways: the doubling
-     * is the backoff, the 2s cap bounds how late a finished result is
-     * picked up, and the per-step upper bounds keep early polls prompt.
+     * is the backoff, the upper bounds keep early polls prompt. The cap
+     * itself is pinned deterministically below, so this test does not have
+     * to wait for it.
      */
     @Test
     void v3ResultPollingBacksOff() throws Exception {
@@ -698,14 +843,12 @@ class Issue13183RegressionTest {
         try (RuntimeBrokerService service = v3Service(transport,
                 Duration.ofMinutes(30))) {
             startV3Execution(service);
-            await(() -> transport.statusV3Nanos.size() >= 7,
-                    Duration.ofSeconds(20));
+            await(() -> transport.statusV3Nanos.size() >= 4,
+                    Duration.ofSeconds(10));
             List<Long> times = transport.statusV3Nanos;
             long firstGap = times.get(1) - times.get(0);
             long secondGap = times.get(2) - times.get(1);
             long thirdGap = times.get(3) - times.get(2);
-            long fifthGap = times.get(5) - times.get(4);
-            long sixthGap = times.get(6) - times.get(5);
             assertTrue(firstGap >= Duration.ofMillis(90).toNanos(),
                     "first retry must double from 100ms: " + firstGap);
             assertTrue(firstGap < Duration.ofSeconds(1).toNanos(),
@@ -718,18 +861,23 @@ class Issue13183RegressionTest {
                     "third retry must double again: " + thirdGap);
             assertTrue(thirdGap < Duration.ofSeconds(3).toNanos(),
                     "third retry must stay prompt: " + thirdGap);
-            // The doubling reaches 1.6s before the cap binds, so the sixth
-            // gap is the first capped one: 2s, not the uncapped 3.2s.
-            assertTrue(fifthGap >= Duration.ofMillis(1_500).toNanos(),
-                    "fifth retry must still double: " + fifthGap);
-            assertTrue(sixthGap >= Duration.ofMillis(1_900).toNanos(),
-                    "the cap must not shorten the backoff below 2s: "
-                            + sixthGap);
-            // The uncapped doubling would schedule 3.2s here; the slack
-            // below that value absorbs scheduler jitter on a loaded runner.
-            assertTrue(sixthGap < Duration.ofMillis(2_900).toNanos(),
-                    "the backoff must stop at the 2s cap: " + sixthGap);
         }
+    }
+
+    /**
+     * The backoff's exact schedule, including the cap: doubling from 100ms
+     * and stopping at 2s, so a finished result is never picked up later
+     * than the cap allows. Asserted on the computation rather than on the
+     * wall clock, which cannot resolve a 2s cap from a 2.5s one without
+     * depending on scheduler jitter.
+     */
+    @Test
+    void v3ResultPollingDelayDoublesToTheCap() {
+        assertEquals(List.of(100L, 200L, 400L, 800L, 1600L, 2000L, 2000L,
+                        2000L),
+                IntStream.rangeClosed(0, 7)
+                        .mapToObj(RuntimeBrokerService::v3PollDelayMillis)
+                        .toList());
     }
 
     /**
@@ -765,9 +913,12 @@ class Issue13183RegressionTest {
 
     /**
      * Medium cluster: a released worker that ignores SIGTERM is destroyed
-     * forcibly after the grace window instead of leaking.
+     * forcibly after the grace window instead of leaking. POSIX-only: on
+     * Windows destroy() terminates outright, so {@code --ignore-term}
+     * cannot wedge a worker and the escalation is unobservable.
      */
     @Test
+    @DisabledOnOs(OS.WINDOWS)
     void releaseEscalatesToForcibleDestroyWhenWorkerIgnoresSigterm()
             throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
@@ -796,9 +947,11 @@ class Issue13183RegressionTest {
 
     /**
      * The same escalation runs from close() (a wedged worker that was never
-     * released), not only from release().
+     * released), not only from release(). POSIX-only, like the release arm
+     * above: Windows has no SIGTERM for {@code --ignore-term} to swallow.
      */
     @Test
+    @DisabledOnOs(OS.WINDOWS)
     void closeEscalatesToForcibleDestroyWhenWorkerIgnoresSigterm()
             throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
@@ -823,8 +976,13 @@ class Issue13183RegressionTest {
 
     /**
      * A provision racing close() is refused by the terminated guard (or,
-     * if it won the lock first, its worker dies with the teardown); it can
-     * never produce an orphan.
+     * if it won the lock first, its worker dies with the teardown), and no
+     * worker is left behind. What this pins dynamically is the guard and
+     * the absence of lingering children. Spawn-and-register atomicity is
+     * structural rather than observable: start() spawns and adds to
+     * {@code starting} inside the {@code lifecycle} lock that
+     * {@code terminateAll()} also holds, so no teardown snapshot can fall
+     * between the two, and nothing outside that lock can interleave there.
      */
     @Test
     void provisionDuringCloseNeverOrphansAWorker() throws Exception {

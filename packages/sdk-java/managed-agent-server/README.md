@@ -390,15 +390,19 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
-Two optional knobs change how the Broker listens and how long it keeps a
-finished v3 result readable:
+Two optional knobs change how the Broker listens and how long it waits for a
+dispatched v3 execution's result:
 
 ```bash
 # Default false: the Broker refuses to bind a non-loopback address. Set it
 # only when the Harness reaches the Broker over a non-loopback interface and
 # that interface is already restricted to trusted peers.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
-# Default 30m, minimum 1s: how long a finished v3 result stays retrievable.
+# Default 30m, minimum 1s: how long the Broker keeps polling the worker for
+# a dispatched v3 execution's result. When the window lapses the execution
+# is marked UNKNOWN instead of polling on, so a value shorter than your
+# longest tool call degrades that call to UNKNOWN. A suffix-less number
+# binds as milliseconds, which startup refuses.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 

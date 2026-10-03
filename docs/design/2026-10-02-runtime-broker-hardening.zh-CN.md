@@ -8,11 +8,13 @@
 
 一次代码审计发现 Runtime Broker 的三个高危缺陷。其一，会话释放决策与"无活跃 execution"检查分属两个事务，仅由进程内锁守护：当两个 Broker 进程共享一个数据库时，可能出现 execution 已准入而 session 被标记为 `RELEASED` 的矛盾态。其二，所有租约续约都跑在与重试、截止围栏和轮询共用的单条调度线程上，且均为同步 JDBC：存储抖动 1-2 秒就会让续约排队错过租约，把健康的 binding 围栏。其三，Broker 的 HTTP 面以明文 HTTP 服务单一全局 Bearer token，并接受非回环监听地址。
 
+同一次变更还修掉两个成本较低的中等缺陷。忽略 SIGTERM 的已释放 worker 从不会被强制销毁，且 ready 握手期间的 JVM 退出会遗弃它。LOST 回收也会在没有预算的情况下反复驱动有界的 100 行恢复批次，因此超过一批容量的代际可能空转。
+
 ## 决策
 
 **单事务释放。** `RuntimeBindingRepository.beginSessionRelease` 把"无活跃 execution"检查移入 RELEASING 转换自身的事务。该转换持有 Session 行的 `FOR UPDATE` 锁——与 `admitExecution` 获取的是同一把锁——因此两条路径在跨进程场景下按会话行互斥。带活跃 execution 的释放以 `runtime_session_busy` 失败；输给 RELEASING 会话的准入以 `runtime_admission_closed` 失败。进程内预检只保留零成本的 `hasActiveControl` 判断；原先那次数据库往返被取消，因为转换自身的检查以相同的 code 和消息回答同一个 409。
 
-**续约线程池。** 续约（binding claim 与 dispatch claim）运行在独立的双线程 `ScheduledThreadPoolExecutor`；协调工作（重试、围栏、轮询）保留单线程调度器。一次卡在 JDBC 调用里的 tick 会占用池中两个线程之一并持有该 claim 的续约监视器，因此它可能拖慢其它续约，但不再拖慢协调工作，且 `close()` 会中断两个线程池、不等待卡住的 tick。v3 结果轮询从 100ms 起指数退避、2s 封顶（该上限约束了已完成结果被取走的最大延迟），窗口可配置（`v3ResultWindow`，下限 1 秒——无后缀的配置值会被解析为毫秒，构造函数现在拒绝这种值）。对 UNKNOWN 执行的自动观测在 1 秒冷却内复用最近一次查询结果，不再把每次轮询穿透到 worker；自身记录已不再是 UNKNOWN 的缓存查询整体回放，两侧都仍为 UNKNOWN 时取 version 更大的一方，因此绝不会把已结算的答案与过期记录拼配。显式 `reconcile=true` 与 mutation 响应（`:start`、`:cancel`）永远不走缓存。
+**续约线程池。** 续约（binding claim 与 dispatch claim）运行在独立的双线程 `ScheduledThreadPoolExecutor`；协调工作（重试、围栏、轮询）保留单线程调度器。一次卡在 JDBC 调用里的 tick 会占用池中两个线程之一并持有该 claim 的续约监视器，因此它可能拖慢其它续约，但不再拖慢协调工作，且 `close()` 会中断两个线程池、不等待卡住的 tick。v3 结果轮询从 100ms 起指数退避、2s 封顶（该上限约束了已完成结果被取走的最大延迟），轮询所处的窗口可配置（`v3ResultWindow`，默认 30 分钟，下限 1 秒——无后缀的配置值会被解析为毫秒，构造函数现在拒绝这种值）；窗口到期后，已派发的执行被标记为 UNKNOWN 而不是无限轮询，因此它是轮询截止期，不是结果保留期。对 UNKNOWN 执行的自动观测在 1 秒冷却内复用最近一次查询结果，不再把每次轮询穿透到 worker；自身记录已不再是 UNKNOWN 的缓存查询整体回放，两侧都仍为 UNKNOWN 时取 version 更大的一方，因此绝不会把已结算的答案与过期记录拼配。显式 `reconcile=true` 与 mutation 响应（`:start`、`:cancel`）永远不走缓存。
 
 **默认回环。** `RuntimeBrokerHttpServer` 拒绝非回环或未解析的绑定地址，除非部署方显式开启（`allow-non-loopback` / `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK`)，因为该面在明文 HTTP 上没有租户级授权。
 

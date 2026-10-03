@@ -215,16 +215,22 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void refusesANonPositiveV3ResultWindowBeforeAnythingIsBuilt()
-            throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setV3ResultWindow(
-                java.time.Duration.ZERO);
+    void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
+        // An absent value binds as null and a suffix-less one as
+        // milliseconds; every shape below the floor must be refused here
+        // rather than degrade each v3 execution later.
+        for (java.time.Duration window : new java.time.Duration[] {
+                null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
+                java.time.Duration.ofMillis(999)}) {
+            ManagedAgentProperties properties = properties();
+            properties.getRuntimeBroker().setV3ResultWindow(window);
 
-        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
-                properties))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("v3 result window");
+            assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                    properties))
+                    .as("window %s", window)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("v3 result window");
+        }
     }
 
     @Test

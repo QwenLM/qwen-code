@@ -58,7 +58,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     // inside this window; sequential observations share the one lookup.
     static final Duration UNKNOWN_LOOKUP_COOLDOWN =
             Duration.ofSeconds(1);
-    /** The smallest v3 result window that can complete a second poll. */
+    /** Floor for {@code v3ResultWindow}: rejects a duration bound as milliseconds. */
     public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =
             Duration.ofMinutes(30);
@@ -188,10 +188,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         this.v3ResultWindow = requireDuration(v3ResultWindow,
                 "v3ResultWindow");
         if (this.v3ResultWindow.compareTo(MIN_V3_RESULT_WINDOW) < 0) {
-            // Below the first poll tick the window cannot complete even one
-            // retry; configuration bindings parse a suffix-less number as
-            // milliseconds, so fail fast rather than silently degrading
-            // every v3 execution to UNKNOWN.
+            // A suffix-less duration config binds as milliseconds, so a
+            // window meant as "30" minutes arrives as 30ms and would
+            // silently degrade every v3 execution to UNKNOWN. Refuse values
+            // below a floor no intended configuration lands under.
             throw new IllegalArgumentException(
                     "v3ResultWindow must be at least "
                             + MIN_V3_RESULT_WINDOW);
@@ -2975,6 +2975,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return result;
     }
 
+    /**
+     * The v3 result-poll backoff: 100ms doubling, capped at 2s so a finished
+     * result is picked up at most one cap late.
+     */
+    static long v3PollDelayMillis(int attempt) {
+        return Math.min(2_000, 100L << Math.min(attempt, 6));
+    }
+
     private void pollV3Result(SessionContext context, ToolExecutionRecord original,
             Instant deadline, CompletableFuture<Map<String, Object>> answer,
             int attempt) {
@@ -3018,10 +3026,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         // Each round costs two repository reads and one worker
                         // call; back off instead of pinning them at 10/s for
-                        // the whole window. The 2s cap bounds how late a
-                        // finished result is picked up.
-                        long delay = Math.min(2_000,
-                                100L << Math.min(attempt, 6));
+                        // the whole window.
+                        long delay = v3PollDelayMillis(attempt);
                         try {
                             scheduler.schedule(() -> pollV3Result(context,
                                     original, deadline, answer, attempt + 1),

@@ -190,11 +190,15 @@ class FakeAttestationWorkerTest {
      * The mirror arm: without {@code --ignore-term} the fake worker's
      * default SIGTERM handler must let destroy() stop it — otherwise the
      * escalation tests prove nothing. The ready line must be read first:
-     * it is written only after the handler is installed, so destroying
-     * earlier would kill the worker through SIGTERM's default disposition
-     * and prove nothing about the handler.
+     * it is written from the listen callback, so it reaches this process
+     * only after the top-level handler installation has run, and
+     * destroying earlier would kill the worker through SIGTERM's default
+     * disposition and prove nothing about the handler. POSIX-only, like the
+     * arm it mirrors: on Windows destroy() terminates outright.
      */
     @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
     void defaultWorkerExitsOnSigterm() throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
         Process worker = start(JSON.writeValueAsBytes(fixtures().get("boot")));
