@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentParameters, Part } from '@google/genai';
+import type {
+  FinishReason,
+  GenerateContentParameters,
+  Part,
+} from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
@@ -43,6 +47,33 @@ export interface RequestContext {
   model: string;
   modalities: InputModalities;
   startTime: number;
+  /**
+   * Effective output-token ceiling sent on the wire (`max_tokens` or a
+   * provider-specific budget key), set by the pipeline once the request is
+   * built. The converter cross-checks it against reported usage before
+   * treating incomplete tool-call JSON as max_tokens truncation
+   * (QwenLM/qwen-code#12970).
+   */
+  maxOutputTokens?: number;
+  /**
+   * Set by the converter when it rewrites a provider-reported finish_reason to
+   * "length" on incomplete tool-call JSON while that chunk's own usage could
+   * not decide whether the response really hit the output limit. The pipeline
+   * requests `stream_options.include_usage`, and under that convention usage
+   * arrives on a *later* `choices: []` chunk, so the parked finish response is
+   * where the delayed evidence first exists: the pipeline settles the rewrite
+   * there, before yielding, and restores the provider's own reason when the
+   * merged totals disprove truncation (QwenLM/qwen-code#12970).
+   *
+   * One-shot: set on this stream's own finish chunk and consumed by
+   * `settleParkedTruncationOverride` before that response is yielded. Nothing
+   * clears it at stream start — a stale park is unreachable only because a
+   * RequestContext is fresh per `executeWithErrorHandling` call and the
+   * streaming executor returns a lazy generator, so no `executeAttempt` retry
+   * can run after the converter has parked one. If that ever changes, this
+   * field needs an explicit per-attempt reset.
+   */
+  pendingTruncationOverride?: { finishReason: FinishReason };
   toolCallParser?: StreamingToolCallParser;
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;
