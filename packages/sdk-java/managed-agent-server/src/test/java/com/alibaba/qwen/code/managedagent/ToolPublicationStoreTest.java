@@ -19,12 +19,19 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +49,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -87,6 +95,9 @@ class ToolPublicationStoreTest {
     private long revision;
     private long sequence;
     private String commitDigest;
+    private WorkspaceCsiReservationStore csiStore;
+    private WorkspaceCsiRegistration csiRegistration;
+    private WorkspaceCsiReservationStore.Reservation csiReservation;
 
     @BeforeEach
     void setup() {
@@ -94,6 +105,13 @@ class ToolPublicationStoreTest {
     }
 
     private void initialize(javax.sql.DataSource source) {
+        initialize(source, false);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace) {
+        revision = 0;
+        sequence = 0;
+        commitDigest = null;
         Flyway.configure().dataSource(source).load().migrate();
         jdbc = new JdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -109,11 +127,36 @@ class ToolPublicationStoreTest {
                 () -> "binding-1");
         executions = new JdbcToolExecutionRepository(source);
         store = newStore(10 * ALLOCATION, 10);
-        var runtime = bindings.findOrCreate(new RuntimeProvisionRequest(
-                new RuntimeScope("tenant-1", "workspace-1", "generation-1", "/workspace", "capability", "workspace"), null));
+        var scope = new RuntimeScope("tenant-1", "workspace-1", csiWorkspace ? "1" : "generation-1", "/workspace",
+                csiWorkspace ? "sha256:" + "a".repeat(64) : "capability", csiWorkspace ? "session" : "workspace");
+        if (csiWorkspace) {
+            csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
+            csiRegistration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
+                    "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
+                    "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
+            csiStore.register(csiRegistration);
+        }
+        var runtime = bindings.findOrCreate(csiWorkspace
+                ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", csiRegistration.storageId())
+                : new RuntimeProvisionRequest(scope, null));
         runtime = bindings.claimOperation(runtime.getBindingId(), "owner", java.time.Duration.ofMinutes(1));
-        assertThat(bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now())))
-                .isNotNull();
+        if (csiWorkspace) {
+            csiReservation = csiStore.reserve(csiRegistration, bindings, runtime, UUID.randomUUID().toString());
+            var seed = runtime.getProvisionSeed();
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            runtime = bindings.compareAndSet(runtime, runtime.withAttestation(lease,
+                    new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("fixture", "local-db")),
+                    Instant.now(), Instant.now()));
+            var nativeSessions = new JdbcRuntimeSessionRepository(source);
+            var acquiring = bindings.admitSession(nativeSessions, new RuntimeSessionRecord(
+                    new RuntimeSession("session-1", "runtime-1", "bootstrap", scope), "binding-1", 1,
+                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            nativeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        } else {
+            runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
+        }
+        assertThat(runtime).isNotNull();
         binding = JSON.createObjectNode().put("publication", ToolPublicationContract.PROTOCOL)
                 .put("publicationId", "pub-1").put("turnId", "turn-1").put("executionCallId", "execution-1")
                 .put("modelCallId", "model-1").put("runtimeBindingId", "binding-1").put("bindingGeneration", "1")
@@ -162,6 +205,185 @@ class ToolPublicationStoreTest {
         source.setURL("jdbc:h2:mem:publication-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000");
         return source;
+    }
+
+    @ParameterizedTest
+    @ValueSource(doubles = {0.5, 1.0, 0.0, -0.0})
+    void csiOriginalProducerFinishesBlockedCaptureAndCreatesItsFirstCandidateAfterSeal(double score) {
+        var execution = authorizeCsi();
+        retireCsi();
+        var objects = new java.util.HashMap<String, byte[]>();
+        var data = csiData(objects);
+        byte[] output = "original".getBytes(StandardCharsets.UTF_8);
+        data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "segment-0", "stdout", 0, output, digest("original"));
+        JsonNode terminal = blockedTerminal();
+        ((ObjectNode) terminal.path("responseParts").get(0)).put("score", score);
+        data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+                terminal.toString().getBytes(StandardCharsets.UTF_8));
+        assertThat(data.finishedForBroker(execution).path("result")).isEqualTo(terminal);
+        execution = executions.compareAndSet(execution, execution.withResult(
+                JSON.convertValue(terminal, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}),
+                0, Instant.now()), "dispatcher", execution.getDispatchGeneration());
+        assertThat(execution.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE slot_key = 'admission'",
+                Integer.class)).isZero();
+        JsonNode outcome = blockedOutcome(terminal);
+        JsonNode candidate = data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
+                WRITER_TOKEN, outcome);
+        assertThat(data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
+                WRITER_TOKEN, outcome)).isEqualTo(candidate);
+        assertThat(csiStore.inspect(csiRegistration).phase()).isEqualTo("DRAINING");
+        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM qwen_runtime_binding_slot", String.class))
+                .isEqualTo("binding-1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0.6", "0.50000000000000000001"})
+    void csiCandidateRefusesAChangedSettledNumericResult(String score) {
+        var execution = authorizeCsi();
+        retireCsi();
+        var data = csiData(new java.util.HashMap<>());
+        JsonNode terminal = blockedTerminal();
+        data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+                terminal.toString().getBytes(StandardCharsets.UTF_8));
+        Map<String, Object> changed = JSON.convertValue(terminal,
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        changed.put("responseParts", List.of(Map.of("score", new java.math.BigDecimal(score))));
+        execution = executions.compareAndSet(execution, execution.withResult(changed, 0, Instant.now()),
+                "dispatcher", execution.getDispatchGeneration());
+        assertThat(execution.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+        var before = jdbc.queryForMap("SELECT * FROM qwen_tool_publication");
+        assertThatThrownBy(() -> data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
+                WRITER_TOKEN, blockedOutcome(terminal)))
+                .hasMessageContaining("Original settled Broker result conflicts");
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication")).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE slot_key = 'admission'",
+                Integer.class)).isZero();
+    }
+
+    @Test
+    void csiSettledProducerOnlyReplaysItsOriginalSucceededOperation() {
+        var execution = authorizeCsi();
+        retireCsi();
+        var data = csiData(new java.util.HashMap<>());
+        byte[] output = "original".getBytes(StandardCharsets.UTF_8);
+        JsonNode receipt = data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "segment-0", "stdout", 0, output, digest("original"));
+        JsonNode terminal = blockedTerminal();
+        JsonNode finish = data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+                terminal.toString().getBytes(StandardCharsets.UTF_8));
+        executions.compareAndSet(execution, execution.withResult(
+                JSON.convertValue(terminal, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}),
+                0, Instant.now()), "dispatcher", execution.getDispatchGeneration());
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication_operation ORDER BY operation_id");
+        var publication = jdbc.queryForMap("SELECT * FROM qwen_tool_publication");
+        assertThat(data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "segment-0", "stdout", 0, output, digest("original"))).isEqualTo(receipt);
+        assertThat(data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+                terminal.toString().getBytes(StandardCharsets.UTF_8))).isEqualTo(finish);
+        assertThatThrownBy(() -> data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "new-operation", "stdout", 0, output, digest("original"))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> data.prefix(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "new-prefix", "stdout")).isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication_operation ORDER BY operation_id")).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication")).isEqualTo(publication);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"marker", "journal", "unknown", "grant"})
+    void csiTailRefusesMissingOrClosedOriginalAuthority(String damage) {
+        var execution = authorizeCsi();
+        retireCsi();
+        if ("marker".equals(damage)) {
+            jdbc.update("UPDATE qwen_tool_execution SET authorized_dispatch_generation = NULL, authorized_binding_version = NULL");
+        } else if ("journal".equals(damage)) {
+            jdbc.update("DELETE FROM managed_workspace_csi_retirement");
+        } else if ("unknown".equals(damage)) {
+            executions.compareAndSet(execution, execution.withUnknown(), "dispatcher", execution.getDispatchGeneration());
+        } else {
+            jdbc.update("UPDATE qwen_tool_publication SET expires_at = 0");
+        }
+        var data = csiData(new java.util.HashMap<>());
+        var before = jdbc.queryForMap("SELECT * FROM qwen_tool_publication");
+        assertThatThrownBy(() -> data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "segment-0", "stdout", 0, new byte[] {1}, null))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication")).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_operation", Integer.class)).isZero();
+        assertThat(csiStore.inspect(csiRegistration).phase()).isEqualTo("DRAINING");
+    }
+
+    @Test
+    void csiSealRefusesNewGrantReserveRenewAndInstallation() {
+        var execution = authorizeCsi();
+        retireCsi();
+        var before = jdbc.queryForMap("SELECT * FROM qwen_tool_publication");
+        assertThatThrownBy(this::reserve).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication")).isEqualTo(before);
+    }
+
+    @Test
+    void csiStagedProducerRefusesAmbientTransactionBeforeObjectWrites() {
+        authorizeCsi();
+        var objects = new java.util.HashMap<String, byte[]>();
+        var data = csiData(objects);
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> data.publishSegment(
+                binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0,
+                new byte[] {1}, null))).hasMessageContaining("ambient transaction");
+        assertThat(objects).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_operation", Integer.class)).isZero();
+    }
+
+    private ToolExecutionRecord authorizeCsi() {
+        initialize(publicationDataSource(), true);
+        reserve();
+        var prepared = executions.findByExecutionCallId("execution-1");
+        assertThat(store.verifyDispatch(prepared, "pub-1", PUBLICATION_TOKEN)).isEqualTo(binding);
+        var claim = executions.claimDispatch("execution-1", "dispatcher", Duration.ofMinutes(1));
+        return bindings.authorizeDispatch(new JdbcRuntimeSessionRepository(manager.getDataSource()), executions,
+                claim, "dispatcher", claim.getDispatchGeneration());
+    }
+
+    private void retireCsi() {
+        csiStore.beginRetirement(csiRegistration, bindings, bindings.findById("binding-1"), csiReservation,
+                UUID.randomUUID().toString());
+    }
+
+    private ToolPublicationDataStore csiData(Map<String, byte[]> objects) {
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) { objects.putIfAbsent(key, bytes.clone()); }
+            @Override
+            public InputStream open(String key) { return new ByteArrayInputStream(objects.get(key)); }
+            @Override
+            public void requireUnversioned() { }
+        };
+        return new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+    }
+
+    private static JsonNode blockedTerminal() {
+        ObjectNode result = JSON.createObjectNode().put("executionStatus", "success");
+        result.putArray("responseParts").addObject().put("score", 0.5);
+        result.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
+                .put("captureReason", "storage_failed").put("previewTruncated", false)
+                .put("deliveryStatus", "pending").putNull("manifest"));
+        return result;
+    }
+
+    private static JsonNode blockedOutcome(JsonNode terminal) {
+        ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
+        outcome.set("envelope", terminal);
+        ObjectNode history = JSON.createObjectNode().put("messageId", UUID.randomUUID().toString())
+                .put("timestamp", Instant.now().toString()).put("model", "fixture");
+        history.putArray("parts");
+        outcome.set("history", history);
+        return outcome;
     }
 
     @Test

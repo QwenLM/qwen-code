@@ -14,6 +14,16 @@ public interface RuntimeBindingRepository {
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);
 
+    /** Authorizes DISPATCHING to EXECUTING under the parent admission lock.
+     * Native repositories retain the locked parent version and dispatch generation.
+     * A dispatch coordinator claim alone grants no execution permission. */
+    default ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long dispatchGeneration) {
+        throw new RuntimeBrokerException(501, "runtime_dispatch_admission_unavailable",
+                "Runtime repository does not support atomic dispatch admission", false);
+    }
+
     /** Performs one bounded recovery transaction under the exact generation
      * claim. Returns LOST while more work or physical stop proof is needed. */
     RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
