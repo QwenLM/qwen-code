@@ -3,6 +3,15 @@
     <string name="app_name">Qwen Code</string>
     <string name="file_picker_unavailable">No document picker is available. Enable a file manager and try again.</string>
     <string name="retry">Retry</string>
+    <string name="microphone_title">Allow microphone access?</string>
+    <string name="microphone_consent">%1$s wants to use your microphone. Audio is handled by this daemon and its configured voice service.\n\nWhen this app is no longer visible, this connection will close, even after recording stops. Changing system settings can also restart the app and close this connection. Unsent text may be lost.</string>
+    <string name="microphone_allow">Enable microphone</string>
+    <string name="microphone_files_title">Reconnect before using files?</string>
+    <string name="microphone_files_reconnect">This connection has microphone access. Reconnect first, then open or save the file again. Reconnecting stops microphone access and may discard unsent text. No file picker has been opened.</string>
+    <string name="keep_editing">Keep editing</string>
+    <string name="reconnect">Reconnect</string>
+    <string name="microphone_closed">Microphone connection closed</string>
+    <string name="microphone_reconnect">This microphone-enabled connection was closed. Reconnect to continue; unsent page state may not have been saved.</string>
     <string name="connections">Connections</string>
     <string name="development_notice">Development client. Per-device credential revocation is not yet available.</string>
     <string name="no_profiles">Add a daemon connection to get started.</string>

@@ -43,6 +43,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -188,6 +189,13 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  /**
+   * Set to true when this call's arguments arrived unterminated and were
+   * repaired into shape, but the output token limit was *not* what cut them.
+   * The data-loss guard needs this fact; the user-visible wording needs the
+   * distinction. See `incomplete-tool-call-args.ts`.
+   */
+  hadIncompleteArguments?: boolean;
   goalContext?: GoalTurnPermit;
   /**
    * Provenance of this request. Only set by in-process callers; absent on
@@ -910,6 +918,9 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(toolCallArgumentsWereIncomplete(fnCall)
+        ? { hadIncompleteArguments: true }
+        : {}),
       ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 

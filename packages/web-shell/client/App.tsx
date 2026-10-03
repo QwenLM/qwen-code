@@ -333,7 +333,11 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
+import {
+  isAgentCollaborationEnabledForWorkspace,
+  workspaceLabel,
+  workspaceLabelForCwd,
+} from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -388,6 +392,7 @@ import {
   decodeVisionModelForPicker,
   encodeVisionModelForSetting,
   extractBareModelId,
+  resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
@@ -5005,9 +5010,10 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
-  const collaborationAvailable =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
-    true;
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    legacyWorkspaceContextCwd,
+  );
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -9206,7 +9212,10 @@ export function App({
     }
   });
   const collaborationThreadId =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') &&
+    isAgentCollaborationEnabledForWorkspace(
+      workspace.capabilities,
+      collaborationThread?.cwd,
+    ) &&
     collaborationThread !== undefined &&
     collaborationThread.server === workspace.baseUrl
       ? collaborationThread.id
@@ -9223,7 +9232,7 @@ export function App({
     );
   }, []);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'tasks' | 'new-agent';
+    view: 'agents' | 'tasks' | 'runtime' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
   useEffect(() => {
@@ -12011,7 +12020,8 @@ export function App({
     enabled: projectFeaturesAvailable,
   });
   const providersEnabled =
-    projectFeaturesAvailable && activePanel === 'settings';
+    projectFeaturesAvailable &&
+    (activePanel === 'settings' || modelDialogMode === 'fast');
   const providersState = useProviders({
     autoLoad: providersEnabled,
     enabled: providersEnabled,
@@ -12229,12 +12239,19 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    // The CLI picker may persist `authType:id\0<baseUrl>` (#12760); decode
-    // like the vision sibling so the dialog highlights the pinned row
-    // instead of falling to the list head. The persisted value keeps the
-    // suffix — this is a read-side strip only.
     if (typeof value !== 'string' || !value.trim()) return undefined;
-    return decodeVisionModelForPicker(value.trim());
+    const models = providersState.providers.flatMap((provider) =>
+      provider.models.map((model) => ({
+        id: model.modelId,
+        baseModelId: model.baseModelId,
+        authType: provider.authType,
+        baseUrl: model.baseUrl,
+      })),
+    );
+    return resolveFastModelForPicker(
+      value.trim(),
+      models.length ? models : (connection.models ?? []),
+    );
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -18249,24 +18266,6 @@ export function App({
     (modelId: string) => {
       if (!projectFeaturesAvailable) return;
       if (!workspaceContextActive) {
-        // This picker cannot distinguish same-id rows by endpoint, so writing
-        // the bare id would erase a live `authType:id\0<baseUrl>` pin the CLI
-        // picker made (#12760). Confirming the already-pinned row leaves the
-        // setting untouched.
-        const existingFast = readScopedModelSetting(
-          workspaceSettings,
-          modelSettingScope,
-          'fastModel',
-        );
-        if (
-          typeof existingFast === 'string' &&
-          existingFast.includes('\0') &&
-          extractBareModelId(
-            decodeVisionModelForPicker(existingFast.trim()),
-          ) === modelId
-        ) {
-          return;
-        }
         void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
           .then(() => {
             void reloadWorkspaceSettings().catch((error: unknown) => {
@@ -18289,10 +18288,6 @@ export function App({
         blockCommand();
         return;
       }
-      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
-      // ACP format. The model picker strips the (authType) suffix before
-      // calling this handler.
-      //
       // Close the panel before sending: unlike the vision/voice pickers (silent
       // setWorkspaceSetting), `/model --fast` runs a real turn whose response
       // lands in the message list. With the panel open the chat is hidden, so
@@ -18345,7 +18340,6 @@ export function App({
       projectFeaturesAvailable,
       setWorkspaceSetting,
       workspaceContextActive,
-      workspaceSettings,
     ],
   );
 
@@ -18707,9 +18701,7 @@ export function App({
     [],
   );
   const agentChatEntry = useAgentChatEntry({
-    enabled: Boolean(
-      workspace.capabilities?.features?.includes('agent_collaboration_v1'),
-    ),
+    enabled: collaborationAvailable,
     getContext: getMentionContext,
     t,
     cwd: legacyWorkspaceContextCwd,
@@ -20579,6 +20571,7 @@ export function App({
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
                         key={agentsNav.request}
+                        workspaceCwd={legacyWorkspaceContextCwd}
                         initialAgentView={agentsNav.view}
                         onOpenThreadChat={(threadId, cwd) => {
                           setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });

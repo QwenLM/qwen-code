@@ -222,6 +222,27 @@ export function authorizeManagedRuntime(
   };
 }
 
+/**
+ * The response header in which a v2 tool route names the worker's
+ * incarnation. No request carries the incarnation, so a process that took
+ * the port of a worker that exited cannot answer as that worker.
+ */
+export const MANAGED_RUNTIME_INCARNATION_HEADER =
+  'X-Qwen-Managed-Runtime-Incarnation';
+
+/** Names the worker's incarnation on every answer to an authorized request. */
+export function nameManagedRuntimeIncarnation(
+  identity: Pick<ManagedRuntimeAttestationIdentity, 'runtimeIncarnation'>,
+): RequestHandler {
+  return (_req, res, next): void => {
+    res.setHeader(
+      MANAGED_RUNTIME_INCARNATION_HEADER,
+      identity.runtimeIncarnation,
+    );
+    next();
+  };
+}
+
 function handleAttestation(
   identity: ManagedRuntimeAttestationIdentity,
   responseJson: string,

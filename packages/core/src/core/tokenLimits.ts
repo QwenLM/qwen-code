@@ -1,3 +1,5 @@
+import { lookupModelCatalog } from '../models/model-catalog.js';
+
 type Model = string;
 type TokenCount = number;
 
@@ -10,6 +12,11 @@ export type TokenLimitType = 'input' | 'output';
 
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
+
+// Below this window, the 85% auto-compaction threshold can leave less than
+// the 4K minimum output budget. Keep those catalog values from becoming
+// automatic defaults; existing family tables remain the fallback.
+export const MIN_AUTO_DETECTED_CONTEXT_WINDOW: TokenCount = 32_000;
 
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
 
@@ -329,6 +336,15 @@ function findTokenLimit(
   type: TokenLimitType = 'input',
 ): TokenCount | undefined {
   const norm = normalize(model);
+  const catalog = lookupModelCatalog(norm);
+  const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
+  const usableCatalogContext =
+    type === 'input' &&
+    fromCatalog !== undefined &&
+    fromCatalog >= MIN_AUTO_DETECTED_CONTEXT_WINDOW;
+  if (usableCatalogContext) {
+    return fromCatalog;
+  }
   const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
 
   for (const [regex, limit] of patterns) {
@@ -337,16 +353,12 @@ function findTokenLimit(
     }
   }
 
-  return undefined;
+  return type === 'input' ? undefined : fromCatalog;
 }
 
 /**
- * Check if a model has an explicitly defined output token limit.
- * This distinguishes between models with known limits in OUTPUT_PATTERNS
- * and unknown models that would fallback to DEFAULT_OUTPUT_TOKEN_LIMIT.
- *
- * @param model - The model name to check
- * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
+ * Whether a curated output limit caps explicit requests. Catalog-only limits
+ * supply defaults, but must not clamp a user's endpoint-specific override.
  */
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
