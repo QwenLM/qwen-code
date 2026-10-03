@@ -3,12 +3,14 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
@@ -775,6 +777,84 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void aRenameFailureThatIsNotABrokerRefusalStillRetiresItsCommand() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        // A Harness that lost the Session answers the rename with a 4xx,
+        // which the client surfaces as a DaemonHttpException — a permanent
+        // failure, but not a broker refusal.
+        DaemonHttpException lost = mock(DaemonHttpException.class);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    private int renames;
+
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                        if (renames++ == 0) {
+                            throw lost;
+                        }
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), null, harness, registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-a", "rename-1", sessionId, "first"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                            assertThat(error.getCode())
+                                    .isEqualTo("hosted_harness_unavailable");
+                        }));
+        // The answered mutation retired its command row too, so a fresh key
+        // is admitted instead of wedging on session_operation_active.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_command WHERE tenant_id = ?"
+                        + " AND session_id = ? AND command_status = 'PENDING'",
+                Integer.class, tenant, sessionId)).isZero();
+
+        transaction.executeWithoutResult(status -> service.renameSession(
+                tenant, "actor-a", "rename-2", sessionId, "second"));
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("second");
+    }
+
+    @Test
     void enabledCreationRefusesPolicyDriftAndAnotherTenantsMount() {
         String tenant = "tenant-" + UUID.randomUUID();
         String otherTenant = "tenant-" + UUID.randomUUID();
@@ -1189,64 +1269,6 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(second.replayed()).isTrue();
         assertThat(second.body().metadata())
                 .containsEntry("title", "renamed title");
-    }
-
-    @Test
-    void permanentNonBrokerRenameFailureRetiresItsCommandRow() {
-        String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = boundSession(tenant);
-        // The connector's approval-mode IllegalStateException is a permanent
-        // failure that is not a RuntimeBrokerException: it must still retire
-        // the PENDING row, or every fresh-key rename wedges on
-        // session_operation_active for the Session's life.
-        UnavailableHarnessConnector harness =
-                new UnavailableHarnessConnector() {
-                    private int attaches;
-
-                    @Override
-                    public boolean isAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean isWorkspaceFilesAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public Attachment createOrLoad(String tenantId,
-                            String sessionId, boolean loadExisting) {
-                        if (attaches++ == 0) {
-                            throw new IllegalStateException(
-                                    "Hosted Harness did not confirm the Session approval mode");
-                        }
-                        return new Attachment("boot");
-                    }
-
-                    @Override
-                    public void rename(String tenantId, String sessionId,
-                            String title) {
-                    }
-                };
-        ManagedAgentService service = boundServiceWith(harness);
-
-        assertThatThrownBy(() -> service.renameSession(tenant, "actor-a",
-                "rename-1", sessionId, "first"))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-                    assertThat(error.getCode())
-                            .isEqualTo("hosted_harness_unavailable");
-                });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_command WHERE tenant_id = ? AND"
-                + " command_status = 'PENDING'", Integer.class, tenant))
-                .isZero();
-
-        var retried = service.renameSession(tenant, "actor-a", "rename-2",
-                sessionId, "second");
-        assertThat(retried.replayed()).isFalse();
-        assertThat(retried.body().metadata())
-                .containsEntry("title", "second");
     }
 
     private ManagedAgentService boundServiceWithWorkingHarness() {
