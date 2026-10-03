@@ -5548,6 +5548,10 @@ export class CoreToolScheduler {
             this.hookOwners.get(callId),
           ),
         (r) =>
+          // This mapper only feeds the OTel span's metadata; the actual
+          // gate below reads `preHookResult.shouldProceed` straight off
+          // `r`, unmapped, so a fail-closed deny (r.shouldProceed === false)
+          // always blocks the call regardless of what is recorded here.
           r.hookError
             ? {
                 success: false,
@@ -5557,6 +5561,12 @@ export class CoreToolScheduler {
                 // hookError). Surface that on the span too so operators
                 // see the same allow-on-failure semantics the runtime
                 // applies (#4321 review-2 DeepSeek Suggestion).
+                //
+                // A `failMode: "closed"` hook's own transport failure is
+                // NOT reported through `hookError`: HookRunner turns it
+                // into an explicit deny decision instead, so it takes the
+                // `else` branch below with shouldProceed:false
+                // (qwen-code#12457).
                 shouldProceed: true,
               }
             : {

@@ -85,6 +85,32 @@ export enum HookPhase {
 export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
 
 /**
+ * How a command hook's own TRANSPORT failure (a non-zero/non-2 exit code,
+ * a timeout, output that looks like JSON but does not parse, or a spawn
+ * error) is reported to the caller. `'open'` (the default) is today's
+ * behaviour: the failure is treated as a non-blocking error and the tool
+ * call proceeds. `'closed'` treats the same failure as a `deny`, for a hook
+ * whose whole purpose is to block dangerous tool calls and that must not go
+ * silently missing because of a missing dependency, a slow box, or a typo in
+ * its own JSON output.
+ *
+ * This only changes how a TRANSPORT failure is reported. A hook that runs
+ * and returns an EXPLICIT decision as valid JSON (`{"decision": "allow"}` /
+ * `"deny"` / ...) is honoured unchanged in both modes — that is success, not
+ * a transport failure. Exit code 1's existing plain-text convention is NOT
+ * such an explicit decision: it is today's non-blocking-error convention,
+ * so it IS a transport failure and DOES deny under `'closed'`, the same as
+ * a timeout, unparsable JSON, or a spawn error.
+ *
+ * A hook that already printed a valid, explicit decision and THEN exited
+ * non-zero or was killed by a signal keeps that decision (a hook that
+ * explicitly allowed and then crashed is treated as having allowed) —
+ * `'closed'` only steps in when the hook produced no explicit decision at
+ * all.
+ */
+export type HookFailMode = 'open' | 'closed';
+
+/**
  * Hook configuration entry for command hooks
  */
 export interface CommandHookConfig {
@@ -99,6 +125,13 @@ export interface CommandHookConfig {
   shell?: 'bash' | 'powershell';
   /** Custom status message to display while hook is executing */
   statusMessage?: string;
+  /**
+   * Opt-in: treat a transport failure of this hook (non-blocking exit code,
+   * timeout, unparsable JSON stdout, or a spawn error) as `deny` instead of
+   * the default `allow`. Absent or `'open'` reproduces today's behaviour
+   * exactly. See {@link HookFailMode}.
+   */
+  failMode?: HookFailMode;
 }
 
 /**

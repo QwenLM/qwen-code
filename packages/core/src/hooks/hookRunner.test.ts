@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { HookRunner } from './hookRunner.js';
+import { HookAggregator } from './hookAggregator.js';
 import {
   HookEventName,
   HookType,
@@ -20,6 +21,7 @@ import type {
   CommandHookConfig,
   HookConfig,
   HookInput,
+  PreToolUseHookOutput,
   UserPromptExpansionInput,
   UserPromptSubmitInput,
 } from './types.js';
@@ -421,6 +423,609 @@ describe('HookRunner', () => {
 
       expect(result.error?.message).toBe('Hook killed by signal');
       expect(result.outcome).toBe('non_blocking_error');
+    });
+  });
+
+  // qwen-code#12457: a `failMode: "closed"` PreToolUse hook must deny the
+  // tool call when ITS OWN transport fails, instead of silently allowing
+  // (today's fail-open default, still exercised by the `failMode` absent
+  // / "open" regression tests below).
+  describe('failMode: "closed"', () => {
+    const closedHookConfig: HookConfig = {
+      type: HookType.Command,
+      command: 'guard-dangerous-tools',
+      name: 'my-security-hook',
+      source: HooksConfigSource.Project,
+      failMode: 'closed',
+    };
+
+    it('denies when the hook exits with a non-blocking error (exit 1) and printed a reason', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(1, '', 'boom'));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('failed closed');
+      expect(result.output?.reason).toContain('boom');
+    });
+
+    it('denies when the hook exits with a non-blocking error and printed nothing at all', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(1, '', ''));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('exited with code 1');
+    });
+
+    it('denies when stdout looks like JSON but fails to parse', async () => {
+      const malformed = '{"decision": "deny",}';
+      mockSpawn.mockImplementation(() => createMockProcess(0, malformed));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('failed closed');
+      expect(result.success).toBe(false);
+    });
+
+    // qwen-code#12457 follow-up (DeepSeek #2/#3, GPT #3): the invalid-JSON
+    // detection above only caught stdout that STARTS with '{'. Bare JSON
+    // values, an empty object, and malformed JSON preceded by ordinary log
+    // lines all used to sail through as an implicit allow even under
+    // failMode: "closed". These three prove the widened rule closes that.
+    it('denies when stdout is valid JSON but not a HookOutput object (bare array)', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, '[]'));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('not a HookOutput object');
+      expect(result.output?.reason).toContain('an array');
+    });
+
+    it('denies when stdout is a JSON object carrying no verdict (empty object)', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, '{}'));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('carrying no verdict');
+    });
+
+    it('denies on a SUCCESSFUL exit when stdout is unparsable and does not start with "{" (log line + truncated JSON)', async () => {
+      // exit 0: proves the fix is a content signal, not an exit-code one —
+      // this hook considers itself to have run fine, but its output still
+      // clearly attempted (and failed) to emit a JSON decision.
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, 'debug\n{"decision":', ''),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('looks like broken JSON');
+    });
+
+    it('regression: an ordinary plain-text error on exit 1 keeps its own specific reason (not swallowed by the broken-JSON path)', async () => {
+      // "boom" contains no '{' at all, so it must NOT be caught by the
+      // HOOK_JSON_OBJECT_FRAGMENT heuristic above — it still denies (via
+      // the existing exit-1 plain-text convention), but with the more
+      // specific, pre-existing reason that names the actual hook text.
+      mockSpawn.mockImplementation(() => createMockProcess(1, '', 'boom'));
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain(
+        'exited with a non-blocking error',
+      );
+      expect(result.output?.reason).toContain('boom');
+    });
+
+    // Regression: the widened "unparsable-but-JSON-shaped output denies"
+    // rule is a content signal (HOOK_JSON_OBJECT_FRAGMENT), not an
+    // exit-code one — ordinary diagnostic prose that never looks like a
+    // broken `{"..."` fragment must stay unaffected, on any exit code, in
+    // either mode.
+    it('regression: still allows plain, non-JSON stdout on a successful exit even under failMode "closed"', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, 'hook finished: nothing to report'),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('allow');
+    });
+
+    it('regression: still allows bare JSON array / empty object stdout when failMode is absent (default)', async () => {
+      const openHookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'guard-dangerous-tools',
+        name: 'my-security-hook',
+        source: HooksConfigSource.Project,
+      };
+
+      mockSpawn.mockImplementation(() => createMockProcess(0, '[]'));
+      const arrayResult = await hookRunner.executeHook(
+        openHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(arrayResult.output?.decision).toBe('allow');
+
+      mockSpawn.mockImplementation(() => createMockProcess(0, '{}'));
+      const emptyObjectResult = await hookRunner.executeHook(
+        openHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      // Unchanged pre-existing behaviour: an empty object passes straight
+      // through as `output`, with no decision — implicit allow downstream.
+      expect(emptyObjectResult.output).toEqual({});
+    });
+
+    it('denies when the process fails to spawn', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      mockProcess.emit('error', new Error('ENOENT: node not found'));
+      const result = await resultPromise;
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('ENOENT: node not found');
+    });
+
+    it('denies when the process is killed by a signal (OOM killer, a supervisor, a crash — not our own timeout or an abort)', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      // exitCode: null is how Node reports a process that was terminated by
+      // a signal this runner did not send (no timeout armed, no abort
+      // signal passed in below).
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('killed by a signal');
+    });
+
+    it('denies when the hook times out', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      vi.useFakeTimers();
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === -mockProcess.pid && signal === 0) {
+          throw Object.assign(new Error('no such process'), {
+            code: 'ESRCH',
+          });
+        }
+        return true;
+      });
+
+      const resultPromise = hookRunner.executeHook(
+        { ...closedHookConfig, timeout: 0.1 },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.outcome).toBe('timeout');
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('my-security-hook');
+      expect(result.output?.reason).toContain('timed out after 0.1s');
+    });
+
+    it('does not deny on a user-initiated abort (only a real timeout fails closed)', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+      vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (target === -mockProcess.pid && signal === 0) {
+          throw Object.assign(new Error('no such process'), {
+            code: 'ESRCH',
+          });
+        }
+        return true;
+      });
+      const controller = new AbortController();
+
+      const resultPromise = hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      controller.abort();
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.outcome).toBe('cancelled');
+      expect(result.output).toBeUndefined();
+    });
+
+    // Regression: absent / explicit "open" must reproduce today's exact
+    // fail-open behaviour — the whole point of an additive, opt-in flag.
+    it('regression: still allows on exit 1 when failMode is absent (default)', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(1, '', 'boom'));
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'guard-dangerous-tools',
+          name: 'my-security-hook',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('allow');
+    });
+
+    it('regression: still allows (no output) on a spawn error when failMode is explicitly "open"', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        { ...closedHookConfig, failMode: 'open' },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      mockProcess.emit('error', new Error('ENOENT: node not found'));
+      const result = await resultPromise;
+
+      expect(result.output).toBeUndefined();
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('regression: still allows (no output) when killed by a signal and failMode is absent (default)', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'guard-dangerous-tools',
+          name: 'my-security-hook',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.output).toBeUndefined();
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error?.message).toBe('Hook killed by signal');
+    });
+
+    // qwen-code#12457 GLM Q3: the commit message asserts a fail-closed deny
+    // "flows through the existing hook aggregation/merge pipeline unchanged
+    // and is caught by the existing isDenied() check" — nobody had tested
+    // that claim with more than one matching hook. Prove it here: a
+    // failMode "closed" hook whose transport fails must still deny the
+    // call even when a second, perfectly healthy hook explicitly allows
+    // (most-restrictive wins — the same guarantee PR #12689 established
+    // for permissionDecision ranking).
+    it('multi-hook: a failMode "closed" transport failure denies even when another hook explicitly allows', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(1, '', ''));
+      const closedResult = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(closedResult.output?.decision).toBe('deny');
+
+      mockSpawn.mockImplementationOnce(() =>
+        createMockProcess(0, JSON.stringify({ decision: 'allow' })),
+      );
+      const permissiveHookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'always-allow',
+        name: 'permissive-hook',
+        source: HooksConfigSource.Project,
+      };
+      const allowResult = await hookRunner.executeHook(
+        permissiveHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(allowResult.output?.decision).toBe('allow');
+
+      // This is the exact aggregation step firePreToolUseEvent runs in
+      // production (hookEventHandler.ts -> HookAggregator).
+      const aggregated = new HookAggregator().aggregateResults(
+        [closedResult, allowResult],
+        HookEventName.PreToolUse,
+      );
+      const finalOutput = aggregated.finalOutput as PreToolUseHookOutput;
+
+      expect(finalOutput.isDenied()).toBe(true);
+      expect(finalOutput.getPermissionDecisionReason()).toContain(
+        'my-security-hook',
+      );
+      expect(finalOutput.getPermissionDecisionReason()).toContain(
+        'failed closed',
+      );
+    });
+
+    // Review follow-up on #12875: the test above proves the fail-closed
+    // deny survives a competitor that answers with the *legacy*
+    // `decision: "allow"` field. It does not cover the competitor shape
+    // that actually wins the merge - `hookSpecificOutput.permissionDecision`
+    // - because PreToolUseHookOutput.getPermissionDecision() reads
+    // hookSpecificOutput first and HookAggregator ranks most-restrictive
+    // only among hooks that participate in that field. A denial that
+    // carries `decision: "deny"` alone never enters the ranking, so a
+    // single healthy permissive hook could overturn it. That is precisely
+    // the outcome failMode "closed" exists to prevent.
+    it('multi-hook: a failMode "closed" transport failure denies even when another hook allows via hookSpecificOutput.permissionDecision', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(1, '', ''));
+      const closedResult = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(closedResult.output?.decision).toBe('deny');
+
+      mockSpawn.mockImplementationOnce(() =>
+        createMockProcess(
+          0,
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              permissionDecisionReason: 'healthy hook says this tool is fine',
+            },
+          }),
+        ),
+      );
+      const permissiveHookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'always-allow',
+        name: 'permissive-hook',
+        source: HooksConfigSource.Project,
+      };
+      const allowResult = await hookRunner.executeHook(
+        permissiveHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      const aggregated = new HookAggregator().aggregateResults(
+        [closedResult, allowResult],
+        HookEventName.PreToolUse,
+      );
+      const finalOutput = aggregated.finalOutput as PreToolUseHookOutput;
+
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.isDenied()).toBe(true);
+      expect(finalOutput.getPermissionDecisionReason()).toContain(
+        'failed closed',
+      );
+    });
+
+    // qwen-code#12875 review round 2, R1-2: the recognised-field check
+    // tested KEY PRESENCE, and `reason` / `systemMessage` / `continue` /
+    // `suppressOutput` are all members of that set — so a closed guard that
+    // printed a verdict-LESS object was read as an explicit decision and the
+    // guarded call was silently allowed. The PR's own docblock says "closed"
+    // only steps in when the hook produced no explicit decision at all, and a
+    // verdict-less object is no explicit decision.
+    it('denies when stdout is an object carrying no verdict, only a reason', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, JSON.stringify({ reason: 'policy engine down' })),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('failed closed');
+    });
+
+    // Same finding, second entrance: `hookSpecificOutput` as a truthy
+    // PRIMITIVE passed the key-presence gate and then made consumer frames
+    // throw a TypeError on the `in` operator, failing open by every route.
+    it('denies when hookSpecificOutput is a primitive rather than an object', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, JSON.stringify({ hookSpecificOutput: 'deny' })),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toContain('failed closed');
+    });
+
+    // qwen-code#12875 review round 2, R1-1: of the seven buildFailClosedDenial
+    // call sites, the bare-JSON-value one did not pass `eventName`, so its
+    // denial carried no `hookSpecificOutput.permissionDecision` — and
+    // mergeWithOrLogic ranks only among outputs that populate that field, so a
+    // healthy neighbour's `allow` overturned the denial. Single-hook configs
+    // still denied, which is why the suite stayed green.
+    it('multi-hook: a bare-JSON-value fail-closed denial survives a healthy hook allowing', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(0, '[]'));
+      const closedResult = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(closedResult.output?.decision).toBe('deny');
+
+      mockSpawn.mockImplementationOnce(() =>
+        createMockProcess(
+          0,
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              permissionDecisionReason: 'healthy hook says this tool is fine',
+            },
+          }),
+        ),
+      );
+      const permissiveHookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'always-allow',
+        name: 'permissive-hook',
+        source: HooksConfigSource.Project,
+      };
+      const allowResult = await hookRunner.executeHook(
+        permissiveHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      const aggregated = new HookAggregator().aggregateResults(
+        [closedResult, allowResult],
+        HookEventName.PreToolUse,
+      );
+      const finalOutput = aggregated.finalOutput as PreToolUseHookOutput;
+
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.isDenied()).toBe(true);
+    });
+
+    // qwen-code#12875 review round 2, R1-13: no test anywhere exercised the
+    // closed-mode HONOUR arm, so any drift in what counts as a verdict would
+    // turn every correctly-answering closed hook into a denial that blocks
+    // every call it guards — with the whole suite green. These three pin the
+    // honour side, and are green both before and after the verdict narrowing.
+    it('honours a closed hook that allows via hookSpecificOutput.permissionDecision', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          0,
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              permissionDecisionReason: 'this tool is fine',
+            },
+          }),
+        ),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).not.toBe('deny');
+      expect(result.output?.reason ?? '').not.toContain('failed closed');
+    });
+
+    it('honours a closed hook that answers with a legacy decision field', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, JSON.stringify({ decision: 'approve' })),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('approve');
+      expect(result.output?.reason ?? '').not.toContain('failed closed');
+    });
+
+    it('honours a closed hook that explicitly stops execution via continue: false', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          0,
+          JSON.stringify({ continue: false, stopReason: 'budget exhausted' }),
+        ),
+      );
+
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.continue).toBe(false);
+      expect(result.output?.reason ?? '').not.toContain('failed closed');
+    });
+
+    // Guard on the narrowing above: only PreToolUse reads permission
+    // decisions, so the denial must not grow a permissionDecision field on
+    // events that have no such concept (it would land in the aggregator's
+    // pass-through hookSpecificOutput fields and mean nothing to anyone).
+    it('does not attach a permission decision to a fail-closed denial on a non-PreToolUse event', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(1, '', ''));
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
     });
   });
 

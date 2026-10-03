@@ -288,6 +288,12 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             description: 'The shell to use for command execution.',
             enum: ['bash', 'powershell'],
           },
+          failMode: {
+            type: 'string',
+            description:
+              'For "command" type only. How a TRANSPORT failure of this hook is reported: "open" (default) allows the tool call to proceed, exactly like today; "closed" denies it instead, naming the hook and that it failed closed. A transport failure is a non-blocking exit code (including today\'s exit-code-1 plain-text convention), a timeout, unparsable JSON on stdout, or a spawn error. Does not change how an EXPLICIT decision the hook returns as valid JSON (allow/deny/ask) is handled — that is success, not a transport failure, in both modes.',
+            enum: ['open', 'closed'],
+          },
         },
       },
     },
