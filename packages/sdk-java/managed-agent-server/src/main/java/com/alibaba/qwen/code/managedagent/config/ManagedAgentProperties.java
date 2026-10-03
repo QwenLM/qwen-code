@@ -412,8 +412,10 @@ public class ManagedAgentProperties {
         private boolean enabled;
         private String host = "127.0.0.1";
         private int port = 4182;
+        private boolean allowNonLoopback;
         private String token = "";
         private String provisioner = "local-process";
+        private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
@@ -470,6 +472,22 @@ public class ManagedAgentProperties {
 
         public void setPort(int port) {
             this.port = port;
+        }
+
+        public boolean isAllowNonLoopback() {
+            return allowNonLoopback;
+        }
+
+        public void setAllowNonLoopback(boolean allowNonLoopback) {
+            this.allowNonLoopback = allowNonLoopback;
+        }
+
+        public Duration getV3ResultWindow() {
+            return v3ResultWindow;
+        }
+
+        public void setV3ResultWindow(Duration v3ResultWindow) {
+            this.v3ResultWindow = v3ResultWindow;
         }
 
         public String getToken() {
