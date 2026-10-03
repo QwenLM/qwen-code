@@ -14,7 +14,11 @@ import type { ChildProcess } from 'node:child_process';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
-import type { ChildRunExitEvidence , ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import type {
+  ChildRunExitEvidence,
+  ManagedChildRunProcess,
+  ManagedChildRunSupervisor,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { HookCommandIsolationUnavailableError } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import {
   ManagedToolExecutor,
@@ -31,24 +35,24 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function fakeChild(
-  unitName: string,
-): ChildProcess & {
+function fakeChild(unitName: string): ChildProcess & {
   emitExit: (code: number | null, signal: string | null) => void;
 } {
   const child = new EventEmitter() as ChildProcess & {
     emitExit: (code: number | null, signal: string | null) => void;
   };
   (child as unknown as { pid: number }).pid = 4242;
-  child.stdout = new PassThrough() as ChildProcess['stdout'];
-  child.stderr = new PassThrough() as ChildProcess['stderr'];
-  child.stdout!.resume();
-  child.stderr!.resume();
-  child.stdout!.write(`out:${unitName}\n`);
-  child.stderr!.write('');
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  child.stdout = stdout as ChildProcess['stdout'];
+  child.stderr = stderr as ChildProcess['stderr'];
+  stdout.resume();
+  stderr.resume();
+  stdout.write(`out:${unitName}\n`);
+  stderr.write('');
   child.emitExit = (code, signal) => {
-    child.stdout!.end();
-    child.stderr!.end();
+    stdout.end();
+    stderr.end();
     child.emit('exit', code, signal ?? null);
   };
   child.kill = (signal) => {
@@ -176,7 +180,7 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
     sessionId: 'runtime-session-1',
     directory,
     tools: new Map([['run_shell_command', tool]]),
-    admitsDirectory: (each) => each.startsWith(directory),
+    admitsDirectory: (each: string) => each.startsWith(directory),
   } as unknown as ManagedToolSet;
   const executor = new ManagedToolExecutor(
     async () => tools,
@@ -185,7 +189,7 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
     undefined,
     options.withSupervisor === false
       ? undefined
-      : (supervisor as unknown as { start: never }),
+      : (supervisor as unknown as ManagedChildRunSupervisor),
   );
   return {
     executor,

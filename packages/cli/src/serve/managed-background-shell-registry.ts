@@ -126,12 +126,12 @@ export class ManagedBackgroundShellRegistry {
       // event may lead it, so wait for each end first.
       const eof = { stdout: false, stderr: false };
       await Promise.allSettled([
-        process.child.stdout?.ended
+        process.child.stdout && process.child.stdout.readableEnded
           ? Promise.resolve((eof.stdout = true))
           : once(process.child.stdout!, 'end').then(() => {
               eof.stdout = true;
             }),
-        process.child.stderr?.ended
+        process.child.stderr && process.child.stderr.readableEnded
           ? Promise.resolve((eof.stderr = true))
           : once(process.child.stderr!, 'end').then(() => {
               eof.stderr = true;

@@ -828,7 +828,16 @@ export class ManagedToolExecutor {
     entry.acknowledgement = receipt;
     entry.v3Result = {
       ...entry.v3Result,
-      capture: { ...actual, deliveryStatus: receipt.deliveryStatus },
+      capture:
+        actual === null
+          ? null
+          : {
+              captureStatus: actual.captureStatus,
+              captureReason: actual.captureReason,
+              manifest: actual.manifest,
+              previewTruncated: actual.previewTruncated,
+              deliveryStatus: receipt.deliveryStatus,
+            },
     };
     return v3View(entry);
   }
