@@ -6834,6 +6834,36 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('replays a passive-minted snapshot only to a same-shape retry', async () => {
+    // A takeover snapshot is valid for one request shape: replaying a
+    // passive-minted report to a drive request would hand it a parked
+    // checkpoint (never continuation-ready) instead of the settlement a
+    // drive recovery would have produced.
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const drive = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(drive.status).toBe(409);
+    expect(drive.body.code).toBe('hosted_session_already_attached');
+    const passiveRetry = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(passiveRetry.status).toBe(200);
+  });
+
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
     let stopConfirmed = false;

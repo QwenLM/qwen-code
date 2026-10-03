@@ -154,8 +154,15 @@ interface HostedSession {
   /** The snapshot a takeover load answered, kept until its prompt's
    * continue/cancel is admitted, so a repeated takeover load that lost the
    * original reply can fetch it again instead of meeting a bare
-   * `hosted_session_already_attached`. */
-  recoverySnapshot?: { promptId: string; report: HostedRuntimeRecoveryReport };
+   * `hosted_session_already_attached`. The snapshot is valid only for a
+   * retry of the same request shape: a passive load parks what a drive
+   * load would settle, so a drive request must not be replayed a passive
+   * report (its phase would never be continuation-ready). */
+  recoverySnapshot?: {
+    promptId: string;
+    passive: boolean;
+    report: HostedRuntimeRecoveryReport;
+  };
 }
 
 async function runHostedLifecycleHook(
@@ -1387,7 +1394,11 @@ export function registerHostedHarnessSessionRoutes(
       // lost after attach, so hand the same snapshot back while the parked
       // prompt is still unsettled.
       const snapshot = attached.recoverySnapshot;
-      if (takeoverFlags && snapshot) {
+      if (
+        takeoverFlags &&
+        snapshot &&
+        snapshot.passive === (body?.['passiveManagedRuntimeRecovery'] === true)
+      ) {
         if (unsettledPromptId(attached) === snapshot.promptId) {
           res.status(200).json({
             sessionId,
@@ -1681,6 +1692,7 @@ export function registerHostedHarnessSessionRoutes(
           } else {
             recovery = outcome.turn.report;
             session.recoverySnapshot = {
+              passive: body?.['passiveManagedRuntimeRecovery'] === true,
               promptId: outcome.turn.promptId,
               report: outcome.turn.report,
             };

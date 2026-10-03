@@ -545,13 +545,35 @@ class QwenHostedHarnessConnectorTest {
         when(oldClient.loadSession(any(LoadHarnessSession.class)))
                 .thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
-        QwenHostedHarnessConnector connector = connector(oldClient);
-        connector.createOrLoad("tenant-a", SESSION_ID, true);
-
         HostedHarnessGenerationException mismatch =
                 mock(HostedHarnessGenerationException.class);
         when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
         doThrow(mismatch).when(oldClient).submitTurn(any());
+        // The losing worker rebuilds after the winner's adoption: give the
+        // connector a replacement factory without standing up a live
+        // /capabilities call, and let its submit also surface the same
+        // mismatch so the race stays deterministic.
+        HostedHarnessClient replacement = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities replacementCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef replacementAttached = mock(HarnessSessionRef.class);
+        when(replacementCapabilities.getBootId()).thenReturn(NEW_BOOT_ID);
+        when(replacement.capabilities())
+                .thenReturn(replacementCapabilities);
+        when(replacement.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(replacementAttached);
+        when(replacementAttached.getHarnessBootId()).thenReturn(NEW_BOOT_ID);
+        doThrow(mismatch).when(replacement).submitTurn(any());
+        QwenHostedHarnessConnector racingConnector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class)) {
+                    @Override
+                    HostedHarnessClient createClient() {
+                        return replacement;
+                    }
+                };
+        ReflectionTestUtils.setField(racingConnector, "client", oldClient);
+        racingConnector.createOrLoad("tenant-a", SESSION_ID, true);
         java.util.concurrent.CountDownLatch start =
                 new java.util.concurrent.CountDownLatch(1);
         Runnable attempt = () -> {
@@ -560,7 +582,7 @@ class QwenHostedHarnessConnectorTest {
             } catch (InterruptedException error) {
                 throw new RuntimeException(error);
             }
-            assertThatThrownBy(() -> connector.submit("tenant-a",
+            assertThatThrownBy(() -> racingConnector.submit("tenant-a",
                     SESSION_ID, SUBMIT_PROMPT_ID, SUBMIT_CONTENT,
                     SUBMIT_DIGEST)).isSameAs(mismatch);
         };
@@ -583,10 +605,9 @@ class QwenHostedHarnessConnectorTest {
             pool.shutdownNow();
         }
         verify(oldClient, org.mockito.Mockito.times(1)).close();
-        // Neither worker fell through into a real client build: a live
-        // GET /capabilities from a unit test must stay impossible.
-        assertThat(ReflectionTestUtils.getField(connector, "client"))
-                .isNull();
+        // The replacement survives its own adoption error: only the
+        // generation the exception named is closed, exactly once.
+        verify(replacement, never()).close();
     }
 
     // The one code-aware call site: a takeover refusal that cannot change

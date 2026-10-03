@@ -519,19 +519,25 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         synchronized (this) {
             current = client;
             if (current == null) {
-                current = HostedHarnessClient.builder()
-                        .baseUri(URI.create(properties.getBaseUrl()))
-                        .bearerToken(properties.getToken())
-                        .capabilityDigest(properties.getCapabilityDigest())
-                        .connectTimeout(properties.getConnectTimeout())
-                        .requestTimeout(properties.getRequestTimeout())
-                        .loadTimeout(properties.getLoadTimeout())
-                        .heartbeatInterval(properties.getHeartbeatInterval())
-                        .build();
+                current = createClient();
                 client = current;
             }
             return current;
         }
+    }
+
+    // Package-private so the adoption race test substitutes the
+    // replacement instead of standing up a live /capabilities call.
+    HostedHarnessClient createClient() {
+        return HostedHarnessClient.builder()
+                .baseUri(URI.create(properties.getBaseUrl()))
+                .bearerToken(properties.getToken())
+                .capabilityDigest(properties.getCapabilityDigest())
+                .connectTimeout(properties.getConnectTimeout())
+                .requestTimeout(properties.getRequestTimeout())
+                .loadTimeout(properties.getLoadTimeout())
+                .heartbeatInterval(properties.getHeartbeatInterval())
+                .build();
     }
 
     /**
