@@ -61,7 +61,10 @@ export function writeWithBackupSync(
   options: WriteWithBackupOptions = {},
 ): void {
   const { backupSuffix = '.orig', encoding = 'utf-8' } = options;
-  if (fs.existsSync(targetPath) && fs.statSync(targetPath).isDirectory()) {
+  const existing = fs.existsSync(targetPath)
+    ? fs.statSync(targetPath)
+    : undefined;
+  if (existing?.isDirectory()) {
     throw new Error(
       `Cannot write to '${targetPath}' because it is a directory`,
     );
@@ -74,7 +77,31 @@ export function writeWithBackupSync(
   let backupCreated = false;
 
   try {
-    fs.writeFileSync(tempPath, content, { encoding, flag: 'wx', flush: true });
+    const mode =
+      existing && fs.lstatSync(targetPath).isFile()
+        ? existing.mode & 0o777
+        : undefined;
+    fs.writeFileSync(tempPath, content, {
+      encoding,
+      flag: 'wx',
+      flush: true,
+      mode,
+    });
+    // Creation applies umask; restore the existing permissions before publishing.
+    if (mode !== undefined) {
+      try {
+        fs.chmodSync(tempPath, mode);
+      } catch (error) {
+        // Filesystems without POSIX permissions may not support chmod.
+        if (
+          !(error instanceof Error) ||
+          !('code' in error) ||
+          (error.code !== 'ENOSYS' && error.code !== 'ENOTSUP')
+        ) {
+          throw error;
+        }
+      }
+    }
 
     if (fs.existsSync(targetPath)) {
       try {
