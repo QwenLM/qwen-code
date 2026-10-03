@@ -118,10 +118,20 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. Existing request/pull catches and public
+  diagnostics still display as clean. For the two diagnostics pulls the error
+  result design is now in place: a failed pull and an unusable response (no
+  response, or no reported item surviving normalization) are recorded per
+  server; a query that retrieves nothing rejects when a selected pull failed
+  or a server that could own the queried file was unreachable, and the tool
+  surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. A server that
+  could never own the queried file does not veto a document query; a workspace
+  query refuses an unbacked clean report while any configured server is
+  unreachable. That relevance rule excuses a server from vetoing _another_
+  server's answer, never from being the only answer: a document query that no
+  queried server answered rejects even when every recorded failure belongs to
+  a server the queried file excludes. Other request/pull catches and public
   query catches other than hierarchy provenance handling are unchanged and can
   return empty arrays or null; these are **not evidence of clean diagnostics**.
-  Broader error result design remains PR2.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 
@@ -159,7 +169,11 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
+earlier server returned results. Other (non-diagnostics) request/pull catches
+are preserved; the two diagnostics pulls now reject a failed or unusable pull
+instead, pinned by `rejects a failed diagnostics pull instead of reporting
+clean` and its workspace twin. Initialization tests exercise capability
+production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag

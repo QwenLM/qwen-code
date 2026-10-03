@@ -761,6 +761,50 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('records the refusal cause on the handle when the command does not exist', async () => {
+    const manager = createTrustedManager();
+    openGates(manager).mockResolvedValue(false);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    // The diagnostics surfaces render `handle.error`; an admission refusal
+    // that leaves it undefined would show a bare `failed` with no cause.
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('command not found: clangd');
+    expect(handle?.processDiagnostics).toBeUndefined();
+  });
+
+  it('records the refusal cause on the handle for an unsafe command path', async () => {
+    const manager = createTrustedManager();
+    spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(true);
+    spyPrivate(manager, 'isPathSafe').mockReturnValue(false);
+
+    manager.setServerConfigs([
+      { ...serverConfig, command: '../../outside/payload' },
+    ]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe(
+      'command path is unsafe: ../../outside/payload',
+    );
+  });
+
+  it('records the refusal cause on the handle when the workspace is not trusted', async () => {
+    const manager = createTrustedManager();
+    spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(false);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('workspace is not trusted');
+  });
+
   it('retries the same config after a crash restart failure', async () => {
     const { manager, crash } = crashingManager([true, false, true]);
     const config = { ...serverConfig, restartOnCrash: true };
