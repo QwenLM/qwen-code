@@ -195,7 +195,9 @@ Steps 2 and 4 are conditional while the experimental skip-selector knob
 (`QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT`, off by default)
 is set: a single fast hit matching the query by title or keyword, whose body
 is not already in context, suppresses the selector. Metadata-only substring
-matches and already-present or stale bodies keep the selector. Count fast
+matches and already-present or stale bodies keep the selector. In this gate a
+short Latin title counts only on a token boundary, so a memory titled `ai` does
+not skip the selector for `explain`. Count fast
 candidates before prompt trimming so a second match cannot disappear from the
 guard. No refined result arrives after a skip; the shared client delivers it
 as the fast phase. This is an ablation experiment; default behavior is unchanged.

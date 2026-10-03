@@ -1112,6 +1112,34 @@ describe('auto-memory relevant recall', () => {
       expect(result.selectorSkipped).toBeUndefined();
     });
 
+    it('keeps the selector when a short title only matches inside a larger word', async () => {
+      // `ai` sits inside `explain` — the collision the design doc names for
+      // keywords. The keyword arm guards it; the skip gate must not accept it
+      // through the title arm, because the match then cancels the very model
+      // call that would have dropped the memory.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ai',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Explain provider fallback.',
+        { config, onFastResult },
+      );
+      // Ranking is untouched: the memory is still published as a fast
+      // candidate, it just no longer suppresses the selector.
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
     it('keeps the selector when the matching body is already present', async () => {
       mockSnapshot([exact, docs[1]!]);
       bodyPresentVersions.set('project:reference.md', exact.mtimeMs);

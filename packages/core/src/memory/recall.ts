@@ -310,6 +310,15 @@ function scoreDocument(
 function matchesTitleOrKeyword(
   query: string,
   doc: ScannedAutoMemoryDocument,
+  /**
+   * Apply the keyword arm's token-boundary rule to a short Latin title too.
+   * Only the #13003 skip gate sets this: there the match is the final
+   * authority on whether the selector runs at all, so a coincidental inner
+   * substring (`ai` inside `explain`) would cancel the model call that is the
+   * only thing correcting it. Ranking callers keep the loose arm, so default
+   * recall behavior is unchanged.
+   */
+  requireTitleBoundary = false,
 ): boolean {
   const normalizedQuery = normalizeRecallText(query);
   const title = normalizeRecallText(doc.title).trim();
@@ -327,7 +336,10 @@ function matchesTitleOrKeyword(
     ).test(normalizedQuery);
   };
   return (
-    (title.length > 0 && normalizedQuery.includes(title)) ||
+    (title.length > 0 &&
+      (requireTitleBoundary
+        ? includesKeyword(title)
+        : normalizedQuery.includes(title))) ||
     keywords.some(includesKeyword)
   );
 }
@@ -430,6 +442,10 @@ function selectModelCandidateDocuments(
   // Reuse the already-scored `lexical` array rather than re-scoring the
   // corpus: the guard only needs a count, and re-scoring would double the
   // cost of the widest pool on this path.
+  //
+  // Loose title arm on purpose: this counts what the suppressed selector would
+  // have had to choose from, and a coincidental short-title substring is still
+  // a competing candidate in its pool, so it suppresses the skip.
   const lexicalStrongMatchCount = countStrongMatches
     ? lexical.filter((doc) => matchesTitleOrKeyword(query, doc)).length
     : undefined;
@@ -796,7 +812,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         (candidates.lexicalStrongMatchCount ?? 0) === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
-        matchesTitleOrKeyword(query, uniqueStrongHit) &&
+        // Strict title arm: this match decides whether the selector runs at
+        // all, so it may not rest on a coincidental inner substring.
+        matchesTitleOrKeyword(query, uniqueStrongHit, true) &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted
       ) {
