@@ -82,7 +82,7 @@ const schema = JSON.parse(
 ) as Record<string, unknown>;
 
 interface ToolFixtureRoute {
-  readonly key: 'execute' | 'status' | 'cancel';
+  readonly key: 'execute' | 'status' | 'cancel' | 'acknowledge';
   readonly method: string;
   readonly path: string;
   readonly protocolVersion: number;
@@ -100,7 +100,7 @@ interface ToolFixtureSuite {
     readonly epoch: number;
   };
   readonly suites: ReadonlyArray<{
-    readonly route: 'execute' | 'status' | 'cancel';
+    readonly route: 'execute' | 'status' | 'cancel' | 'acknowledge';
     readonly canonicalRequest: {
       readonly headers: Readonly<Record<string, string>>;
       readonly body: Readonly<Record<string, unknown>>;
@@ -115,7 +115,7 @@ interface MutableToolFixtureSuite {
     responseBodyLimitBytes: number;
   }>;
   suites: Array<{
-    route: 'execute' | 'status' | 'cancel';
+    route: 'execute' | 'status' | 'cancel' | 'acknowledge';
     canonicalRequest: {
       headers: Record<string, string>;
       body: Record<string, unknown>;
@@ -485,6 +485,18 @@ describe('Managed Runtime tool contract', () => {
       },
     ],
     [
+      'acknowledge forbids afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].canonicalRequest.body['afterSequence'] = 0;
+      },
+    ],
+    [
+      'acknowledge forbids toolName',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].canonicalRequest.body['toolName'] = 'read_file';
+      },
+    ],
+    [
       'execute case body overrides stay route-specific',
       (clone: MutableToolFixtureSuite) => {
         clone.suites[0].cases[0].request = {
@@ -533,7 +545,7 @@ describe('Managed Runtime tool contract', () => {
     expect(validate(invalidFixtures)).toBe(false);
   });
 
-  it.each([0, 1, 2])('pins envelope limits for route %i', (routeIndex) => {
+  it.each([0, 1, 2, 3])('pins envelope limits for route %i', (routeIndex) => {
     const validate = new Ajv2020({ strict: true }).compile(toolSchema);
     for (const field of [
       'requestBodyLimitBytes',
@@ -598,6 +610,9 @@ describe('Managed Runtime tool contract', () => {
     expect(definitions['cancelRequestBody']?.['additionalProperties']).toBe(
       false,
     );
+    expect(
+      definitions['acknowledgeRequestBody']?.['additionalProperties'],
+    ).toBe(false);
     expect(definitions['toolResponseBody']?.['additionalProperties']).toBe(
       false,
     );

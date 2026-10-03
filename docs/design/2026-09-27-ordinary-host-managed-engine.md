@@ -236,8 +236,8 @@ The B2d invariants hold. In addition:
 
 ### Slice plan
 
-M1 to M4 are implemented and retained; M2, M4 and M5a landed ahead of the
-priority review described in Status without registering the engine. M5b, M5c
+M1 to M4 are implemented and retained; M2, M4, M5a and M5b landed ahead of
+the priority review described in Status without registering the engine. M5c
 and M6 are deferred until that review; the dependency order and exit checks
 below do not schedule their implementation. Reference commits describe the original port;
 the linked host decision supersedes the old in-process M2 approach.
@@ -995,10 +995,14 @@ alone says which call took effect.
   `managed_runtime_outcome_unknown` before any model request, and the reason
   says it comes from the log. A log whose latest Runtime state is
   `results_ready` restores normally: every outcome is committed, the recorded
-  results are in history, and nothing replays the Runtime. A fresh open's
-  dispatch gate is empty, and a blocked session admits no prompt, so the gate
-  cannot claim a re-dispatch of the original call. Recovery of a settled but
-  unconsumed turn, and of a blocked session, stays with M6.
+  results are in history, and nothing replays the Runtime. The leftover
+  continuation closes at the session's next admission — consumed and settled,
+  since its outcomes are committed; that is not replaying — and a turn that
+  settled under an earlier prompt ends with its own boundary, so the new
+  prompt's batch and attempt are its own. A fresh open's dispatch gate is
+  empty, and a blocked session admits no prompt, so the gate cannot claim a
+  re-dispatch of the original call. Recovery of a settled but unconsumed
+  turn, and of a blocked session, stays with M6.
 - **The worker forgets what is committed.** The host acknowledges each call
   once its commit has landed, over an `acknowledge` route added to the same
   tool v2 protocol; the worker then drops the call's parameters and result
@@ -1249,7 +1253,9 @@ M5b:
    and restore, and on a fresh open of a crashed child's log: a prompt fails
    with `managed_runtime_outcome_unknown` before any model request, and the
    reason names the log as its source. A log whose latest Runtime state is
-   `results_ready` restores, and its tools run again.
+   `results_ready` restores; its next admission closes the leftover
+   continuation, and its tools run again, with the new prompt's batch and
+   attempt its own.
 5. An acknowledged call no longer occupies the worker: its parameters and
    result are dropped, `status` answers `acknowledged`, a repeated `execute`
    of the same reference is refused, and a worker that is never asked still

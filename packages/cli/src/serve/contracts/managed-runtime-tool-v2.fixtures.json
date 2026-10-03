@@ -508,6 +508,20 @@
             "classification": "protocol",
             "code": "managed_runtime_attestation_invalid"
           }
+        },
+        {
+          "id": "lease-epoch-mismatch",
+          "request": {
+            "replaceHeader": {
+              "name": "x-qwen-managed-lease-epoch",
+              "value": "5"
+            }
+          },
+          "expected": {
+            "status": 409,
+            "classification": "identity",
+            "code": "managed_runtime_identity_conflict"
+          }
         }
       ]
     }

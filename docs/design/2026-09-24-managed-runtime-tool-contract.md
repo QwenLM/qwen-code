@@ -216,7 +216,7 @@ The worker handlers described below serve these routes.
 
 ## 6. Worker implementation
 
-The merged attestation worker now mounts the three routes beside `attest`.
+The merged attestation worker now mounts the four tool routes beside `attest`.
 Its executor admits exactly the first-slice ordinary tools — `read_file`,
 `write_file`, `edit`, and foreground `run_shell_command` — over a real
 `Config` rooted at the attested workspace cwd, with checkpointing disabled.
