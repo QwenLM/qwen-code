@@ -19,12 +19,13 @@ re-attests the Runtime identity through the transport, while a legacy binding
 still fails closed with `runtime_reconciliation_required`; see
 [Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
 
-The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
+The module ships a local process provider, `LocalProcessRuntimeProvisioner`,
 which starts the merged Managed Runtime worker and adopts it only after
 attestation; see
 [Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
 The embedding service still owns the worker command wiring, recovery-capable
-provisioners, and any container or remote provider. The module
+provisioners, and deployment configuration. The experimental Kubernetes provider
+below supports disposable scratch only. The module
 intentionally does not expose an HTTP API, wire Spring, call the Hosted
 Harness, or define public Agent resources. Those adapters belong to later PRs.
 
@@ -98,6 +99,52 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## Experimental Kubernetes scratch Runtime
+
+`KubernetesRuntimeProvisioner` implements the K1 slice of the
+[Kubernetes Runtime design](../../../docs/design/2026-10-01-managed-kubernetes-runtime.md).
+It creates one bare Pod and immutable boot Secret per persisted provision seed,
+with Session-exclusive `emptyDir` scratch. It rejects managed-context requests
+and mounts no PVC. This is a private SDK adapter for trusted development
+embeddings; Spring selection and public Hosted Workspace admission stay closed.
+
+Construct `KubernetesHttpRuntimeClient` with the HTTPS API origin, service-account
+token file and cluster CA file. Configure the provisioner with a stable cluster
+identifier, existing namespace, SHA-256-pinned worker image and worker command.
+The embedding scope resolver must authorize Session isolation and a container
+scratch directory such as `/workspace`; the Java-host directory is not copied
+into the Pod. Keep the Broker's encrypted seed and resource handle across
+restarts. Custom clients must bound API calls and preserve authoritative-404
+semantics.
+
+The image must include Node.js 22+, the built CLI and runtime dependencies, and
+support UID/GID 1000 with a read-only root filesystem. Broker RBAC needs `get`
+and `create` on Pods and Secrets in the namespace. The Broker must reach the
+API and the Pod's IPv4 port `43190`. Worker HTTP uses the existing bearer/lease
+protocol on a trusted development network; production TLS/workload identity and
+network-policy qualification are later gates.
+
+Recovery observes the original Pod/Secret UIDs and re-attests the same worker.
+Restarted, missing, replaced or mismatched resources block adoption. `release`
+and `close` never delete Kubernetes objects; neither is authorization to stop a
+worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
+automatic garbage collection, persistent Workspace storage or volume handoff.
+
+After building and bundling the CLI, run the opt-in real-worker test from this
+module with Node.js, a reachable non-loopback IPv4 interface and free port `43190`:
+
+```bash
+mvn -Dtest=KubernetesRuntimeWorkerTest \
+  -Dqwen.kubernetes.worker-test=true \
+  -Dqwen.cli.entry=../../../dist/cli.js test
+```
+
+The test uses fake Kubernetes observations and a real Broker/worker for private
+file tools, deduplication and live-worker adoption. It does not qualify scheduling,
+container isolation, NetworkPolicy or CSI. The default suite skips this opt-in
+test; provider and API-client tests run without a cluster. Historical cloud smoke
+results in the design concern an earlier snapshot, not this PR's requalification.
 
 ## Trusted local recovery
 

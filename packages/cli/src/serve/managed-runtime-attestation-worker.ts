@@ -5,6 +5,8 @@
  */
 
 import { createServer } from 'node:http';
+import { createReadStream } from 'node:fs';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
@@ -97,7 +99,7 @@ function isExactBoot(value: unknown): value is ManagedRuntimeWorkerBoot {
 
 async function collectManagedRuntimeWorkerBoot(
   input: Readable,
-): Promise<ManagedRuntimeWorkerBoot | ManagedContextBoot> {
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of input) {
@@ -108,7 +110,12 @@ async function collectManagedRuntimeWorkerBoot(
     }
     chunks.push(bytes);
   }
-  const document = Buffer.concat(chunks);
+  return Buffer.concat(chunks);
+}
+
+function parseWorkerBoot(
+  document: Buffer,
+): ManagedRuntimeWorkerBoot | ManagedContextBoot {
   let parsed: unknown;
   try {
     parsed = JSON.parse(document.toString('utf8'));
@@ -131,6 +138,10 @@ async function collectManagedRuntimeWorkerBoot(
 export async function readManagedRuntimeWorkerBoot(
   input: Readable,
 ): Promise<ManagedRuntimeWorkerBoot | ManagedContextBoot> {
+  return parseWorkerBoot(await readBootDocument(input));
+}
+
+async function readBootDocument(input: Readable): Promise<Buffer> {
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
@@ -153,7 +164,14 @@ export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode = false,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
+  if (
+    containerMode &&
+    (boot.version !== 1 || boot.isolationClass !== 'session')
+  ) {
+    throw new Error(INVALID_BOOT_MESSAGE);
+  }
   const app = express();
   app.disable('x-powered-by');
   let executor: ManagedToolExecutor;
@@ -215,7 +233,10 @@ export async function startManagedRuntimeAttestationWorker(
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(0, '127.0.0.1');
+    server.listen(
+      containerMode ? 43190 : 0,
+      containerMode ? '0.0.0.0' : '127.0.0.1',
+    );
   });
 
   const address = server.address() as AddressInfo | null;
@@ -252,7 +273,29 @@ export async function startManagedRuntimeAttestationWorker(
   };
 }
 
-export async function runManagedRuntimeAttestationWorker(): Promise<void> {
+export async function readManagedRuntimeContainerBoot(
+  bootPath: string,
+): Promise<ManagedRuntimeWorkerBoot> {
+  if (!path.isAbsolute(bootPath)) throw new Error(INVALID_BOOT_MESSAGE);
+  const input = createReadStream(bootPath);
+  try {
+    const document = await readBootDocument(input);
+    new TextDecoder('utf-8', { fatal: true }).decode(document);
+    const boot = parseWorkerBoot(document);
+    if (boot.version !== 1 || boot.isolationClass !== 'session') {
+      throw new Error(INVALID_BOOT_MESSAGE);
+    }
+    return boot;
+  } catch {
+    throw new Error(INVALID_BOOT_MESSAGE);
+  } finally {
+    input.destroy();
+  }
+}
+
+export async function runManagedRuntimeAttestationWorker(
+  containerBootPath?: string,
+): Promise<void> {
   // A Managed session's host starts its worker over an IPC channel, with the
   // loader vars that only boot this process; the commands it runs must not
   // inherit them. Other launchers choose the worker's environment themselves.
@@ -263,13 +306,25 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
       'Managed Runtime worker',
     );
   }
-  const boot = await readManagedRuntimeWorkerBoot(process.stdin);
+  let boot: ManagedRuntimeWorkerBoot | ManagedContextBoot;
+  try {
+    boot =
+      containerBootPath !== undefined
+        ? await readManagedRuntimeContainerBoot(containerBootPath)
+        : await readManagedRuntimeWorkerBoot(process.stdin);
+  } catch (error) {
+    if (containerBootPath === undefined) throw error;
+    process.stderr.write(`${INVALID_BOOT_MESSAGE}\n`);
+    process.exitCode = 1;
+    return;
+  }
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,
     boot.version === 2 && boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
       ? new ManagedShellPublisherRegistry()
       : undefined,
+    containerBootPath !== undefined,
   );
 
   await new Promise<void>((resolve, reject) => {
