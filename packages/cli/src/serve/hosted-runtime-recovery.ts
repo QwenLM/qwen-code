@@ -51,6 +51,11 @@ export interface HostedRecoveryTurn {
   /** Whether the recovery acquired the Runtime Session, which a later
    * continue/cancel must release. */
   acquiredRuntime: boolean;
+  /** Whether the coordinator can still drive this report: every execution
+   * reads known, and a drive report reached results_ready. The takeover
+   * arms the undriven marker only in that case, since the coordinator fails
+   * an undrivable one without ever calling continue/cancel. */
+  drivable: boolean;
 }
 
 async function originalRuntimeBroker(
@@ -235,7 +240,11 @@ export async function settleParkedTurnCancelled(input: {
  * A cancellation only becomes durable evidence after the execution reaches a
  * terminal state — issuing cancel is not proof, since the Broker accepts a
  * cancel without having stopped anything yet. An execution the Broker never
- * knew (definitive not-found) is already stopped.
+ * knew (definitive not-found) is already stopped. A terminally abandoned
+ * record is accepted without proof of a stop: the Broker fenced it
+ * permanently on loss evidence, so neither cancel nor the terminal poll
+ * could ever observe more — a still-reconcilable unknown fails closed
+ * instead.
  */
 export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
@@ -254,20 +263,27 @@ export async function stopParkedRuntimeExecutions(input: {
     authorization.checkpoint.tools?.items ?? [],
     input.brokerOptions,
   );
+  // Terminal for the stop's purposes — the Broker never knew it, the result
+  // is durable, or the record is fenced permanently. The pre-cancel skip
+  // and the post-cancel poll must agree on this or one side lies.
+  const stopComplete = (state: { state: string } | undefined): boolean =>
+    state === undefined ||
+    state.state === 'settled' ||
+    state.state === 'abandoned';
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
     if (before?.state === 'unknown')
       throw new Error('Runtime execution outcome is unknown.');
-    if (before === undefined || before.state === 'settled') continue;
+    if (stopComplete(before)) continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
       if (status?.state === 'unknown')
         throw new Error('Runtime execution outcome is unknown.');
-      if (status === undefined || status.state === 'settled') break;
+      if (stopComplete(status)) break;
       if (Date.now() >= deadline) {
         throw new Error(
           'Runtime execution did not reach a terminal state after cancellation.',
@@ -350,6 +366,9 @@ export async function recoverHostedRuntimeTurn(input: {
     if (passive) {
       for (const item of pending) {
         const status = await broker.status(item.executionCallId);
+        // Only a still-reconcilable unknown reports as failing to account
+        // for the execution; a terminally fenced abandoned record keeps its
+        // distinction so the coordinator can cancel over it.
         states.set(
           item.executionCallId,
           status?.state === 'unknown' ? undefined : status,
@@ -535,17 +554,23 @@ export async function recoverHostedRuntimeTurn(input: {
           : { status: state }),
     };
   });
+  const report: HostedRuntimeRecoveryReport = {
+    phase:
+      finalCheckpoint.continuation.phase === 'results_ready'
+        ? 'results_ready'
+        : 'await_runtime',
+    checkpointId: finalCheckpoint.identity.checkpointId,
+    activationId: session.activation.activationId,
+    executions,
+  };
   return {
     promptId,
     acquiredRuntime,
-    report: {
-      phase:
-        finalCheckpoint.continuation.phase === 'results_ready'
-          ? 'results_ready'
-          : 'await_runtime',
-      checkpointId: finalCheckpoint.identity.checkpointId,
-      activationId: session.activation.activationId,
-      executions,
-    },
+    report,
+    // The marker arms only for a report the coordinator can drive:
+    // everything answered known, and a drive report reached results_ready.
+    drivable:
+      executions.every((execution) => execution.outcome === 'known') &&
+      (passive || report.phase === 'results_ready'),
   };
 }
