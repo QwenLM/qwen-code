@@ -381,9 +381,11 @@ Do not modify any files.
 
 Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
-**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+**`tools` (allowlist):** When specified, the list bounds direct tool calls and deferred-tool bridge targets. Code mode also supports the nested `exec` path described below. When omitted, the subagent inherits all available tools from the parent session.
 
-The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.codeModeOnly`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.mode: "code_mode_only"`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+
+With `tools.mode: "code_mode"` or `"code_mode_only"`, `exec` provides a third path: nested `tools.<name>(...)` calls. Explicitly listing `exec` also grants otherwise-admitted code-mode-callable bindings, including ordinary tools such as `write_file` and `run_shell_command` that are not individually listed. Thus `tools: [read_file, exec]` is not a read-only policy. Omit `exec` from the configured list to keep nested targets bounded by the listed names; the runtime still exposes the `exec` wrapper in code mode. `disallowedTools`, `permissions.deny`, and subagent exclusions continue to restrict access in both modes. Hybrid additionally excludes tools hidden by `tools.eager`. This nested grant does not add direct-call permission in hybrid mode. A fork's explicit `fork_tools: [exec]` grant also remains bounded by its parent's inherited execution policy.
 
 ```
 ---
@@ -412,7 +414,7 @@ disallowedTools:
 
 If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
 
-**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+**MCP tools** follow the same rules. Without a `tools` list, the subagent inherits MCP tools from the parent session. An explicit list ordinarily requires matching MCP entries. Granting `exec` also admits otherwise-available MCP bindings through the nested path when the list contains no MCP entries; once the list mentions MCP, nested MCP calls must match those entries. The blocklists and exclusions above still apply.
 
 The `disallowedTools` field supports MCP server-level patterns:
 

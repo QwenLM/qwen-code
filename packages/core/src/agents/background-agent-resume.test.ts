@@ -1175,6 +1175,7 @@ describe('BackgroundAgentResumeService', () => {
       },
       boolean,
       ToolMode?,
+      boolean?,
     ]
   >([
     ['inherits every tool', {}, true],
@@ -1221,6 +1222,20 @@ describe('BackgroundAgentResumeService', () => {
       true,
       ToolMode.CodeModeOnly,
     ],
+    [
+      'names exec without skill under Hybrid with registered exec',
+      { tools: [ToolNames.EXEC] },
+      true,
+      ToolMode.CodeMode,
+      true,
+    ],
+    [
+      'names exec without skill under Hybrid without exec',
+      { tools: [ToolNames.EXEC] },
+      false,
+      ToolMode.CodeMode,
+      false,
+    ],
     // Same definition, Direct mode: no gateway, so no listing. Pins that the
     // row above is the tool mode and not the `exec` name doing the work.
     [
@@ -1230,7 +1245,7 @@ describe('BackgroundAgentResumeService', () => {
     ],
   ])(
     'matches the launch-time skill listing when the definition %s',
-    async (_label, toolFields, expectListing, toolMode) => {
+    async (_label, toolFields, expectListing, toolMode, hasExec = false) => {
       const sessionId = 'session-skill-listing';
       const agentId = 'agent-skill-listing';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1290,7 +1305,10 @@ describe('BackgroundAgentResumeService', () => {
         // below are about `subagentWillHaveSkillTool`, not about #12838's
         // registry gate. Omitting this made every row answer "no listing" for
         // the registry's reason and the two negative rows pass vacuously.
-        registeredToolNames: [ToolNames.SKILL],
+        registeredToolNames: [
+          ToolNames.SKILL,
+          ...(hasExec ? [ToolNames.EXEC] : []),
+        ],
         skillManager: {
           listSkills: vi.fn().mockResolvedValue([
             {
@@ -1303,7 +1321,10 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
-      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
+      stubToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.SKILL,
+        ...(hasExec ? [ToolNames.EXEC] : []),
+      ]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',
@@ -1775,6 +1796,7 @@ describe('BackgroundAgentResumeService', () => {
       format: 'persisted deny-all execution policy',
       legacyCapabilities: {},
       executionAllowedTools: [] as string[] | undefined,
+      nestedExecutionAllowedTools: ['read_file'],
       includeDisplayImage: false,
       deniedTool: 'Read',
       expectedExecutionAllowedTools: [],
@@ -1832,6 +1854,7 @@ describe('BackgroundAgentResumeService', () => {
     async ({
       legacyCapabilities,
       executionAllowedTools,
+      nestedExecutionAllowedTools,
       includeDisplayImage,
       deniedTool,
       expectedExecutionAllowedTools,
@@ -1845,7 +1868,7 @@ describe('BackgroundAgentResumeService', () => {
         launchPrompt,
         [userText('bootstrap env'), modelText('bootstrap ack')],
         {
-          meta: { executionAllowedTools },
+          meta: { executionAllowedTools, nestedExecutionAllowedTools },
           payload: legacyCapabilities,
           reply: 'Working silently',
         },
@@ -1942,6 +1965,9 @@ describe('BackgroundAgentResumeService', () => {
           ToolNames.ASK_USER_QUESTION,
         ],
         executionAllowedTools: expectedExecutionAllowedTools,
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
       });
       expect(createArgs?.[9]).toBe(launchPrompt);
       expect(createArgs?.[10]).toBe(agentId);

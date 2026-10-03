@@ -385,7 +385,7 @@ describe('ToolRegistry', () => {
       const baseUrl = 'https://images.example/v1';
       const config = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         experimentalZedIntegration: true,
         modelProvidersConfig: {
           openai: [
@@ -653,7 +653,7 @@ describe('ToolRegistry', () => {
       'applies modelAccess=%s to CodeModeOnly bindings',
       (enabled) => {
         const registry = registryFor({
-          codeModeOnly: true,
+          toolMode: 'code_mode_only',
           omniPolicyTools: {
             omni_compress_image: { modelAccess: { enabled } },
           },
@@ -966,6 +966,42 @@ describe('ToolRegistry', () => {
         expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
       });
 
+      it('counts CodeMode declaration decoration toward the budget', () => {
+        const directTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const codeModeTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const directRegistry = new ToolRegistry(new Config(baseConfigParams));
+        const codeModeRegistry = new ToolRegistry(
+          new Config({ ...baseConfigParams, toolMode: 'code_mode' }),
+        );
+        directRegistry.registerTool(directTool);
+        codeModeRegistry.registerTool(new MockTool({ name: 'exec' }));
+        codeModeRegistry.registerTool(codeModeTool);
+        const rawBudget = tokensFor(directTool);
+
+        expect(directRegistry.preloadDeferredToolsWithinBudget(rawBudget)).toBe(
+          1,
+        );
+        expect(
+          codeModeRegistry.preloadDeferredToolsWithinBudget(rawBudget),
+        ).toBe(0);
+      });
+
       it('excludes visible deferred tools from the preload budget', () => {
         const visibleTool = deferred('visible', {
           description: 'x'.repeat(CHARS_PER_TOKEN * 10),
@@ -1025,7 +1061,7 @@ describe('ToolRegistry', () => {
     it('getDeferredToolSummary is empty in CodeModeOnly', () => {
       // Code Mode discovers tools without a startup catalog or Direct-mode
       // bridge reminders.
-      const registry = registryFor({ codeModeOnly: true });
+      const registry = registryFor({ toolMode: 'code_mode_only' });
       register(registry, deferred('deferred'), cronList());
 
       expect(registry.getDeferredToolSummary()).toEqual([]);
@@ -1202,6 +1238,28 @@ describe('ToolRegistry', () => {
   // `tool_call` bridge while their schemas stay out of the eager model
   // request (#9827).
   describe('permission-deferred tools (#10075)', () => {
+    it('keeps deferred direct-control tools out of CodeMode bindings', async () => {
+      const registry = new ToolRegistry(
+        new Config({
+          ...baseConfigParams,
+          toolMode: ToolMode.CodeMode,
+        }),
+      );
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerPermissionDeferredFactory(
+        'send_message',
+        async () => new MockTool({ name: 'send_message' }),
+      );
+      await registry.warmAll();
+
+      expect(registry.isDeferredAndHidden('send_message')).toBe(true);
+      expect(
+        registry
+          .getCodeModeBindingPlan()
+          .bindings.some((binding) => binding.name === 'send_message'),
+      ).toBe(false);
+    });
+
     const HIDDEN = 'hidden_by_allowlist';
 
     async function addPermissionDeferred(registry = toolRegistry) {

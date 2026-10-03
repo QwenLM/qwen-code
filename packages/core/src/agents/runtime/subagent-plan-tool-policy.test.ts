@@ -252,7 +252,7 @@ describe('subagent plan tool policy', () => {
       expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
     });
 
-    it('credits the exec gateway only under CodeModeOnly', () => {
+    it('credits the exec gateway only when its bindings are available', () => {
       const execList = { tools: [ToolNames.EXEC, ToolNames.READ_FILE] };
       expect(toolConfigAllowsSkill(execList, true)).toBe(true);
       expect(toolConfigAllowsSkill(execList, false)).toBe(false);

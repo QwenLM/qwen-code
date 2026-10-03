@@ -207,11 +207,23 @@ export function resolveBundledReferenceSurface(
  * Whether a registered tool's schema can be withheld from the request:
  * permission-deferred by a `tools.eager` allowlist and not listed in
  * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
- * drops it — a decision recorded once has to ask this. CodeModeOnly invokes
- * deferred tools through `exec` instead of the Direct-mode bridge.
+ * drops it — a decision recorded once has to ask this. CodeModeOnly discovers
+ * schemas through top-level search and invokes deferred tools through exec.
+ * Hybrid also carries their schemas in exec when the bridge is incomplete.
  */
 function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
-  if (config.getToolMode?.() === ToolMode.CodeModeOnly) return false;
+  const mode = config.getToolMode?.();
+  if (mode === ToolMode.CodeModeOnly) return false;
+  const names = config.getToolRegistry?.()?.getAllToolNames?.() ?? [];
+  if (
+    mode === ToolMode.CodeMode &&
+    names.includes(ToolNames.EXEC) &&
+    !(
+      names.includes(ToolNames.TOOL_SEARCH) &&
+      names.includes(ToolNames.TOOL_CALL)
+    )
+  )
+    return false;
   if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
   return !config.getVisibleTools?.()?.has(name);
 }

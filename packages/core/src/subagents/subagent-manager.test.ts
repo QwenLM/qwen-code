@@ -14,7 +14,8 @@ import {
   SubagentError,
   SubagentErrorCode,
 } from './types.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { ExecTool } from '../tools/exec.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -3204,25 +3205,36 @@ describe('SubagentManager', () => {
       // skills through the exec gateway and must keep its manager. The parent
       // is a real CodeModeOnly Config: dropping the tool-mode argument at the
       // createAgentHeadless call site turns this case red.
-      it('keeps the manager for an exec-only agent under CodeModeOnly', async () => {
-        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
-        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
-          sessionManager,
-        );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
-        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
-          mockToolRegistry,
-        );
+      it.each(['code_mode_only', 'code_mode'] as const)(
+        'keeps the manager and registered Skill for an exec-only agent in %s',
+        async (toolMode) => {
+          const codeModeParent = makeFakeConfig({ toolMode });
+          const codeModeRegistry = new ToolRegistry(codeModeParent);
+          codeModeRegistry.registerFactory(
+            ToolNames.EXEC,
+            async () => new ExecTool(codeModeParent),
+          );
+          expect(codeModeRegistry.getTool(ToolNames.EXEC)).toBeUndefined();
+          vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+            sessionManager,
+          );
+          vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+            manager,
+          );
+          vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+            codeModeRegistry,
+          );
 
-        const context = await launch(
-          { tools: [ToolNames.EXEC] },
-          codeModeParent,
-        );
-        expect(context.getSkillManager()).toBe(sessionManager);
-        expect(context.getToolRegistry().getAllToolNames()).toContain(
-          ToolNames.SKILL,
-        );
-      });
+          const context = await launch(
+            { tools: [ToolNames.EXEC] },
+            codeModeParent,
+          );
+          expect(context.getSkillManager()).toBe(sessionManager);
+          expect(context.getToolRegistry().getAllToolNames()).toContain(
+            ToolNames.SKILL,
+          );
+        },
+      );
 
       // The rebuilt registry's tools are per-subagent instances: the nested
       // Agent tool subscribes to the *shared session* SubagentManager in its

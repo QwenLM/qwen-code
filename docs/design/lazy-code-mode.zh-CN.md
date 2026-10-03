@@ -4,9 +4,9 @@
 
 ## 问题与范围
 
-CodeModeOnly 目前把所有可调用工具的签名和描述写入初始 `exec` 声明，包括 deferred 工具，因此失去了延迟加载节省提示词的效果。现有 `tool_call` 桥接层还把目标参数描述为通用对象；issue #12889 记录了 Responses provider 下反复生成空参数的问题。Code Mode 允许模型通过 JavaScript 表达参数，并保留正常的运行时校验。
+本次修改前，CodeModeOnly 把所有可调用工具的签名和描述写入初始 `exec` 声明，包括 deferred 工具，因此失去了延迟加载节省提示词的效果。现有 `tool_call` 桥接层还把目标参数描述为通用对象；issue #12889 记录了 Responses provider 下反复生成空参数的问题。Code Mode 允许模型通过 JavaScript 表达参数，并保留正常的运行时校验。
 
-本次修改让现有实验性 `tools.codeModeOnly` 模式通过 `tool_search` 按需加载 deferred 工具的描述和 schema。Direct 模式保持现有协议。这扩展了最初 CodeModeOnly MVP 的范围。
+本次修改让现有实验性 `tools.mode: "code_mode_only"` 模式通过 `tool_search` 按需加载 deferred 工具的描述和 schema。Direct 模式保持现有协议。这扩展了最初 CodeModeOnly MVP 的范围。
 
 ## 设计
 

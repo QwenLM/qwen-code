@@ -5,6 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import type { ToolConfig } from './agent-types.js';
@@ -88,6 +89,23 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.MANAGE_MEMORY,
 ]);
 
+export function hasAgentSkillExecBinding(
+  context: Pick<Config, 'getToolMode' | 'getToolRegistry' | 'getVisibleTools'>,
+): boolean {
+  const mode = context.getToolMode?.();
+  const registry = context.getToolRegistry?.();
+  return (
+    mode === ToolMode.CodeModeOnly ||
+    (mode === ToolMode.CodeMode &&
+      !!registry?.getAllToolNames().includes(ToolNames.EXEC) &&
+      !(
+        registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
+        !registry?.isDeferredToolRevealed?.(ToolNames.SKILL) &&
+        !context.getVisibleTools?.().has(ToolNames.SKILL)
+      ))
+  );
+}
+
 /**
  * Whether an agent running with `toolConfig` is declared the Skill tool.
  *
@@ -102,25 +120,12 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * listing and the pointer cannot disagree about whether a skill can actually
  * be loaded — the disagreement #12424 reports.
  *
- * Tool mode is an input; registry state deliberately is not. A
- * `permissions.deny` or `excludeTools` entry is a registry property, and
- * `resolveBundledReferenceRoute` answers the route from it. The per-agent
- * policy is the one input that resolver cannot see (#12424).
- *
- * Of the two `ToolMode.CodeModeOnly` arms, this predicate covers the `exec`
- * gateway: `prepareTools()` additionally admits every `code-mode-callable`
- * registry tool when the configured names include `exec`
- * (`inheritsCodeModeBindings`, `agent-core.ts`), and `getToolExposure(SKILL)`
- * is `code-mode-callable` because SKILL is in neither `HIDDEN_TOOLS` nor
- * `DIRECT_ONLY_TOOLS`. So an agent whose finite list names `exec` but not
- * `skill` reaches the Skill tool, and callers must pass the mode — with it
- * omitted this answers `false` for that shape, which would withhold the manager
- * and, through the `config.ts` registration guard, the Skill tool itself.
- *
- * The `exec` arm also holds when a `tools.eager` allowlist demotes `skill`:
- * `prepareTools()` keeps eager-demoted tools in the code-mode allowlist
- * (#12898), where they stay callable and discoverable through `tool_search`,
- * so the pointer this answer leads to can be followed (#12809).
+ * Callers supply whether exec bindings are reachable in the current mode and
+ * registry. A finite list naming exec can therefore reach Skill without
+ * naming it directly. CodeModeOnly retains eager-deferred nested targets;
+ * Hybrid applies its final eager and permission scope in prepareTools().
+ * Registry deny/exclude rules remain the bundled-reference resolver's concern;
+ * this predicate supplies the per-agent policy that resolver cannot see.
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
@@ -133,7 +138,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
-  codeModeOnly = false,
+  execBindingsAvailable = false,
 ): boolean {
   if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
@@ -153,9 +158,9 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = names.includes('*');
-  // Under CodeModeOnly, naming `exec` inherits every code-mode-callable
-  // binding (`prepareTools()`), and `skill` is one of them.
-  const reachesThroughExec = codeModeOnly && names.includes(ToolNames.EXEC);
+  // Naming an available exec gateway can reach the nested Skill binding.
+  const reachesThroughExec =
+    execBindingsAvailable && names.includes(ToolNames.EXEC);
   return (
     inheritsRegistry || names.includes(ToolNames.SKILL) || reachesThroughExec
   );

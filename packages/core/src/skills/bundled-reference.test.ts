@@ -25,7 +25,12 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { AGENT_DELEGATION_SKILL_NAME } from './agent-delegation-skill.js';
-import { readBundledReference } from './bundled-reference.js';
+import {
+  readBundledReference,
+  resolveBundledReferenceRoute,
+  isToolHiddenBehindToolSearch,
+} from './bundled-reference.js';
+import type { Config } from '../config/config.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from './workflow-authoring-skill.js';
 
 /** First body line of each reference, after the frontmatter is stripped. */
@@ -36,6 +41,45 @@ const REFERENCES = [
   [WORKFLOW_AUTHORING_SKILL_NAME, WORKFLOW_ANCHOR, DELEGATION_ANCHOR],
   [AGENT_DELEGATION_SKILL_NAME, DELEGATION_ANCHOR, WORKFLOW_ANCHOR],
 ] as const;
+
+describe('hybrid reference routes', () => {
+  it.each([
+    [[], 'skill'],
+    [['tool_search'], 'skill'],
+    [['tool_call'], 'skill'],
+    [['tool_search', 'tool_call'], 'skill-via-tool-search'],
+  ] as const)('uses a reachable skill with bridge %j', (bridge, route) => {
+    const config = {
+      getToolMode: () => 'code_mode',
+      getSkillManager: () => ({}),
+      getToolRegistry: () => ({
+        getAllToolNames: () => ['exec', 'skill', ...bridge],
+        isPermissionDeferred: () => true,
+        isDeferredToolRevealed: () => false,
+      }),
+    } as unknown as Config;
+    expect(resolveBundledReferenceRoute(config, 'agent-delegation')).toBe(
+      route,
+    );
+    expect(isToolHiddenBehindToolSearch(config, 'skill')).toBe(
+      bridge.length === 2,
+    );
+  });
+
+  it('inlines a hidden skill when both exec and the bridge are unavailable', () => {
+    const config = {
+      getToolMode: () => 'code_mode',
+      getSkillManager: () => ({}),
+      getToolRegistry: () => ({
+        getAllToolNames: () => ['skill'],
+        isPermissionDeferred: () => true,
+      }),
+    } as unknown as Config;
+    expect(resolveBundledReferenceRoute(config, 'agent-delegation')).toBe(
+      'inline',
+    );
+  });
+});
 
 describe('readBundledReference', () => {
   /**

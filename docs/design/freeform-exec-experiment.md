@@ -13,7 +13,7 @@ evaluation inside exec remains.
 ## Design
 
 `tools.freeform` opts into a Responses custom tool with text input for exec.
-The setting is effective only when `tools.codeModeOnly` is true and the current
+The setting is effective only when `tools.mode` is `code_mode_only` and the current
 model uses `wireApi: "responses"`. Other tools and the default behavior remain
 function tools. The Responses converter maps completed custom input to internal
 `{ source }`, leaving scheduler validation, permissions, runtime execution,
@@ -35,7 +35,7 @@ types, converter, pipeline, and their tests. There is no automatic capability
 detection, fallback, grammar constraint, or change to other provider adapters.
 The caller enables the setting only on an endpoint that supports
 [Responses Custom Tools](https://developers.openai.com/api/docs/guides/function-calling#custom-tools).
-When `tools.codeModeOnly` is false, `tools.freeform` is stored but has no effect.
+When `tools.mode` is `direct` or `code_mode`, `tools.freeform` is stored but has no effect.
 
 ## Validation and acceptance
 
