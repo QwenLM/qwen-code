@@ -23,6 +23,7 @@ import {
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
+  versionSpellingAlias,
   type ModelCatalog,
   type ModelCatalogEntry,
 } from './model-catalog.js';
@@ -141,33 +142,6 @@ function servesAgentTurns(model: ModelsDevModel): boolean {
 /** `toLimits` builds its keys in a fixed order, so this compares by value. */
 function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-/**
- * The same version with its minor separator respelled: `qwen2-5-72b-instruct`
- * <-> `qwen2.5-72b-instruct`, `glm-5.3-flash` <-> `glm-5-3-flash`. Vendors and
- * the proxies in front of them accept either spelling, and `normalize()` folds
- * the dotted minor to dashes for Claude only, so every other family reaches the
- * catalog with whichever spelling the user typed. models.dev publishes one
- * spelling per provider — `alibaba` lists `qwen2-5-72b-instruct`, `zai` lists
- * `glm-5.3-flash` — so keying an entry by `normalize(model.id)` alone left the
- * other spelling to fall through to the family regex rows (#13209):
- * `tokenLimit('qwen2.5-72b-instruct')` answered 262,144 instead of the
- * catalog's own 131,072, and the vision twin degraded to text-only.
- *
- * Only a version boundary is respelled. The digit run before the separator has
- * to be the last one in the prefix and the run after it has to be a whole
- * segment, so a size suffix is never mistaken for a minor version
- * (`gemma-4-26b-a4b-it` gets no alias). Returns undefined when the key carries
- * no version to respell.
- */
-function versionSpellingAlias(key: string): string | undefined {
-  const dotted = key.replace(/^(.*\d)-(\d+(?=-|$))/, '$1.$2');
-  if (dotted !== key) {
-    return dotted;
-  }
-  const dashed = key.replace(/^(.*\d)\.(\d+(?=-|$))/, '$1-$2');
-  return dashed === key ? undefined : dashed;
 }
 
 /**

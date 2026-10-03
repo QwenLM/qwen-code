@@ -31,6 +31,7 @@ import {
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
+  versionSpellingAlias,
 } from './model-catalog.js';
 
 const FAR_FUTURE = '9999-01-01T00:00:00.000Z';
@@ -548,6 +549,29 @@ describe('model catalog', () => {
       output: 8_192,
       modalities: { image: true },
     });
+  });
+
+  it('adjusts both spellings of a version, not just the one it names', () => {
+    // The projection commits one entry per model under each spelling of its
+    // version, but the context corrections and the DashScope pdf carve-out are
+    // each written against a single id. Applied by exact key they reached only
+    // that spelling and left its twin serving models.dev's unadjusted numbers,
+    // so `glm-4-7` got the 204,800 round-up the correction exists to overwrite
+    // and `qwen3-8-max` got the pdf the carve-out exists to withhold.
+    for (const key of Object.keys(bundled.models)) {
+      const alias = versionSpellingAlias(key);
+      if (!alias || !(alias in bundled.models)) {
+        continue;
+      }
+      expect({ key, alias: lookupModelCatalog(alias) }).toEqual({
+        key,
+        alias: lookupModelCatalog(key),
+      });
+    }
+    expect(lookupModelCatalog('glm-4-7')?.context).toBe(202_752);
+    expect(lookupModelCatalog('minimax-m2-5')?.context).toBe(196_608);
+    expect(lookupModelCatalog('minimax-m2-5-highspeed')?.context).toBe(196_608);
+    expect(lookupModelCatalog('qwen3-8-max')?.modalities?.pdf).toBeUndefined();
   });
 
   it('keeps the ids whose row requires the dot off the alias machinery', () => {
