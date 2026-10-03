@@ -89,6 +89,7 @@ const mockConfig = {
   // constructor-injected ContentGenerator without building a per-model one.
   getModel: vi.fn().mockReturnValue('test-model'),
   getModelsConfig: vi.fn().mockReturnValue(undefined),
+  getChatCompression: vi.fn().mockReturnValue(undefined),
 } as unknown as Mocked<Config>;
 
 // A single-candidate model response carrying `part`.
@@ -1204,6 +1205,7 @@ describe('BaseLlmClient', () => {
       mockConfig.getModelsConfig.mockReturnValue(
         undefined as unknown as ReturnType<Config['getModelsConfig']>,
       );
+      mockConfig.getChatCompression.mockReturnValue(undefined);
       mockBuildAgentContentGeneratorConfig.mockReset();
       mockCreateContentGenerator.mockReset();
     });
@@ -1328,6 +1330,56 @@ describe('BaseLlmClient', () => {
       expect(100 + 2_000 + (8_192 - 100 - 2_000)).toBeLessThanOrEqual(8_192);
     });
 
+    // The declared contract is `string | Part | Part[] | Content`, and
+    // `appendSystemInstruction` in utils/sideQuery.ts produces every one of
+    // those. Pin the three non-string branches: collapsing the shape-narrowing
+    // to `parts = [value]` must redden the Content and Part[] cases.
+    it.each<[string, NonNullable<GenerateTextOptions['systemInstruction']>]>([
+      ['Content', { role: 'user', parts: [{ text: 'y'.repeat(2_000 * 4) }] }],
+      ['Part[]', [{ text: 'y'.repeat(2_000 * 4) }]],
+      ['bare Part', { text: 'y'.repeat(2_000 * 4) }],
+    ])('counts a %s system instruction against the window', async (_l, si) => {
+      useWindow('qwen3-coder-plus', 8_192);
+
+      await askText('qwen3-coder-plus', 100, { systemInstruction: si });
+
+      expect(sentBudget()).toBe(8_192 - 100 - 2_000);
+    });
+
+    it('prices a kept image with the operator-resolved estimate', async () => {
+      // Every other estimator on the send path uses
+      // `resolveSlimmingConfig(...).imageTokenEstimate`; the 1_600 default here
+      // would under-price each image, over-state the room by the difference
+      // and grant a `max_tokens` the window cannot hold.
+      mockConfig.getModel.mockReturnValue('deepseek-r1');
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'deepseek-r1',
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 32_768,
+        // `slimCompactionInput` keeps an `inlineData` part only for a target
+        // that declares the modality.
+        modalities: { image: true },
+      });
+      mockConfig.getChatCompression.mockReturnValue({
+        imageTokenEstimate: 3_000,
+      });
+      mockGenerateContent.mockResolvedValue(createMockTextResponse('ok'));
+
+      await client.generateText({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'aGk=' } }],
+          },
+        ],
+        model: 'deepseek-r1',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(sentBudget()).toBe(32_768 - 3_000);
+    });
+
     it('budgets against the target window, not the session window', async () => {
       // Side queries default to the fast model, and a same-provider target
       // whose registry entry declares no window inherits the *session* model's
@@ -1368,13 +1420,14 @@ describe('BaseLlmClient', () => {
       expect(5_000 + 32_768).toBeLessThanOrEqual(1_000_000);
     });
 
-    it('budgets against the session window when the target generator failed to build', async () => {
+    it('budgets against the session window when the target model is not registered', async () => {
       // Caveat, by design: `createRuntimeViewForModel` falls back to the main
       // generator when the target model is not registered, returning the
       // *session* config while `model` stays the resolved target. The window
       // therefore describes the session model (8_192) and the ceiling the
       // target (`qwen3-coder-plus`, 64_000) — the budget still fits the
-      // window it was handed.
+      // window it was handed. The generator-error fallback returns the same
+      // config object, so it budgets identically.
       useWindow('test-model', 8_192);
 
       await askText('qwen3-coder-plus', 100);

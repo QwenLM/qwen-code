@@ -39,7 +39,10 @@ import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
-import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import {
+  resolveSlimmingConfig,
+  slimCompactionInput,
+} from '../services/compactionInputSlimming.js';
 import {
   CHARS_PER_TOKEN,
   estimateContentTokens,
@@ -148,13 +151,14 @@ function estimateSystemInstructionTokens(
  * Call after `resolveForModel` so `model` is the resolved target and
  * `contents` is the slimmed payload actually sent. Caveats:
  *
- * - On the generator-error fallback in `createRuntimeViewForModel` the session
- *   generator sends the request, so `resolvedContextWindowSize` is `undefined`
- *   and the session config supplies the window while `model` stays the
- *   resolved target: the ceiling can then describe a different model than the
- *   window does. That mismatch is inherent to the fallback (the target's own
- *   config could not be built); the budget still never exceeds the window the
- *   request is actually handed.
+ * - On either `createRuntimeViewForModel` fallback — the target generator
+ *   failed to build, or the target is not registered — the session generator
+ *   sends the request, so `resolvedContextWindowSize` is `undefined` and the
+ *   session config supplies the window while `model` stays the resolved
+ *   target: the ceiling can then describe a different model than the window
+ *   does. That mismatch is inherent to the fallback (the target's own config
+ *   could not be built); the budget still never exceeds the window the request
+ *   is actually handed.
  * - For a target in neither the catalog nor the curated tables the window term
  *   falls back to `DEFAULT_TOKEN_LIMIT` (200 000) and does not bind. That
  *   fabrication is pre-existing and shared with the main turn
@@ -166,6 +170,7 @@ function budgetOutputTokensForWindow(
   model: string,
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
   resolvedContextWindowSize: number | undefined,
+  imageTokenEstimate: number,
 ): GenerateContentConfig {
   const explicitCeiling =
     contentGeneratorConfig?.samplingParams?.max_tokens ??
@@ -179,7 +184,11 @@ function budgetOutputTokensForWindow(
   ].find((v): v is number => typeof v === 'number' && v > 0);
   const room =
     (declaredWindow ?? tokenLimit(model, 'input')) -
-    estimateContentTokens(contents) -
+    // The operator's resolved estimate, not `DEFAULT_IMAGE_TOKEN_ESTIMATE`:
+    // every other estimator on the send path uses it, and pricing a kept image
+    // low here over-states the room, which is the 400 this budget exists to
+    // prevent.
+    estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction);
 
   return {
@@ -423,6 +432,8 @@ export class BaseLlmClient {
       requestModel,
       contentGeneratorConfig,
       resolvedContextWindowSize,
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate,
     );
 
     try {
@@ -563,6 +574,8 @@ export class BaseLlmClient {
       requestModel,
       contentGeneratorConfig,
       resolvedContextWindowSize,
+      resolveSlimmingConfig(this.config.getChatCompression?.())
+        .imageTokenEstimate,
     );
 
     try {
