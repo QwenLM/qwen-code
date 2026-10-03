@@ -613,7 +613,13 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 /** Refusals observed during one refresh, including loads that later fail. */
 type ScanRefusalCollector = Map<
   string,
-  { extensionDir: string; refusals: Map<string, SubagentError> }
+  {
+    extensionDir: string;
+    refusals: Map<string, SubagentError>;
+    // Agents-dir file each refusal name came from; staleness is judged per
+    // name against the next scan's damaged-file set (R17-1).
+    refusalFiles: Map<string, string>;
+  }
 >;
 
 // ============================================================================
@@ -641,9 +647,19 @@ export class ExtensionManager {
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
   // Pending refusals gate dispatch without publishing incomplete extensions.
-  // Only a complete committed agent scan or removal supersedes them.
+  // Superseded per name by a committed scan that re-refused the name or saw
+  // its file clean/absent, per extension by removal.
   private readonly pendingScanRefusals: ScanRefusalCollector = new Map();
+  // Agents-dir-level failures (unreadable directory) mark the whole scan
+  // incomplete: nothing per-file is known, so EVERY pending name is kept.
   private readonly incompleteAgentScans = new WeakSet<Extension>();
+  // Agents-dir entries that failed to parse this scan, per committed object.
+  // A per-file failure can only hide ITS OWN declared name, so pending
+  // refusals survive per name only while their file stays damaged (R17-1).
+  private readonly agentScanDamagedFiles = new WeakMap<
+    Extension,
+    Set<string>
+  >();
 
   private withNetworkPolicy(
     installMetadata: ExtensionInstallMetadata | undefined,
@@ -1628,7 +1644,7 @@ export class ExtensionManager {
     this.applyStoreActivation(snapshot);
     this.mergeScanRefusals(scanRefusals, requestedNames);
     for (const extension of extensions) {
-      this.clearPendingScanRefusals(extension);
+      this.reconcilePendingScanRefusals(extension);
     }
     if (dirFingerprintBeforeLoad !== undefined) {
       for (const [name, { extensionDir }] of this.pendingScanRefusals) {
@@ -1671,17 +1687,56 @@ export class ExtensionManager {
     }
   }
 
+  /**
+   * Per-name supersede after a committed refresh (R17-1). Fresh refusals and
+   * names whose recorded file this scan still damaged stay; a name whose file
+   * now parses clean, parses into a different refusal, or is gone has its
+   * evidence withdrawn — a refusal must not outlive the file that caused it,
+   * and parse noise from a DIFFERENT file must not pin it. A directory-level
+   * agents failure (incompleteAgentScans) knows nothing per file, so it keeps
+   * every name; a record without a known source file is kept conservatively.
+   */
+  private reconcilePendingScanRefusals(extension: Extension): void {
+    const pending = this.pendingScanRefusals.get(extension.name);
+    if (!pending || this.incompleteAgentScans.has(extension)) {
+      return;
+    }
+    const damaged = this.agentScanDamagedFiles.get(extension);
+    const fresh = new Set(
+      [...(extension.agentExecutorRefusals?.keys() ?? [])].map((name) =>
+        name.toLowerCase(),
+      ),
+    );
+    for (const agentName of [...pending.refusals.keys()]) {
+      if (fresh.has(agentName)) continue;
+      const file = pending.refusalFiles.get(agentName);
+      if (file === undefined || damaged?.has(file)) continue;
+      pending.refusals.delete(agentName);
+      pending.refusalFiles.delete(agentName);
+    }
+    if (pending.refusals.size === 0) {
+      this.pendingScanRefusals.delete(extension.name);
+    }
+  }
+
   private mergeScanRefusals(
     scanRefusals: ScanRefusalCollector,
     requestedNames: string[],
   ): void {
     const requested = new Set(requestedNames.map((name) => name.toLowerCase()));
-    for (const [name, { extensionDir, refusals }] of scanRefusals) {
+    for (const [
+      name,
+      { extensionDir, refusals, refusalFiles },
+    ] of scanRefusals) {
       if (requested.size > 0 && !requested.has(name.toLowerCase())) continue;
       const previous = this.pendingScanRefusals.get(name);
       this.pendingScanRefusals.set(name, {
         extensionDir,
         refusals: new Map([...(previous?.refusals ?? []), ...refusals]),
+        refusalFiles: new Map([
+          ...(previous?.refusalFiles ?? []),
+          ...refusalFiles,
+        ]),
       });
     }
   }
@@ -2117,6 +2172,10 @@ export class ExtensionManager {
     let extension: Extension | undefined;
     // The finally block preserves refusals even if a later loader fails.
     let agentExecutorRefusals: Map<string, SubagentError> | undefined;
+    // Same hoisting reason: refusal sources and damaged agent files must stay
+    // visible to the finally when a sibling leg rejects mid-scan.
+    const agentRefusalFiles = new Map<string, string>();
+    const damagedAgentFiles = new Set<string>();
     try {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
@@ -2167,7 +2226,7 @@ export class ExtensionManager {
         // recorded.
         const [commandsResult, skillsResult, agentsResult] =
           await Promise.allSettled([
-            loadCommandsFromDir(`${effectiveExtensionPath}/commands`),
+            loadCommandsFromDir(path.join(effectiveExtensionPath, 'commands')),
             loadSkillsFromDir(
               `${effectiveExtensionPath}/skills`,
               onSkillsDiscoveryError,
@@ -2175,7 +2234,14 @@ export class ExtensionManager {
             loadSubagentFromDir(
               `${effectiveExtensionPath}/agents`,
               agentExecutorRefusals,
-              () => this.incompleteAgentScans.add(head.extension),
+              (file) => {
+                if (file === undefined) {
+                  this.incompleteAgentScans.add(head.extension);
+                } else {
+                  damagedAgentFiles.add(file);
+                }
+              },
+              agentRefusalFiles,
             ),
           ]);
         if (commandsResult.status === 'rejected') throw commandsResult.reason;
@@ -2274,7 +2340,11 @@ export class ExtensionManager {
         options.scanRefusals?.set(extension.name, {
           extensionDir,
           refusals: agentExecutorRefusals,
+          refusalFiles: agentRefusalFiles,
         });
+      }
+      if (extension && damagedAgentFiles.size > 0) {
+        this.agentScanDamagedFiles.set(extension, damagedAgentFiles);
       }
     }
   }
@@ -2817,7 +2887,7 @@ export class ExtensionManager {
 
         const commands = isAgentPlugin
           ? []
-          : await loadCommandsFromDir(`${localSourcePath}/commands`);
+          : await loadCommandsFromDir(path.join(localSourcePath, 'commands'));
         const previousCommands = previous?.commands ?? [];
 
         const skills = isAgentPlugin

@@ -132,16 +132,20 @@ function isNamedExecutionRefusal(error: unknown): error is SubagentError {
 
 const acceptedRefusalNames = new WeakMap<SubagentError, readonly string[]>();
 
+/** Lowercased declared names a refusal records for; [] for non-refusals. */
+function refusalNames(error: unknown): string[] {
+  if (!isNamedExecutionRefusal(error)) return [];
+  return [error.subagentName, ...(acceptedRefusalNames.get(error) ?? [])]
+    .filter((name): name is string => Boolean(name))
+    .map((name) => name.toLowerCase());
+}
+
 function recordExecutionRefusal(
   refusals: Map<string, SubagentError>,
   error: unknown,
 ): void {
-  if (!isNamedExecutionRefusal(error)) return;
-  for (const name of [
-    error.subagentName,
-    ...(acceptedRefusalNames.get(error) ?? []),
-  ]) {
-    if (name) refusals.set(name.toLowerCase(), error);
+  for (const name of refusalNames(error)) {
+    refusals.set(name, error as SubagentError);
   }
 }
 
@@ -2026,7 +2030,14 @@ export async function loadSubagentFromDir(
   // name, so a by-name dispatch can refuse instead of falling through to a
   // builtin of the same name.
   refusals?: Map<string, SubagentError>,
-  onDiscoveryError?: () => void,
+  // file: the agents-dir entry a per-file failure damaged, so the caller can
+  // retain pending refusals per name/file instead of per extension; omitted
+  // on directory-level failure (a readdir that genuinely could not complete),
+  // where no per-name evidence exists.
+  onDiscoveryError?: (file?: string) => void,
+  // Records which agents-dir file each freshly recorded refusal name came
+  // from, so staleness is provable per name (R17-1).
+  refusalFiles?: Map<string, string>,
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
@@ -2037,7 +2048,7 @@ export async function loadSubagentFromDir(
         file,
       ): Promise<
         | { config: SubagentConfig }
-        | { refusal: unknown }
+        | { refusal: unknown; file: string }
         | { exhaustion: unknown }
       > => {
         const filePath = path.join(baseDir, file);
@@ -2057,9 +2068,19 @@ export async function loadSubagentFromDir(
           // settled and the refusals below are folded: failing the refresh
           // closed must not discard the refusals the scan already produced.
           if (isResourceExhaustion(error)) return { exhaustion: error };
-          if (!isNamedExecutionRefusal(error)) onDiscoveryError?.();
+          // A named execution refusal is evidence, not damage. A vanished
+          // file (deleted between readdir and readFile) explains nothing —
+          // reporting it as damage would pin the pending refusal that file
+          // caused after the file is gone (R17-1). Only an unreadable file
+          // that is still there counts as damage, keyed by its own name.
+          if (
+            !isNamedExecutionRefusal(error) &&
+            (error as NodeJS.ErrnoException).code !== 'ENOENT'
+          ) {
+            onDiscoveryError?.(file);
+          }
           warnInvalidSubagentFile(filePath, error);
-          return { refusal: error };
+          return { refusal: error, file };
         }
       },
     );
@@ -2078,6 +2099,9 @@ export async function loadSubagentFromDir(
       }
       if ('refusal' in item && refusals) {
         recordExecutionRefusal(refusals, item.refusal);
+        for (const name of refusalNames(item.refusal)) {
+          refusalFiles?.set(name, item.file);
+        }
       }
     }
     if (firstExhaustion !== undefined) {

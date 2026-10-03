@@ -505,6 +505,31 @@ describe('extension scan recovery', () => {
     );
   });
 
+  it('withdraws a stale refusal once the refused file is gone, even with a malformed sibling', async () => {
+    // R17-1: a refusal must not outlive the file that caused it, and parse
+    // noise from a DIFFERENT file must not pin it. notes.md stays malformed
+    // throughout; deleting explore.md must withdraw the explore refusal.
+    extension('aaa-refusal');
+    refusal('aaa-refusal');
+    write(
+      'aaa-refusal/agents/notes.md',
+      '---\nname: notes\n---\nMissing description.',
+    );
+    await manager.refreshCache();
+    expect(
+      manager.getPendingScanRefusals().get('aaa-refusal')?.has('explore'),
+    ).toBe(true);
+    await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
+      SubagentError,
+    );
+
+    const ext = path.join(extensionsDir, 'aaa-refusal');
+    fs.rmSync(path.join(ext, 'agents', 'explore.md'));
+    await manager.refreshCache();
+    expect(manager.getPendingScanRefusals().has('aaa-refusal')).toBe(false);
+    expect((await subagents().loadSubagent('explore'))?.isBuiltin).toBe(true);
+  });
+
   it('withdraws a pending refusal when a complete rescan finds no agents directory', async () => {
     const ext = extension('aaa-refusal');
     refusal('aaa-refusal');

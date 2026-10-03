@@ -91,10 +91,15 @@ extensions cannot block a builtin; records without a cache entry still refuse
 dispatch. Re-enabling an entry exposes its retained records again. No activation
 snapshot is needed on rejection.
 
-A successful refresh retains refusals from skipped extensions and incomplete
-agent discovery. A complete committed agent scan supersedes only that
-extension's pending records, including on named refreshes and install/update
-reloads. Uninstall removes the name; a full refresh also drops records whose
+A successful refresh retains refusals from skipped extensions and reconciles
+the rest per name, keyed by the agents-dir file each refusal was recorded
+from: a name stays while this scan refused it again or while its file is
+still damaged, and is withdrawn once that file parses clean, parses into a
+different refusal, or no longer exists. A refusal therefore never outlives
+the file that caused it, and a malformed sibling file cannot pin it. An
+unreadable agents directory proves nothing per file and keeps every record
+for that extension; install/update reloads supersede the extension's records
+wholesale. Uninstall removes the name; a full refresh also drops records whose
 installation directory is confirmed missing. Unreadable directories and
 `ENOTDIR` are not proof of removal. Pending state does not persist across
 process restarts.
