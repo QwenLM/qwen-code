@@ -374,6 +374,17 @@ describe('answer command parsing with the root options registered', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('delivers an answer behind a boolean root flag and its off-word', async () => {
+    // yargs-parser consumes the `false` after a known boolean flag; read as
+    // the first positional it hid the chain, and the reply bound to the
+    // literal string "sessions".
+    const answer = mockDelivered();
+    await parse(['--debug', 'false', 'sessions', 'answer', SESSION, 'hi']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'hi');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('delivers an answer whose last token is the bare word help', async () => {
     // The root instance's help command pops a trailing bare `help`, so it
     // too must be shielded by the inserted `--`.

@@ -234,7 +234,22 @@ async function handlePs(argv: PsArgs): Promise<void> {
               ipcToken: undefined,
               managed: false,
             })
-          : JSON.stringify({ ...row, dedupedRecord: undefined }),
+          : JSON.stringify({
+              ...row,
+              dedupedRecord: undefined,
+              // The table refuses the live-tense label when the pid probe
+              // returns nothing; the JSON row must carry the same probe
+              // fact, or a monitoring script reads `waiting`+`alive` for a
+              // session with no process and dispatches `sessions answer`
+              // at nothing. (`pid` absent proves only "no live process to
+              // print", so this is an explicit field, not a mapped token.)
+              ...(row.pid === undefined &&
+              (row.runtimeState === 'starting' ||
+                row.runtimeState === 'alive' ||
+                row.runtimeState === 'restarting')
+                ? { liveProcess: false }
+                : {}),
+            }),
       );
       // A managed session that is also registered keeps its registry
       // record on the JSON path: the table dedupes to one row per

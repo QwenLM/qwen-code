@@ -856,7 +856,7 @@ session also has a registry record, that record follows as its own
 `managed: false` line:
 
 ```
-name, pid, startedAt, cwd, taskState, runtimeState, sessionId, managed
+name, pid, startedAt, cwd, taskState, runtimeState, sessionId, managed, liveProcess
 ```
 
 `taskState` is the machine-readable form of the STATE column, and is the
@@ -864,8 +864,11 @@ field to script against: `running`, `waiting`, `ready`, `stopped` or
 `failed` — with `waiting`/`ready` becoming producible when the worker-side
 state reporting lands (see the STATE note above). The column's wording can
 change; these tokens will not. `runtimeState` is the presentation layer's
-process-level read (`alive`, `hibernated`, `exited`, ...), so a script can
-tell "no live process" from "waiting" without inferring it from a missing
+process-level read (`alive`, `hibernated`, `exited`, ...) as recorded in
+the store. It is not probe-backed: when the pid probe finds no process
+behind a row whose store state is live-tense, the row carries
+`liveProcess: false` — that field, not `runtimeState`, is how a script
+tells "no live process" from "waiting" without inferring it from a missing
 `pid`.
 
 Nothing else is written to stdout — an empty listing prints nothing at

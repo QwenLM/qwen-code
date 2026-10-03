@@ -445,6 +445,12 @@ describe('resolveBootstrapRoute', () => {
     expect(
       resolveBootstrapRoute(['-v', 'sessions', 'answer', '0f8e1c42']),
     ).toBe('version');
+    // A `-v` between `answer` and the session id is a root global, not a
+    // version request: the recognizer skipping it is what keeps the reply
+    // from being printed as the version and dropped with exit 0.
+    expect(
+      resolveBootstrapRoute(['sessions', 'answer', '-v', '0f8e1c42', 'hi']),
+    ).toBe('default');
   });
 
   it('exempts the sessions answer chain behind a root global prefix', () => {
@@ -2183,6 +2189,39 @@ describe('bootstrap import boundaries', () => {
           '../../scripts/cli-entry.js',
           '--debug',
           'sessions',
+          'answer',
+          '0f8e1c42',
+          'rerun',
+          '-v',
+          'now',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, CLI_VERSION: '7.7.7-test' },
+        },
+      );
+    } catch (error) {
+      output = String((error as { stdout?: string }).stdout ?? '');
+    }
+
+    expect(output).not.toBe('7.7.7-test\n');
+  });
+
+  it('defers a sessions answer chain split by a root global instead of intercepting its -v', () => {
+    // cli.js's recognizer accepts a root global between the chain words, so
+    // the wrapper must defer on the coarse `sessions` token alone: requiring
+    // adjacency under-approximates, and the miss prints the version and
+    // exits 0 with the reply silently discarded.
+    let output: string;
+    try {
+      output = execFileSync(
+        process.execPath,
+        [
+          '../../scripts/cli-entry.js',
+          '--debug',
+          'sessions',
+          '--proxy',
+          'http://127.0.0.1:1',
           'answer',
           '0f8e1c42',
           'rerun',

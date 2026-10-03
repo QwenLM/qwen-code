@@ -80,23 +80,26 @@ function hasBackgroundFlagToken() {
   return false;
 }
 
-// True when argv carries the `sessions answer` chain before any `--`.
+// True when argv carries a `sessions` token before any `--`.
 //
 // The answer text is free text: a `-v`/`--version` in it is the reply, not
 // a version request. cli.js owns the precise call (its recognizer anchors
-// the chain to the first positional); this wrapper only has to avoid
-// swallowing the argv into a fast path that exits before cli.js runs —
-// intercepting the `-v` of `qwen --debug sessions answer <id> rerun -v now`
-// printed the version and exited 0, discarding the reply with a success
-// code. Deliberately coarse, the way `hasBackgroundFlagToken` is: any
-// adjacent pair defers, and cli.js still prints the version for a genuine
-// request (`qwen -v sessions answer …`), only slower.
+// the `sessions answer` chain to the first positional, root globals and
+// all); this wrapper only has to avoid swallowing the argv into a fast
+// path that exits before cli.js runs — intercepting the `-v` of
+// `qwen --debug sessions answer <id> rerun -v now` printed the version and
+// exited 0, discarding the reply with a success code. Deliberately coarse,
+// the way `hasBackgroundFlagToken` is: any `sessions` token defers — a
+// root global may sit between the chain words, so requiring adjacency
+// would under-approximate and the miss is silent — and cli.js still prints
+// the version for a genuine request (`qwen -v sessions answer …`), only
+// slower.
 function hasSessionsAnswerChainToken() {
-  for (let i = 0; i < cliArgs.length; i++) {
-    if (cliArgs[i] === '--') {
+  for (const arg of cliArgs) {
+    if (arg === '--') {
       return false;
     }
-    if (cliArgs[i] === 'sessions' && cliArgs[i + 1] === 'answer') {
+    if (arg === 'sessions') {
       return true;
     }
   }

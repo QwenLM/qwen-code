@@ -565,6 +565,23 @@ describe('qwen sessions ps', () => {
     ).toBe('no process'.padEnd(STATE_COL));
   });
 
+  it('marks the same row liveProcess:false on the JSON path', async () => {
+    // The store keeps saying needs_input/alive after the process is gone;
+    // the table says `no process`, so the JSON row must carry the probe's
+    // verdict too — otherwise a monitoring script reads waiting+alive for
+    // a session with no process and dispatches `sessions answer` at it.
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
+    isPidAlive.mockReturnValue(false);
+    await run({ json: true });
+
+    const row = JSON.parse(stdout[0]!) as Record<string, unknown>;
+    expect(row['taskState']).toBe('waiting');
+    expect(row['runtimeState']).toBe('alive');
+    expect(row['pid']).toBeUndefined();
+    expect(row['liveProcess']).toBe(false);
+  });
+
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {
     // Degrading to the registry half is right; degrading silently is not
     // — an omitted session waiting for input is exactly what this

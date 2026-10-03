@@ -15,6 +15,7 @@
  * invocation.
  */
 
+import type { Options } from 'yargs';
 import { TOP_LEVEL_HELP_OPTIONS } from '../config/top-level-options.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
@@ -83,6 +84,22 @@ function flagName(name: string): string {
   return name.length === 1 ? `-${name}` : `--${name}`;
 }
 
+/** The top-level flags of the given option types, aliases included. */
+function rootFlagsOfType(...types: Array<Options['type']>): Set<string> {
+  const flags = new Set<string>();
+  for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
+    if (!types.includes(config.type)) continue;
+    flags.add(flagName(option));
+    const alias = config.alias;
+    if (typeof alias === 'string') {
+      flags.add(flagName(alias));
+    } else if (alias) {
+      for (const a of alias) flags.add(flagName(a));
+    }
+  }
+  return flags;
+}
+
 /**
  * The full value-taking top-level flag surface, derived from the shared
  * option table plus the hidden options config.ts registers inline. The
@@ -92,25 +109,20 @@ function flagName(name: string): string {
  * scan deliberately does NOT use this set (see BASE_VALUE_FLAGS above).
  */
 export const ROOT_VALUE_FLAGS: ReadonlySet<string> = (() => {
-  const flags = new Set<string>();
-  for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
-    if (
-      config.type === 'string' ||
-      config.type === 'number' ||
-      config.type === 'array'
-    ) {
-      flags.add(flagName(option));
-      const alias = config.alias;
-      if (typeof alias === 'string') {
-        flags.add(flagName(alias));
-      } else if (alias) {
-        for (const a of alias) flags.add(flagName(a));
-      }
-    }
-  }
+  const flags = rootFlagsOfType('string', 'number', 'array');
   flags.add('--sandbox-session-id');
   return flags;
 })();
+
+/**
+ * The boolean top-level flags, derived the same way as ROOT_VALUE_FLAGS.
+ * yargs-parser consumes a space-separated `false`/`true` word after every
+ * known boolean flag (measured above at BACKGROUND_FLAG_OFF_WORD), so a
+ * recognizer that skips only value-flag slots reads that word as the first
+ * positional and the chain goes dark for all 48 boolean spellings.
+ */
+export const ROOT_BOOLEAN_FLAGS: ReadonlySet<string> =
+  rootFlagsOfType('boolean');
 
 /**
  * Where a `sessions answer` chain sits in a raw argv.
@@ -150,6 +162,7 @@ export interface SessionsAnswerChain {
 export function findSessionsAnswerChain(
   argv: readonly string[],
   valueFlags: ReadonlySet<string> = ROOT_VALUE_FLAGS,
+  booleanFlags: ReadonlySet<string> = ROOT_BOOLEAN_FLAGS,
 ): SessionsAnswerChain | undefined {
   let sessionsAt = -1;
   let answerAt = -1;
@@ -159,21 +172,26 @@ export function findSessionsAnswerChain(
       break;
     }
     if (token.startsWith('-')) {
-      // Between `answer` and the session id a help/version token is the
-      // user asking for help (or a version print), not a root global to
-      // skip: bail so yargs shows it instead of the answer path
-      // swallowing it into a delivery.
-      if (
-        answerAt !== -1 &&
-        (token === '--help' ||
-          token === '-h' ||
-          token === '--version' ||
-          token === '-v')
-      ) {
+      // Between `answer` and the session id a help token is the user asking
+      // for help, not a root global to skip: bail so yargs shows it instead
+      // of the answer path swallowing it into a delivery. A version token
+      // is not bailed on: the version intercept in cli.ts already exempts
+      // the region after `answer`, and treating `-v` as skippable here is
+      // what lets `sessions answer -v <id> …` deliver instead of printing
+      // the version and dropping the reply with exit 0.
+      if (answerAt !== -1 && (token === '--help' || token === '-h')) {
         return undefined;
       }
       if (valueFlags.has(token)) {
         i++; // skip the value slot; the loop increment consumes the flag
+      } else if (
+        booleanFlags.has(token) &&
+        (argv[i + 1] === BACKGROUND_FLAG_OFF_WORD ||
+          argv[i + 1] === BACKGROUND_FLAG_ON_WORD)
+      ) {
+        // yargs-parser consumes exactly these two words as a boolean
+        // flag's value; any other word is a real positional.
+        i++;
       }
       continue;
     }
