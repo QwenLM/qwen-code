@@ -29,7 +29,10 @@ export interface ModelCatalog {
 }
 
 // Bump when projection rules change so older caches are fetched and reprojected.
-export const MODEL_CATALOG_PROJECTION_VERSION = 1;
+// 2: entries are also committed under the other spelling of their version
+//    (`qwen2-5-72b-instruct` <-> `qwen2.5-72b-instruct`), so a projection-1
+//    cache must not keep winning and silently drop the aliases (#13209).
+export const MODEL_CATALOG_PROJECTION_VERSION = 2;
 
 /** `QWEN_CODE_MODELS_DEV=off` restores the regex-only model tables. */
 export const MODEL_CATALOG_ENV = 'QWEN_CODE_MODELS_DEV';
@@ -172,6 +175,45 @@ function readCache(cachePath: string): ModelCatalog | undefined {
 }
 
 /**
+ * The same version with its minor separator respelled: `qwen2-5-72b-instruct`
+ * <-> `qwen2.5-72b-instruct`, `glm-5.3-flash` <-> `glm-5-3-flash`. Vendors and
+ * the proxies in front of them accept either spelling, and `normalize()` folds
+ * the dotted minor to dashes for Claude only, so every other family reaches the
+ * catalog with whichever spelling the user typed. models.dev publishes one
+ * spelling per provider — `alibaba` lists `qwen2-5-72b-instruct`, `zai` lists
+ * `glm-5.3-flash` — so keying an entry by `normalize(model.id)` alone left the
+ * other spelling to fall through to the family regex rows (#13209):
+ * `tokenLimit('qwen2.5-72b-instruct')` answered 262,144 instead of the
+ * catalog's own 131,072, and the vision twin degraded to text-only.
+ *
+ * Only a version boundary is respelled. The digit run before the separator has
+ * to be the last one in the prefix and the run after it has to be a whole
+ * segment, so a size suffix is never mistaken for a minor version
+ * (`gemma-4-26b-a4b-it` gets no alias). Returns undefined when the key carries
+ * no version to respell.
+ */
+export function versionSpellingAlias(key: string): string | undefined {
+  const dotted = key.replace(/^(.*\d)-(\d+(?=-|$))/, '$1.$2');
+  if (dotted !== key) {
+    return dotted;
+  }
+  const dashed = key.replace(/^(.*\d)\.(\d+(?=-|$))/, '$1-$2');
+  return dashed === key ? undefined : dashed;
+}
+
+/**
+ * Both catalog keys one model can be stored under, since the projection
+ * commits every entry under each spelling of its version. Key-specific
+ * adjustments have to walk this list rather than the single id they are
+ * written against, or they reach one spelling and leave its twin answering
+ * models.dev's unadjusted numbers.
+ */
+function versionSpellings(key: string): string[] {
+  const alias = versionSpellingAlias(key);
+  return alias ? [key, alias] : [key];
+}
+
+/**
  * Client-owned context windows. models.dev's `limit.input` is the source of
  * truth for input limits, but for these ids it is bucketed above the window
  * the curated table in `tokenLimits.ts` *and* the provider presets declare,
@@ -221,10 +263,12 @@ export function loadModelCatalog(): ModelCatalog {
     const models = { ...base.models };
     let corrected = false;
     for (const [id, context] of Object.entries(CATALOG_CONTEXT_CORRECTIONS)) {
-      const entry = models[id];
-      if (entry) {
-        models[id] = { ...entry, context };
-        corrected = true;
+      for (const key of versionSpellings(id)) {
+        const entry = models[key];
+        if (entry) {
+          models[key] = { ...entry, context };
+          corrected = true;
+        }
       }
     }
     if (corrected) {
@@ -239,6 +283,9 @@ export function invalidateModelCatalog(): void {
   loaded = undefined;
 }
 
+/** DashScope's pdf carve-out binds the model, so it binds both spellings. */
+const PDF_CARVE_OUT_IDS = new Set(versionSpellings('qwen3.8-max'));
+
 /**
  * `model` must already be normalized (`normalize()` in tokenLimits.ts) so
  * the catalog keys and the regex tables see the same id.
@@ -252,7 +299,7 @@ export function lookupModelCatalog(
   const entry = loadModelCatalog().models[model];
   // DashScope PDF support depends on endpoint and protocol (not Responses).
   // Keep it opt-in through explicit model configuration until scoped lookup.
-  if (model === 'qwen3.8-max' && entry?.modalities?.pdf) {
+  if (PDF_CARVE_OUT_IDS.has(model) && entry?.modalities?.pdf) {
     const modalities = { ...entry.modalities };
     delete modalities.pdf;
     return { ...entry, modalities };

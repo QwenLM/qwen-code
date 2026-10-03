@@ -23,6 +23,7 @@ import {
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
+  versionSpellingAlias,
   type ModelCatalog,
   type ModelCatalogEntry,
 } from './model-catalog.js';
@@ -145,8 +146,8 @@ function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
 
 /**
  * Projects a models.dev `api.json` payload onto the catalog shape: one entry
- * per normalized model id with only the fields the limit and modality tables
- * consume.
+ * per normalized model id, committed under both spellings of its version, with
+ * only the fields the limit and modality tables consume.
  *
  * Two ids can land on the same key, either because they normalize together
  * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
@@ -219,11 +220,15 @@ export function trimModelsDevCatalog(
       }
     }
   }
-  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
-  for (const key of new Set([
+  // Every key the projection considered, whether or not it ended up writing
+  // one. Reserving all of them, rather than only the written ones, is what
+  // keeps the alias pass below from resurrecting a key this loop dropped.
+  const seen = new Set([
     ...limitCandidates.keys(),
     ...modalityCandidates.keys(),
-  ])) {
+  ]);
+  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
+  for (const key of seen) {
     const entry: ModelCatalogEntry = {};
     const limits = limitCandidates.get(key);
     if (
@@ -246,6 +251,38 @@ export function trimModelsDevCatalog(
     }
     if (Object.keys(entry).length > 0) {
       agreed.push([key, entry]);
+    }
+  }
+  // Commit every entry under the other spelling of its version too, so the
+  // dotted and dashed ids a vendor accepts both reach it (#13209).
+  const aliasCandidates = new Map<string, ModelCatalogEntry[]>();
+  for (const [key, entry] of agreed) {
+    const alias = versionSpellingAlias(key);
+    // A key the projection considered describes a model of its own: if it was
+    // written it keeps its own numbers, and if it was dropped because its
+    // allowlisted providers disagreed on limits then the veto stands — letting
+    // a spelling twin write it would assert the very limits the disagreement
+    // rule above refused to guess, on an entry the twin's endpoint never
+    // published. An alias normalize() does not return unchanged is unreachable
+    // by its own spelling (Claude's dotted minor is folded to dashes), so it
+    // would be a dead key — the same class isModelCatalogKey keeps out of the
+    // projection above.
+    if (!alias || seen.has(alias) || !isModelCatalogKey(alias)) {
+      continue;
+    }
+    const existing = aliasCandidates.get(alias);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      aliasCandidates.set(alias, [entry]);
+    }
+  }
+  for (const [alias, candidates] of aliasCandidates) {
+    // Two spellings claiming one alias with different numbers would let the
+    // payload order decide what a user gets; drop it, as the provider and
+    // alias disagreement rules above do.
+    if (candidates.every((candidate) => sameEntry(candidate, candidates[0]!))) {
+      agreed.push([alias, candidates[0]!]);
     }
   }
   return {
