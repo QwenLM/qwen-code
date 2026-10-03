@@ -7,8 +7,8 @@
 Extension loading scanned every extension, and every per-extension
 commands/skills/agents directory, serially. On machines with many installed
 extensions this dominated startup-adjacent latency: the in-process bench
-(`extension-manager.bench.ts`) measured a median of ~565 ms for a full load
-before this work, ~228 ms after it.
+(`packages/core/scripts/bench-extension-load.ts`) measured a median of
+~565 ms for a full load before this work, ~228 ms after it.
 
 ## Current state
 

@@ -6,8 +6,8 @@
 
 扩展加载此前是串行的：逐个扫描每个扩展，再逐个扫描每个扩展的
 commands/skills/agents 目录。在安装了较多扩展的机器上，这主导了启动前后的
-延迟：进程内基准（`extension-manager.bench.ts`）测得一次完整加载的中位数
-在本次改动前约为 ~565 ms，改动后约为 ~228 ms。
+延迟：进程内基准（`packages/core/scripts/bench-extension-load.ts`）测得
+一次完整加载的中位数在本次改动前约为 ~565 ms，改动后约为 ~228 ms。
 
 ## 当前状态
 
