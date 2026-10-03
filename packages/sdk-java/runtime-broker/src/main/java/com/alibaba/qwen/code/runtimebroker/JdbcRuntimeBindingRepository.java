@@ -81,6 +81,12 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException("Release requires the same DataSource");
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            // Statement order is load-bearing under InnoDB REPEATABLE READ:
+            // this locking read must stay first, and the plain execution read
+            // below must stay the transaction's first consistent read, so its
+            // read view is built after the row lock is held and therefore
+            // sees an admission that committed before it. A read moved ahead
+            // of the lock silently reopens the race, and H2 would not show it.
             RuntimeSessionRecord current = JdbcRuntimeSessionRepository.selectSession(
                     connection, expected.getSession().getScope(),
                     expected.getRuntimeSessionId(), true);

@@ -58,12 +58,15 @@ public final class LocalProcessRuntimeProvisioner
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
     private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
-    // Spawned but not yet issued: the exit hook and close() must see a
-    // worker from the moment the process exists, not from when its lease
-    // lands in `owned` — the ready handshake can take READY_TIMEOUT.
+    // Workers the exit hook and close() must see that `owned` does not
+    // cover: one still in its ready handshake (spawned, not yet issued —
+    // that can take READY_TIMEOUT), and one already released but inside its
+    // grace window (no longer owned, its escalation running on a daemon
+    // thread that dies with the JVM).
     private final Set<OwnedProcess> starting = ConcurrentHashMap.newKeySet();
-    // Serialize spawn-and-register against the exit snapshot, so a worker
-    // can never exist unseen by terminateAll.
+    // Serialize spawn-and-register, and the release-side move out of
+    // `owned`, against the exit snapshot, so a worker can never exist unseen
+    // by terminateAll.
     private final Object lifecycle = new Object();
     private volatile boolean terminated;
     private final Thread exitHook;
@@ -353,6 +356,9 @@ public final class LocalProcessRuntimeProvisioner
             // Move the worker from owned to starting under the same lock
             // terminateAll() snapshots with, so an exit can never find it in
             // neither set. Once terminated, that snapshot already covered it.
+            // Like spawn-and-register in start(), this is structural: the
+            // window it closes is inside the lock, so no test can reach the
+            // interleaving from outside it.
             process = owned.remove(ownershipKey(lease));
             if (process != null && !terminated) {
                 starting.add(process);
@@ -427,6 +433,9 @@ public final class LocalProcessRuntimeProvisioner
         }
         owned.clear();
         executor.shutdownNow();
+        // A queued escalation does not run after that shutdown, and its
+        // finally block was the only thing removing the entry it tracked.
+        starting.clear();
         if (exitHook != null) {
             try {
                 Runtime.getRuntime().removeShutdownHook(exitHook);

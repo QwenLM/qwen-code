@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -880,9 +881,10 @@ class Issue13183RegressionTest {
      * than the cap allows. Asserted on the computation rather than on the
      * wall clock, which cannot resolve a 2s cap from a 2.5s one without
      * depending on scheduler jitter. The sweep past the cap pins the inner
-     * clamp: a 30-minute window reaches attempt 900, and an unclamped shift
-     * wraps there, so dropping it would schedule zero and negative delays
-     * and return the polling to the rate the backoff exists to remove.
+     * clamp: the window has a floor but no ceiling, so the attempt count is
+     * unbounded, and an unclamped shift wraps — negative at attempt 57 —
+     * which would schedule zero and negative delays and return the polling
+     * to the rate the backoff exists to remove.
      */
     @Test
     void v3ResultPollingDelayDoublesToTheCap() {
@@ -891,7 +893,7 @@ class Issue13183RegressionTest {
                 IntStream.rangeClosed(0, 7)
                         .mapToObj(RuntimeBrokerService::v3PollDelayMillis)
                         .toList());
-        IntStream.rangeClosed(0, 1000).forEach(attempt -> {
+        IntStream.rangeClosed(0, 100_000).forEach(attempt -> {
             long delay = RuntimeBrokerService.v3PollDelayMillis(attempt);
             assertTrue(delay >= 100L && delay <= 2_000L,
                     "backoff left its bounds at attempt " + attempt + ": "
@@ -995,20 +997,13 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * A provision racing close() is refused by the terminated guard (or,
-     * if it won the lock first, its worker dies with the teardown), and no
-     * worker is left behind. What this pins dynamically is the guard and
-     * the absence of lingering children. Spawn-and-register atomicity is
-     * structural rather than observable: start() spawns and adds to
-     * {@code starting} inside the {@code lifecycle} lock that
-     * {@code terminateAll()} also holds, so no teardown snapshot can fall
-     * between the two, and nothing outside that lock can interleave there.
-     * The guard half needs the wedged worker's grace window, so it is
-     * asserted only where destroy() is a signal; the lingering-children half
-     * is platform-independent.
+     * Provisions a wedged worker, races provisions against close(), and
+     * returns the guard error one of them hit — null when the race never
+     * reached the guard. The lingering-children check lives here because it
+     * is the platform-independent half of the invariant.
      */
-    @Test
-    void provisionDuringCloseNeverOrphansAWorker() throws Exception {
+    private static RuntimeBrokerException raceProvisionsAgainstClose()
+            throws Exception {
         LocalProcessRuntimeProvisionerTest.requireNode();
         Set<Long> before = ProcessTrees.childPids();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -1055,15 +1050,6 @@ class Issue13183RegressionTest {
             Thread.sleep(20);
         }
         closer.join(TimeUnit.SECONDS.toMillis(15));
-        if (DESTROY_IS_SIGTERM) {
-            // Only where the wedged worker holds close() inside its grace
-            // window does the loop reliably overlap the teardown. On Windows
-            // destroy() terminates outright, close() finishes in
-            // milliseconds, and the loop can miss it entirely; the lingering
-            // check below is the assertion that still applies there.
-            assertNotNull(refused,
-                    "a provision racing the close must hit the closed guard");
-        }
         // Killed children linger as zombies until the JVM reaper runs, so
         // wait them out rather than snapshot once.
         await(() -> {
@@ -1073,6 +1059,38 @@ class Issue13183RegressionTest {
                     .map(process -> !process.isAlive()).orElse(true));
             return lingering.isEmpty();
         }, Duration.ofSeconds(10));
+        return refused;
+    }
+
+    /**
+     * A provision racing close() leaves no worker behind, whichever way the
+     * race resolves: refused by the terminated guard, or spawned before it
+     * and then torn down with the rest. Spawn-and-register atomicity is
+     * structural rather than observable: start() spawns and adds to
+     * {@code starting} inside the {@code lifecycle} lock that
+     * {@code terminateAll()} also holds, so no teardown snapshot can fall
+     * between the two, and nothing outside that lock can interleave there.
+     */
+    @Test
+    void provisionDuringCloseNeverOrphansAWorker() throws Exception {
+        raceProvisionsAgainstClose();
+    }
+
+    /**
+     * The guard half of the same race: a provision that reaches start()
+     * after close() is refused with the closed message. Reaching it needs
+     * the wedged worker to hold close() inside its grace window, which only
+     * exists where destroy() is a signal — elsewhere close() finishes in
+     * milliseconds and the race cannot overlap the teardown at all, so this
+     * reports as skipped rather than passing without exercising the guard.
+     */
+    @Test
+    void provisionAfterCloseHitsTheTerminatedGuard() throws Exception {
+        assumeTrue(DESTROY_IS_SIGTERM,
+                "destroy() terminates outright here, so close() finishes"
+                        + " before the race can reach the guard");
+        assertNotNull(raceProvisionsAgainstClose(),
+                "a provision racing the close must hit the closed guard");
     }
 
     private static RuntimeBrokerService v3Service(V3Transport transport,
@@ -1487,7 +1505,10 @@ class Issue13183RegressionTest {
     }
 
     private static final class MutableClock extends Clock {
-        private Instant now = Instant.now();
+        // The test thread advances this while the service reads it from the
+        // HTTP handler and the coordination scheduler, so the write has to be
+        // published.
+        private volatile Instant now = Instant.now();
 
         @Override
         public ZoneId getZone() {

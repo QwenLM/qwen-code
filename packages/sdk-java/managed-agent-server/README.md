@@ -394,9 +394,11 @@ Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:
 
 ```bash
-# Default false: the Broker refuses to bind a non-loopback address. Set it
-# only when the Harness reaches the Broker over a non-loopback interface and
-# that interface is already restricted to trusted peers.
+# Default false: the Broker refuses to bind a non-loopback address. This face
+# is plaintext HTTP with one global bearer token and no per-tenant
+# authorization, so set it only behind a layer that terminates TLS and
+# authorizes callers — restricting the network alone still puts that token on
+# the wire, and whoever reads it owns every execution the Broker admits.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
 # Default 30m, minimum 1s: how long the Broker keeps polling the worker for
 # a dispatched v3 execution's result. When the window lapses the execution

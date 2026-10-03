@@ -8,7 +8,7 @@
 
 一次代码审计发现 Runtime Broker 的三个高危缺陷。其一，会话释放决策与"无活跃 execution"检查分属两个事务，仅由进程内锁守护：当两个 Broker 进程共享一个数据库时，可能出现 execution 已准入而 session 被标记为 `RELEASED` 的矛盾态。其二，所有租约续约都跑在与重试、截止围栏和轮询共用的单条调度线程上，且均为同步 JDBC：存储抖动 1-2 秒就会让续约排队错过租约，把健康的 binding 围栏。其三，Broker 的 HTTP 面以明文 HTTP 服务单一全局 Bearer token，并接受非回环监听地址。
 
-同一次变更还修掉两个成本较低的中等缺陷。忽略 SIGTERM 的已释放 worker 从不会被强制销毁，且 ready 握手期间的 JVM 退出会遗弃它。LOST 回收每个阶段也只跑一趟有界的 100 行恢复批次，因此超过一趟容量的代际会一直停在 LOST，之后每次尝试都回答 `runtime_broker_runtime_lost`。
+同一次变更还修掉两个成本较低的中等缺陷。忽略 SIGTERM 的已释放 worker 从不会被强制销毁，且 ready 握手期间的 JVM 退出会遗弃它。LOST 回收每个阶段也只跑一趟有界的 100 行恢复批次，因此超过一趟容量的代际需要连续多次 reclaim 才能排空，而每一次都回答 `runtime_broker_runtime_lost`，binding 在此期间无法复用。
 
 ## 决策
 
@@ -28,4 +28,4 @@
 
 ## 验证
 
-`Issue13183RegressionTest` 与 `Issue13183AdversarialTest` 以修复后的期望编码了 issue 的场景：竞态交错、卡住的续约、观测冷却、回环拒绝、楔住 worker 的升级强杀、整代际排空，另有 200 轮跨进程对撞与 forked-JVM 退出钩子实证。`RuntimeRecoveryContract.verifyBeginSessionRelease` 在两种仓库后端上覆盖新原语的四种结果。`packages/sdk-java/runtime-broker` 的 `mvn clean test` 与 managed-agent-server 修复邻近套件通过；`mvn checkstyle:check` 干净。
+`Issue13183RegressionTest` 与 `Issue13183AdversarialTest` 以修复后的期望编码了 issue 的场景：竞态交错、卡住的续约、观测冷却、回环拒绝、楔住 worker 的升级强杀、整代际排空，另有 600 轮跨进程对撞（其中 300 轮为紧竞态、300 轮由准入先提交）与 forked-JVM 退出钩子实证。`RuntimeRecoveryContract.verifyBeginSessionRelease` 在两种仓库后端上覆盖新原语：READY 与 ACQUIRING 两种转换、快照过期时返回 null、已 RELEASING 或 RELEASED 时原样返回、`runtime_session_busy`，以及 `runtime_session_not_ready`。`packages/sdk-java/runtime-broker` 的 `mvn clean test` 与 managed-agent-server 修复邻近套件通过；`mvn checkstyle:check` 干净。

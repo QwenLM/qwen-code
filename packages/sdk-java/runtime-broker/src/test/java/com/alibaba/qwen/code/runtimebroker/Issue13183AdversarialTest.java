@@ -172,10 +172,12 @@ class Issue13183AdversarialTest {
                 "admission and release contradicted each other");
         assertEquals(0, unexpected.get(),
                 () -> "unexpected failure: " + surprises);
-        // Both arms must have run, or the exact error-code checks above only
-        // covered one of the two outcomes.
+        // Both outcomes must have occurred, or the exact error-code checks
+        // above only covered one of them. The committed-admission half is
+        // guaranteed by the even rounds' latch, so what this really guards
+        // is that the raced half still produces committed releases.
         assertTrue(admitWins.get() > 0 && releaseWins.get() > 0,
-                "one arm of the stress never ran: admission won "
+                "one outcome never occurred: admission won "
                         + admitWins.get() + " rounds, release won "
                         + releaseWins.get() + " of " + rounds);
     }
@@ -507,11 +509,14 @@ class Issue13183AdversarialTest {
                 harness.destroyForcibly();
             }
             // A failed assertion above must not leave the harness's worker
-            // spinning on the runner: nothing else ever stops it.
-            if (worker > 0) {
-                ProcessHandle.of(worker)
-                        .ifPresent(ProcessHandle::destroyForcibly);
-            }
+            // spinning on the runner: nothing else ever stops it. Only kill
+            // that pid while it still names a node worker, so a recycled pid
+            // cannot take out an unrelated process.
+            ProcessHandle.of(worker)
+                    .filter(handle -> handle.info().command()
+                            .map(command -> command.contains("node"))
+                            .orElse(false))
+                    .ifPresent(ProcessHandle::destroyForcibly);
             Files.deleteIfExists(harnessLog);
             Files.deleteIfExists(exitSignal);
         }
@@ -550,14 +555,18 @@ class Issue13183AdversarialTest {
             assertTrue(worker > 0,
                     "the harness never reported its worker; harness log: "
                             + logTail(harnessLog));
-            // The hook shares one 5s grace window across the processes it
-            // reclaimed; the loop only has to outlast that.
+            // The harness has exited, and with it the hook's grace window,
+            // so this loop only waits out pid reaping. It trusts the pid
+            // only while that process still names a node worker: the pid
+            // could be recycled while the loop waits.
             long pid = worker;
             boolean alive = true;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
             while (alive && System.nanoTime() < deadline) {
-                alive = ProcessHandle.of(pid)
-                        .map(ProcessHandle::isAlive).orElse(false);
+                alive = ProcessHandle.of(pid).map(handle -> handle.isAlive()
+                        && handle.info().command()
+                                .map(command -> command.contains("node"))
+                                .orElse(true)).orElse(false);
                 Thread.sleep(100);
             }
             assertTrue(!alive,
@@ -568,11 +577,13 @@ class Issue13183AdversarialTest {
             if (harness.isAlive()) {
                 harness.destroyForcibly();
             }
-            // A failed assertion must not leave the wedged worker behind.
-            if (worker > 0) {
-                ProcessHandle.of(worker)
-                        .ifPresent(ProcessHandle::destroyForcibly);
-            }
+            // A failed assertion must not leave the wedged worker behind -
+            // and must not kill an unrelated process holding a recycled pid.
+            ProcessHandle.of(worker)
+                    .filter(handle -> handle.info().command()
+                            .map(command -> command.contains("node"))
+                            .orElse(false))
+                    .ifPresent(ProcessHandle::destroyForcibly);
             Files.deleteIfExists(harnessLog);
         }
     }
@@ -611,9 +622,11 @@ class Issue13183AdversarialTest {
             System.out.flush();
             provisioner.release(ManagedContextProtocolTest.request(), lease)
                     .toCompletableFuture().join();
-            // Exit inside the 5s grace window: the daemon escalation thread
-            // dies here, so the hook is the only thing left that can reclaim
-            // a worker ignoring SIGTERM.
+            // Exit inside the 5s grace window. The hook's snapshot is what
+            // keeps this JVM alive until the reclaim completes, and what
+            // issues the forcible destroy: with the worker untracked the JVM
+            // halts at once, the daemon escalation dies mid-wait, and a
+            // worker ignoring SIGTERM keeps running.
             System.exit(0);
         }
     }

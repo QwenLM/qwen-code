@@ -25,6 +25,7 @@ class RuntimeRecoveryTest {
                 new InMemoryRuntimeSessionRepository(),
                 new InMemoryToolExecutionRepository(), "memory-release");
     }
+
     @Test
     void persistedLossEndsExecutionBeforeAnUnavailableObserverResponds() {
         var bindings = new InMemoryRuntimeBindingRepository();
