@@ -823,6 +823,10 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         // it may not rest on a coincidental inner substring.
         matchesTitleOrKeyword(query, uniqueStrongHit, true) &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
+        !options.abortSignal?.aborted &&
+        (await rereadSelectedDocuments([uniqueStrongHit]))[0]?.mtimeMs ===
+          uniqueStrongHit.mtimeMs &&
+        !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted
       ) {
         const result: RelevantAutoMemoryPromptResult = {

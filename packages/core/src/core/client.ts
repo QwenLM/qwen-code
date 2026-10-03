@@ -1292,7 +1292,7 @@ export class LlmClient {
     if (handle.terminalLogged) return undefined;
     handle.terminalLogged = true;
     const event = new MemoryRecallDeliveryEvent({
-      phase: 'refined',
+      phase: result.selectorSkipped ? 'fast' : 'refined',
       delivery_point: deliveryPoint,
       discard_reason: discardReason,
       strategy: result.strategy,

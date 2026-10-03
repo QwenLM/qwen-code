@@ -1092,6 +1092,48 @@ describe('auto-memory relevant recall', () => {
       expect(result.selectorSkipped).toBeUndefined();
     });
 
+    it.each(['changed', 'disappeared'])(
+      'keeps the selector when the unique strong document has %s',
+      async (state) => {
+        mockSnapshot([exact]);
+        const current =
+          state === 'changed' ? { ...exact, mtimeMs: exact.mtimeMs + 1 } : null;
+        vi.mocked(rereadAutoMemoryDocument).mockResolvedValue(current);
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+          exact,
+        ]);
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(result.selectedDocs).toEqual(current ? [current] : []);
+      },
+    );
+
+    it('keeps the selector when the strong body enters history during reread', async () => {
+      mockSnapshot([exact]);
+      vi.mocked(rereadAutoMemoryDocument).mockImplementationOnce(
+        async (doc) => {
+          bodyPresentVersions.set('project:reference.md', doc.mtimeMs);
+          return doc;
+        },
+      );
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
     it('keeps the selector for a metadata-only substring match', async () => {
       const weak = {
         ...exact,
