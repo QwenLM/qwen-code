@@ -417,6 +417,50 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // The AGENTS.md PR-body idiom: a heredoc nested inside a quoted
+  // substitution. The substitution loop already evaluates the interior as
+  // its own command (cat reads the body as data), so the relocation scan
+  // must not pattern-match the token's raw text for git markers.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body inside a quoted command substitution',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## How to verify\ncd /tmp/scratch\ngit reset --hard\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // Same idiom, but the body carries `)` characters (checklists, emoticons):
+  // the substitution scan must read the heredoc instead of letting the first
+  // body paren close the substitution early and failing closed.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body whose lines carry closing parens',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## Checklist\n1) run npm test\n2) open the preview\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\nlgtm :)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
 
@@ -424,6 +468,45 @@ describe('createDaemonToolGuard', () => {
       guard(request(`echo $(git -C ${outsideRepo} reset --hard`)),
     ).resolves.toMatchObject({ allowed: false });
   });
+
+  it.runIf(bashSemanticsLane)(
+    'denies a relocation masked by placeholder index collisions',
+    async () => {
+      // Ten filler expansions push the GIT_DIR one to index 10: a placeholder
+      // without a terminator makes `..._1` a prefix of `..._10`, and a naive
+      // restore rewrites the eleventh span with the second one's text.
+      const guard = createDaemonToolGuard();
+      const filler = Array.from({ length: 10 }, (_, i) => `\${v${i}}`).join(
+        ' ',
+      );
+
+      await expect(
+        guard(
+          request(
+            `${filler} \${GIT_DIR=${cmdPath(outsideRepo)}/.git} git reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not exempt a quoted payload from scanning over a literal $(',
+    async () => {
+      // The `$(date)` sits inside single quotes, so bash never runs it and
+      // the extractor never lifts it out; the token must stay scannable or
+      // the whole wrapper payload escapes the relocation scan.
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `nice sh -c 'cd ${cmdPath(outsideRepo)} && git reset --hard $(date)'`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
 
   it.each([
     () => `bash -c'git -C ${outsideRepo} reset --hard'`,
@@ -2675,6 +2758,10 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     // A heredoc body must not launder a tracked cwd.
     () =>
       `cd ${plainOutsidePath}; cat <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    () =>
+      `cd ${plainOutsidePath}; bash <<EOF\ngit() { true; }\nEOF\ngit reset --hard`,
     // A `-C` inside a function body is seen when the body spans segments.
     () => `f() { true; git -C ${plainOutsidePath} reset --hard; }; f`,
   ])('denies the round-9 critical form %#', async (build) => {
@@ -2695,6 +2782,199 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }
+  });
+
+  it('keeps valid compound heredoc openers parseable', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'cat <<EOF && echo done\nhello\nEOF',
+      'cat <<EOF || echo done\nhello\nEOF',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
+  it.runIf(bashSemanticsLane)(
+    'does not blanket-deny here-strings and arithmetic shifts',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // No heredoc body exists in either shape, so the fail-closed heredoc
+      // gate has nothing to deny: <<< feeds data on the same line and a <<
+      // inside arithmetic is a bitwise shift.
+      for (const command of [
+        'git log <<< "x"',
+        'echo $((1 << 20)) && git status',
+        'echo $[1 << 5] && git status',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    },
+  );
+
+  // Heredocs are bash syntax; on the cmd.exe lane these shapes never execute
+  // as heredocs and the divergent-syntax gate owns what is provable there.
+  it.runIf(bashSemanticsLane)(
+    'denies a heredoc piped into a shell outright',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // The body runs as shell code here; nothing about it is provable, so the
+      // guard must fail closed instead of dropping it from view (#9417).
+      await expect(
+        guard(request('cat <<EOF | bash\necho done\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request('tee /tmp/s.sh <<EOF\nrm -rf /important\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each([
+    // A shell-fed body is executed code, never stdin data.
+    `bash <<'EOF'\ngit reset --hard\nEOF`,
+    `sh <<'EOF'\ngit reset --hard\nEOF`,
+    `bash -s <<'EOF'\ngit reset --hard\nEOF`,
+    `bash - <<'EOF'\ngit reset --hard\nEOF`,
+    `bash /dev/stdin <<'EOF'\ngit reset --hard\nEOF`,
+    // Interpreters run the body as a program.
+    `python <<'EOF'\nimport os\nEOF`,
+    `python - X=1 <<'EOF'\nprint(1)\nEOF`,
+    // The issue #9381 repro: the bare `-` idiom still reads a program, not
+    // data, so it fails closed like any other interpreter entrance.
+    `python - <<'PY'\nimport os\nprint(os.getcwd())\nPY`,
+    `node <<'EOF'\nprocess.exit(1)\nEOF`,
+    // Command substitution inside an unquoted body executes.
+    `cat <<EOF\n$(git reset --hard)\nEOF`,
+    // A delimiter prefix is not a word boundary in bash.
+    `cat <<END-X\nbody\nEND-X`,
+    // Arithmetic spanning lines is outside the grammar.
+    `(( a\ncat <<EOF\n))`,
+    // An unsafe opener keeps the body, and the body must not launder the cwd.
+    `cat $F <<'EOF'\ncd /tmp\nEOF\ngit reset --hard`,
+    // An odd trailing backslash splices lines the parser cannot see across.
+    `bash -s \\\ncat <<EOF\nrm -rf /important\nEOF`,
+    `cat <<EOF # c \\\nbody\nEOF`,
+    // A bare dot is the POSIX source builtin.
+    `. /tmp/evil\ncat <<EOF\nrm -rf /important\nEOF`,
+    // trap redefines the receiver behind the guard's back.
+    `trap 'cat() { bash; }' DEBUG\ncat <<EOF\ngit reset --hard\nEOF`,
+  ])('fails closed on heredoc entrance %#', async (command) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(command))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  // The round-19 narrowing: bodies a provably inert receiver reads as data
+  // are as opaque to shell rules as any script file, so these entrances must
+  // stop denying.
+  it.runIf(bashSemanticsLane).each([
+    // An output redirect on the opener never moves stdin.
+    `cat > README.md <<'EOF'\nhello\nEOF`,
+    // git commit -F - reads the message from stdin; the body is data.
+    `git commit -F - <<'MSG'\nsubject\nMSG`,
+    // << inside arithmetic, inside a comment, and inside a parameter
+    // subscript arms no heredoc at all.
+    `echo $((1 << 20)) && git add .`,
+    `echo $HOME # a << b`,
+    `echo \${arr[1 << 2]}`,
+    `printf $'it\\'s\n'\ngit log <<< 'x'`,
+    // A function body replays whole: braces keep the heredoc unprojected, so
+    // the recorded body keeps its terminator and replays as inert cat input.
+    `banner() {\ncat <<'EOF'\nhello\nEOF\n}\nbanner`,
+    // An apostrophe inside a comment opens no quote and cannot swallow the
+    // heredoc lines that follow.
+    `echo "x" # don't forget\ncat <<EOF\nbody\nEOF`,
+  ])('allows the provably-inert heredoc entrance %#', async (command) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(command))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
+  it.runIf(bashSemanticsLane)(
+    'denies interpreter and assignment-prefixed heredoc payloads',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // python reads the body as its program: the body stays visible, and
+      // the relocated git inside is exactly what the scan has to see.
+      await expect(
+        guard(
+          request(
+            `python - <<'PY'\ngit -C ${cmdPath(outsideRepo)} reset --hard\nPY`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      // A leading NAME=value can load code into the receiver (LD_PRELOAD
+      // &co), so the inert-receiver classification must not strip the body.
+      await expect(
+        guard(
+          request(
+            `LD_PRELOAD=/tmp/hijack.so cat <<'EOF'\ngit -C ${cmdPath(outsideRepo)} reset --hard\nEOF`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'still denies the inert-looking shapes that execute the body',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // A group piped onward hands the receiver's stdout to a shell.
+      await expect(
+        guard(request(`{\ncat <<EOF\nx\nEOF\n} | sh`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // A function whose replay runs a relocated mutation stays denied.
+      await expect(
+        guard(
+          request(`f() {\ngit -C ${cmdPath(outsideRepo)} reset --hard\n}\nf`),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      // A # behind a NBSP is mid-word in bash, not a comment: the pipe that
+      // follows is real and must deny, while a blank before # comments it out.
+      await expect(
+        guard(request('cat <<EOF # - | sh\ngit reset --hard\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request('cat <<EOF # - | sh\ngit reset --hard\nEOF')),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not let an LF-only line terminate a CRLF heredoc early',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // bash keeps the CR in the delimiter word, so "EOF" without it is body,
+      // not the terminator; the command is unterminated and must fail closed.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      // A consistently CRLF command parses fine and stays inert.
+      await expect(
+        guard(request('cat <<EOF\r\nbody\r\nEOF\r')),
+      ).resolves.toMatchObject({ allowed: true });
+    },
+  );
+
+  it('treats an escaped quote as a literal, not a string opener', async () => {
+    const guard = createDaemonToolGuard();
+
+    // \" is a literal character, so the heredoc below is real and its body is
+    // stripped as usual instead of being hidden inside a phantom string.
+    await expect(
+      guard(request("echo \\\"\ncat <<'EOF'\nrm -rf /important\nEOF")),
+    ).resolves.toMatchObject({ allowed: true });
   });
 
   // Backgrounding, heredocs and function definitions are bash spellings the

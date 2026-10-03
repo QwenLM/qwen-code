@@ -9,6 +9,7 @@ import {
   parseRule,
   matchesRule,
   resolveToolName,
+  rawCommandCandidatesForRules,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
@@ -42,6 +43,22 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+
+/**
+ * Raw per-line/per-operator candidates of a shell command, minus the command
+ * itself. `rawCommandCandidatesForRules` can return the input unchanged when
+ * the two splitter readings disagree (a backslash continuation is the common
+ * case), and recursing on an identical candidate never terminates.
+ */
+function rawRuleCandidates(command: string): string[] {
+  const candidates: string[] = [];
+  for (const segment of rawCommandCandidatesForRules(command)) {
+    if (segment.command !== command) {
+      candidates.push(segment.command);
+    }
+  }
+  return candidates;
+}
 
 /**
  * How a tool participates in the registry for this session.
@@ -423,6 +440,13 @@ export class PermissionManager {
           );
         }
       }
+      if (SHELL_TOOL_NAMES.has(toolName)) {
+        bashDecision = this.escalateFromRawCandidates(
+          ctx,
+          command,
+          bashDecision,
+        );
+      }
     } else {
       bashDecision = this.evaluateSingle(ctx);
     }
@@ -442,16 +466,13 @@ export class PermissionManager {
   }
 
   /**
-   * Evaluate a single (non-compound) context against all rules.
-   *
-   * For shell commands (run_shell_command), the result is the most restrictive
-   * of:
-   *   1. The base decision from Bash / command-pattern rules.
-   *   2. The decision derived from virtual file / network operations extracted
-   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
-   *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
+   * The explicit-rule cascade (deny → ask → allow) for one context, with no
+   * virtual file-op derivation. This is the whole decision for non-shell
+   * tools; for shell commands the caller layers virtual ops on top.
    */
-  private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
+  private evaluateExplicitRules(
+    ctx: PermissionCheckContext,
+  ): PermissionDecision {
     const {
       toolName,
       toolAliases,
@@ -463,7 +484,6 @@ export class PermissionManager {
       toolParams,
     } = ctx;
 
-    // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
@@ -483,34 +503,55 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
-    // Compute the base decision from explicit Bash/file/domain rules.
-    // Using an IIFE to keep the priority-cascade logic clean.
-    const baseDecision: PermissionDecision = (() => {
-      // Restrictive rules follow canonical destinations; allow rules stay
-      // lexical so a symlink cannot widen what the user explicitly allowed.
-      // Priority 1: deny rules (session first, then persistent)
-      for (const rule of [
-        ...this.sessionRules.deny,
-        ...this.persistentRules.deny,
-      ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
-      }
-      // Priority 2: ask rules
-      for (const rule of [
-        ...this.sessionRules.ask,
-        ...this.persistentRules.ask,
-      ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
-      }
-      // Priority 3: allow rules
-      for (const rule of [
-        ...this.activeSessionAllowRules(),
-        ...this.persistentRules.allow,
-      ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'allow';
-      }
-      return 'default';
-    })();
+    // Restrictive rules follow canonical destinations; allow rules stay
+    // lexical so a symlink cannot widen what the user explicitly allowed.
+    // Priority 1: deny rules (session first, then persistent)
+    for (const rule of [
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ]) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+    }
+    // Priority 2: ask rules
+    for (const rule of [
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+    ]) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+    }
+    // Priority 3: allow rules
+    for (const rule of [
+      ...this.activeSessionAllowRules(),
+      ...this.persistentRules.allow,
+    ]) {
+      if (matchesRule(rule, ...matchArgs)) return 'allow';
+    }
+    return 'default';
+  }
+
+  /**
+   * Evaluate a single (non-compound) context against all rules.
+   *
+   * For shell commands (run_shell_command), the result is the most restrictive
+   * of:
+   *   1. The base decision from Bash / command-pattern rules.
+   *   2. The decision derived from virtual file / network operations extracted
+   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
+   *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
+   */
+  private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
+    const { toolName, command } = ctx;
+
+    // Build path context for resolving relative path patterns
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: ctx.cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const baseDecision: PermissionDecision = this.evaluateExplicitRules(ctx);
 
     // `deny` is the most restrictive result — no further checks needed.
     if (baseDecision === 'deny') return 'deny';
@@ -1067,12 +1108,65 @@ export class PermissionManager {
         return rule.raw;
       }
     }
+
+    // ── Raw-candidate pass ───────────────────────────────────────────────
+    // Mirrors the escalation in evaluate(): a deny produced there matched a
+    // raw per-line candidate, and without the same pass here the denial has
+    // no citable rule (permissionFlow reads this method for the denyMessage).
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      for (const candidate of rawRuleCandidates(command)) {
+        const rule = this.findMatchingDenyRule({ ...ctx, command: candidate });
+        if (rule) {
+          return rule;
+        }
+      }
+    }
     return undefined;
   }
 
   // ---------------------------------------------------------------------------
   // Shell command helper
   // ---------------------------------------------------------------------------
+
+  /**
+   * Deny/ask rules see the command as raw per-operator/per-line candidates,
+   * never the joined multi-line text: the matcher's contract is a single
+   * simple command, and on joined text anchored rules cannot match, a '#'
+   * comment blinds everything after it, and `.*` over-matches across
+   * operators. The candidates keep heredoc body lines, so a payload bash
+   * would feed an interpreter still meets the deny rule the pre-projection
+   * per-line evaluation hit. Escalation only: a non-match never lowers the
+   * verdict.
+   *
+   * Only explicit Bash rules run per candidate. Deriving virtual file ops
+   * from a body line resurrects operations the whole-command extraction
+   * correctly proved inert (a doc snippet under `cat <<'EOF'` is not a
+   * write), so documentation text could hard-deny a command that performs
+   * no such operation.
+   */
+  private escalateFromRawCandidates(
+    ctx: PermissionCheckContext,
+    command: string,
+    decision: PermissionDecision,
+  ): PermissionDecision {
+    if (decision === 'deny') {
+      return decision;
+    }
+    let upgraded = decision;
+    for (const candidate of rawRuleCandidates(command)) {
+      const candidateDecision = this.evaluateExplicitRules({
+        ...ctx,
+        command: candidate,
+      });
+      if (candidateDecision === 'deny') {
+        return 'deny';
+      }
+      if (candidateDecision === 'ask' && upgraded === 'allow') {
+        upgraded = 'ask';
+      }
+    }
+    return upgraded;
+  }
 
   /**
    * Determine the permission decision for a specific shell command string.
@@ -1220,10 +1314,40 @@ export class PermissionManager {
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
-      if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
+      if (
+        subCommands.length > 1 &&
+        subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
-        );
+        )
+      ) {
+        return true;
+      }
+      // evaluate() escalates on raw per-line candidates, so relevance must
+      // see them too: when a deny/ask rule matches only a heredoc body line
+      // the projection strips, a false here keeps evaluate() from ever
+      // running and the tool default wins. Allow rules are excluded on
+      // purpose: a body the projection proved inert must not demote the
+      // tool's own default ask to allow just because it mentions something
+      // an allow rule covers.
+      if (
+        rawRuleCandidates(command).some((candidate) =>
+          restrictiveRules.some((rule) =>
+            matchesRule(
+              rule,
+              toolName,
+              candidate,
+              filePath,
+              domain,
+              pathCtx,
+              specifier,
+              toolParams,
+              toolAliases,
+              'canonical',
+            ),
+          ),
+        )
+      ) {
+        return true;
       }
     }
 
@@ -1318,10 +1442,26 @@ export class PermissionManager {
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
-      if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
+      if (
+        subCommands.length > 1 &&
+        subCommands.some((subCmd) =>
           this.hasMatchingAskRule({ ...ctx, command: subCmd }),
-        );
+        )
+      ) {
+        return true;
+      }
+      // Ask rules must also see the same raw candidates deny rules
+      // escalate on: the projection strips heredoc bodies out of the
+      // segments, and an ask an explicit rule matches there must not stay
+      // invisible to the auto-approval gate that reads this method. Runs
+      // for single-segment projections too, mirroring the unconditional
+      // escalation in evaluate().
+      if (
+        rawRuleCandidates(command).some((candidate) =>
+          this.hasMatchingAskRule({ ...ctx, command: candidate }),
+        )
+      ) {
+        return true;
       }
     }
 

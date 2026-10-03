@@ -877,6 +877,826 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  */
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
+interface HeredocDelimiter {
+  delimiter: string;
+  stripTabs: boolean;
+  quoted: boolean;
+}
+
+interface SimpleHeredocLine {
+  receiver: string;
+  delimiters: HeredocDelimiter[];
+  // The receiver provably never executes the body: it reads it as data (cat)
+  // or as a commit message (git commit -F -). An interpreter reading its
+  // program from stdin executes the body, so it is never a consumer.
+  consumesData: boolean;
+}
+
+interface HeredocProjection {
+  command: string;
+  ambiguous: boolean;
+  bodyPlaceholders: Array<{ placeholder: string; line: string }>;
+}
+
+// Only these receivers provably never execute the heredoc body. Interpreters
+// (node/perl/python/ruby) run it as a program, tee can persist it to a file
+// that is executed later, and anything piped onward reaches a shell.
+const HEREDOC_DATA_CONSUMERS = new Set(['cat', 'head', 'tail']);
+
+// Receivers that run the heredoc body as shell code. Only such a body can
+// carry alias/function definitions or resolution hooks, so only it joins the
+// executed text the resolution probes below scan.
+const SHELL_RECEIVER_NAME = /^(?:bash|sh|dash|ash|zsh|ksh)$/;
+
+// Operators whose operand is a file or fd, never an argv word. A redirection
+// may sit in front of the command word (`< in cat <<EOF`), so receiver
+// detection walks past these pairs instead of trusting the first word.
+const HEREDOC_REDIRECT_OPERATORS = new Set([
+  '<',
+  '>',
+  '>>',
+  '>&',
+  '<&',
+  '>|',
+  '&>',
+  '&>>',
+  '<<<',
+  '<>',
+]);
+
+function parseSimpleHeredocLine(
+  line: string,
+): SimpleHeredocLine | 'none' | null {
+  if (!line.includes('<<')) return null;
+
+  const delimiters: HeredocDelimiter[] = [];
+  let quote: "'" | '"' | undefined;
+  // The body belongs to the simple command the operator attaches to, so the
+  // receiver is read from that command's text alone: in `cd /x; cat <<EOF`
+  // the body goes to cat no matter what the chain did earlier.
+  let segmentStart = 0;
+  let firstOpenerStart = -1;
+  // A chain after a delimiter means a later opener answers to a different
+  // command than the first one, a shape this grammar cannot attribute.
+  let chainAfterDelimiter = false;
+  let commentStart = line.length;
+
+  for (let i = 0; i < commentStart; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      if (ch === quote) {
+        quote = undefined;
+      } else if (quote === '"') {
+        // Inside double quotes a backslash escapes exactly the next
+        // character; inside single quotes everything is literal, `\` too.
+        if (ch === '\\') i++;
+        else if (ch === '$' || ch === '`') return null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    // An escaped character is literal, never structure: `\<<` is no opener.
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '$' || ch === '`') return null;
+    if (ch === '#') {
+      // A # at word start opens a comment whose tail holds no operator; a
+      // mid-word # (foo#bar) is literal text. bash blanks are space and tab
+      // only: JS \s also matches NBSP/U+2028/…, which bash reads as word
+      // characters, so a # behind one is mid-word too and starts nothing.
+      if (i === 0 || /[ \t;&|]/.test(line[i - 1]!)) commentStart = i;
+      continue;
+    }
+    if (ch !== '<' || line[i + 1] !== '<') {
+      if (ch === ';' || ch === '&') {
+        if (line[i + 1] === '&') i++;
+        if (delimiters.length > 0) chainAfterDelimiter = true;
+        else segmentStart = i + 1;
+        continue;
+      }
+      if (ch === '|') {
+        if (line[i + 1] === '|') {
+          i++;
+          if (delimiters.length > 0) chainAfterDelimiter = true;
+          else segmentStart = i + 1;
+          continue;
+        }
+        // A pipe moves the body to a consumer this grammar cannot see,
+        // before the opener or between two openers alike.
+        return null;
+      }
+      // Grouping makes the body's owner unprovable. A plain output redirect
+      // never moves stdin, so the body still answers to the same receiver;
+      // only a bare-word target is provable, anything quoted or computed
+      // stays unprovable.
+      if (ch === '(' || ch === ')') return null;
+      if (ch === '>') {
+        i++;
+        if (line[i] === '>' || line[i] === '|') i++;
+        while (line[i] === ' ' || line[i] === '\t') i++;
+        const targetStart = i;
+        while (i < line.length && !/[\s;&|<>()]/.test(line[i]!)) i++;
+        if (!/^[A-Za-z0-9_./~-]+$/.test(line.slice(targetStart, i))) {
+          return null;
+        }
+        i--;
+        continue;
+      }
+      continue;
+    }
+    if (line[i + 2] === '<') return null;
+    if (chainAfterDelimiter) return null;
+
+    if (firstOpenerStart === -1) firstOpenerStart = i;
+    i += 2;
+    let stripTabs = false;
+    if (line[i] === '-') {
+      stripTabs = true;
+      i++;
+    }
+    while (line[i] === ' ' || line[i] === '\t') i++;
+
+    const delimiterQuote = line[i] === "'" || line[i] === '"' ? line[i] : '';
+    if (delimiterQuote) i++;
+    const delimiterStart = i;
+    if (delimiterQuote) {
+      while (i < line.length && line[i] !== delimiterQuote) {
+        if (line[i] === '\\' || line[i] === '$' || line[i] === '`') return null;
+        i++;
+      }
+      if (line[i] !== delimiterQuote) return null;
+    } else {
+      while (i < line.length && /[A-Za-z0-9_]/.test(line[i]!)) i++;
+    }
+
+    let delimiter = line.slice(delimiterStart, i);
+    // Only identifier-shaped delimiters are provably a plain heredoc; a
+    // digit-leading, spaced, or punctuated word can be arithmetic or worse,
+    // so anything else falls back to keeping every line visible.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(delimiter)) return null;
+    if (delimiterQuote) i++;
+    // bash keeps a trailing CR in the delimiter word: a CRLF opener arms the
+    // CRLF terminator, and an LF-only line must never terminate it early.
+    if (line[i] === '\r' && i === line.length - 1) {
+      delimiter += '\r';
+      i++;
+    }
+    if (i < line.length && !/[ \t<]/.test(line[i]!)) return null;
+
+    delimiters.push({ delimiter, stripTabs, quoted: delimiterQuote !== '' });
+    i--;
+  }
+
+  if (quote !== undefined) return null;
+  if (delimiters.length === 0) return 'none';
+
+  let words: ReturnType<typeof parse>;
+  try {
+    words = parse(line.slice(segmentStart, firstOpenerStart));
+  } catch {
+    return null;
+  }
+  // The only non-string tokens possible here are shell-quote operator marks:
+  // the scan above truncated the line at any real comment, and the slice ends
+  // before the opener. A # inside the receiver word itself (ca#t) breaks the
+  // word away from any allowlist name, which fails closed on its own.
+  const isRedirectOp = (token: (typeof words)[number]): boolean =>
+    token !== null &&
+    typeof token === 'object' &&
+    'op' in token &&
+    HEREDOC_REDIRECT_OPERATORS.has(token.op);
+  // A redirection may sit in front of the command word (`< in cat <<EOF`),
+  // so skip each redirect operator and its operand word instead of trusting
+  // the first word to name the receiver.
+  const argvWords: string[] = [];
+  for (let wi = 0; wi < words.length; wi++) {
+    const token = words[wi]!;
+    if (isRedirectOp(token)) {
+      if (typeof words[wi + 1] !== 'string') return null;
+      wi++;
+      continue;
+    }
+    if (typeof token !== 'string') {
+      // shell-quote reads a mid-word # as a comment opener; the scan above
+      // already proved every # in this slice is literal text, and a comment
+      // token always runs to the end of the slice, so nothing is lost.
+      if (token !== null && 'comment' in token) break;
+      return null;
+    }
+    // An `N>` file-descriptor prefix belongs to the redirection after it.
+    if (/^\d+$/.test(token) && isRedirectOp(words[wi + 1])) continue;
+    argvWords.push(token);
+  }
+  // Only leading NAME=value words are environment prefixes; one sitting after
+  // the command name is an ordinary argument, so `python - X=1` carries three
+  // words and is not the bare-stdin idiom below.
+  let commandStart = 0;
+  while (
+    commandStart < argvWords.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(argvWords[commandStart]!)
+  ) {
+    commandStart++;
+  }
+  const commandWords = argvWords.slice(commandStart);
+  const receiver = commandWords[0];
+  if (typeof receiver !== 'string') return null;
+  // An interpreter with an inline program (python -c, node -e, a script
+  // path) can route stdin anywhere that program wants, so the body's fate is
+  // unprovable. The bare `-` idiom reads its program from stdin, which is the
+  // same execution as the no-argument form, so it proves nothing either.
+  const receiverIsInterpreter = /^(?:python\d*(?:\.\d+)*|node|ruby|perl)$/.test(
+    receiver,
+  );
+  const isStdinScriptIdiom =
+    commandWords.length === 2 && commandWords[1] === '-';
+  if (receiverIsInterpreter && commandWords.length > 1 && !isStdinScriptIdiom) {
+    return null;
+  }
+  // A path-qualified receiver (./cat, /usr/bin/cat) bypasses name-based trust:
+  // an attacker-placed binary at that path receives the body, so only a bare
+  // name from the allowlist may strip.
+  if (receiver.includes('/')) return null;
+  // `git commit -F -` (and the --file=- spellings) reads the commit message
+  // from stdin: the body is data, never executed. `git apply` deliberately
+  // stays unlisted — a patch is an arbitrary file write.
+  const gitCommitReadsStdin =
+    receiver === 'git' &&
+    commandWords[1] === 'commit' &&
+    commandWords.some(
+      (word, i) =>
+        ((word === '-F' || word === '--file') && commandWords[i + 1] === '-') ||
+        word === '-F-' ||
+        word === '--file=-',
+    );
+  return {
+    receiver,
+    delimiters,
+    // A leading NAME=value can choose which binary runs (PATH) or load code
+    // into it (LD_PRELOAD &co), so the receiver identity is only provable
+    // with no assignment in front of it.
+    consumesData:
+      commandStart === 0 &&
+      (HEREDOC_DATA_CONSUMERS.has(receiver) || gitCommitReadsStdin),
+  };
+}
+
+function quoteStateAtLineEnd(
+  line: string,
+  open: "'" | '"' | '$' | undefined,
+): { end: "'" | '"' | '$' | undefined; closedAt: number | undefined } {
+  // Tracks quotes across physical lines so a multi-line quoted string is never
+  // mistaken for shell structure. `\` escapes only inside double quotes and
+  // ANSI-C `$'…'` strings (tracked as the '$' state). closedAt records where
+  // the incoming quote closed, if it did.
+  let closedAt: number | undefined;
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (open !== "'" && ch === '\\') {
+      // Outside plain single quotes a backslash escapes the next character,
+      // so an escaped quote is a literal, never an opener or a closer.
+      escaped = true;
+      continue;
+    }
+    if (open === '"' && ch === '"') {
+      open = undefined;
+      closedAt ??= i;
+      continue;
+    }
+    if ((open === "'" || open === '$') && ch === "'") {
+      open = undefined;
+      closedAt ??= i;
+      continue;
+    }
+    if (open === undefined) {
+      // A word-start # opens a comment: the tail is text, quotes included.
+      // bash blanks are space and tab only, so a # behind NBSP &co is
+      // mid-word and starts nothing.
+      if (ch === '#' && (i === 0 || /[ \t;&|]/.test(line[i - 1]!))) {
+        return { end: undefined, closedAt };
+      }
+      // `$'…'` is ANSI-C quoting: the apostrophes it escapes stay literal.
+      if (ch === '$' && line[i + 1] === "'") {
+        open = '$';
+        i++;
+        continue;
+      }
+      if (ch === "'" || ch === '"') open = ch;
+    }
+  }
+  return { end: open, closedAt };
+}
+
+function receiverRedefinedInCommand(
+  command: string,
+  receiver: string,
+): boolean {
+  const escaped = receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`\\balias\\s+${escaped}=`).test(command) ||
+    new RegExp(`\\b${escaped}\\s*\\(\\s*\\)`).test(command) ||
+    new RegExp(`\\bfunction\\s+${escaped}\\b`).test(command)
+  );
+}
+
+// Tokens that can change how the receiver name resolves at runtime. With any
+// of them present (or a PATH assignment) this parser cannot prove which
+// binary receives the body, so nothing is strippable. A standalone `.` is
+// the POSIX synonym of `source` and cannot be matched by \b, and it is only
+// `source` in command position: after an operator or at a line start, never
+// as an argument (`git add .` stays provable).
+const UNPROVABLE_RESOLUTION =
+  /\b(alias|function|eval|hash|enable|exec|source|builtin|command|trap)\b|\bPATH\s*=|(?:^|[;&|\n(][ \t]*)\.(?=[ \t]|$)/;
+
+// Grouping and pipe tokens outside quotes and expansions. A `{`/`}`/`(`/`)`
+// can hand the heredoc receiver's stdout to a later command through a pipe
+// (`{ cat <<EOF; } | sh`), turning a stripped body back into executed code.
+// Quotes, ANSI-C strings and escapes hide literals; `${…}` and the arithmetic
+// forms `$((…))`/`((…))` nest their own braces and parens, none of which are
+// grouping. `$(` fails closed: a substitution can hold a whole script.
+function shellGroupingAndPipe(line: string): {
+  grouping: boolean;
+  pipe: boolean;
+} {
+  let grouping = false;
+  let pipe = false;
+  let quote: "'" | '"' | '$' | undefined;
+  let parameterDepth = 0;
+  let arithmeticDepth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      // A backslash escapes the next character inside double quotes and
+      // ANSI-C strings; inside plain single quotes it is literal.
+      if (quote !== "'" && ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote || (quote === '$' && ch === "'")) quote = undefined;
+      continue;
+    }
+    if (parameterDepth > 0) {
+      if (ch === '{') parameterDepth++;
+      else if (ch === '}') parameterDepth--;
+      continue;
+    }
+    if (arithmeticDepth > 0) {
+      if (ch === '(') arithmeticDepth++;
+      else if (ch === ')') arithmeticDepth--;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === "'") {
+      quote = '$';
+      i++;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /[ \t;&|]/.test(line[i - 1]!))) {
+      // A word-start # opens a comment: its tail holds no structure, and
+      // nothing bash executes can follow it on this line. Expansion depths
+      // are handled above and never reach here, so `${x#pat}` stays literal.
+      break;
+    }
+    if (ch === '$' && line[i + 1] === '{') {
+      parameterDepth = 1;
+      i++;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === '(') {
+      if (line[i + 2] === '(') {
+        arithmeticDepth = 2;
+        i += 2;
+        continue;
+      }
+      grouping = true;
+      i++;
+      continue;
+    }
+    if (ch === '(' && line[i + 1] === '(') {
+      arithmeticDepth = 2;
+      i++;
+      continue;
+    }
+    if (ch === '{' || ch === '}' || ch === '(' || ch === ')') {
+      grouping = true;
+    } else if (ch === '|') {
+      if (line[i + 1] === '|') i++;
+      else pipe = true;
+    }
+  }
+  return { grouping, pipe };
+}
+
+function projectHeredocBodies(
+  command: string,
+  stripAllSimpleBodies: boolean,
+): HeredocProjection {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  const bodyPlaceholders: Array<{ placeholder: string; line: string }> = [];
+  let placeholderPrefix = '__QWEN_HEREDOC_BODY_';
+  while (command.includes(placeholderPrefix)) placeholderPrefix += '_';
+  let pending: HeredocDelimiter[] = [];
+  let keepPendingBody = false;
+  // Whether the pending heredoc's receiver runs the body as shell code; only
+  // such a body can redefine a name for later commands, so only it joins the
+  // redefinition-visible text below.
+  let pendingRunsBody = false;
+  let quoteOpen: "'" | '"' | '$' | undefined;
+  // Text bash actually executes: non-body lines plus bodies fed to a shell.
+  // Redefinition and resolution probes are scoped to it, so documentation
+  // inside an inert body (`function f() {}` under cat) no longer denies.
+  const executed: string[] = [];
+
+  // No heredoc opener anywhere means there is nothing to project: the raw
+  // splitter below already handles quote and continuation structure, and an
+  // odd trailing backslash only matters when a body boundary exists.
+  if (!command.includes('<<')) {
+    return { command, ambiguous: false, bodyPlaceholders: [] };
+  }
+
+  for (const line of lines) {
+    if (pending.length > 0) {
+      const current = pending[0]!;
+      // bash matches the terminator byte-exact, CR included.
+      const terminator = current.stripTabs ? line.replace(/^\t+/, '') : line;
+      if (terminator === current.delimiter) {
+        pending = pending.slice(1);
+      } else if (
+        !current.quoted &&
+        (line.includes('$(') || line.includes('`') || line.includes('\\'))
+      ) {
+        // An unquoted heredoc body undergoes command substitution, and a
+        // trailing backslash splices the next physical line into this one
+        // (forming $( or the terminator across the boundary), so such a line
+        // is executed code, not data; never strip it from rule evaluation.
+        return { command, ambiguous: true, bodyPlaceholders: [] };
+      } else if (keepPendingBody) {
+        const placeholder = `${placeholderPrefix}${bodyPlaceholders.length}__`;
+        kept.push(placeholder);
+        bodyPlaceholders.push({ placeholder, line });
+        if (pendingRunsBody) executed.push(line);
+      }
+      continue;
+    }
+
+    kept.push(line);
+    executed.push(line);
+    if (quoteOpen !== undefined) {
+      // Inside a multi-line quoted string. A line the quote never closes on
+      // is string content whole, heredoc-looking text included; only when the
+      // quote closes and a real opener follows can we not prove the structure
+      // (a here-string or an arithmetic shift after the close arms no body).
+      const scan = quoteStateAtLineEnd(line, quoteOpen);
+      if (
+        scan.closedAt !== undefined &&
+        lineHasHeredocCandidate(line.slice(scan.closedAt + 1))
+      ) {
+        return { command, ambiguous: true, bodyPlaceholders: [] };
+      }
+      quoteOpen = scan.end;
+      continue;
+    }
+    // A grouping construct on a line of its own can hand the receiver's
+    // stdout to whoever follows the group (`{ cat <<EOF; } | sh`), turning
+    // the stripped body back into executed code. Fail closed wherever one
+    // appears, the way the opener line already does. A bare pipe needs no
+    // bail: it wires up the command on its own line, never an earlier,
+    // already-closed heredoc receiver.
+    if (shellGroupingAndPipe(line).grouping) {
+      return { command, ambiguous: true, bodyPlaceholders: [] };
+    }
+    let trailingBackslashes = 0;
+    for (let k = line.length - 1; k >= 0 && line[k] === '\\'; k--) {
+      trailingBackslashes++;
+    }
+    // An odd trailing backslash splices the next physical line into this one
+    // (comment text included), a join this parser does not model.
+    if (trailingBackslashes % 2 === 1) {
+      return { command, ambiguous: true, bodyPlaceholders: [] };
+    }
+    if (!line.includes('<<')) {
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
+    }
+
+    const parsed = parseSimpleHeredocLine(line);
+    if (parsed === null) {
+      return { command, ambiguous: true, bodyPlaceholders: [] };
+    }
+    if (parsed === 'none') continue;
+    pending = parsed.delimiters;
+    pendingRunsBody = SHELL_RECEIVER_NAME.test(parsed.receiver);
+    keepPendingBody =
+      (!stripAllSimpleBodies && !parsed.consumesData) ||
+      receiverRedefinedInCommand(executed.join('\n'), parsed.receiver);
+  }
+
+  if (pending.length > 0 || UNPROVABLE_RESOLUTION.test(executed.join('\n'))) {
+    return { command, ambiguous: true, bodyPlaceholders: [] };
+  }
+  return {
+    command: kept.join('\n'),
+    ambiguous: false,
+    bodyPlaceholders,
+  };
+}
+
+/**
+ * State trackers (permission extraction and the daemon guard) need heredoc
+ * stdin out of the tracked command only when the receiver provably never
+ * executes it. Bodies for any other receiver are executed code and stay
+ * visible as commands; structure the parser cannot prove stays visible too.
+ */
+export function projectHeredocBodiesForStateTracking(command: string): string {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  let pending: HeredocDelimiter[] = [];
+  let keepPendingBody = false;
+  let quoteOpen: "'" | '"' | '$' | undefined;
+
+  for (const line of lines) {
+    if (pending.length > 0) {
+      const current = pending[0]!;
+      const terminator = current.stripTabs ? line.replace(/^\t+/, '') : line;
+      if (terminator === current.delimiter) {
+        pending = pending.slice(1);
+        // A body that stays visible keeps its terminator too: nothing from a
+        // heredoc region this arm could not prove inert is dropped.
+        if (keepPendingBody) kept.push(line);
+        continue;
+      }
+      if (
+        keepPendingBody ||
+        (!current.quoted &&
+          (line.includes('$(') || line.includes('`') || line.includes('\\')))
+      ) {
+        // A body the receiver runs, or an unquoted body carrying substitution,
+        // is executed code and must stay visible.
+        kept.push(line);
+      }
+      continue;
+    }
+
+    kept.push(line);
+    if (quoteOpen !== undefined) {
+      // A line inside a multi-line quoted string is string content, heredoc-
+      // looking text included; only the quote state is tracked so the string
+      // never arms a phantom body that swallows the lines bash executes.
+      quoteOpen = quoteStateAtLineEnd(line, quoteOpen).end;
+      continue;
+    }
+    // Grouping can hand the receiver's stdout to a later command
+    // (`{ cat <<EOF; } | sh`); this projection cannot prove the body's
+    // owner across a group, so every line stays visible.
+    if (shellGroupingAndPipe(line).grouping) {
+      return command;
+    }
+    let trailingBackslashes = 0;
+    for (let k = line.length - 1; k >= 0 && line[k] === '\\'; k--) {
+      trailingBackslashes++;
+    }
+    // An odd trailing backslash splices the next physical line into this one,
+    // a join this parser does not model, so everything stays visible.
+    if (trailingBackslashes % 2 === 1) {
+      return command;
+    }
+    if (!line.includes('<<')) {
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
+    }
+
+    const parsed = parseSimpleHeredocLine(line);
+    if (parsed === null) {
+      // Mirror the gate: the null arm still tracks quote state, or a `<<`
+      // quoted as string content arms a phantom body that swallows the lines
+      // bash actually executes.
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
+    }
+    if (parsed === 'none') continue;
+    pending = parsed.delimiters;
+    keepPendingBody =
+      !parsed.consumesData ||
+      receiverRedefinedInCommand(kept.join('\n'), parsed.receiver);
+  }
+
+  // Resolution hooks only matter where bash actually reads them: an inert
+  // body that mentions `alias` or `source` stays stripped, while the same
+  // tokens anywhere in the visible text fail closed.
+  if (UNPROVABLE_RESOLUTION.test(kept.join('\n'))) {
+    return command;
+  }
+  return kept.join('\n');
+}
+
+/**
+ * Whether a line can arm a heredoc in bash at all. A `<<` inside quotes or
+ * arithmetic is not an operator, and `<<<` is a here-string whose data lives
+ * on the same line; neither has a body to mis-track. parseSimpleHeredocLine
+ * bails (null) on all of them alike, and the projections keep such lines
+ * byte-identical, so only a line with a genuine opener candidate justifies
+ * failing closed.
+ */
+function lineHasHeredocCandidate(line: string): boolean {
+  let quote: "'" | '"' | '$' | undefined;
+  let arithmeticDepth = 0;
+  let bracketArithmetic = false;
+  let parameterDepth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      if (ch === quote || (quote === '$' && ch === "'")) quote = undefined;
+      else if ((quote === '"' || quote === '$') && ch === '\\') i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === "'") {
+      quote = '$';
+      i++;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === '{') {
+      // `${arr[1 << 2]}` is a parameter expansion: the subscript arithmetic
+      // inside can shift, it cannot open a heredoc.
+      parameterDepth++;
+      i++;
+      continue;
+    }
+    if (parameterDepth > 0 && ch === '}') {
+      parameterDepth--;
+      continue;
+    }
+    if (ch === '$' && line[i + 1] === '[') {
+      bracketArithmetic = true;
+      i++;
+      continue;
+    }
+    if (bracketArithmetic && ch === ']') {
+      bracketArithmetic = false;
+      continue;
+    }
+    if (ch === '(' && line[i + 1] === '(') {
+      arithmeticDepth++;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 && ch === ')' && line[i + 1] === ')') {
+      arithmeticDepth--;
+      i++;
+      continue;
+    }
+    if (arithmeticDepth > 0 || bracketArithmetic || parameterDepth > 0) {
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /[ \t;&|]/.test(line[i - 1]!))) {
+      // A word-start # opens a comment: nothing after it is an operator.
+      // Reached only outside every expansion, so `${x#pat}` never lands here.
+      return false;
+    }
+    if (ch === '<' && line[i + 1] === '<') {
+      if (line[i + 2] === '<') {
+        // Here-string: the payload is on this line, there is no body.
+        i += 2;
+        continue;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a guard can evaluate a command's heredoc structure at all. Safe
+ * means every body goes to a provably inert consumer with provable
+ * structure; anything else (a receiver that executes the body, structure
+ * this parser does not model, or a splice it cannot see across) must be
+ * failed closed by the caller rather than scanned further.
+ */
+export function heredocSafetyForStateTracking(command: string): {
+  safe: boolean;
+} {
+  if (!command.includes('<<')) {
+    return { safe: true };
+  }
+  const lines = command.split('\n');
+  let pending: HeredocDelimiter[] = [];
+  let quoteOpen: "'" | '"' | '$' | undefined;
+  // Every non-body line, quote continuations included. Resolution probes are
+  // scoped to this text so an inert body that mentions `alias` or shows a
+  // function skeleton in documentation no longer denies.
+  const visible: string[] = [];
+  let sawGrouping = false;
+  let sawPipe = false;
+
+  for (const line of lines) {
+    if (pending.length > 0) {
+      const current = pending[0]!;
+      const terminator = current.stripTabs ? line.replace(/^\t+/, '') : line;
+      if (terminator === current.delimiter) {
+        pending = pending.slice(1);
+      } else if (
+        !current.quoted &&
+        (line.includes('$(') || line.includes('`') || line.includes('\\'))
+      ) {
+        return { safe: false };
+      }
+      continue;
+    }
+
+    visible.push(line);
+    if (quoteOpen !== undefined) {
+      const scan = quoteStateAtLineEnd(line, quoteOpen);
+      if (
+        scan.closedAt !== undefined &&
+        lineHasHeredocCandidate(line.slice(scan.closedAt + 1))
+      ) {
+        return { safe: false };
+      }
+      quoteOpen = scan.end;
+      continue;
+    }
+    // A group piped onward hands the receiver's stdout to whoever follows
+    // (`{ cat <<EOF; } | sh`), so a body stripped as inert comes back as
+    // executed code this gate never saw. Each half alone is harmless: a
+    // bare function wrapper like `banner() { … }` pipes nothing, and a
+    // plain pipeline on a later line wires up its own command, not the
+    // already-closed heredoc receiver.
+    const structure = shellGroupingAndPipe(line);
+    sawGrouping ||= structure.grouping;
+    sawPipe ||= structure.pipe;
+    let trailingBackslashes = 0;
+    for (let k = line.length - 1; k >= 0 && line[k] === '\\'; k--) {
+      trailingBackslashes++;
+    }
+    if (trailingBackslashes % 2 === 1) {
+      return { safe: false };
+    }
+    if (!line.includes('<<')) {
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
+    }
+
+    const parsed = parseSimpleHeredocLine(line);
+    if (parsed === null) {
+      // null mixes two shapes: an opener this grammar cannot prove (deny)
+      // and a `<<` that is provably no heredoc at all — a here-string or an
+      // arithmetic shift — where the projection stays byte-identical and
+      // denying would reject legitimate commands for no security gain.
+      if (lineHasHeredocCandidate(line)) {
+        return { safe: false };
+      }
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+      continue;
+    }
+    if (parsed === 'none') continue;
+    if (!parsed.consumesData) {
+      // A receiver that executes the body (shells, tee, anything not proven
+      // inert) must never have its body hidden from the guard.
+      return { safe: false };
+    }
+    // A receiver redefined in the visible text (alias, function form) turns
+    // the body back into executed code this gate cannot see.
+    if (receiverRedefinedInCommand(visible.join('\n'), parsed.receiver)) {
+      return { safe: false };
+    }
+    pending = parsed.delimiters;
+  }
+
+  if (
+    pending.length > 0 ||
+    quoteOpen !== undefined ||
+    (sawGrouping && sawPipe) ||
+    UNPROVABLE_RESOLUTION.test(visible.join('\n'))
+  ) {
+    return { safe: false };
+  }
+  return { safe: true };
+}
+
 /**
  * The characters bash's lexer treats as whitespace (space, tab and newline —
  * `whitespace(c)` in bash's `parse.y`). These coincide with bash's default
@@ -994,16 +1814,14 @@ export interface CompoundCommandSegment {
 
 /**
  * Split a compound shell command into its individual simple commands, keeping
- * the operator that terminated each one.
+ * the operator that terminated each one, with no heredoc projection.
  *
- * See {@link splitCompoundCommand} for the string-only form and for examples;
- * this is the same split, and that function is a projection of this one.
- *
- * Scanned twice and split wherever either scan finds an operator: comments,
- * backtick bodies and heredocs are not modelled, and quotes inside them can
- * fool bash's backslash reading where the pre-fix reading still splits.
+ * See {@link splitCompoundCommand} for the rule-facing form and for examples;
+ * that function projects heredoc bodies out through this raw split. Comments,
+ * backtick bodies and heredocs are not modelled here, and quotes inside them
+ * can fool bash's backslash reading where the pre-fix reading still splits.
  */
-export function splitCompoundCommandSegments(
+export function splitCompoundCommandSegmentsRaw(
   command: string,
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
@@ -1048,6 +1866,117 @@ interface OperatorBoundary {
   start: number;
   end: number;
   operator: string;
+}
+
+// A `#` opens a comment only at a word start outside quotes (and outside
+// ANSI-C `$'…'` escapes); everything from there to the end of the physical
+// line is comment text bash never executes. Rule evaluation must drop that
+// tail before matching, or a commented-out command looks executable.
+// The quote state threads across physical lines: a `#` inside a multi-line
+// quoted string is string content, not a comment opener.
+interface CommentStripState {
+  inSingle: boolean;
+  inDouble: boolean;
+  inAnsiC: boolean;
+}
+
+const COMMENT_STRIP_FRESH: CommentStripState = {
+  inSingle: false,
+  inDouble: false,
+  inAnsiC: false,
+};
+
+function stripBashCommentTail(
+  line: string,
+  incoming: CommentStripState = COMMENT_STRIP_FRESH,
+): { text: string; state: CommentStripState } {
+  let { inSingle, inDouble, inAnsiC } = incoming;
+  let dollarPending = false;
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !(inSingle && !inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      continue;
+    }
+    if (ch === '$') {
+      dollarPending = !ansiCIntroducer;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /[ \t;&|]/.test(line[i - 1]!))) {
+      // bash blanks are space and tab only: JS \s also matches NBSP/U+2028…,
+      // which bash reads as word characters, so a # behind one is mid-word
+      // and starts no comment.
+      return {
+        text: line.substring(0, i),
+        state: { inSingle, inDouble, inAnsiC },
+      };
+    }
+  }
+  return { text: line, state: { inSingle, inDouble, inAnsiC } };
+}
+
+/**
+ * Raw per-operator candidates with comment tails stripped per physical line
+ * first: a `;` sitting inside a comment is not a separator in bash, and the
+ * raw splitter does not model comments. Quote state folds across lines so a
+ * `#` inside a multi-line quoted string stays string content; heredoc body
+ * lines start from fresh state (their quotes belong to the receiver, not the
+ * outer shell) and the fold resets again past the terminator.
+ */
+export function rawCommandCandidatesForRules(
+  command: string,
+): CompoundCommandSegment[] {
+  const lines = command.split(/\r?\n/);
+  const stripped: string[] = [];
+  let pending: HeredocDelimiter[] = [];
+  let state = COMMENT_STRIP_FRESH;
+  for (const line of lines) {
+    if (pending.length > 0) {
+      const current = pending[0]!;
+      // bash matches the terminator byte-exact, CR included.
+      const terminator = current.stripTabs ? line.replace(/^\t+/, '') : line;
+      if (terminator === current.delimiter) {
+        pending = pending.slice(1);
+        state = COMMENT_STRIP_FRESH;
+        stripped.push(line);
+        continue;
+      }
+      const scanned = stripBashCommentTail(line, state);
+      state = scanned.state;
+      stripped.push(scanned.text);
+      continue;
+    }
+    const scanned = stripBashCommentTail(line, state);
+    state = scanned.state;
+    stripped.push(scanned.text);
+    if (!state.inSingle && !state.inDouble && line.includes('<<')) {
+      const parsed = parseSimpleHeredocLine(line);
+      if (parsed !== null && parsed !== 'none') {
+        pending = parsed.delimiters;
+        state = COMMENT_STRIP_FRESH;
+      }
+    }
+  }
+  return splitCompoundCommandSegmentsRaw(stripped.join('\n'));
 }
 
 type BackslashReading = 'bash' | 'escape-everywhere';
@@ -1099,6 +2028,13 @@ function findOperatorBoundaries(
       inDouble = !inDouble;
       continue;
     }
+    // A backslash escapes the next character except inside single quotes,
+    // where it is a literal. quoteStateAtLineEnd reads it the same way, so
+    // the two quote trackers cannot disagree about where a string ends.
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
     if (inSingle || inDouble) {
       continue;
     }
@@ -1140,6 +2076,65 @@ function findOperatorBoundaries(
 }
 
 /**
+ * Split a compound shell command into its individual simple commands, keeping
+ * the operator that terminated each one. Heredoc bodies are removed only for
+ * simple commands with a known non-shell receiver. Retained body lines are
+ * split in isolation so child quoting cannot hide later parent commands. If an
+ * opener needs shell grammar this parser does not model, each physical line
+ * stays visible independently.
+ */
+export function splitCompoundCommandSegments(
+  command: string,
+): CompoundCommandSegment[] {
+  const projected = projectHeredocBodies(command, false);
+  if (projected.ambiguous) {
+    // Per-line fallback, but quote-aware: a line that starts inside an open
+    // quote belongs to the previous chunk, so a quoted tail can never glue
+    // into a fake command of its own.
+    const chunks: string[] = [];
+    let quoteOpen: "'" | '"' | '$' | undefined;
+    for (const line of command.split(/\r?\n/)) {
+      if (quoteOpen !== undefined) {
+        chunks[chunks.length - 1] += '\n' + line;
+        quoteOpen = quoteStateAtLineEnd(line, quoteOpen).end;
+        continue;
+      }
+      chunks.push(line);
+      quoteOpen = quoteStateAtLineEnd(line, undefined).end;
+    }
+    return chunks.flatMap((chunk) => splitCompoundCommandSegmentsRaw(chunk));
+  }
+  const bodies = new Map(
+    projected.bodyPlaceholders.map(({ placeholder, line }) => [
+      placeholder,
+      line,
+    ]),
+  );
+  return splitCompoundCommandSegmentsRaw(projected.command).flatMap(
+    (segment) => {
+      const bodyLine = bodies.get(segment.command);
+      if (bodyLine === undefined) return [segment];
+      const bodySegments = splitCompoundCommandSegmentsRaw(bodyLine);
+      const last = bodySegments.at(-1);
+      if (last !== undefined && last.terminator === '') {
+        bodySegments[bodySegments.length - 1] = {
+          ...last,
+          terminator: segment.terminator,
+        };
+      }
+      return bodySegments;
+    },
+  );
+}
+
+export function splitCompoundCommandSegmentsForStateTracking(
+  command: string,
+): CompoundCommandSegment[] {
+  const projected = projectHeredocBodiesForStateTracking(command);
+  return splitCompoundCommandSegmentsRaw(projected);
+}
+
+/**
  * Split a compound shell command into its individual simple commands
  * by splitting on unquoted shell operators (&&, ||, ;, |, etc.).
  *
@@ -1154,6 +2149,7 @@ function findOperatorBoundaries(
  *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
  *   "x=$(( a & b ))"         → ["x=$(( a & b ))"]  (arithmetic, not async)
+ *   "python - <<'PY'\nimport os\nPY"  → ["python - <<'PY'"]  (heredoc body is stdin)
  */
 export function splitCompoundCommand(command: string): string[] {
   const commands = splitCompoundCommandSegments(command).map(
