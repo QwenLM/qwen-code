@@ -21,7 +21,7 @@ Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12
 
 - 在两个入口上把 close、archive、delete 作为持久操作提供，以 `202` 返回 `PublicCommandOperation` 或 `WebShellCommandOperation`。
 - 在两个入口上提供 operation 查询，已删除的 Session 也能查。
-- 在后台投递 close 与 delete，直到 Harness 关闭与 Runtime 排空成功，能经受 Harness 调用持续失败、单次尝试失败与 worker 丢失。
+- 在后台投递 close 与 delete，直到 Harness 关闭与 Runtime 排空成功，或 `dispatch.max-operation-retries` 预算耗尽（4.5），能经受 Harness 调用持续失败、单次尝试失败与 worker 丢失。
 - 保持契约的幂等域：租户、Session、操作类型、actor 与幂等键。
 - 升级时完成那些正在等待重试的 archive 与 delete。
 
@@ -31,7 +31,7 @@ Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12
 - 第 10 节的 reader、operator、owner 角色——其来源仍是 #12867 的待决问题（Q4）；以及 Workspace 绑定 Session 的生命周期操作，它们等待该问题的答复（4.9）。
 - `archived_at` 与列表的 `include_archived`，仍为 `planned`。
 - 清除已删除 Session 的内容，以及重试窗口过后清理墓碑与 operation。两者都属于保留策略的工作。
-- `failed`、`cancelled` 与 `recovery_blocked` 结果。D4 的操作在 `dispatch.max-operation-retries` 预算内重试，预算耗尽后以未确认方式完成（4.5）。
+- `cancelled` 结果。D4 的操作在 `dispatch.max-operation-retries` 预算内重试，预算耗尽后以 `failed` 终结并带上 settle 的失败码（4.5）；等待无法核实的 workspace 结算时，close 处于 `recovery_blocked`。
 
 ## 4. 决策
 
@@ -92,9 +92,11 @@ archive 只需要 Java 这一个权威，因此在同一个事务里完成：Ses
 3. 排空该 Session 的 Runtime 绑定。内嵌的 Runtime Broker 只是不再预热该 Session，目前还没有 Harness 级别的回收。
 4. 在一个锁住 Session 行的事务中，确认自己的认领仍然有效，完成 operation，把 Session 设为 `closed` 或墓碑，并追加 `session.closed` 或终态的 `session.deleted`。
 
-失败的尝试让 operation 回到待定状态并计数，退避沿用 dispatch 设置：从 `dispatch.retry-initial-delay` 起翻倍，直到 `dispatch.retry-max-delay`。重试受 `dispatch.max-operation-retries`（默认 10 次）约束：预算用尽之前，operation 只有在各步骤成功之后才会完成，因此 `202` 从不表示工具已停止；Harness 调用持续失败时，operation 保持 `running`。预算耗尽后，operation 不再重试，但仍会尽力排空 Runtime 绑定，并以未确认（`admission_stage` 保持 `java_durable`）的方式完成，因此 settle 永远无法成功的 Session 也能到达终态，而不是永远循环。Hosted Harness 重启之后，Java 连接器仍沿用之前的 boot，因此它的调用会以 generation 错误失败，直到 Java 也重启为止，与 Turn 分发的情况相同；期间 operation 在同一预算内等待，之后还要等旧进程的 writer 租约过期。
+失败的尝试让 operation 回到待定状态并计数，退避沿用 dispatch 设置：从 `dispatch.retry-initial-delay` 起翻倍，直到 `dispatch.retry-max-delay`。重试受 `dispatch.max-operation-retries`（默认 10 次）约束：预算用尽之前，operation 只有在各步骤成功之后才会完成，因此 `202` 从不表示工具已停止；Harness 调用持续失败时，operation 保持 `running`。预算是按尝试次数计量的，因此它对应的墙钟时长取决于故障应答的速度：在默认退避下，尝试立即失败（generation 错误立即拒绝、journal 受阻的 Harness 每次都立即应答 `503`）时历次认领跨越约五分钟，而每次尝试都耗满 Harness 请求超时时约为两倍。预算耗尽后，operation 仍会尽力释放 Runtime 绑定——绑定的 Session 走 workspace 关闭那一对调用——并以 `failed` 终结且带上 settle 的失败码：Session 保持其待定状态，不追加 `session.closed`，不为任何完成出具凭证。唯一的例外是存活的 journal writer：在活动 Session 上受理、其 writer 租约仍然有效的 close 或 delete 在该 writer 停止后仍能成功，因此预算不会终结它——它会一直等到 writer 停止或其租约过期。Hosted Harness 重启之后，Java 连接器仍沿用之前的 boot，因此它的调用会以 generation 错误失败，直到 Java 也重启为止，与 Turn 分发的情况相同；期间 operation 在同一预算内等待，之后还要等旧进程的 writer 租约过期。
 
-停止写入该 Session journal 的 Harness 同样无法关闭它。任何一次 journal 提交失败之后（例如在 Java 或其数据库不可用时发生的提交），Harness 会拒绝该 Session 之后的所有提交；而它的关闭要先记录其 activation 已结束，因此它对每次尝试都返回 `503`。它的 writer 租约可能仍然有效，因为 writer 自己的续约还在继续，所以其他服务器也无法完成这个 close；operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启——或者直到 operation 的重试预算耗尽，此时它按上文所述以未确认方式完成。只有该租约也过期后，另一台服务器的 Harness 才能完成它（第 2 步）。预算用尽之前，D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
+预算终结的 operation 会让其 Session 停留在待定状态（`closing` 或 `deleting`），失败码记录在 operation 行上，而目前没有任何路由允许在该状态上受理新的 operation：运维人员在消除失败码所指明的原因后手工对账该 Session（operation 行即审计记录）；允许从 API 对其受理新的 close 或 delete 属于后续工作。
+
+停止写入该 Session journal 的 Harness 同样无法关闭它。任何一次 journal 提交失败之后（例如在 Java 或其数据库不可用时发生的提交），Harness 会拒绝该 Session 之后的所有提交；而它的关闭要先记录其 activation 已结束，因此它对每次尝试都返回 `503`。它的 writer 租约可能仍然有效，因为 writer 自己的续约还在继续，所以其他服务器也无法完成这个 close；operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启，或者直到该租约过期——预算不会终结 writer 仍然存活的 operation。只有该租约也过期后，另一台服务器的 Harness 才能完成它（第 2 步）。预算用尽之前，D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
 
 两个步骤都是幂等的，因此重复的尝试是安全的。租约与 Turn 租约一样使用各服务器自己的时钟，而不是[契约收敛][closure]第 1 节要求的数据库时间，并且不续约。在默认租约（60 秒）与 Harness 请求超时（30 秒）下，同一服务器上的尝试只有在 worker 丢失后才会重叠；但时钟偏差、更短的租约或较慢的首次连接也可能让尝试重叠。认领代次让过期的尝试无法完成，重复的关闭也不会造成影响。
 
@@ -102,14 +104,15 @@ delete 不动共享 Workspace：worker 只关闭该 Session 并排空它自己�
 
 ### 4.6 operation 字段
 
-| 字段              | 取值                                                                                         |
-| ----------------- | -------------------------------------------------------------------------------------------- |
-| `status`          | 受理时为 `pending`，首次认领起为 `running`，结束时为 `completed`。                           |
-| `admission_stage` | `java_durable`；完成时，如果持有该 Session 的 Harness 确认了关闭，则为 `harness_confirmed`。 |
-| `delivery_state`  | 两次尝试之间为 `pending`，尝试期间为 `leased`，完成时为 `confirmed`。                        |
-| `receipt_id`      | operation 完成时由 Java 签发的不透明回执 `rcpt_…`。                                          |
+| 字段              | 取值                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `status`          | 受理时为 `pending`，首次认领起为 `running`，结束时为 `completed`，重试预算耗尽时为 `failed`（4.5）。 |
+| `admission_stage` | `java_durable`；完成时，如果持有该 Session 的 Harness 确认了关闭，则为 `harness_confirmed`。         |
+| `delivery_state`  | 两次尝试之间为 `pending`，尝试期间为 `leased`，到达终态时为 `confirmed`，恢复受阻时为 `blocked`。    |
+| `receipt_id`      | operation 到达终态时由 Java 签发的不透明回执 `rcpt_…`。                                              |
+| `failure_code`    | 耗尽预算的 settle 失败原因，或 `recovery_blocked` 的 close 正在等待的 workspace 关闭失败码。         |
 
-持有该 Session 的 Harness，是该 Session 所记录的 boot ID 对应的那个 Harness：Turn 分发会记录它挂接的 boot，而 rename 只在尚未记录任何 boot 时才记录，因此只经过 rename 之后，记录可能是较旧的 boot，这时 close 虽已封存，仍报告为 `java_durable`。新的 archive、删除已关闭或已归档的 Session，以及关闭或删除从未被任何 Harness 持有的 Session，完成时都保持 `java_durable`：没有任何 Harness 确认过该 Session 的任何事。Harness 因重启被替换的 Session 同样如此：新的 Harness 回答它没有持有该 Session，operation 要等旧进程的 writer 租约过期之后才完成，而那个 writer 没有被封存。V17 之前受理、迁移过来的 archive 是在活动 Session 上受理的，因此它会先关闭该 Session，可能以 `harness_confirmed` 完成（4.10）。不会产生 `failure_code`、`blocked`，以及 `failed`、`cancelled`、`recovery_blocked` 状态。
+持有该 Session 的 Harness，是该 Session 所记录的 boot ID 对应的那个 Harness：Turn 分发会记录它挂接的 boot，而 rename 只在尚未记录任何 boot 时才记录，因此只经过 rename 之后，记录可能是较旧的 boot，这时 close 虽已封存，仍报告为 `java_durable`。新的 archive、删除已关闭或已归档的 Session，以及关闭或删除从未被任何 Harness 持有的 Session，完成时都保持 `java_durable`：没有任何 Harness 确认过该 Session 的任何事。Harness 因重启被替换的 Session 同样如此：新的 Harness 回答它没有持有该 Session，operation 要等旧进程的 writer 租约过期之后才完成，而那个 writer 没有被封存。V17 之前受理、迁移过来的 archive 是在活动 Session 上受理的，因此它会先关闭该 Session，可能以 `harness_confirmed` 完成（4.10）。workspace 结算被 Runtime Broker 持续拒绝的 close 在预算耗尽前处于 `recovery_blocked`，`delivery_state` 为 `blocked`，`failure_code` 为拒绝的原因。不会产生 `cancelled` 状态。预算终结的 operation 读作 `failed` 并带 `failure_code`，因此放弃与已结算的 close 总是可区分的。
 
 ### 4.7 读取 operation
 
@@ -141,7 +144,7 @@ W0e（#12839）先占用了 V16，因此本迁移为 V17，即 `main` 上下一�
 ## 5. 测试
 
 - **契约测试。** 场景对活动 Session 做 archive（`409`），在 Harness 让每次关闭都失败时关闭一个 Session 并读到 `closing` 与 `running`，在该 close 期间试探 delete（`409`），等 close 完成后重放幂等键（同一个 operation、`replayed: true`、`harness_confirmed`），再 archive、unarchive 回 `closed` 并删除。WebShell 一侧对另一个 Session 做 close、查询、archive 与 delete。每个路由都覆盖 `400`、`403` 与 `404`，两个 operation 读取都以 `400` 拒绝过长的 operation id，读取已删除 Session 的 operation，墓碑上的新幂等键返回 `404`。场景覆盖了所有非 `planned` 的操作。
-- **生命周期测试。** 十一个场景：Harness 让每次关闭都失败时一直等待的 close；一次失败的 Harness 关闭和多次失败的排空，完成前必须重试，期间拒绝输入；在配置与未配置 Harness 时分别关闭从未被任何 Harness 持有的 Session；因重启被替换的 Harness，其回答不构成确认；另一台服务器的 Harness 持有 journal writer 时一直等待、并在该 writer 被封存后以 `java_durable` 完成的 close，以及一直等到被遗弃的 writer 租约过期的 close；一个丢失的 worker，其租约过期后由另一个 worker 完成 operation；跨两个入口的重放，以及对其他 Session、类型或 actor 各自独立的 operation；与待定 rename 之间一次只允许一个生命周期变更；一次只排空自己 Session 的 delete，之后另一个 Session 运行它的第一个 Turn；以及绑定的 Session。
+- **生命周期测试。** 十一个场景：Harness 让每次关闭都失败时持续重试的 close（预算耗尽后的 `failed` 终态由 coordinator 与 operation 存储的单元套件钉住）；一次失败的 Harness 关闭和多次失败的排空，完成前必须重试，期间拒绝输入；在配置与未配置 Harness 时分别关闭从未被任何 Harness 持有的 Session；因重启被替换的 Harness，其回答不构成确认；另一台服务器的 Harness 持有 journal writer 时一直等待、并在该 writer 被封存后以 `java_durable` 完成的 close，以及一直等到被遗弃的 writer 租约过期的 close；一个丢失的 worker，其租约过期后由另一个 worker 完成 operation；跨两个入口的重放，以及对其他 Session、类型或 actor 各自独立的 operation；与待定 rename 之间一次只允许一个生命周期变更；一次只排空自己 Session 的 delete，之后另一个 Session 运行它的第一个 Turn；以及绑定的 Session。
 - **存储测试。** 使用由测试推进的时钟且没有 worker 扫描时：operation 只有在到期或租约过期时才能被认领；同一 worker 再次认领之后，它较早的认领既不能完成也不能重试；重试会等到 `available_at`。以另一个摘要重用的幂等键会冲突。
 - **迁移测试。** 在 H2 上，V15 时写入的待定 archive 与 delete 命令变为 operation，重试 archive 的幂等键会重放，worker 会完成两者。
 - **MySQL 测试。** 同样的升级在已有的升级测试中运行；新增的测试在真实数据库上受理、重放、认领、防护并完成 operation，并验证 journal writer 在被封存或按数据库时间租约过期之前都被视为仍持有。

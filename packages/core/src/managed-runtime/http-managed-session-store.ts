@@ -54,12 +54,17 @@ const WRITER_TOKEN = new RegExp(
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 /**
- * Bound on background seal retries. Each attempt rides the renewal cadence
- * (~leaseDurationMs/2); past the bound the cadence stops and the grant
- * lapses, so a writer whose seal endpoint stays broken while renewal still
- * works stops blocking a takeover.
+ * Bounds on background seal retries. Attempts ride the renewal cadence
+ * (~leaseDurationMs/2), so the attempt count alone gives no wall-clock
+ * guarantee — at the contract maximum lease the cadence is 150s and ten
+ * attempts would keep the grant live for ~25 minutes. The pending seal
+ * therefore also abandons once it has been pending for two lease durations,
+ * whichever bound trips first; past the bound the cadence stops and the
+ * grant lapses, so a writer whose seal endpoint stays broken while renewal
+ * still works stops blocking a takeover.
  */
 const MAX_PENDING_SEAL_ATTEMPTS = 10;
+const MAX_PENDING_SEAL_LEASES = 2;
 
 export interface HttpManagedSessionStoreOptions {
   readonly baseUrl: string;
@@ -387,6 +392,7 @@ class ManagedSessionStoreHttpClient {
   private sealed = false;
   private sealPending = false;
   private sealAttempts = 0;
+  private sealPendingSince: number | undefined;
   private sealAbandoned = false;
   private readonly publicationAdmissions = new Map<string, string>();
 
@@ -884,11 +890,13 @@ class ManagedSessionStoreHttpClient {
       // from under the retry) and retries the seal until the writer is
       // actually sealed.
       this.sealPending = true;
+      this.sealPendingSince ??= Date.now();
       this.scheduleRenewal();
       throw error;
     }
     this.sealPending = false;
     this.sealAttempts = 0;
+    this.sealPendingSince = undefined;
     this.sealed = true;
     this.stopRenewal();
     this.resources.clear();
@@ -950,12 +958,20 @@ class ManagedSessionStoreHttpClient {
       await this.renewWriter();
       return;
     }
-    if (this.sealAttempts >= MAX_PENDING_SEAL_ATTEMPTS) {
+    if (
+      this.sealAttempts >= MAX_PENDING_SEAL_ATTEMPTS ||
+      (this.sealPendingSince !== undefined &&
+        Date.now() - this.sealPendingSince >=
+          MAX_PENDING_SEAL_LEASES * this.leaseDurationMs)
+    ) {
       // The seal endpoint stays broken while renewal works (e.g. a
       // per-session poison record): renewing any longer only blocks a
       // takeover. Stop the cadence and let the grant lapse; a later close()
-      // still retries the seal, which does not require a live lease.
+      // still retries the seal, which does not require a live lease. The
+      // time bound keeps the attempt count from stretching with the
+      // caller-configured lease.
       this.sealPending = false;
+      this.sealPendingSince = undefined;
       this.sealAbandoned = true;
       return;
     }

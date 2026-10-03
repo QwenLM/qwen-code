@@ -104,6 +104,21 @@ public interface AgentStateStore {
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed);
 
+    /**
+     * Terminates a claimed operation whose retry budget is spent, recording
+     * the failure honestly: the operation row goes to FAILED with the
+     * failure code kept and delivery_state CONFIRMED so no recovery path
+     * re-drives it — and nothing else. The Session keeps its pending status
+     * and no completion event is appended, because the settle this operation
+     * promised never happened; the receipt the contract requires of every
+     * confirmed row certifies nothing.
+     *
+     * @return false when the claim is no longer current
+     */
+    boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt);

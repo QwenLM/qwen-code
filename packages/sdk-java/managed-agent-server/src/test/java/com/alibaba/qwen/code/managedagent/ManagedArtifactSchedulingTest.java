@@ -76,7 +76,8 @@ class ManagedArtifactSchedulingTest {
                 com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy.class,
                 fixture::policy);
         context.registerBean(
-                "materializer", MessageMaterializer.class, () -> new MessageMaterializer(state));
+                "materializer", MessageMaterializer.class,
+                () -> new MessageMaterializer(state, java.time.Clock.systemUTC()));
         context.registerBean(
                 "projector",
                 ManagedToolResultProjector.class,

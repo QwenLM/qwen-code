@@ -99,6 +99,53 @@ class ManagedSessionOperationStoreTest {
         assertThat(targets(store)).isEmpty();
     }
 
+    // The budget-exhausted terminal write: the operation row fails closed
+    // with its cause kept, the Session keeps its pending status, and no
+    // scanner ever re-drives the row.
+    @Test
+    void aFailedTerminationKeepsTheSessionPendingAndStopsRedriving() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        String operationId = store.beginOperation(TENANT, sessionId,
+                OperationKind.CLOSE, "", "close", "digest").operation()
+                .operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+
+        // Fencing: another owner, an older generation, or an expired lease
+        // cannot terminate the operation.
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "other", claimed.claimGeneration(), "some_code")).isFalse();
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration() + 1, "some_code"))
+                .isFalse();
+
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration(),
+                "session_lifecycle_delivery_failed")).isTrue();
+        OperationRecord failed = operation(store, sessionId, operationId);
+        assertThat(failed.state()).isEqualTo("FAILED");
+        assertThat(failed.deliveryState()).isEqualTo("CONFIRMED");
+        assertThat(failed.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(failed.failureCode())
+                .isEqualTo("session_lifecycle_delivery_failed");
+        // The contract requires a receipt on every confirmed row; it
+        // certifies nothing here.
+        assertThat(failed.receiptId()).startsWith("rcpt_");
+        assertThat(failed.leaseOwner()).isNull();
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("CLOSING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND event_type = 'session.closed'",
+                Integer.class, TENANT, sessionId)).isZero();
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, operationId,
+                "worker", Duration.ofSeconds(30))).isEmpty();
+    }
+
     private long databaseTime() {
         return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);

@@ -102,12 +102,29 @@ public class HarnessCoordinator {
         int maxOperationRetries = properties.getDispatch()
                 .getMaxOperationRetries();
         if (retryInitialDelay.isNegative() || retryInitialDelay.isZero()
-                || retryMaxDelay.compareTo(retryInitialDelay) < 0
-                || maxPreAdmissionRetries < 0 || maxPostAdmissionRetries < 0
-                || maxOperationRetries < 0
-                || maxPostAdmissionRetries < maxPreAdmissionRetries) {
+                || retryMaxDelay.compareTo(retryInitialDelay) < 0) {
             throw new IllegalStateException(
-                    "Managed dispatch retry limits are invalid");
+                    "Managed dispatch retry delays are invalid:"
+                            + " retry-initial-delay=" + retryInitialDelay
+                            + " retry-max-delay=" + retryMaxDelay);
+        }
+        if (maxPreAdmissionRetries < 0 || maxPostAdmissionRetries < 0
+                || maxOperationRetries < 0) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " max-post-admission-retries="
+                            + maxPostAdmissionRetries
+                            + " max-operation-retries=" + maxOperationRetries);
+        }
+        if (maxPostAdmissionRetries < maxPreAdmissionRetries) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " exceeds max-post-admission-retries="
+                            + maxPostAdmissionRetries);
         }
     }
 

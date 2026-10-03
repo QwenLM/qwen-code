@@ -997,8 +997,10 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  // The retry cadence is bounded: a seal endpoint that stays broken while
-  // renewal works must not block a takeover for the process's lifetime.
+  // The retry cadence is bounded in wall-clock time, not just attempts: a
+  // seal endpoint that stays broken while renewal works must not block a
+  // takeover for longer than two lease durations, no matter how the caller
+  // sized the lease.
   it('lets the grant lapse when the seal stays broken past the retry bound', async () => {
     vi.useFakeTimers();
     const server = new FakeManagedSessionStore();
@@ -1015,29 +1017,33 @@ describe('HTTP Managed Session store', () => {
       await vi.advanceTimersByTimeAsync(30_000);
       await expect(stores.close()).rejects.toThrow('backend down');
 
-      // The seal rides the renewal cadence for a bounded number of attempts
-      // (the close() call plus the background retries), then the cadence
-      // stops so the grant can lapse.
+      // The seal rides the 30s renewal cadence (half the 60s lease) for the
+      // ticks at 60s/90s/120s; at the 150s tick the seal has been pending
+      // for two lease durations and the cadence stops so the grant lapses.
       await vi.advanceTimersByTimeAsync(360_000);
-      expect(server.sealCount).toBe(10);
-      expect(server.renewCount).toBeGreaterThan(1);
-      const renewals = server.renewCount;
-      await vi.advanceTimersByTimeAsync(300_000);
-      expect(server.renewCount).toBe(renewals);
-      expect(server.sealCount).toBe(10);
+      expect(server.sealCount).toBe(4);
+      expect(server.renewCount).toBe(4);
       expect(server.state).toBe('ACTIVE');
 
-      // An abandoned seal stays abandoned: a write-path renewal may restart
-      // one renewal, but the cadence must not resume without sealing.
+      // An abandoned seal stays abandoned: a write-path renewal from a
+      // still-live lease may restart one renewal, but the cadence must not
+      // resume without sealing.
       await stores.assertWritable();
-      expect(server.renewCount).toBe(renewals + 1);
-      await vi.advanceTimersByTimeAsync(300_000);
-      expect(server.renewCount).toBe(renewals + 1);
-      expect(server.sealCount).toBe(10);
+      expect(server.renewCount).toBe(5);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(5);
+      expect(server.sealCount).toBe(4);
       expect(server.state).toBe('ACTIVE');
 
-      // A later close() still retries the seal, which does not require a
-      // live lease server-side.
+      // Past the lapse the fake — like the real backend — refuses to renew
+      // the grant; only the seal still lands without a live lease.
+      await vi.advanceTimersByTimeAsync(600_000);
+      await expect(stores.assertWritable()).rejects.toThrow(
+        'The writer lease has lapsed.',
+      );
+      expect(server.renewCount).toBe(5);
+      expect(server.sealCount).toBe(4);
+
       server.sealFailuresRemaining = 0;
       await stores.close();
       expect(server.state).toBe('SEALED');
@@ -1594,6 +1600,20 @@ class FakeManagedSessionStore {
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:renew') {
+      // The real backend refuses to renew a lapsed lease
+      // (ManagedSessionStore.requireWriter with requireUnexpired); the seal
+      // endpoint below intentionally keeps accepting one.
+      if (Date.now() >= this.leaseUntil) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease has lapsed.',
+            },
+          },
+          409,
+        );
+      }
       this.renewCount++;
       if (this.renewFailuresRemaining > 0) {
         this.renewFailuresRemaining--;

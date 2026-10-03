@@ -26,6 +26,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
  */
 class ManagedActionStoreTest {
     private static final String TENANT = "action-store";
+    private static final String ACTION_ID =
+            "tool_approval_" + "a".repeat(32);
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
 
@@ -76,6 +78,118 @@ class ManagedActionStoreTest {
                 "invalid_action_response", null, true, now.get());
         assertThat(state(sessionId)).isEqualTo("FAILED");
         assertThat(stage(sessionId)).isEqualTo("HARNESS_CONFIRMED");
+    }
+
+    // A delivery that failed past its retry budget is not the end of the
+    // answer: while the Action still waits, the caller's retried click
+    // replays the same key and digest and must re-admit the delivery on the
+    // same operation row instead of returning the stale failure receipt
+    // forever (issue #13182 finding 3, review).
+    @Test
+    void aReplayedFailedResponseIsReadmittedWhileTheActionIsStillRequested()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        // The first delivery of the answer failed past its retry budget.
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().operationId()).isEqualTo("op-action");
+        assertThat(admission.operation().state()).isEqualTo("PENDING");
+        assertThat(admission.operation().deliveryState()).isEqualTo("PENDING");
+        assertThat(admission.operation().attemptCount()).isEqualTo(0);
+        assertThat(admission.operation().receiptId()).isNull();
+        assertThat(admission.operation().failureCode()).isNull();
+        // The re-admitted row is deliverable again — no recovery path could
+        // see the FAILED/CONFIRMED row.
+        assertThat(actions.deliverable(Long.MAX_VALUE))
+                .anySatisfy(target -> assertThat(target.operationId())
+                        .isEqualTo("op-action"));
+    }
+
+    // The same replay against an Action that already ended must not re-open
+    // the delivery: the recorded decision is final.
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedOnceTheActionEnded()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'decided', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().state()).isEqualTo("FAILED");
+        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
     private String stage(String sessionId) {

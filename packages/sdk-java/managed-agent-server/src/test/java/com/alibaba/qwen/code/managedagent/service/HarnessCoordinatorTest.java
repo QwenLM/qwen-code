@@ -49,7 +49,7 @@ class HarnessCoordinatorTest {
     // pre-admission one, which would silently strip late-admitted turns of
     // their retries — is a startup error.
     @ParameterizedTest(name = "pre = {0}, post = {1}, operations = {2}")
-    @CsvSource({"-1, 10, 10", "5, -1, 10", "5, 10, -1", "5, 4, 10"})
+    @CsvSource({"-1, 10, 10", "5, -1, 10", "5, 10, -1"})
     void rejectsInvalidDispatchRetryBudgets(int pre, int post,
             int operations) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
@@ -61,6 +61,26 @@ class HarnessCoordinatorTest {
                         mock(HarnessConnector.class),
                         new HarnessEventProjector(), mock(RuntimeWarmer.class),
                         directExecutor(), Clock.systemUTC(), properties));
+    }
+
+    // The cross-field guard rejects a configuration that was legal before
+    // the budgets existed, so its message must name the offending pair and
+    // both values — an operator deploying onto an external config gets no
+    // other pointer.
+    @Test
+    void rejectsAPostAdmissionBudgetBelowThePreAdmissionOne() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(5);
+        properties.getDispatch().setMaxPostAdmissionRetries(4);
+        properties.getDispatch().setMaxOperationRetries(10);
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new HarnessCoordinator(mock(AgentStateStore.class),
+                        mock(HarnessConnector.class),
+                        new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                        directExecutor(), Clock.systemUTC(), properties));
+        org.assertj.core.api.Assertions.assertThat(error.getMessage())
+                .contains("max-pre-admission-retries=5")
+                .contains("max-post-admission-retries=4");
     }
 
     // Positive control for the ordering guard: equal budgets are a

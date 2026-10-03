@@ -22,9 +22,11 @@ import org.springframework.stereotype.Component;
  * active Session closes it in the Hosted Harness and waits until no Harness
  * holds the Session's journal writer; every operation then drains the
  * Session's Runtime binding and completes. A failed attempt is retried with
- * the dispatch backoff; once the retry budget is spent the operation
- * completes unconfirmed rather than retrying forever, so a Session whose
- * settle can never succeed still reaches a terminal state.
+ * the dispatch backoff; once the retry budget is spent the operation reaches
+ * a terminal failure that keeps the failure code and leaves the Session in
+ * its pending status, rather than retrying forever or certifying a settle
+ * that never happened. The one exception is a live journal writer: the close
+ * can still succeed once it stops, so the operation keeps waiting.
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -130,20 +132,54 @@ public class SessionLifecycleCoordinator {
                         tenantId, sessionId, operationId);
             }
         } catch (RuntimeException error) {
-            if (claimed.attemptCount() >= maxOperationRetries) {
+            long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
+                    retryMaxDelay, claimed.attemptCount());
+            Throwable cause = error;
+            while (cause.getCause() != null && cause instanceof java.util.concurrent.CompletionException) {
+                cause = cause.getCause();
+            }
+            // A blocked close waits on a fact only an operator or the
+            // original worker can change; it keeps its failure code through
+            // every attempt and through the terminal record.
+            String blocked = null;
+            String failureCode = "session_lifecycle_delivery_failed";
+            if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
+                failureCode = brokerError.getCode();
+                if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
+                    blocked = brokerError.getCode();
+                } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
+                        || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
+                    blocked = "workspace_close_identity_unverified";
+                }
+            }
+            // The budget bounds every settle outcome, blocked or not, and
+            // the terminal record keeps the cause instead of certifying a
+            // completion that never settled. A live journal writer is the
+            // one exception: the close can still succeed once it stops, so
+            // the operation keeps waiting rather than recording a failure.
+            if (claimed.attemptCount() >= maxOperationRetries && valid.get()
+                    && !writerStillLive(claimed)) {
                 LOG.error("Managed Session operation exhausted retries"
                                 + " tenant={} session={} operation={}"
                                 + " attempts={}",
                         tenantId, sessionId, operationId,
                         claimed.attemptCount(), error);
-                // Settle can never succeed (e.g. another live Harness keeps
-                // the journal writer), so the operation completes
-                // unconfirmed instead of retrying forever. The Runtime
-                // binding is still drained first: a session recorded as
-                // closed must not stay warmable.
+                // The Runtime binding is still released first, along
+                // settle()'s routing: a session whose operation is terminal
+                // must not stay warmable.
                 try {
-                    runtimeWarmer.drain(sessionId).toCompletableFuture()
-                            .join();
+                    if (store.requireSession(tenantId, sessionId)
+                            .workspace() != null) {
+                        if (runtimeWarmer.supportsWorkspaceClose()) {
+                            runtimeWarmer.requestWorkspaceClose(tenantId,
+                                    sessionId);
+                            runtimeWarmer.closeWorkspace(tenantId, sessionId)
+                                    .toCompletableFuture().join();
+                        }
+                    } else {
+                        runtimeWarmer.drain(sessionId).toCompletableFuture()
+                                .join();
+                    }
                 } catch (RuntimeException drainError) {
                     LOG.warn("Managed Session operation drain failed"
                                     + " tenant={} session={} operation={}"
@@ -151,30 +187,41 @@ public class SessionLifecycleCoordinator {
                             tenantId, sessionId, operationId,
                             drainError.getMessage());
                 }
-                if (!store.completeOperation(tenantId, sessionId,
-                        operationId, owner, claimed.claimGeneration(),
-                        false)) {
-                    LOG.warn("Managed Session operation was claimed by"
-                                    + " another worker tenant={} session={}"
-                                    + " operation={}",
-                            tenantId, sessionId, operationId);
+                try {
+                    if (!store.failOperation(tenantId, sessionId,
+                            operationId, owner, claimed.claimGeneration(),
+                            failureCode)) {
+                        LOG.warn("Managed Session operation was claimed by"
+                                        + " another worker tenant={}"
+                                        + " session={} operation={}",
+                                tenantId, sessionId, operationId);
+                    }
+                } catch (RuntimeException writeError) {
+                    // The terminal record itself failed: reschedule rather
+                    // than leave the operation wedged on a spent lease. The
+                    // blocked arm only exists for CLOSE — it is the single
+                    // kind the recovery scan re-drives from BLOCKED.
+                    LOG.warn("Managed Session operation terminal record"
+                                    + " failed; rescheduling tenant={}"
+                                    + " session={} operation={} failure={}",
+                            tenantId, sessionId, operationId,
+                            writeError.getMessage());
+                    if (valid.get()) {
+                        if (blocked != null
+                                && claimed.kind() == com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.CLOSE) {
+                            store.blockLifecycleOperation(tenantId, sessionId,
+                                    operationId, owner,
+                                    claimed.claimGeneration(), blocked,
+                                    Math.addExact(clock.millis(), delay));
+                        } else {
+                            store.retryOperation(tenantId, sessionId,
+                                    operationId, owner,
+                                    claimed.claimGeneration(),
+                                    Math.addExact(clock.millis(), delay));
+                        }
+                    }
                 }
                 return;
-            }
-            long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
-                    retryMaxDelay, claimed.attemptCount());
-            Throwable cause = error;
-            while (cause.getCause() != null && cause instanceof java.util.concurrent.CompletionException) {
-                cause = cause.getCause();
-            }
-            String blocked = null;
-            if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
-                if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
-                    blocked = brokerError.getCode();
-                } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
-                        || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
-                    blocked = "workspace_close_identity_unverified";
-                }
             }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
@@ -191,6 +238,27 @@ public class SessionLifecycleCoordinator {
                     error.getClass().getSimpleName(), error.getMessage());
         } finally {
             renewal.cancel(false);
+        }
+    }
+
+    // A close or delete admitted on an ACTIVE Session can still succeed once
+    // the Harness holding its journal writer stops, so the budget never
+    // terminates it while that writer is live. A writer check that itself
+    // fails is treated as live rather than recorded as a failure.
+    private boolean writerStillLive(OperationRecord operation) {
+        if (!"ACTIVE".equals(operation.sessionStatusBefore())) {
+            return false;
+        }
+        try {
+            return sessionStore.hasLiveWriter(operation.tenantId(),
+                    operation.sessionId());
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Session operation could not check the journal"
+                            + " writer tenant={} session={} operation={}"
+                            + " failure={}",
+                    operation.tenantId(), operation.sessionId(),
+                    operation.operationId(), error.getMessage());
+            return true;
         }
     }
 
