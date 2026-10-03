@@ -74,7 +74,7 @@ export function goalToolResultProvenance(
 /** Whether a tool_search query is a `select:` lookup naming a Goal tool. */
 function selectsGoalTool(query: unknown): boolean {
   if (typeof query !== 'string' || !query.startsWith('select:')) return false;
-  const goalTools = new Set([
+  const goalTools = new Set<string>([
     ToolNames.GET_GOAL,
     ToolNames.UPDATE_GOAL,
     ToolNames.PROPOSE_GOAL,
