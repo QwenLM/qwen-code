@@ -28,6 +28,7 @@ import {
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import { createManagedEngineChannelFactory } from './managed-engine-channel-factory.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
@@ -294,6 +295,17 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     }
   }
 
+  /** The session's Managed Session log, as the child left it. */
+  async function readManagedLog(sessionId: string): Promise<string> {
+    const transcript = new SessionService(workspace, {
+      runtimeBaseDir: path.join(root, 'runtime'),
+    }).getSessionTranscriptPath(sessionId);
+    return waitFor(async () => {
+      const text = await readFile(transcript, 'utf8').catch(() => undefined);
+      return text !== undefined && text.length > 0 ? text : undefined;
+    });
+  }
+
   /** A shell command that records the worker's pid, command and parent. */
   function recordWorker(file: string, then = ''): Record<string, unknown> {
     return {
@@ -381,6 +393,15 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // Closing the session stops its worker before the session ends.
     await bridge!.closeSession(sessionId);
     expect(isAlive(worker.pid)).toBe(false);
+
+    // Every call's evidence is durable: admitted before dispatch, settled as
+    // it ended, and the batch closed behind it before the model continued.
+    const log = await readManagedLog(sessionId);
+    const count = (needle: string) => log.split(needle).length - 1;
+    expect(count('"tool.intent"')).toBe(4);
+    expect(count('"tool.receipt"')).toBe(4);
+    expect(count('"durable_wait"')).toBeGreaterThanOrEqual(1);
+    expect(count('"turn_complete"')).toBeGreaterThanOrEqual(1);
   }, 120_000);
 
   it('starts no worker for a session that calls no tool', async () => {
@@ -431,6 +452,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // The worker settled the call only after the command stopped.
     expect(isAlive(sleepPid)).toBe(false);
     expect(isAlive(worker.pid)).toBe(true);
+    // The cancellation settled as a receipt too: the log says the call ended,
+    // and how.
+    const cancelledLog = await readManagedLog(sessionId);
+    expect(cancelledLog).toContain('"tool.intent"');
+    expect(cancelledLog).toContain('"tool.receipt"');
+    expect(cancelledLog).toContain('"cancelled"');
 
     // The same worker serves the session's next call.
     const nextOut = path.join(workspace, 'next.txt');
@@ -518,5 +545,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     turns.push({ text: 'SHOULD_NOT_RUN' });
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
+
+    // The durable form of the block: admitted before dispatch, never settled,
+    // and the log answers nothing for it.
+    const blockedLog = await readManagedLog(sessionId);
+    expect(blockedLog).toContain('"tool.intent"');
+    expect(blockedLog).not.toContain('"tool.receipt"');
+    expect(blockedLog).toContain('"durable_wait"');
   }, 120_000);
 });

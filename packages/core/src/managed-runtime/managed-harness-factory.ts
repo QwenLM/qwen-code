@@ -159,6 +159,15 @@ export interface ManagedHarnessHandle {
    */
   run<T>(agent: () => Promise<T>): Promise<T>;
   /**
+   * Commits the initial `before_model` checkpoint when the session has none,
+   * and leaves any existing checkpoint alone. Local hosts whose earlier
+   * slices recorded without checkpoints start their Runtime evidence here:
+   * nothing in such a log names Runtime work, so the checkpoint covers the
+   * committed log as-is. A restored hosted session with content but no
+   * checkpoint stays blocked — it must never call this.
+   */
+  ensureCheckpoint(): Promise<HarnessCheckpointV1>;
+  /**
    * Observes an already-committed turn-complete or durable-wait checkpoint.
    * Does not wait for an in-flight turn, and does not invent a boundary.
    */
@@ -255,6 +264,37 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   ensureRunnable(): Promise<HarnessCheckpointV1> {
     return this.mutateCheckpoint(() => this.ensureRunnableUnlocked());
+  }
+
+  async ensureCheckpoint(): Promise<HarnessCheckpointV1> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      let authorization = await this.authority.harnessRunAuthorization();
+      // A log without any checkpoint starts here, whether it is empty or
+      // only carries records from slices that wrote none. A checkpoint that
+      // already exists is used as-is; its own wait and wait-resolution gates
+      // continue to apply after this call.
+      if (
+        authorization.status === 'initial' ||
+        (authorization.status === 'blocked' &&
+          authorization.reason === 'missing_checkpoint' &&
+          this.authority.latestCheckpoint === undefined)
+      ) {
+        await this.commitInitialBeforeModel();
+        authorization = await this.authority.harnessRunAuthorization();
+      }
+      if (authorization.status !== 'runnable') {
+        throw new ManagedHarnessBlockedError({
+          status: 'blocked',
+          reason:
+            authorization.status === 'blocked'
+              ? authorization.reason
+              : 'missing_checkpoint',
+        });
+      }
+      return authorization.checkpoint;
+    });
   }
 
   private async ensureRunnableUnlocked(): Promise<HarnessCheckpointV1> {
