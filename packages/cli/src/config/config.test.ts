@@ -5231,6 +5231,67 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  it('builds agent-host sessions with a read-only initialization profile', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: { ambient: { command: 'ambient-mcp' } },
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+      },
+      tools: { workflowsEnabled: true },
+      experimental: {
+        cron: true,
+        sessionWorkflow: true,
+        artifact: true,
+      },
+      omni: { enabled: true },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      ['ambient-extension'],
+      { userHooks: { PromptSubmit: [{ command: 'ambient-hook' }] } },
+      undefined,
+      { injected: new ServerConfig.MCPServerConfig('node', ['injected.js']) },
+      undefined,
+      false,
+      { agentHostReadOnly: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
+        includeDirectories: [],
+        lsp: { enabled: false },
+        disableAllHooks: true,
+        mcpServers: {},
+        topTierMcpServers: undefined,
+        pendingMcpServers: undefined,
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        sessionWorkflowEnabled: false,
+        fileCheckpointingEnabled: false,
+        cronEnabled: false,
+        artifactEnabled: false,
+        omniEnabled: false,
+      }),
+    );
+    expect(sshWorkspaceProbe).not.toHaveBeenCalled();
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');

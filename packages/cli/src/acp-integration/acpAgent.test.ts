@@ -9200,6 +9200,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('initializes trusted agent-host sessions without ambient executable inputs', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const getRuntimeMcpServers = vi.fn().mockReturnValue({
+      bootstrap: new MCPServerConfig('node', ['bootstrap.js']),
+    });
+    Object.assign(mockConfig, { getRuntimeMcpServers });
+    const addRuntimeMcpServer = vi.fn();
+    const setMcpTransportPool = vi.fn();
+    Object.assign(innerConfig, {
+      addRuntimeMcpServer,
+      setMcpTransportPool,
+    });
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [
+          {
+            name: 'injected',
+            command: 'node',
+            args: ['injected.js'],
+            env: [],
+          } as unknown as McpServer,
+        ],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+          },
+        },
+      });
+
+      const configCall = vi.mocked(loadCliConfig).mock.calls.at(-1)!;
+      expect(configCall[1]).toMatchObject({
+        experimentalLsp: false,
+        mcpConfig: undefined,
+      });
+      expect(configCall[3]).toEqual([]);
+      expect(configCall[4]).toEqual({});
+      expect(configCall[5]).toBeUndefined();
+      expect(configCall[6]).toBeUndefined();
+      expect(configCall[9]).toEqual(
+        expect.objectContaining({ agentHostReadOnly: true }),
+      );
+      expect(configCall[10]).toBeUndefined();
+      expect(innerConfig.initialize).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipHooks: true,
+          skipMcpDiscovery: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+          lenientToolWarmup: true,
+          sendSdkMcpMessage: undefined,
+        }),
+      );
+      expect(innerConfig.setSessionSource).toHaveBeenCalledWith(
+        AGENT_HOST_SESSION_SOURCE_TYPE,
+        undefined,
+      );
+      expect(innerConfig.setArtifactSnapshotsEnabled).toHaveBeenCalledWith(
+        false,
+      );
+      expect(getRuntimeMcpServers).not.toHaveBeenCalled();
+      expect(addRuntimeMcpServer).not.toHaveBeenCalled();
+      expect(setMcpTransportPool).not.toHaveBeenCalled();
+      expect(innerConfig.waitForMcpReady).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('defers standalone new-session workspace setup until managed activation', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

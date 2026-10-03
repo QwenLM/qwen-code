@@ -90,9 +90,9 @@ public class SessionLifecycleService {
         sessions.requireReadGrant(session, actorId);
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
-        if (session.workspace() != null && kind == OperationKind.CLOSE) {
-            admission = store.beginWorkspaceClose(tenantId, sessionId, actorId, actorDigest(actorId),
-                    idempotencyKey, digest, runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
+        if (session.workspace() != null) {
+            admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
+                    idempotencyKey, digest, kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);

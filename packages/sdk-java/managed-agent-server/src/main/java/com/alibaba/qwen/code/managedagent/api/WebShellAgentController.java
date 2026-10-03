@@ -185,6 +185,15 @@ public class WebShellAgentController {
         return operation(tenant, request, OperationKind.DELETE);
     }
 
+    @PostMapping("/sessions/unarchive")
+    public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(result.body());
+    }
+
     @PostMapping("/operations/query")
     public WebShellCommandOperation queryOperation(TenantContext tenant,
             @Valid @RequestBody WebShellOperationRequest request) {

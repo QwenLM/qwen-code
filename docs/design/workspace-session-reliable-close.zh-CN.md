@@ -26,7 +26,7 @@ Harness prompt 和既有 Runtime 恢复准入路由在本地 close 开始后拒�
 
 栅栏查询在取得 placement 锁后进行普通读取，避免缺失行上的 InnoDB 间隙锁阻塞其他租户插入栅栏。Execution 准入在准入事务之外读取不可变的 binding tenant；事务的首次一致性读发生在取得锁之后，避免 REPEATABLE READ 隐藏等待期间已提交的栅栏。
 
-按 tenant、Session isolation class 和 isolation key 分页枚举保存的 binding 代际；身份按字节精确匹配，不依赖数据库排序规则。标记 draining 时不重新授权当前 Workspace 执行。按精确 binding/generation 枚举 Runtime Sessions，使用保存的记录按顺序释放：provider release、activation=false 确认、条件释放原 holder、持久 RELEASED。close 不进行 acquire、安装、执行重放或模型调用。未知执行或启动身份阻止完成。原 worker 不可用时返回身份失败并阻塞，不进入通用租约恢复。共享存储上的新 holder 必须保留。
+按 tenant、Session isolation class 和 isolation key 分页枚举保存的 binding 代际；身份按字节精确匹配，不依赖数据库排序规则。标记 draining 时不重新授权当前 Workspace 执行。按精确 binding/generation 枚举 Runtime Sessions，使用保存的记录按顺序释放：provider release、activation=false 确认、条件释放原 holder、持久 RELEASED。close 不进行 acquire、安装、执行重放或模型调用。未知执行或启动身份阻止完成。没有活跃 Runtime Session 或 execution 的 LOST binding，可以经过同样的 holder 检查与持久停机凭据完成退休；提交凭据并进入 RELEASED 前保持 LOST。有未结算资源的 LOST binding 仍需要恢复。原 worker 不可用且仍有未释放的 Session 时返回身份失败并阻塞，不进入通用租约恢复。共享存储上的新 holder 必须保留。
 
 ## Worker 停机与完成
 
