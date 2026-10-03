@@ -95,6 +95,7 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 ## Prerequisites
 
 - Java 21
+- Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
@@ -399,19 +400,25 @@ defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. By default, local worker ownership is ephemeral
-and a restarted Broker cannot adopt it. On Linux, set
-`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true` to enable persistent
-launch registration and adoption of the same live worker. The state directory
+credentials with AES-256-GCM. By default, local worker ownership is durable:
+the Broker registers every launch and a restarted Broker adopts the same live
+worker. This requires Linux and fails startup elsewhere; on such hosts set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
+worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
 must be persistent local storage, owned by the Broker user with mode `0700`,
-without symlinks, outside every configured Workspace root. Workers and tools
+without symlinks, outside every configured Workspace root. The expected
+owner is resolved from the process UID, so a numeric UID without a passwd
+entry is fine. Workers and tools
 must be trusted; same-UID hostile tools and multi-host or remote storage are
 unsupported. Keep the host machine ID, SQL credential key, placement mapping,
 state directory and worker command stable across Broker restarts. Shutdown and
 late lease discard detach from registered workers instead of killing them.
 `/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
 and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
-requires Linux 5.6 or newer with `CONFIG_TIME_NS`). The service
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). An empty or malformed
+identity fails startup the same way as an absent one, naming both opt-out
+switches. The service
 manager must let workers survive a Broker exit: systemd's default
 `KillMode=control-group` kills them, as does restarting a container whose main
 process is the Broker. Configure the service to leave child workers running
@@ -420,17 +427,18 @@ processes. The Broker recognizes `Z`/`X` workers as exited even before they are
 reaped.
 Missing or damaged records and worker death do not authorize replacement;
 worker death does not prove escaped writers stopped. No host reboot reclamation
-is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+is enabled by this option alone. Old v1 handles cannot be upgraded by guessing identity.
 This option does not retire idle workers or prune their registration and lock
 files. With session isolation, each Hosted Session can retain a separate idle
 worker across Broker restarts; budget process, memory and state-directory growth
-before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
+for it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
 
-For trusted same-host Linux reboot recovery, additionally set
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=true`. This requires
-durable local mode. A changed kernel boot ID on the original machine can prove
+Trusted same-host Linux reboot recovery is also on by default. It requires
+durable local mode with the `local-process` provisioner, so a deployment that
+opts out of durable local workers or uses another provisioner must set
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed kernel boot ID on the original machine can prove
 that original local writers stopped; worker-only death still cannot. The
 service scans eight saved bindings every five seconds, independently of current
 Session grants, and clears only the original SQL holder after all execution
@@ -438,7 +446,8 @@ receipts become terminal. Recovery never starts a replacement worker or replays
 an unknown execution. A later authorized request may create a new generation.
 Keep the same Broker user, local disks, machine identity and SQL keys; remote
 writers, restored/cloned snapshots and external jobs that recreate writers are
-outside this contract. The option remains disabled by default. The
+outside this contract. Where a matching boot identity cannot be trusted as stop
+evidence, set the option to `false`. The
 [reboot recovery design](../../../docs/design/2026-09-28-local-reboot-recovery.md)
 distinguishes portable test evidence from the dedicated Linux reboot acceptance
 gate completed at W0e-3 head `8c2b626c`. A systemd soft reboot is not stop
@@ -487,7 +496,7 @@ responses retain the SQL holder; there is no timeout-based takeover. The
 provider and file tools do not confine access to the mount root: Read/Write/Edit
 and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
-local workloads. The opt-in W0e recovery above handles trusted host reboot; it
+local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above and to later Turns submitted by the Session's creator under the same
@@ -597,10 +606,17 @@ artifacts, before enabling the local-process provisioner in a container.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. The optional
-real-MySQL profile also verifies schema upgrade, exact bytes, public
-Item/Snapshot projection, and the independent-JVM Managed Session Store
-crash/takeover path:
+Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
+warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To run the static
+gates without the test suite, use `mvn verify -DskipTests` — it also runs
+Checkstyle and the Spring Boot repackage, and the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
+optional real-MySQL profile also verifies schema upgrade,
+exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+Session Store crash/takeover path:
 
 ```bash
 mvn -Pmysql-integration \
@@ -628,7 +644,8 @@ script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
 starts its own temporary MySQL server and exits before starting anything else
 when a command or a required file is missing.
 
-Build the required artifacts first, then run:
+Build the required artifacts first, then run (the Maven steps need Maven
+3.8.9+ — the SpotBugs gate rides the `verify` phase that `install` traverses):
 
 ```bash
 npm run build && npm run bundle

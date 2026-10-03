@@ -218,7 +218,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return server.getBaseUri();
     }
 
-    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 5000)
+    @org.springframework.scheduling.annotation.Scheduled(scheduler = "runtimeRecoveryScheduler",
+            fixedDelay = 5000)
     public void recoverSavedRuntimes() {
         if (recovery != null) {
             recovery.scan();
@@ -238,7 +239,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             HttpRuntimeTransport transport) {
         if (broker.isTrustedLocalRebootRecovery()
                 && (!broker.isDurableLocalProcess() || !"local-process".equals(broker.getProvisioner()))) {
-            throw new IllegalStateException("Trusted reboot recovery requires durable local-process provisioning");
+            if (!broker.isDurableLocalProcess()) {
+                throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
+                        + " provisioning; enable durable local-process"
+                        + " (QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true),"
+                        + " or set trusted-local-reboot-recovery=false"
+                        + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)");
+            }
+            throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
+                    + " provisioning with the local-process provisioner (configured: "
+                    + broker.getProvisioner() + "); set trusted-local-reboot-recovery=false"
+                    + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)"
+                    + " for non-durable provisioners");
         }
         if ("local-process".equals(broker.getProvisioner())) {
             require(broker.getStateDirectory(),
@@ -290,16 +302,23 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             Path candidate = java.nio.file.Files.exists(directory) ? directory.toRealPath()
                     : directory.getParent().toRealPath().resolve(directory.getFileName());
             if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
-                throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+                throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
             }
             for (var mount : broker.getWorkspaceMounts()) {
                 if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
-                    throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+                    throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
                 }
             }
         } catch (IOException error) {
             throw new IllegalStateException("Runtime recovery directory could not be verified", error);
         }
+    }
+
+    private static String recoveryDirectoryOutsideRootsMessage() {
+        return "Runtime recovery directory must be outside Workspace roots; set"
+                + " QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY outside every configured Workspace"
+                + " root, or opt out with QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false"
+                + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
     private static String resolveWorkspaceCwd(
