@@ -423,6 +423,7 @@ export function getMainSessionBaseSystemPrompt(
             config.getShellExecutionSandbox?.()?.filesystem,
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
+          executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
         },
       );
 }

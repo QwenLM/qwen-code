@@ -235,6 +235,9 @@ describe('systemInfo', () => {
       expect(info.sandboxEnv).toBe(
         'tools / bwrap → bwrap (full) / read-only / command network: closed',
       );
+      expect(info.npmVersion).toBe(
+        'not probed (tool execution sandbox active)',
+      );
       expect(mockedExecFile).not.toHaveBeenCalled();
     });
 

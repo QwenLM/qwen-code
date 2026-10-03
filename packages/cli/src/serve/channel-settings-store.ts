@@ -737,6 +737,27 @@ export class WorkspaceChannelSettingsStore {
     const { current, storedChannels } = this.assertRevision(
       options.expectedRevision,
     );
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured) {
+      if (!current.startupNames.includes(name)) return current;
+      // The config is already gone from this scope; only a stale startup
+      // selection can remain. Write just that selection — replacing the
+      // whole `channels` subtree would erase entries the read view filters
+      // out (and this delete never touched), such as legacy scalar values.
+      saveSettings(
+        channelSettingsScope(this.workspaceCwd),
+        {
+          serve: {
+            channels: current.startupNames.filter(
+              (startupName) => startupName !== name,
+            ),
+          },
+        },
+        ['serve', 'channels'],
+        { throwOnWriteFailure: true },
+      );
+      return this.snapshot();
+    }
     const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);

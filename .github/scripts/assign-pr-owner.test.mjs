@@ -631,7 +631,9 @@ describe('assign-pr-owner: workflow invariants', () => {
   it('scopes the write permission to the job and the token to the step', () => {
     assert.equal(doc.permissions['pull-requests'], undefined);
     assert.equal(assignJob.permissions['pull-requests'], 'write');
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     assert.ok(runStep.env.GH_TOKEN);
     assert.equal(doc.env?.GH_TOKEN, undefined);
     assert.equal(
@@ -655,32 +657,45 @@ describe('assign-pr-owner: workflow invariants', () => {
     );
     assert.match(checkout.with.ref, /pull_request\.base\.sha/);
     assert.equal(checkout.with['persist-credentials'], false);
-    assert.match(checkout.with['sparse-checkout'], /issue-owners\.json/);
-    // The run step's guard skips when this entry is dropped, so pin the
-    // membership — otherwise routing could be silently disabled forever.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-pr-owner\.mjs$/m,
-    );
-    // The entry script statically imports assign-issue-owner.mjs, and the
-    // bootstrap guard only checks for assign-pr-owner.mjs — dropping this
-    // entry makes node fail on the missing module after the guard passed.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-issue-owner\.mjs$/m,
-    );
+    // One cone-mode directory carries everything the run step needs: both
+    // entry scripts (the run step's guard skips without assign-pr-owner.mjs,
+    // and it statically imports assign-issue-owner.mjs), plus
+    // issue-owners.json, which cone mode adds as a direct child of .github/.
+    // File entries break on a reused ECS workspace — cone mode dies with
+    // "is not a directory" once the index holds them as files — and
+    // non-cone mode leaves core.sparseCheckout behind, so the next full
+    // checkout on that runner comes out sparse.
+    assert.equal(checkout.with['sparse-checkout'], '.github/scripts');
+    assert.equal(checkout.with['sparse-checkout-cone-mode'], undefined);
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
 
   it('bootstrap-skips on a base without the script, before running node', () => {
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     // Pin the guard's shape and ordering: an inverted guard turns every run
     // into a silent no-op, a non-zero exit re-breaks the bootstrap PR's own
     // check, and a node call ahead of the guard fails on the base checkout.
     assert.match(
       runStep.run,
       /if \[ ! -f \.github\/scripts\/assign-pr-owner\.mjs \]; then[\s\S]*?exit 0[\s\S]*?fi[\s\S]*?node \.github\/scripts\/assign-pr-owner\.mjs\s*$/,
+    );
+  });
+
+  it('restores pool workspace ownership before the checkout', () => {
+    // #13245 routes trusted runs onto the shared ECS pool, where a prior
+    // containerised job can leave root-owned files that fail the checkout.
+    const names = assignJob.steps.map((step) => step.name);
+    const heal = names.indexOf('Restore workspace ownership');
+    const checkout = assignJob.steps.findIndex((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    assert.ok(heal !== -1 && heal < checkout);
+    assert.equal(
+      assignJob.steps[heal].if,
+      "${{ runner.environment == 'self-hosted' }}",
     );
   });
 
