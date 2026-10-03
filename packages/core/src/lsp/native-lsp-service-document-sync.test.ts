@@ -3006,6 +3006,59 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
+    it('refuses a clean answer whose only backer is keyed by a language ID', async () => {
+      // The `cpp` twin of the python-only refusal above. `cpp` is absent from
+      // LANGUAGE_ID_TO_EXTENSIONS only because the ID already equals the
+      // extension, so it is just as attributable: a lone clangd still cannot
+      // certify main.ts clean.
+      withServers([
+        [
+          'clangd',
+          {
+            ...emptyReportHandle('clangd'),
+            config: { ...handle.config, name: 'clangd', languages: ['cpp'] },
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it.each(['cpp', 'java', 'go'])(
+      'does not let a downed %s sibling veto a clean answer it cannot own',
+      async (languageId) => {
+        // The token twin of the `['python']` case above with an
+        // identity-mapped language ID: `cpp` serves `.cpp` even though the
+        // mapping table omits it, so the downed sibling still provably cannot
+        // own main.ts and the ready server's empty report stands.
+        mockDiagnosticsResponses(connection);
+        const failedSibling: LspServerHandle = {
+          ...handle,
+          config: {
+            ...handle.config,
+            name: languageId,
+            languages: [languageId],
+          },
+          status: 'FAILED',
+          connection: undefined,
+          error: new Error(`command not found: ${languageId}`),
+        };
+        withServers([
+          ['test', handle],
+          [languageId, failedSibling],
+        ]);
+        const result = await run(queryDiagnosticsTool('diagnostics'));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
     it('does not excuse a failed server whose config key is capitalized', async () => {
       // `.lsp.json` keys reach `languages` unnormalized, so `"Python"` has to
       // derive `py` exactly like `"python"` does. Otherwise the relevance rule

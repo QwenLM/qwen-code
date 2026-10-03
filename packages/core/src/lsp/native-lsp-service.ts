@@ -159,6 +159,31 @@ const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
 );
 
 /**
+ * Language IDs the table above omits because the ID already names the
+ * language, so `?? [id]` is not a guess for them: `cpp` serves `.cpp`, `go`
+ * serves `.go`. A `.lsp.json` key in this set declares a real language, which
+ * is what makes a veto decision possible; a key that is a server name
+ * (`pyright`, `remote-lsp`) is in neither set and still proves nothing. The
+ * table itself must not be widened to carry these: the set derived from it
+ * also gates which queried files get a relevance decision at all.
+ */
+const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
+  'c',
+  'cpp',
+  'css',
+  'dockerfile',
+  'go',
+  'html',
+  'java',
+  'json',
+  'markdown',
+  'php',
+  'rust',
+  'swift',
+  'yaml',
+]);
+
+/**
  * Language IDs one JS/TS-family server answers for. `warmupTypescriptServer`
  * already relies on this: it opens a `.js`/`.jsx` file with languageId
  * `javascript`/`javascriptreact` against a server it recognizes by a
@@ -762,9 +787,13 @@ export class NativeLspService {
     // server name (`pyright`, `remote-lsp`) seeds `owned` with the guess
     // `[id]`. A set made only of such guesses proves nothing about the
     // queried file — reading it as proof both excuses a downed server from
-    // the veto and strips a ready one of its backing.
-    const attributed = [...owned].some((ext) =>
-      KNOWN_DIAGNOSTIC_EXTENSIONS.has(ext),
+    // the veto and strips a ready one of its backing. An ID that names a
+    // real language (`cpp`, `go`) is not such a guess, even though the
+    // mapping table omits it.
+    const attributed = [...owned].some(
+      (ext) =>
+        KNOWN_DIAGNOSTIC_EXTENSIONS.has(ext) ||
+        DIAGNOSTIC_LANGUAGE_IDS.has(ext),
     );
     return attributed && !owned.has(extension);
   }
