@@ -3758,7 +3758,7 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
-  it('reclaims a msg_seq counter orphaned by a vetoed release on the next tick (R12-1)', () => {
+  it('reclaims a msg_seq counter orphaned by a vetoed release on the next tick', () => {
     vi.useFakeTimers();
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -3811,7 +3811,7 @@ describe('replyMsgId cleanup timer', () => {
     expect(msgSeqMap.get('msg-A')).toBe(5);
 
     // The last holder disappears. No naming entry is left that could reach the
-    // counter — exactly the orphan shape R12-1 describes.
+    // counter — the orphan shape this reclaim exists for.
     streamState.delete('sess-1');
 
     // Tick 2: the sweep iterates the counter map itself, so the orphan is
@@ -3822,7 +3822,7 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
-  it('keeps a msg_seq counter named only by replyContextByMessageId (R12-1b)', () => {
+  it('keeps a msg_seq counter named only by replyContextByMessageId', () => {
     vi.useFakeTimers();
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -3867,7 +3867,7 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
-  it('reclaims a msg_seq counter orphaned by group removal on the next tick (R12-3)', () => {
+  it('reclaims a msg_seq counter orphaned by group removal on the next tick', () => {
     vi.useFakeTimers();
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -3917,7 +3917,7 @@ describe('replyMsgId cleanup timer', () => {
 
     // Every holder is destroyed, but the release ran first and was vetoed by
     // the in-flight marker, and the naming entries are gone — so the counter
-    // is orphaned with nothing left that could name it (R12-3).
+    // is orphaned with nothing left that could name it.
     expect(sessionAnchors.has('sess-1')).toBe(false);
     expect(streamState.has('sess-1')).toBe(false);
     expect(flushingSessions.has('sess-1')).toBe(false);

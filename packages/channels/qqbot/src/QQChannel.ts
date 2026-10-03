@@ -2150,7 +2150,7 @@ export class QQChannel extends ChannelBase {
           // first (folded in, so the merge below is not applied twice) — but
           // only while this state still owns the live turn: a superseded
           // entry's text is abandoned with its permanent failure and must not
-          // be injected into a successor's reply (R9-1).
+          // be injected into a successor's reply.
           if (
             state.boundaryClearedInFlight !== undefined &&
             this.ownsLiveTurn(sessionId, state)
@@ -2231,7 +2231,7 @@ export class QQChannel extends ChannelBase {
             // deterministically, not by comparing seal text). Only a chain that
             // still owns the live turn may write the seal: a superseded
             // entry's payload is abandoned with its failure and must not be
-            // injected into a successor's reply (R21-6). The carried-seal
+            // injected into a successor's reply. The carried-seal
             // branch is the backstop for a re-seal whose boundary marker was
             // missed.
             if (this.ownsLiveTurn(sessionId, state)) {
@@ -2294,8 +2294,7 @@ export class QQChannel extends ChannelBase {
             current.buffer = buffer + (current.buffer || '');
             // Same re-seal as the parked branch above, under the same
             // turn-ownership gate: a boundary during the flight strips the
-            // whole payload from fullText, but only the live turn may seal it
-            // (R21-6).
+            // whole payload from fullText, but only the live turn may seal it.
             if (this.ownsLiveTurn(sessionId, state)) {
               if (state.boundaryClearedInFlight !== undefined) {
                 current.sealedPre = this.sealClearedPayload(
@@ -2489,7 +2488,7 @@ export class QQChannel extends ChannelBase {
     // so a stash accumulated before this point is no longer part of any later
     // fullText and must still be prepended when the turn completes. Seal that
     // portion separately: chunks arriving after the boundary append to `text`
-    // but are already in fullText and must not be prepended too (R9-1).
+    // but are already in fullText and must not be prepended too.
     this.captureBoundaryClear(sessionId);
     this.sealOrphanStash(sessionId);
     // A stale entry belongs to an earlier turn; when the deletes below drop it
@@ -2565,7 +2564,7 @@ export class QQChannel extends ChannelBase {
       // A live turn's stashed pre-boundary text is prepended only when a
       // boundary has cleared the bridge's chunk collection since it was
       // taken; otherwise fullText already carries those chunks and prepending
-      // would deliver the head twice (R9-1). A superseded stash is dropped
+      // would deliver the head twice. A superseded stash is dropped
       // with a log.
       let replyText = fullText;
       const held = this.streamOrphanBuffer.get(sessionId);
@@ -2633,8 +2632,8 @@ export class QQChannel extends ChannelBase {
     // A live turn's stashed pre-boundary text must go out with the final text
     // only when a boundary cleared the bridge's collection since it was taken —
     // state.buffer and fullText both miss it then. Without a boundary, fullText
-    // already carries the diverted chunks, and prepending would double the HEAD
-    // (R9-1). The entry is removed here, before the send, so a chunk arriving
+    // already carries the diverted chunks, and prepending would double the HEAD.
+    // The entry is removed here, before the send, so a chunk arriving
     // during the send cannot drain the same stash into a fresh entry and
     // duplicate the HEAD. A superseded entry is dropped with a log.
     const held = this.streamOrphanBuffer.get(sessionId);
@@ -2817,7 +2816,7 @@ export class QQChannel extends ChannelBase {
    * marker is cleared only by `.finally()` after the settle arms, so this stays
    * true while those arms hand state off; a session torn down by onSessionDied
    * (or replaced outright) owns neither, and its chain must not write shared
-   * per-session state (R21-1).
+   * per-session state.
    */
   private ownsSession(sessionId: string, state: QQStreamState): boolean {
     return (
@@ -2829,7 +2828,7 @@ export class QQChannel extends ChannelBase {
   /**
    * Whether this entry is still the turn that owns the session's counter. A
    * superseded entry's text is abandoned with its failure and must not be
-   * sealed into a successor's reply (R21-6, R9-1).
+   * sealed into a successor's reply.
    */
   private ownsLiveTurn(sessionId: string, state: QQStreamState): boolean {
     return state.turn === (this.turnCounter.get(sessionId) ?? 0);
@@ -2850,7 +2849,7 @@ export class QQChannel extends ChannelBase {
    * keeps the existing entry's turn, which a stash always carries as the turn
    * that wrote it. `pre` carries the sealed head alone and is never widened to
    * the whole dropped buffer: the post-boundary text is still in fullText and
-   * prepending it again would deliver it twice (R9-1).
+   * prepending it again would deliver it twice.
    *
    * Otherwise the turn is already over — completion returned and parked the
    * session, or the caller is the park-consuming exhaustion branch, which
@@ -2883,7 +2882,7 @@ export class QQChannel extends ChannelBase {
     // A chain whose session was torn down (onSessionDied) or replaced outright
     // owns neither map: its seal has no consumer left, and re-writing the side
     // buffer here would later prepend a dead turn's head to an unrelated
-    // successor reply (R21-1). A superseded chain that still holds the flush
+    // successor reply. A superseded chain that still holds the flush
     // marker legitimately hands off, which is why both maps are consulted.
     if (!this.ownsSession(sessionId, state)) {
       // The seal is dropped here, so log it like every other loss: nothing else
@@ -3099,7 +3098,7 @@ export class QQChannel extends ChannelBase {
 
   /**
    * A boundary clears the bridge's chunk collection. Seal the live turn's
-   * buffer-resident prefix for the completion path (R9-1), and record on the
+   * buffer-resident prefix for the completion path, and record on the
    * entry whose flush is in flight what its re-buffer must re-seal: the payload
    * the boundary stripped from fullText, always, plus that residual when the
    * flushed entry is the live turn's own. Called by the adapter hook and by the
@@ -3115,7 +3114,7 @@ export class QQChannel extends ChannelBase {
     // Seal ONLY the live turn's buffer-resident prefix: a stale/parked
     // predecessor's buffer is delivered by its own chain on its own anchor, and
     // sealing it would let the permanent-failure arm re-stash that text into a
-    // successor turn's reply (R9-1).
+    // successor turn's reply.
     const liveResidual =
       state !== undefined && state.turn === currentTurn && state.buffer
         ? state.buffer
@@ -3743,7 +3742,7 @@ export class QQChannel extends ChannelBase {
     // expectedMsgId so this turn's msg_seq counter cannot orphan.
     const target = expectedMsgId ?? current?.msgId;
     if (target === undefined) return;
-    // Derived reclamation (R12-1): the predicate now covers every holder —
+    // Derived reclamation: the predicate now covers every holder —
     // another session's anchor, the chat-level anchor that used to be scanned
     // inline here, a live stream entry, an in-flight send — so this one call
     // replaces the veto + scan + delete. Releasing while a holder remains
@@ -3768,7 +3767,7 @@ export class QQChannel extends ChannelBase {
    */
   private isMsgSeqStillInUse(msgId: string): boolean {
     if (this.isMsgIdAnchoredBySession(msgId)) return true;
-    // Chat-level anchor (R12-1): this scan used to live inline in
+    // Chat-level anchor: this scan used to live inline in
     // releaseSessionReplyAnchor only, so the TTL/teardown reclaimers could
     // drop a counter the chat entry still named. Folding it in gives every
     // site the same holder set.
@@ -3783,7 +3782,7 @@ export class QQChannel extends ChannelBase {
         return true;
     }
     if ((this.inFlightMsgSeqSends.get(msgId) ?? 0) > 0) return true;
-    // Routing map (R12-1): replyContextByMessageId is the structure a send
+    // Routing map: replyContextByMessageId is the structure a send
     // actually resolves its outgoing msg_id from (sendResponseMessage,
     // sendMessageWithReplyContext, handleInbound), so a counter it still names
     // is still reachable by a send even when no anchor/stream/in-flight holder
@@ -3794,7 +3793,7 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Drop a msgId's msg_seq counter once no holder remains (R12-1). Derived,
+   * Drop a msgId's msg_seq counter once no holder remains. Derived,
    * not decided per call site: a release site that vetoes reclamation while a
    * holder still exists never gets a second chance once that holder later
    * disappears, so every site routes through isMsgSeqStillInUse and the sweep
@@ -3809,8 +3808,8 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Safety net that reclaims a msg_seq counter once its last holder is gone
-   * (R12-1/R12-3): the iteration domain is the counter map itself, so a
+   * Safety net that reclaims a msg_seq counter once its last holder is gone:
+   * the iteration domain is the counter map itself, so a
    * counter whose only *naming* entry (session anchor, chat anchor,
    * replyContextByMessageId routing entry, stream entry) was already deleted
    * is still visited. It cannot make orphaning impossible — a counter can
@@ -3873,7 +3872,7 @@ export class QQChannel extends ChannelBase {
     this.replyContextByMessageId.delete(context.msgId);
     // Drop the chat-level naming entry BEFORE the reclaim: while it is still
     // present it is itself a holder, so reclaiming first would always veto and
-    // the counter would linger until the next 60s tick (R12-1).
+    // the counter would linger until the next 60s tick.
     if (this.replyMsgId.get(context.chatId)?.msgId === context.msgId) {
       this.replyMsgId.delete(context.chatId);
     }
@@ -3907,7 +3906,7 @@ export class QQChannel extends ChannelBase {
           // alive while any holder remains. The entry is deleted right after,
           // so this site's own veto (the entry still names the counter) is
           // expected; the orphan pass at the end of the tick picks the
-          // counter up once it is gone (R12-1).
+          // counter up once it is gone.
           this.reclaimMsgSeq(entry.msgId);
           this.replyMsgId.delete(chatId);
           dirty = true;
@@ -3929,7 +3928,7 @@ export class QQChannel extends ChannelBase {
           this.releaseSessionReplyAnchor(sessionId, entry.msgId);
         }
       }
-      // Derived reclamation (R12-1/R12-3): the iteration domain is the counter
+      // Derived reclamation: the iteration domain is the counter
       // map itself, so a counter whose only naming entry was already deleted —
       // earlier in this tick or on a previous one — is still visited, and one
       // that outlived its last holder between two ticks is dropped here rather
@@ -5073,8 +5072,9 @@ export class QQChannel extends ChannelBase {
     // Non-@-bot messages pass isMentioned:false, which causes GroupGate.requireMention
     // to silently drop them before they reach the LLM. This is by core design:
     // non-@-bot group messages should flow through cron/log only, not trigger AI.
-    // A prior fix (setting isMentioned=true for non-@-bot keyword/all matches)
-    // was intentionally reverted — it violated principle #1.
+    // The isMentioned=true override for non-@-bot keyword/all matches (PR #6457
+    // review thread #17, landed in 998d36068b, then reverted there) was
+    // intentionally not restored — it violated principle #1.
     // Users must set requireMention: false in group config
     // (e.g., `groups: { '*': { requireMention: false } }`) to allow
     // non-@-bot keyword/all messages to reach the AI.
@@ -5158,7 +5158,7 @@ export class QQChannel extends ChannelBase {
     // msgSeqMap is keyed by message ID, not group_openid — get the
     // message ID from replyMsgId before deleting the reply entry. The entry
     // still names the counter here, so the reclaim is expected to veto; the
-    // sweep's orphan pass reclaims once every holder is gone (R12-1/R12-3).
+    // sweep's orphan pass reclaims once every holder is gone.
     const replyEntry = this.replyMsgId.get(groupId);
     if (replyEntry) {
       this.reclaimMsgSeq(replyEntry.msgId);

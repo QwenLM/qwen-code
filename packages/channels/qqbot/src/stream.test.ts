@@ -1194,7 +1194,7 @@ describe('onResponseComplete', () => {
     expect(body['msg_seq']).toBe(3);
     // The anchor is released after the final segment goes out. The counter is
     // NOT cascaded away: replyContextByMessageId still names msg-A, so a send
-    // could still resolve it (R12-1b). The retention is bounded — evicting
+    // could still resolve it. The retention is bounded — evicting
     // that routing entry reclaims the counter.
     expect(sessionAnchors.has('sess-A')).toBe(false);
     expect(seqMap.get('msg-A')).toBe(3);
@@ -1893,7 +1893,7 @@ describe('error recovery paths', () => {
     expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-B');
     // ...but the superseded turn's counter is not orphaned either: the release
     // ran and the counter is retained because replyContextByMessageId still
-    // names msg-A (R12-1b). Evicting that routing entry reclaims it.
+    // names msg-A. Evicting that routing entry reclaims it.
     expect(seqMap.has('msg-A')).toBe(true);
     (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
       chatId: 'test-chat',
@@ -3418,7 +3418,7 @@ describe('cancel/flush coordination', () => {
 
     // The tail send settles; the chain's terminal release is deferred to its
     // .finally(), after the in-flight marker is cleared. The counter is then
-    // retained because replyContextByMessageId still names msg-A (R12-1b) —
+    // retained because replyContextByMessageId still names msg-A —
     // a later send could still resolve it — and is reclaimed once that routing
     // entry is evicted.
     resolveTailSend!(mockResponse(true));
@@ -4102,7 +4102,7 @@ describe('stash ownership regressions', () => {
 
     onResponseBoundary(ch, 'test-chat', 's1');
     // Preserved, and now sealed as the pre-boundary portion: the bridge's
-    // collection was cleared, so the head can only come from the stash (R9-1).
+    // collection was cleared, so the head can only come from the stash.
     expect(orphanBuffer.get('s1')).toEqual({
       turn: 2,
       text: 'T2-HEAD ',
@@ -4137,7 +4137,7 @@ describe('stash ownership regressions', () => {
     expect(sentContents().at(-1)).toBe('T2-HEAD ');
   });
 
-  it("does not duplicate the live turn's stashed head when fullText already has it (R9-1)", async () => {
+  it("does not duplicate the live turn's stashed head when fullText already has it", async () => {
     const ch = makeChannel();
     const { resolveSend } = await reachStaleStash(ch);
 
@@ -4154,7 +4154,7 @@ describe('stash ownership regressions', () => {
     await drain();
   });
 
-  it('prepends the stashed head when a response boundary cleared fullText (R9-1)', async () => {
+  it('prepends the stashed head when a response boundary cleared fullText', async () => {
     const ch = makeChannel();
     const { resolveSend, orphanBuffer } = await reachStaleStash(ch);
 
@@ -4171,7 +4171,7 @@ describe('stash ownership regressions', () => {
     await drain();
   });
 
-  it('does not duplicate post-boundary text when the stash spans a boundary (R9-1)', async () => {
+  it('does not duplicate post-boundary text when the stash spans a boundary', async () => {
     const ch = makeChannel();
     const { resolveSend, orphanBuffer } = await reachStaleStash(ch);
     // Turn 1's chain is still parked, so turn 2's first chunk is stashed in
@@ -4203,7 +4203,7 @@ describe('stash ownership regressions', () => {
     await drain();
   });
 
-  it('consumes the stash without prepending on the normal completion path (R9-1)', async () => {
+  it('consumes the stash without prepending on the normal completion path', async () => {
     const ch = makeChannel();
     const { rejectSend } = await reachStaleStash(ch);
     const chp = ch as unknown as Record<string, unknown>;
@@ -4224,7 +4224,7 @@ describe('stash ownership regressions', () => {
     expect(contents.some((c) => c.includes('T2-HEAD T2-HEAD'))).toBe(false);
   });
 
-  it('prepends the stash on the normal completion path when a boundary cleared fullText (R9-1)', async () => {
+  it('prepends the stash on the normal completion path when a boundary cleared fullText', async () => {
     const ch = makeChannel();
     const { rejectSend } = await reachStaleStash(ch);
 
@@ -5999,7 +5999,7 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
 // longer owns the session (onSessionDied tore it down) or the turn (a
 // successor replaced it): the dead or superseded text would be prepended to
 // an unrelated successor reply.
-describe('R21 acceptance: ownership gates for a settling flush chain', () => {
+describe('ownership gates for a settling flush chain', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
@@ -6771,5 +6771,159 @@ describe('R17-1 acceptance: cancelled-stash delivery failure classification', ()
     resolveSend(mockResponse(true));
     await vi.advanceTimersByTimeAsync(20_000);
     await drain();
+  });
+});
+
+// Guards a single-edit mutant run over the flush chain left unpinned: each test
+// below fails when its guard is removed and passes on this head. The test names
+// state the guard under test.
+describe('flush-chain guards pinned by witness tests', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('onPromptStart drops a dead orphan stash left behind a turn-counter reset', async () => {
+    const ch = makeChannel();
+    // State a settled deferred chain leaves: a stash tagged with the turn the
+    // counter is about to restart at, which nothing else clears.
+    (
+      (ch as unknown as Record<string, unknown>)['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >
+    ).set('sess-1', { turn: 1, text: 'STALE-HEAD ', pre: 'STALE-HEAD ' });
+
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B'); // counter restarts at 1
+    onResponseChunk(ch, 'test-chat', 'fresh answer', 'sess-1');
+    await onResponseComplete(ch, 'test-chat', 'fresh answer', 'sess-1');
+    await vi.advanceTimersByTimeAsync(2100);
+    await drain();
+
+    const delivered = sentContents().join('|');
+    expect(delivered).toContain('fresh answer');
+    expect(delivered).not.toContain('STALE-HEAD');
+  });
+
+  it('isMsgSeqStillInUse holds a suspended cancelled-stash send on its counter', async () => {
+    const ch = makeChannel();
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'part-1 ', 'sess-1');
+    await vi.advanceTimersByTimeAsync(2100); // idle flush -> (msg-A, seq 1)
+    await drain();
+    expect(sentBodies().map((b) => b['msg_seq'])).toEqual([1]);
+
+    // The next send must refresh the token: hold it so the send stays suspended
+    // inside the route resolution while a successor turn starts.
+    const tok = deferred<{ accessToken: string; expiresIn: number }>();
+    mockFetchAccessToken.mockReturnValueOnce(tok.promise);
+    (ch as unknown as Record<string, unknown>)['tokenExpiresAt'] = 0;
+    const delivery = (
+      ch as unknown as {
+        deliverCancelledStash: (
+          c: string,
+          s: string,
+          t: string,
+          a?: string | null,
+        ) => Promise<void>;
+      }
+    ).deliverCancelledStash('test-chat', 'sess-1', 'STASHED-HEAD', 'msg-A');
+    await drain();
+
+    // A successor turn starts on the same session and releases msg-A's anchor.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B');
+    tok.resolve({ accessToken: 'test-token-2', expiresIn: 7200 });
+    await drain();
+    await vi.advanceTimersByTimeAsync(10);
+    await delivery;
+
+    const stash = sentBodies().find((b) =>
+      String(
+        (b['markdown'] as { content?: string } | undefined)?.content ?? '',
+      ).includes('STASHED-HEAD'),
+    )!;
+    expect(stash['msg_id']).toBe('msg-A');
+    // QQ dedupes on (msg_id, msg_seq): a reclaimed counter resolves 1 again.
+    expect(stash['msg_seq']).toBe(2);
+  });
+
+  it("the flush chain's .finally releases flushingSessions only for its own state", async () => {
+    const ch = makeChannel();
+    const sendA = deferred<MockResponse>();
+    const sendB = deferred<MockResponse>();
+    mockSendQQMessage
+      .mockReturnValueOnce(sendA.promise)
+      .mockReturnValueOnce(sendB.promise);
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'a-1 ', 'sess-1');
+    await vi.advanceTimersByTimeAsync(2100); // chain A in flight, marker = A
+    await drain();
+
+    // The session is replaced outright while A's send is still pending.
+    ch.onSessionDied('sess-1');
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'b-1 ', 'sess-1');
+    await vi.advanceTimersByTimeAsync(2100); // chain B in flight, marker = B
+    await drain();
+    const flushing = (ch as unknown as Record<string, unknown>)[
+      'flushingSessions'
+    ] as Map<string, unknown>;
+    const markerB = flushing.get('sess-1');
+    expect(markerB).toBeDefined();
+
+    sendA.resolve(mockResponse(true)); // the superseded chain settles
+    await drain();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // B's send is still in flight: its marker must survive A's settle.
+    expect(flushing.get('sess-1')).toBe(markerB);
+
+    sendB.resolve(mockResponse(true));
+    await drain();
+  });
+
+  it('onPromptStart clears completedTurns so a restarted turn cannot alias it', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    // A teardown keeps the completion record while the turn counter restarts;
+    // without the clear the record names the restarted turn 1 again.
+    (chp['completedTurns'] as Map<string, number>).set('sess-1', 1);
+
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B'); // turn 1 again
+    const state = {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-B',
+      turn: 1,
+      sealedPre: 'SEALED-HEAD ',
+    };
+    streamState(ch).set('sess-1', state as never);
+    (
+      ch as unknown as {
+        handOffSealedPre: (st: unknown, s: string) => void;
+      }
+    ).handOffSealedPre(state, 'sess-1');
+    await drain();
+
+    // This turn's completion has not run: the head must wait in the stash for
+    // it, not go out on its own ahead of the reply.
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(
+      (chp['streamOrphanBuffer'] as Map<string, { text: string }>).get('sess-1')
+        ?.text,
+    ).toBe('SEALED-HEAD ');
   });
 });
