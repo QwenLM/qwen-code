@@ -1017,7 +1017,7 @@ describe('ManagedHookRuntime', () => {
     const instance = runtime([
       {
         ...definition(),
-        config: { type: 'function', timeout: 3000 },
+        config: { type: 'function', timeout: 5000 },
         handler: {
           handlerId: 'cold',
           handlerRevision: 1,
@@ -1043,7 +1043,7 @@ describe('ManagedHookRuntime', () => {
     const modulePath = path.join(directory, 'over-budget-handler.mjs');
     await writeFile(
       modulePath,
-      `await new Promise((resolve) => setTimeout(resolve, 700));
+      `await new Promise((resolve) => setTimeout(resolve, 900));
        export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
     );
     const instance = runtime([

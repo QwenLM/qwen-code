@@ -193,9 +193,11 @@ evaluation timeout with the dedicated code
 `managed_hook_module_evaluation_timeout`, and the Harness fences the execution
 as outcome_unknown rather than claiming not_started_proven for code that may
 have run; a genuinely failing import settles as
-`managed_hook_handler_unavailable` and keeps the original proof. An owner that
-hold-fences its release is skipped rather than retried once: a later acquire
-attempts the release again.
+`managed_hook_handler_unavailable` and keeps the original proof. A release of an
+earlier owner that the Runtime refuses — absent (404), or conflicting (409), the
+latter being how a hold-fenced owner answers — is skipped for that pass and the
+owner is not recorded as released, so a later acquire attempts the release again
+instead of the refusal escaping and wedging the replacement activation.
 
 Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
 owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks

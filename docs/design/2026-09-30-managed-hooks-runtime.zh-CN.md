@@ -143,8 +143,10 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 `managed_hook_module_evaluation_timeout` 报告求值超时，
 Harness 据此以 outcome_unknown 围闭该执行，而不是对可能已经运行过的代码出具
 not_started_proven；真正加载失败的 import 以
-`managed_hook_handler_unavailable` 结算并保留原证明。若释放被 hold 围闭的
-owner 被拒绝，则本次跳过该 owner 而不视为已释放；后续 acquire 会再次尝试释放它。
+`managed_hook_handler_unavailable` 结算并保留原证明。释放此前 owner 时被 Runtime
+拒绝——已不存在（404）或冲突（409，被 hold 围闭的 owner 即以冲突作答）——则本次
+跳过该 owner 且不记为已释放，后续 acquire 会再次尝试释放，而不是让该拒绝抛出、
+把替换 activation 卡死。
 
 Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
 快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
