@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,6 +24,11 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
       close = wsMock.close;
     },
   };
+});
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, tmpdir: vi.fn(actual.tmpdir) };
 });
 
 import { FeishuChannel } from './FeishuAdapter.js';
@@ -822,9 +833,9 @@ describe('FeishuChannel', () => {
       cachedToken: false,
     },
     {
-      failure: 'media authorization',
+      failure: 'media permission',
       authStatus: 200,
-      mediaStatus: 401,
+      mediaStatus: 403,
       cachedToken: true,
     },
   ])(
@@ -903,6 +914,142 @@ describe('FeishuChannel', () => {
       }
     },
   );
+
+  describe('inbound file dispatch', () => {
+    const systemTmpDir = tmpdir();
+    const bytes = new Uint8Array([0, 1, 255]);
+    const resourceUrl =
+      'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file';
+    let directory: string;
+    let channel: FeishuChannel;
+    let dispatch: ReturnType<typeof vi.spyOn<FeishuChannel, 'handleInbound'>>;
+    let fetchSpy: ReturnType<typeof vi.spyOn<typeof global, 'fetch'>>;
+
+    beforeEach(() => {
+      directory = mkdtempSync(join(systemTmpDir, 'feishu-inbound-file-'));
+      vi.mocked(tmpdir).mockReturnValue(directory);
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-03T00:00:00Z'));
+      channel = createChannel();
+      Object.assign(channel, {
+        tokenCache: { token: 'test_token', expiresAt: Date.now() + 3600_000 },
+      });
+      dispatch = vi
+        .spyOn(channel, 'handleInbound')
+        .mockResolvedValue(undefined);
+      fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+        if (String(input) !== resourceUrl) {
+          throw new Error(`Unexpected request: ${String(input)}`);
+        }
+        return new Response(bytes, {
+          headers: { 'Content-Type': 'application/octet-stream' },
+        });
+      });
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    });
+
+    afterEach(() => {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.mocked(tmpdir).mockReturnValue(systemTmpDir);
+      vi.restoreAllMocks();
+      rmSync(directory, { recursive: true, force: true });
+    });
+
+    function receive(fileName: string) {
+      const event = feishuDmMessage('inbound-file');
+      Object.assign(event['message'] as Record<string, unknown>, {
+        message_type: 'file',
+        content: JSON.stringify({ file_key: 'file_1', file_name: fileName }),
+      });
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        event,
+      );
+    }
+
+    it.each([
+      { incoming: '.hidden', saved: '_hidden' },
+      { incoming: '../report\0.txt', saved: 'report.txt' },
+      { incoming: '...', saved: '_' },
+      { incoming: '\0', saved: 'feishu_file_1790985600000' },
+    ])(
+      'persists $incoming and dispatches its attachment',
+      async ({ incoming, saved }) => {
+        receive(incoming);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        const envelope = dispatch.mock.calls[0]![0];
+        const attachment = envelope.attachments?.[0];
+        expect(envelope.attachments).toEqual([
+          {
+            type: 'file',
+            filePath: expect.any(String),
+            fileName: saved,
+            mimeType: 'application/octet-stream',
+          },
+        ]);
+        const childDirectories = readdirSync(join(directory, 'channel-files'));
+        expect(childDirectories).toHaveLength(1);
+        const fileDirectory = join(
+          directory,
+          'channel-files',
+          childDirectories[0]!,
+        );
+        expect(attachment?.filePath).toBe(join(fileDirectory, saved));
+        expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
+        expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
+          resourceUrl,
+          expect.objectContaining({
+            method: 'GET',
+            headers: { Authorization: 'Bearer test_token' },
+            signal: expect.any(AbortSignal),
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(existsSync(fileDirectory)).toBe(true);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(existsSync(fileDirectory)).toBe(false);
+      },
+    );
+
+    it('retains the text fallback without creating a file on download failure', async () => {
+      fetchSpy.mockResolvedValue(jsonResponse('Media unavailable', 403));
+      receive('report.txt');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const envelope = dispatch.mock.calls[0]![0];
+      expect(envelope.text).toContain('report.txt');
+      expect(envelope.attachments).toBeUndefined();
+      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+    });
+
+    it('removes a downloaded file immediately when stopped during preparation', async () => {
+      const media = deferred<Response>();
+      fetchSpy.mockReturnValue(media.promise);
+      receive('report.txt');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      getPrivateMethod<Set<string>>(channel, 'stoppedMessages').add(
+        'inbound-file',
+      );
+      media.resolve(new Response(bytes));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    });
+
+    it('cleans up after dispatch rejects', async () => {
+      dispatch.mockRejectedValue(new Error('Synthetic dispatch failure'));
+      receive('report.txt');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const filePath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
+      expect(existsSync(filePath)).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(existsSync(filePath)).toBe(false);
+    });
+  });
 
   it('preserves text after platform-normalized mentions with spaced names', async () => {
     const bridge = createMockBridge();
