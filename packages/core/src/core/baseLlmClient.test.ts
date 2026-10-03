@@ -1281,13 +1281,31 @@ describe('BaseLlmClient', () => {
       expect(sentBudget()).toBe(31_072);
     });
 
-    it('does not shrink the request when the window has room', async () => {
+    it('leaves the request untouched when the window has room', async () => {
       useWindow('deepseek-r1', 200_000);
 
       await askText('deepseek-r1', 100_000);
 
-      // 200_000 − 100_000 = 100_000 of room, above the 64_000 ceiling.
-      expect(sentBudget()).toBe(64_000);
+      // 200_000 − 100_000 = 100_000 of room, above the 64_000 ceiling: the
+      // window is not what binds, so the budget emits nothing and the wire
+      // keeps applying its own output limit as it did before this change.
+      expect(sentBudget()).toBeUndefined();
+    });
+
+    it('does not cap a Gemini side query at the stale 8k output row', async () => {
+      // The Gemini/Vertex wire (`llm-content-generator.ts`) and the OpenAI
+      // Responses wire (`responses-pipeline.ts`) never consulted
+      // `defaultOutputCeiling`, so they sent no output limit at all. Emitting
+      // one unconditionally would cap every `gemini-2.5-*` side query at 8_192
+      // (`OUTPUT_PATTERNS`'s `[/^gemini-/, LIMITS['8k']]` row) against a
+      // 65_536 backend default — `/summary`, web-fetch extraction and the
+      // vision bridge truncated with no `finishReason` to reveal it.
+      useWindow('gemini-2.5-pro', 1_000_000);
+
+      await askText('gemini-2.5-pro', 100);
+
+      expect(sentBudget()).not.toBe(8_192);
+      expect(sentBudget()).toBeUndefined();
     });
 
     it('never requests a ceiling >= the window, even for a small prompt', async () => {
@@ -1385,16 +1403,17 @@ describe('BaseLlmClient', () => {
       // whose registry entry declares no window inherits the *session* model's
       // number through `{ ...parentConfig }` — a number, so the
       // `?? tokenLimit(model, 'input')` fallback never fires. Session on an
-      // 8_192 window, target `qwen3-coder-plus` (1_000_000 window, 32_768
-      // ceiling): budgeting against the inherited 8_192 truncates a
-      // 5_000-token prompt to 3_192, 10x below what the provider itself would
-      // have written. The window has to come from the target.
+      // 8_192 window, target declaring 12_000: budgeting against the inherited
+      // number leaves 3_192 of room where the target's own window leaves
+      // 7_000, so the assertion below only holds when the window comes from
+      // the target. (A roomy target window would prove nothing here — the
+      // budget emits nothing at all once the window does not bind.)
       useWindow('test-model', 8_192);
       mockConfig.getModelsConfig.mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue({
           id: 'qwen3-coder-plus',
           authType: AuthType.USE_GEMINI,
-          generationConfig: {},
+          generationConfig: { contextWindowSize: 12_000 },
         }),
       } as unknown as ReturnType<Config['getModelsConfig']>);
       mockBuildAgentContentGeneratorConfig.mockReturnValue({
@@ -1416,8 +1435,8 @@ describe('BaseLlmClient', () => {
       await askText('qwen3-coder-plus', 5_000);
 
       expect(targetGenerateContent).toHaveBeenCalledTimes(1);
-      expect(sentBudget(targetGenerateContent)).toBe(32_768);
-      expect(5_000 + 32_768).toBeLessThanOrEqual(1_000_000);
+      expect(sentBudget(targetGenerateContent)).toBe(7_000);
+      expect(5_000 + 7_000).toBeLessThanOrEqual(12_000);
     });
 
     it('budgets against the session window when the target model is not registered', async () => {
@@ -1456,8 +1475,8 @@ describe('BaseLlmClient', () => {
       // output limit of its own (`provider/default.ts` applyOutputTokenLimit,
       // `anthropicContentGenerator.ts` buildSamplingParameters), so a budget
       // that ignores the env var silently displaces the documented override —
-      // and can even raise the wire value. These assert the budget itself,
-      // which is the layer the providers now take the value from.
+      // and can even raise the wire value. The override therefore has to be
+      // the term the room is compared against, not a value this layer emits.
       const ENV_KEY = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
       let saved: string | undefined;
 
@@ -1475,15 +1494,16 @@ describe('BaseLlmClient', () => {
 
       it('caps the budget at the override instead of raising it', async () => {
         process.env[ENV_KEY] = '2000';
-        useWindow('qwen3-coder-plus', 131_072);
+        useWindow('qwen3-coder-plus', 5_100);
 
-        // 131_072 − 500 = 130_572 of room, so an env-blind budget would send
-        // the model's own 32_768 output ceiling — 16x the 2_000 the operator
-        // asked for, i.e. the override does not merely stop applying, the
-        // wire value goes up.
-        await askText('qwen3-coder-plus', 500);
+        // 5_100 − 100 = 5_000 of room, above the operator's 2_000: the
+        // override is what binds, so the budget leaves the request alone and
+        // the provider applies 2_000 itself. An env-blind budget would compare
+        // against the model's own 32_768 ceiling instead, find the window
+        // binding, and put 5_000 on the wire — 2.5x what was asked for.
+        await askText('qwen3-coder-plus', 100);
 
-        expect(sentBudget()).toBe(2_000);
+        expect(sentBudget()).toBeUndefined();
       });
 
       it('treats the override as a ceiling, not a floor', async () => {
@@ -1526,33 +1546,36 @@ describe('BaseLlmClient', () => {
       it('sends an override above the auto ceiling instead of clipping it', async () => {
         // The override *replaces* the model-limit default, so an operator limit
         // above `defaultOutputCeiling` still reaches the wire on a side query,
-        // as it does on the main turn. With 1_000_000 of window the room term
-        // does not bind, so the budget is exactly the override; an intersecting
-        // budget would clip it to the model's own 32_768 ceiling.
+        // as it does on the main turn. The window has to bind between the two
+        // for that to be observable: at 60_100 the room is 60_000, above the
+        // model's own 32_768 ceiling and below the override, so a budget that
+        // intersected the two would emit 32_768 here.
         process.env[ENV_KEY] = '100000';
-        useWindow('qwen3-coder-plus', 1_000_000);
+        useWindow('qwen3-coder-plus', 60_100);
 
         await askText('qwen3-coder-plus', 100);
 
-        expect(sentBudget()).toBe(100_000);
+        expect(sentBudget()).toBe(60_000);
       });
 
       it('lets samplingParams.max_tokens outrank the override', async () => {
         // Documented precedence: the override "is overridden by
         // `samplingParams.max_tokens` in settings". The sampling value has to
-        // sit above the override to pin that direction.
+        // sit above the override to pin that direction, and the window has to
+        // bind between them: at 40_100 the room is 40_000, so a budget that
+        // compared against the 2_000 override would emit nothing at all.
         process.env[ENV_KEY] = '2000';
         mockConfig.getModel.mockReturnValue('qwen3-coder-plus');
         mockConfig.getContentGeneratorConfig.mockReturnValue({
           model: 'qwen3-coder-plus',
           authType: AuthType.USE_GEMINI,
-          contextWindowSize: 1_000_000,
+          contextWindowSize: 40_100,
           samplingParams: { max_tokens: 128_000 },
         });
 
         await askText('qwen3-coder-plus', 100);
 
-        expect(sentBudget()).toBe(128_000);
+        expect(sentBudget()).toBe(40_000);
       });
     });
   });

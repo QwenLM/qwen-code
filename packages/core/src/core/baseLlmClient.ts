@@ -111,23 +111,26 @@ function estimateSystemInstructionTokens(
  *
  * Side queries reach the provider through `generateJson`/`generateText` and
  * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
- * never runs on them: with no budget the providers fall back to
- * `defaultOutputCeiling(model)`, which has no window term, and a large prompt
- * overflows. That helper is deliberately not reused here either — it floors at
- * MIN_CLAMPED_OUTPUT_TOKENS (4K), a floor that can itself exceed a tight
- * window, which is exactly the invariant this path must keep.
+ * never runs on them: with no budget the wires that apply a ceiling fall back
+ * to `defaultOutputCeiling(model)`, which has no window term, and a large
+ * prompt overflows. That helper is deliberately not reused here either — it
+ * floors at MIN_CLAMPED_OUTPUT_TOKENS (4K), a floor that can itself exceed a
+ * tight window, which is exactly the invariant this path must keep. This
+ * budget adds the missing window term; it is not a second output-ceiling
+ * policy, and it stays out of the way when the window is not what binds.
  *
- * A caller-supplied `maxOutputTokens` passes through untouched (`??`, so the
- * prompt is not even measured): every caller that sets one has already
+ * A caller-supplied `maxOutputTokens` passes through untouched (early return,
+ * so the prompt is not even measured): every caller that sets one has already
  * budgeted it against the *receiving* model's window — compaction via
  * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
  * shrink it against a window it is not going to.
  *
  * An explicit user ceiling — `samplingParams.max_tokens`, else
- * `QWEN_CODE_MAX_OUTPUT_TOKENS` — *replaces* `defaultOutputCeiling` instead of
- * intersecting it. That is the precedence the main turn already applies
- * (`llm-chat.ts` `explicitOutputCeiling`), the one both providers apply when
- * the request carries no output limit of its own
+ * `QWEN_CODE_MAX_OUTPUT_TOKENS` — *replaces* `defaultOutputCeiling` as the
+ * term the room is compared against instead of intersecting it. That is the
+ * precedence the main turn already applies (`llm-chat.ts`
+ * `explicitOutputCeiling`), the one both providers apply when the request
+ * carries no output limit of its own
  * (`openaiContentGenerator/provider/default.ts` `applyOutputTokenLimit`,
  * `anthropicContentGenerator.ts` `buildSamplingParameters`), and the one
  * `docs/users/configuration/settings.md` documents ("Takes precedence over the
@@ -136,8 +139,12 @@ function estimateSystemInstructionTokens(
  * — 100 000 down to 64 000, or to `DEFAULT_OUTPUT_TOKEN_LIMIT` for a
  * self-hosted id — on side queries only, and `generateText` reports no
  * `finishReason`, so the truncated page extract or recap would be stored as
- * complete. Each provider still clips an explicit value to the model's real
- * output limit, so that policy is not duplicated here.
+ * complete. When the room is below that ceiling the emitted budget is the room
+ * alone; above it nothing is emitted, so the ceiling-applying providers
+ * (`openaiContentGenerator/provider/default.ts`, `anthropicContentGenerator.ts`)
+ * apply the operator's value themselves as they did before, while the two wires
+ * that read no ceiling stay uncapped — which is also what they did before, and
+ * the point of not emitting.
  *
  * `resolvedContextWindowSize` is the window of the model the request is
  * actually sent to, resolved by `resolveForModel` against that target (its
@@ -158,7 +165,13 @@ function estimateSystemInstructionTokens(
  *   target: the ceiling can then describe a different model than the window
  *   does. That mismatch is inherent to the fallback (the target's own config
  *   could not be built); the budget still never exceeds the window the request
- *   is actually handed.
+ *   is actually handed. It can however emit nothing there while the sending
+ *   wire applies its *own* fallback ceiling, which `anthropicContentGenerator`
+ *   derives from the session id (`this.contentGeneratorConfig.model`) rather
+ *   than the target id used here — so if that ceiling is the larger of the two
+ *   and the room sits between them, the request still overflows the window
+ *   exactly as it did before this budget existed. Closing that needs the
+ *   receiving wire's ceiling, which this layer cannot see.
  * - For a target in neither the catalog nor the curated tables the window term
  *   falls back to `DEFAULT_TOKEN_LIMIT` (200 000) and does not bind. That
  *   fabrication is pre-existing and shared with the main turn
@@ -172,6 +185,8 @@ function budgetOutputTokensForWindow(
   resolvedContextWindowSize: number | undefined,
   imageTokenEstimate: number,
 ): GenerateContentConfig {
+  if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
+
   const explicitCeiling =
     contentGeneratorConfig?.samplingParams?.max_tokens ??
     parsePositiveIntegerEnvValue(process.env['QWEN_CODE_MAX_OUTPUT_TOKENS']);
@@ -191,17 +206,23 @@ function budgetOutputTokensForWindow(
     estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction);
 
-  return {
-    ...requestConfig,
-    maxOutputTokens:
-      requestConfig.maxOutputTokens ??
-      // The room term keeps binding on an explicit ceiling too, or the #13208
-      // 400 returns.
-      Math.max(
-        1,
-        Math.min(explicitCeiling ?? defaultOutputCeiling(model), room),
-      ),
-  };
+  const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
+  // Only the window term is this layer's business: when it does not bind,
+  // leave the request alone so each wire keeps applying whatever output limit
+  // it applied before side queries were budgeted. Two wires apply none at all —
+  // Gemini/Vertex (`llm-content-generator.ts`) and OpenAI Responses
+  // (`responses-pipeline.ts`) — so always emitting one would cap them at
+  // `defaultOutputCeiling` (8 192 for `gemini-2.5-pro`, via the
+  // `[/^gemini-/, LIMITS['8k']]` row) and silently truncate side-query output
+  // that used to be uncapped.
+  //
+  // The ceiling has to stay inside this comparison: with an operator ceiling
+  // below the room (env 2 000, room 3 000) an auto-ceiling test would emit
+  // 3 000 and displace that value, since the ceiling-applying providers read
+  // the override only when the request carries no output limit of its own.
+  if (room >= ceiling) return requestConfig;
+
+  return { ...requestConfig, maxOutputTokens: Math.max(1, room) };
 }
 
 /**
