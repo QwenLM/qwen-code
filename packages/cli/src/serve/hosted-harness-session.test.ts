@@ -173,7 +173,7 @@ function headers<T extends supertest.Test>(request: T): T {
 
 function store() {
   return {
-    baseUrl: 'http://store.test',
+    baseUrl: 'https://store.test',
     tenantId: 'tenant',
     workspaceId: 'workspace',
     writerId: BOOT_ID,
@@ -869,7 +869,7 @@ describe('Hosted Harness no-tool session', () => {
           '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
         );
         const bounded = actual.createHttpManagedSessionStores({
-          baseUrl: 'http://store.test',
+          baseUrl: 'https://store.test',
           writerId: BOOT_ID,
           sessionKey: {
             tenantId: 'tenant',

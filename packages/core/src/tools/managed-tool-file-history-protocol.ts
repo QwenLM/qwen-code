@@ -8,7 +8,10 @@ import * as path from 'node:path';
 import { getMemoryBaseDir } from '../memory/paths.js';
 import type { Config } from '../config/config.js';
 import { normalizeQwenCustomIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
-import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
+import {
+  MAX_SNAPSHOTS,
+  type SerializedFileHistorySnapshot,
+} from '../services/fileHistoryService.js';
 import type { ManagedToolFileHistoryState } from './managed-tool-file-history.js';
 import {
   managedToolDigest,
@@ -133,7 +136,7 @@ export function parseManagedToolFileHistoryPromptId(value: unknown): string {
 }
 
 function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
-  if (!Array.isArray(value) || value.length > 100)
+  if (!Array.isArray(value) || value.length > MAX_SNAPSHOTS)
     throw new ManagedToolProtocolError();
   const prompts = new Set<string>();
   return value.map((item) => {
@@ -152,7 +155,7 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
         Object.entries(record(snapshot['trackedFileBackups'])).map(
           ([filePath, value]) => {
             text(filePath, 4096);
-            if (filePath.split(path.sep).includes('..'))
+            if (filePath.split(/[/\\]/).includes('..'))
               throw new ManagedToolProtocolError();
             const backup = record(value, [
               'backupFileName',

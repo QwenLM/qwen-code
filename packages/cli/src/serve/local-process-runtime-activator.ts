@@ -58,20 +58,32 @@ export function managedWorkerEnvironment(
   source: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
+  // Windows environment variable names are case-insensitive; match loosely so
+  // e.g. "Path"/"SYSTEMROOT" still reach the worker.
   for (const [key, value] of Object.entries(source)) {
     if (
-      /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|SystemRoot|WINDIR|COMSPEC|PATHEXT|TMP|TEMP|TMPDIR|LANG|LC_[A-Z_]+|TZ|WSL_INTEROP|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy|QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/.test(
+      /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|SystemRoot|WINDIR|COMSPEC|PATHEXT|TMP|TEMP|TMPDIR|LANG|LC_[A-Z_]+|TZ|WSL_INTEROP|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/i.test(
         key,
       )
     )
       result[key] = value;
   }
-  for (const key of ['QWEN_HOME', 'QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
-    if (result[key]) result[key] = path.resolve(result[key]);
+  for (const [key, value] of Object.entries(result)) {
+    if (/^(QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/i.test(key) && value)
+      result[key] = path.resolve(value);
   }
   return result;
 }
 
+/**
+ * Local-process ManagedRuntimeActivator for the Hosted Runtime worker fleet.
+ *
+ * Provisional surface: landed with the guarded Hosted Runtime foundations
+ * (PR #12691) ahead of its consumer, the daemon-side gateway factory that
+ * constructs it. Until that wiring lands, this class is exercised only by
+ * its tests — treat the spawn/handshake contract as frozen pending the
+ * follow-up integration.
+ */
 export class LocalProcessRuntimeActivator {
   private readonly incarnation = randomUUID();
   private readonly registry = new ProcessRegistry();
@@ -262,14 +274,21 @@ export class LocalProcessRuntimeActivator {
   }
   close(): Promise<void> {
     this.closed = true;
-    this.closePromise ??= Promise.all(
-      [...this.generations.values()].map((g) =>
-        this.stop(
-          g,
-          new ManagedRuntimeReleasedError('Managed Runtime Gateway stopped.'),
+    this.closePromise ??= (async () => {
+      const stops = await Promise.allSettled(
+        [...this.generations.values()].map((g) =>
+          this.stop(
+            g,
+            new ManagedRuntimeReleasedError('Managed Runtime Gateway stopped.'),
+          ),
         ),
-      ),
-    ).then(() => this.registry.shutdown());
+      );
+      await this.registry.shutdown();
+      const failed = stops.find(
+        (stop): stop is PromiseRejectedResult => stop.status === 'rejected',
+      );
+      if (failed) throw failed.reason;
+    })();
     return this.closePromise;
   }
   killAllSync(): void {
@@ -418,19 +437,24 @@ export class LocalProcessRuntimeActivator {
     g.retiring = true;
     g.controller.abort(reason);
     g.stop = (async () => {
-      await g.endpoint.catch(() => {});
-      if (g.tracked) {
-        try {
-          await g.tracked.terminate();
-        } catch (error) {
-          if (!(error instanceof ProcessExitError)) throw error;
-          this.log(g, 'terminated');
+      try {
+        await g.endpoint.catch(() => {});
+        if (g.tracked) {
+          try {
+            await g.tracked.terminate();
+          } catch (error) {
+            if (!(error instanceof ProcessExitError)) throw error;
+            this.log(g, 'terminated');
+          }
         }
+        await rm(g.boot.outputRoot, { recursive: true, force: true });
+        this.log(g, 'released');
+        g.resolveExit();
+      } finally {
+        // Release the capacity slot even when cleanup fails; a leaked entry
+        // otherwise wedges same-key activation forever.
+        if (this.generations.get(g.key) === g) this.generations.delete(g.key);
       }
-      await rm(g.boot.outputRoot, { recursive: true, force: true });
-      if (this.generations.get(g.key) === g) this.generations.delete(g.key);
-      this.log(g, 'released');
-      g.resolveExit();
     })().catch((error) => {
       g.rejectExit(error);
       this.log(g, 'cleanup_failed');

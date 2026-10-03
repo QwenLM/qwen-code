@@ -779,6 +779,94 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void settledExecutionServesTheFullWireEnvelope() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord record = fixture.service.prepareExecution("harness", "runtime", "key",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                    .toCompletableFuture().join();
+            fixture.service.cancelExecution("harness", "runtime", record.getExecutionCallId()).toCompletableFuture().join();
+            fixture.service.startExecution("harness", "runtime", record.getExecutionCallId(), payload)
+                    .toCompletableFuture().join();
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + record.getExecutionCallId()
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> settled = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, settled.statusCode(), settled.body());
+            var body = JSON.parseObject(settled.body());
+            assertEquals(Set.of("protocolVersion", "harnessSessionId", "runtimeSessionId",
+                    "executionCallId", "status", "runtimeBindingId", "bindingGeneration"), body.keySet());
+            assertEquals(1, body.getIntValue("protocolVersion"));
+            assertEquals("harness", body.getString("harnessSessionId"));
+            assertEquals("runtime", body.getString("runtimeSessionId"));
+            assertEquals(record.getExecutionCallId(), body.getString("executionCallId"));
+            var status = body.getJSONObject("status");
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
+                    "progress", "result"), status.keySet());
+            assertEquals("settled", status.getString("state"));
+            assertEquals("cancelled", status.getJSONObject("result").getString("executionStatus"));
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsInvalidAfterSeqAndDuplicateQueryFields() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            for (String query : new String[] {"afterSeq=abc", "afterSeq=-1"}) {
+                HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                                + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&" + query))
+                        .header("Authorization", "Bearer secret").GET().build();
+                HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                assertEquals(400, response.statusCode(), response.body());
+                assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+            }
+            HttpRequest duplicate = HttpRequest.newBuilder(fixture.uri("/executions/call"
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=1&afterSeq=2"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> duplicated = fixture.client.send(duplicate, HttpResponse.BodyHandlers.ofString());
+            assertEquals(400, duplicated.statusCode(), duplicated.body());
+            assertTrue(duplicated.body().contains("runtime_broker_invalid_request"), duplicated.body());
+        }
+    }
+
+    @Test
+    void rejectsOversizedContentLengthBeforeReadingTheBody() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            URI baseUri = fixture.uri("/tool-sessions:acquire");
+            try (java.net.Socket socket = new java.net.Socket(
+                    baseUri.getHost(), baseUri.getPort())) {
+                // Headers only — the body is never sent. The server must
+                // reject from Content-Length alone; streaming the 9 MiB body
+                // would race the close and abort the socket on Windows.
+                byte[] headers = ("POST " + baseUri.getRawPath()
+                        + " HTTP/1.1\r\nHost: " + baseUri.getHost() + ":"
+                        + baseUri.getPort()
+                        + "\r\nAuthorization: Bearer secret"
+                        + "\r\nContent-Type: application/json"
+                        + "\r\nContent-Length: " + (9 * 1024 * 1024)
+                        + "\r\nConnection: close\r\n\r\n")
+                        .getBytes(StandardCharsets.UTF_8);
+                socket.getOutputStream().write(headers);
+                socket.getOutputStream().flush();
+                // EOF the write side: the server drains unread request bytes
+                // before closing, so it must not wait for the 9 MiB body.
+                socket.shutdownOutput();
+                socket.setSoTimeout(30_000);
+                String response = new String(
+                        socket.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertTrue(response.startsWith("HTTP/1.1 413"), response);
+                assertTrue(response.contains("runtime_broker_request_too_large"),
+                        response);
+            }
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");

@@ -207,6 +207,14 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.baseUrl must be an HTTP(S) URL without credentials, query, or fragment',
     );
   }
+  if (
+    parsedBaseUrl.protocol === 'http:' &&
+    !isManagedSessionStoreLoopback(parsedBaseUrl.hostname)
+  ) {
+    throw new TypeError(
+      'managedSessionStore.baseUrl must use HTTPS outside the loopback interface',
+    );
+  }
   const leaseDurationMs = record['leaseDurationMs'];
   if (
     typeof leaseDurationMs !== 'number' ||
@@ -225,6 +233,33 @@ export function parseBridgeManagedSessionStore(
     writerId,
     leaseDurationMs,
   });
+}
+
+/**
+ * Loopback predicate for the session-store parser. The URL parser has
+ * already canonicalized the hostname (inet_aton short forms, case), so the
+ * dotted-quad check only needs the 127/8 range; acp-bridge cannot import the
+ * CLI's isLoopbackBind and must keep this minimal.
+ */
+function isManagedSessionStoreLoopback(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  if (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '[::1]'
+  ) {
+    return true;
+  }
+  const octets = normalized.split('.');
+  return (
+    octets.length === 4 &&
+    octets[0] === '127' &&
+    octets.every(
+      (octet) =>
+        /^\d+$/u.test(octet) && Number(octet) >= 0 && Number(octet) <= 255,
+    )
+  );
 }
 
 function requireManagedSessionStoreString(
@@ -2002,12 +2037,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`,
-   * `PromptIdConflictError`, and pre-aborted signals throw synchronously so
-   * HTTP routes can reject before returning 202. A retry with the same
-   * `promptId` and payload returns the original promise and must not abort
-   * the admitted turn. Deferred failures such as `SessionNotFoundError` may
-   * be returned as rejected promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject
+   * before returning 202. Deferred failures such as `SessionNotFoundError`
+   * may be returned as rejected promises.
+   *
+   * Reserved contract (not yet implemented): promptId admission dedup — a
+   * `PromptIdConflictError` admission failure class, and a rule that a
+   * retry with the same `promptId` and payload returns the original
+   * promise without aborting the admitted turn. No implementation provides
+   * this today; the follow-up admission-dedup change must land it before
+   * any caller relies on it.
    */
   sendPrompt(
     sessionId: string,

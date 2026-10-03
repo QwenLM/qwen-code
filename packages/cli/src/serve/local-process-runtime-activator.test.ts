@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 // @vitest-environment node
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,7 +30,12 @@ afterEach(async () => {
     dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
 });
-async function setup(maxWorkers = 4, code = fixture, startupMs = 3000) {
+async function setup(
+  maxWorkers = 4,
+  code: string | ((stateDir: string) => string) = fixture,
+  startupMs = 3000,
+  env: NodeJS.ProcessEnv = process.env,
+) {
   const stateDir = await mkdtemp(
     path.join(os.tmpdir(), 'qwen-activator-test-'),
   );
@@ -39,14 +44,14 @@ async function setup(maxWorkers = 4, code = fixture, startupMs = 3000) {
   const activator = new LocalProcessRuntimeActivator({
     stateDir,
     cliEntry: process.execPath,
-    launcher: ['-e', code],
-    env: process.env,
+    launcher: ['-e', typeof code === 'function' ? code(stateDir) : code],
+    env,
     maxWorkers,
     startupMs,
     log,
   });
   active.push(activator);
-  return { activator, log };
+  return { activator, log, stateDir };
 }
 function scope(id = 'a') {
   return {
@@ -233,5 +238,111 @@ describe('owned Runtime activation', () => {
       QWEN_HOME: '/config',
       QWEN_CODE_TRUSTED_FOLDERS_PATH: '/trust',
     });
+  });
+
+  it('accepts allowlisted keys under any casing (Windows names are case-insensitive)', () => {
+    expect(
+      managedWorkerEnvironment({
+        Path: '/bin',
+        systemroot: 'C:\\Windows',
+        lc_all: 'en_US.UTF-8',
+        qwen_home: 'config',
+        openai_api_key: 'secret',
+        qwen_server_token: 'secret',
+        node_options: '--import evil',
+      }),
+    ).toEqual({
+      Path: '/bin',
+      systemroot: 'C:\\Windows',
+      lc_all: 'en_US.UTF-8',
+      qwen_home: path.resolve('config'),
+    });
+  });
+
+  it('spawns the worker without ambient secrets end-to-end', async () => {
+    const SECRETS = [
+      'OPENAI_API_KEY',
+      'QWEN_SERVER_TOKEN',
+      'QWEN_MANAGED_RUNTIME_TOKEN',
+      'NODE_OPTIONS',
+      'QWEN_CODE_IDE_WORKSPACE_PATH',
+    ];
+    const { activator, stateDir } = await setup(
+      4,
+      (dir) => `
+const fs = require('node:fs');
+process.on('message', b => {
+  if (b.type === 'shutdown') process.exit(0);
+  if (b.type === 'boot') {
+    fs.writeFileSync(${JSON.stringify(path.join(dir, 'observed.json'))}, JSON.stringify(${JSON.stringify(SECRETS)}.filter(k => process.env[k])));
+    setTimeout(() => process.send({ ...b, token: undefined, type: 'ready', url: 'http://127.0.0.1:12345' }), 50);
+  }
+});
+process.on('disconnect', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+`,
+      3000,
+      {
+        PATH: process.env['PATH'],
+        HOME: process.env['HOME'],
+        OPENAI_API_KEY: 'leak-check',
+        QWEN_SERVER_TOKEN: 'leak-check',
+        QWEN_MANAGED_RUNTIME_TOKEN: 'leak-check',
+        NODE_OPTIONS: '--import leak-check',
+        QWEN_CODE_IDE_WORKSPACE_PATH: '/leak-check',
+      },
+    );
+    const use = activator.activate(scope());
+    await use.endpoint;
+    const observed = JSON.parse(
+      await readFile(path.join(stateDir, 'observed.json'), 'utf8'),
+    ) as string[];
+    expect(observed).toEqual([]);
+    use.release('completed');
+  });
+});
+
+describe('worker handshake validation', () => {
+  const handshakeFixture = (mutations: string) => `
+process.on('message', b => {
+  if (b.type === 'shutdown') process.exit(0);
+  if (b.type === 'boot') setTimeout(() => {
+    const ready = { ...b, token: undefined, type: 'ready', url: 'http://127.0.0.1:12345' };
+    ${mutations}
+    process.send(ready);
+  }, 50);
+});
+process.on('disconnect', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+`;
+  it.each([
+    ['wrong leaseId', "ready.leaseId = 'forged';"],
+    ['wrong epoch', 'ready.epoch += 1;'],
+    ['wrong gatewayIncarnation', "ready.gatewayIncarnation = 'forged';"],
+    ['wrong message type', "ready.type = 'banner';"],
+    ['unparseable URL', "ready.url = 'not a url';"],
+    ['non-http protocol', "ready.url = 'https://127.0.0.1:12345';"],
+    ['non-loopback host', "ready.url = 'http://192.168.1.10:12345';"],
+    ['embedded credentials', "ready.url = 'http://user:pw@127.0.0.1:12345';"],
+    ['query string', "ready.url = 'http://127.0.0.1:12345/?q=1';"],
+  ])('rejects the endpoint on %s', async (_label, mutations) => {
+    const { activator } = await setup(4, handshakeFixture(mutations));
+    await expect(activator.activate(scope()).endpoint).rejects.toThrow(
+      /invalid (handshake|URL|endpoint)/,
+    );
+  });
+
+  it('rejects when no ready message arrives before the startup deadline', async () => {
+    const { activator } = await setup(
+      4,
+      `process.on('message', b => { if (b.type === 'shutdown') process.exit(0); });
+process.on('disconnect', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+`,
+      500,
+    );
+    await expect(activator.activate(scope()).endpoint).rejects.toThrow(
+      /startup timed out/,
+    );
   });
 });

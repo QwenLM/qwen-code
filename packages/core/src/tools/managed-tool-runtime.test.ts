@@ -405,6 +405,94 @@ describe('ManagedToolRuntime', () => {
     }
   });
 
+  it('binds media-capable builtins to the modality view and rejects media on other tools', async () => {
+    const { ReadFileTool } = await import('./read-file.js');
+    const { WriteFileTool } = await import('./write-file.js');
+    const parentRead = new ReadFileTool(config);
+    const parentWrite = new WriteFileTool(config);
+    config.isLsToolEnabled = () => false;
+    config.getFileService = () =>
+      ({ shouldQwenIgnoreFile: () => false }) as unknown as ReturnType<
+        Config['getFileService']
+      >;
+    config.getFileReadCache = () =>
+      new Map() as unknown as ReturnType<Config['getFileReadCache']>;
+    config.getWorkspaceContext = () =>
+      ({
+        isPathWithinWorkspace: () => true,
+        getDirectories: () => ['/managed-child'],
+      }) as unknown as ReturnType<Config['getWorkspaceContext']>;
+    config.getTargetDir = () => '/managed-child';
+    config.getPlansDir = () => '/managed-child/plans';
+    config.storage = {
+      getProjectTempDir: () => '/managed-child/tmp',
+      getProjectDir: () => '/managed-child',
+      getUserSkillsDirs: () => [],
+      getWorkflowRunsDir: () => '/managed-child/workflow-runs',
+    } as unknown as Config['storage'];
+    config.getToolRegistry = () =>
+      ({
+        getTool: (name: string) =>
+          [parentRead, parentWrite].find(
+            (candidate) => candidate.name === name,
+          ),
+        ensureTool: vi.fn(async () => undefined),
+      }) as unknown as ReturnType<Config['getToolRegistry']>;
+    const build = vi.spyOn(ReadFileTool.prototype, 'build');
+    const builtin = await createBuiltinManagedToolRuntime(config);
+    try {
+      const manifest = builtin.manifest();
+      const call = {
+        ...identity,
+        policyRevision: manifest.policyRevision,
+        capabilityDigest: manifest.capabilityDigest,
+      };
+      await builtin.beginTurn(call);
+      const media = {
+        inputModalities: {
+          image: true,
+          pdf: false,
+          audio: false,
+          video: false,
+        },
+      };
+      const prepared = await builtin.prepare(
+        call,
+        ReadFileTool.Name,
+        { file_path: '/managed-child/a.png' },
+        undefined,
+        media,
+      );
+      expect(prepared.params).toEqual({ file_path: '/managed-child/a.png' });
+      expect(build).toHaveBeenCalledOnce();
+      expect(build.mock.instances[0]).not.toBe(parentRead);
+      await expect(
+        builtin.prepare(
+          { ...call, callId: 'call-2' },
+          WriteFileTool.Name,
+          { file_path: '/managed-child/b', content: 'y' },
+          undefined,
+          media,
+        ),
+      ).rejects.toThrow('does not support media context');
+    } finally {
+      build.mockRestore();
+      await builtin.dispose();
+    }
+  });
+
+  it('projects explicit-undefined params out of the prepared digest', async () => {
+    tool.setup = (invocation) => {
+      Object.assign(invocation as { params: Record<string, unknown> }, {
+        params: { ...invocation.params, optional: undefined },
+      });
+    };
+    await runtime.beginTurn(identity);
+    const prepared = await runtime.prepare(identity, tool.name, input);
+    expect(prepared.params).toEqual(input);
+    expect(prepared.argsDigest).toBe(managedToolDigest(input));
+  });
+
   it('prepares once without execution and checkpoints at the explicit turn boundary', async () => {
     await runtime.beginTurn(identity);
     const prepared = await runtime.prepare(identity, tool.name, input);
@@ -626,6 +714,39 @@ describe('ManagedToolRuntime', () => {
     await expect(
       runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce),
     ).rejects.toThrow('already decided');
+  });
+
+  it('normalizes a switch-to-default approval to a single local approval', async () => {
+    tool.setup = (invocation) => {
+      invocation.getDefaultPermission.mockResolvedValue('ask');
+    };
+    const ref = await prepare();
+    await runtime.confirmation(ref);
+    await runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
+    expect(tool.invocations[0].onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+  });
+
+  it('settles with a hook-error record when a hook payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: false,
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(runtime.status(ref).result?.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
   });
 
   it('requires preflight and supports trusted automatic allow without onConfirm', async () => {

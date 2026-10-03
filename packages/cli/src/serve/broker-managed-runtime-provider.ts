@@ -489,7 +489,8 @@ export class ManagedRuntimeBrokerClient {
     } catch (error) {
       if (
         signal.aborted ||
-        (error instanceof BrokerResponseError && error.status < 500)
+        (error instanceof BrokerResponseError &&
+          (error.status < 500 || error.retryable === false))
       ) {
         throw error;
       }
@@ -880,6 +881,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     expected?: ManagedRuntimePrepareRequest,
     options?: ManagedRuntimeReleaseOptions,
   ): Promise<boolean> {
+    this.lifetime.signal.throwIfAborted();
     const entry = this.entries.get(sessionId);
     const closed = this.closedSessions.get(sessionId);
     if (closed) {
@@ -914,13 +916,16 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
         ]),
       );
-      if (released) {
-        this.entries.delete(sessionId);
-        if (entry.terminal) {
-          this.closedSessions.set(sessionId, entry.request);
-        }
+      if (released !== true) {
+        throw new Error(
+          'Managed Runtime Broker did not confirm Session release.',
+        );
       }
-      return released;
+      this.entries.delete(sessionId);
+      if (entry.terminal) {
+        this.closedSessions.set(sessionId, entry.request);
+      }
+      return true;
     })().finally(() => {
       if (entry.release === release) entry.release = undefined;
     });
@@ -1001,6 +1006,14 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           ),
         };
         entry.executions.set(reference.invocationId, execution);
+        const retained = execution;
+        // A transiently rejected reservation must not be cached forever: the
+        // next attempt re-prepares under the stable idempotency key.
+        void retained.reserved.catch(() => {
+          if (entry.executions.get(reference.invocationId) === retained) {
+            entry.executions.delete(reference.invocationId);
+          }
+        });
       }
       return execution;
     };
