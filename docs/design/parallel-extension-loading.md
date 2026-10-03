@@ -56,9 +56,10 @@ enumeration included), the per-extension manifest config read, the hooks
 sidecar read, the extensions-root `readdirSync`, the install-metadata
 sidecar read, `loadExtensionWorkflows` (including its candidate and
 per-file stat legs), the Agent Plugins `mcp.json` read, the load path's
-existence checks (manifest, context files, hooks — `fs.existsSync` folds
-every errno into `false`, so those go through an `accessSync`-based
-variant that rethrows exhaustion), and `loadExtension`'s catch-all. The refresh then rejects, the previous
+existence checks (manifest, context files, hooks, and the named-load
+extensions-root guard — `fs.existsSync` folds every errno into `false`, so
+those go through an `accessSync`-based variant that rethrows exhaustion),
+and `loadExtension`'s catch-all. The refresh then rejects, the previous
 cache and fingerprint baseline stay in place, and the next
 `refreshCacheIfSourcesChanged` retries — instead of committing a truncated
 (or empty) extension set stamped as up to date.

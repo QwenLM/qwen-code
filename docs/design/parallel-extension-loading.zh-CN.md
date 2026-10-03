@@ -49,9 +49,9 @@ commands/skills/agents 目录。在安装了较多扩展的机器上，这主导
 读取、hooks sidecar 读取、扩展根目录的 `readdirSync`、
 install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径与
 逐文件 stat 分支）、Agent Plugins 的 `mcp.json`
-读取、加载路径上的存在性检查（manifest、上下文文件、hooks——
-`fs.existsSync` 会把所有 errno 折叠成 `false`，因此这些地方改用一个基于
-`accessSync`、会对资源耗尽重抛的变体），以及
+读取、加载路径上的存在性检查（manifest、上下文文件、hooks、按名加载的
+扩展根目录检查——`fs.existsSync` 会把所有 errno 折叠成 `false`，因此这些
+地方改用一个基于 `accessSync`、会对资源耗尽重抛的变体），以及
 `loadExtension` 的兜底 catch。refresh 随之拒绝，既有缓存与指纹基线保持不动，下一次
 `refreshCacheIfSourcesChanged` 会重试——而不是把一个被截断（或为空）的
 扩展集提交并盖上"已是最新"的戳。

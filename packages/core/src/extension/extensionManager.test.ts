@@ -3225,6 +3225,53 @@ describe('extension tests', () => {
         ).toEqual(['good-ext', 'later-ext']);
       });
 
+      it('fails a named refresh closed instead of committing an empty cache when the extensions-root existence check hits resource exhaustion', async () => {
+        // loadExtensionByName guards the extensions root: a bare existsSync
+        // there folds EMFILE into "absent", every requested name resolves to
+        // null, and the "successful" named refresh commits an empty cache —
+        // no error, no retry. The existsSync probe is exactly the false
+        // fs.existsSync itself produces under exhaustion; the accessSync
+        // probe faults existsSyncOrThrow's errno-preserving replacement at
+        // that same guard.
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'some-ext',
+        });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+        fsProbe.falseExistsSyncFor = userExtensionsDir;
+        fsProbe.failAccessSyncFor = userExtensionsDir;
+        try {
+          await expect(
+            manager.refreshCache({ names: ['some-ext'] }),
+          ).rejects.toThrow('EMFILE');
+        } finally {
+          fsProbe.falseExistsSyncFor = undefined;
+          fsProbe.failAccessSyncFor = undefined;
+        }
+        // The rejected named refresh never committed: the previously cached
+        // extension survives.
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'some-ext',
+        ]);
+
+        // A retried named refresh recovers.
+        await manager.refreshCache({ names: ['some-ext'] });
+        expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
+          'some-ext',
+        ]);
+
+        // A genuinely absent root must still resolve quietly to null: a
+        // first-run machine with no extensions dir gets an empty result,
+        // not an ENOENT throw.
+        fs.rmSync(userExtensionsDir, { recursive: true, force: true });
+        await expect(
+          manager.loadExtensionByName('some-ext'),
+        ).resolves.toBeNull();
+      });
+
       it('keeps executor refusals dispatchable for an extension whose scan died of resource exhaustion', async () => {
         // Cold-start leg: with no previous cache to fall back to, the
         // refusals a scan recorded before it died must still gate dispatch —

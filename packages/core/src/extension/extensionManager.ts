@@ -1898,7 +1898,7 @@ export class ExtensionManager {
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
     const userExtensionsDir = this.configDir;
-    if (!fs.existsSync(userExtensionsDir)) {
+    if (!existsSyncOrThrow(userExtensionsDir)) {
       return null;
     }
 
