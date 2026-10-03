@@ -69,6 +69,8 @@ import {
   escapeXml,
   escapeXmlElementText,
   escapeXmlWithinBudget,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
@@ -709,7 +711,7 @@ export class WorkflowRunRegistry {
           .map((block) => truncateWorkflowText(block, 4_096))
           .join('\n');
     const modelParts = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
@@ -769,7 +771,7 @@ export class WorkflowRunRegistry {
         `<${tag}>${escapeXmlElementText(recovery.join('\n'))}</${tag}>`,
       );
     }
-    modelParts.push('</task-notification>');
+    modelParts.push(TASK_NOTIFICATION_CLOSE);
 
     const meta: WorkflowRunCompletionMeta = {
       ...(!entry.isBackgrounded ? { isBackgrounded: false } : {}),
