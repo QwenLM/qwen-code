@@ -225,6 +225,7 @@ public class ManagedAgentService {
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         requireReadableSession(tenantId, actorId, sessionId);
+        requireBoundCreator(tenantId, actorId, sessionId);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
@@ -290,6 +291,7 @@ public class ManagedAgentService {
             String title) {
         validateIdempotencyKey(idempotencyKey);
         requireReadableSession(tenantId, actorId, sessionId);
+        requireBoundCreator(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
@@ -779,6 +781,19 @@ public class ManagedAgentService {
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (!maySubmitWorkspaceTurn(session, actorId)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // Replay skips the admission gate, so a bound Session's recorded
+    // admission answers only its creator. The creation receipt survives a
+    // revoked grant, a draining Workspace and a re-registration, so the
+    // creator's own same-key retry still replays.
+    private void requireBoundCreator(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (session.workspace() != null
+                && !workspaces.createdSession(tenantId, actorId, sessionId)) {
             requireLegacyWorkspace(session, actorId);
         }
     }

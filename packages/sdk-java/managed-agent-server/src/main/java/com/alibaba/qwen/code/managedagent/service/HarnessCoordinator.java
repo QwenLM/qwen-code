@@ -561,7 +561,9 @@ public class HarnessCoordinator {
             // An admitted Turn's boot is already bound, so the cancel needs no
             // attach: attaching re-runs the Workspace authorization, and
             // aborting running work must not depend on the grants that admit
-            // new work. harness.cancel reuses the running Turn's attachment.
+            // new work. harness.cancel reuses the running Turn's attachment
+            // while it is resident; after a restart or takeover it re-attaches
+            // through that authority and keeps retrying while it refuses.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());

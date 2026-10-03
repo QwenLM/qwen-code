@@ -1193,6 +1193,30 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void sameKeyReplayAnswersOnlyTheCreator() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        grant(tenant, "ws-a", "actor-b", false);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        service.submitTurn(tenant, "actor-a", "submit-1", sessionId, input);
+        service.renameSession(tenant, "actor-a", "rename-1", sessionId,
+                "renamed title");
+
+        // A reader who did not create the Session neither replays the
+        // creator's admissions nor learns which keys exist.
+        assertRefused(() -> service.submitTurn(tenant, "actor-b",
+                "submit-1", sessionId, input), "workspace_unavailable");
+        assertRefused(() -> service.submitTurn(tenant, "actor-b",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "other"))),
+                "workspace_unavailable");
+        assertRefused(() -> service.renameSession(tenant, "actor-b",
+                "rename-1", sessionId, "renamed title"),
+                "workspace_unavailable");
+    }
+
+    @Test
     void sameKeySubmitReplaysTheRecordedAdmissionAfterReRegistration() {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);

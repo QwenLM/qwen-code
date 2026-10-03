@@ -33,7 +33,9 @@ Cancelling only aborts work already running: while the deployment still enables
 Workspace files, the creator who can still read the Workspace may cancel even
 after the create grant is revoked, the Workspace starts draining or it is
 re-registered. A live cancel reuses the running
-Turn's attachment without re-running the execution authority, and a cancel the
+Turn's resident attachment without re-running the execution authority; after a
+restart or takeover the owner re-attaches through that authority, so while it
+refuses, the Turn may stay cancelling. A cancel the
 Harness did not take is re-sent while the Turn is still cancelling. After each
 successful lease renewal, the running owner observes cancellation requested
 through any API replica and sends it on the executor, keeping network waits

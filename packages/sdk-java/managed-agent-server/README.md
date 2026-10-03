@@ -359,8 +359,10 @@ not a filesystem sandbox.
 Later Turns may be submitted by the Session's creator under the
 same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
-grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Workspace close follows
+grants, the Workspace registry's `ACTIVE` state and the Workspace generation the
+Session was bound to), and the creator may rename the Session. The creator may
+also cancel a running Turn while they can still read the Workspace, under the
+cancel rule below. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
 close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
@@ -498,7 +500,10 @@ registry's `ACTIVE` state and the Workspace generation the Session was bound
 to); the creator may also rename the Session. Cancelling aborts work that is
 already running, so the creator may cancel a running Turn while they can still
 read the Workspace, even after their create grant is revoked, the Workspace
-starts draining or it is re-registered. Later Turns run
+starts draining or it is re-registered. A live cancel reuses the owner's
+resident Harness attachment; after a restart or takeover the owner re-attaches
+through Workspace execution authority, so while that authority refuses, the
+Turn may stay cancelling. Later Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. Public close follows its separate close
