@@ -10,6 +10,8 @@ import type {
   DaemonInputAnnotation,
 } from '@qwen-code/sdk/daemon';
 
+import type { components } from '../components/managed/generated/managed-agent-api.js';
+
 export interface AttachmentPreviewRequest {
   name: string;
   mimeType?: string;
@@ -60,9 +62,12 @@ export interface DaemonMessageToolCall {
   backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
+  /** The producer's own call ID when `callId` is keyed by something else. */
+  toolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
+  toolResult?: components['schemas']['PublicToolResult'];
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
@@ -80,6 +85,17 @@ export interface DaemonMessageTodoItem {
   status: 'pending' | 'in_progress' | 'completed';
   priority?: 'high' | 'medium' | 'low';
   blockedBy?: string[];
+}
+
+/**
+ * Who wrote a message when a transcript has more than one assistant voice, as
+ * in a conversation several workspace agents work in. Absent in an ordinary
+ * session, where the assistant needs no name.
+ */
+export interface DaemonMessageAuthor {
+  name: string;
+  /** The agent's own color, when it has one. */
+  color?: string;
 }
 
 /**
@@ -107,6 +123,7 @@ export interface DaemonMessageMeta {
   timestamp?: number;
   /** Stable transcript blocks folded into this rendered message. */
   sourceBlockIds?: string[];
+  author?: DaemonMessageAuthor;
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {

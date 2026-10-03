@@ -16,6 +16,11 @@
  * and how to interpret the results.
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
 import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -81,6 +86,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { LlmChat } from '../../core/llm-chat.js';
+import { toolCallArgumentsWereIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -133,6 +139,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 // The tool-exclusion sets and the context-aware selector now live in
@@ -357,7 +364,10 @@ Important Rules:
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
-    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+    autoMemory:
+      runtimeContext.getMemoryRecallMode() === 'structured'
+        ? ''
+        : runtimeContext.getAutoMemoryPrompt(),
   });
 }
 
@@ -378,6 +388,7 @@ export class AgentCore {
   private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
+  private readonly hookExecutionOwner: HookExecutionOwner | undefined;
   readonly name: string;
   /** Business/task name used for local per-invocation usage labels. */
   readonly taskName?: string;
@@ -466,6 +477,11 @@ export class AgentCore {
   ) {
     this.subagentId =
       subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    // Internal forks without an explicit identity retain the caller's hook scope.
+    this.hookExecutionOwner = captureHookExecutionOwner(
+      runtimeContext,
+      subagentId,
+    );
     this.name = name;
     this.taskName = taskName;
     this.runtimeContext = runtimeContext;
@@ -595,20 +611,18 @@ export class AgentCore {
    * Returns true if this agent's effective tool surface will include the Skill
    * tool. Used before `prepareTools()` to decide whether to inject the
    * `<available_skills>` snapshot.
+   *
+   * Delegates to the predicate `SubagentManager` uses to decide whether this
+   * agent's Config holds a SkillManager, so the listing and a bundled
+   * reference's pointer cannot disagree (#12424). That predicate also honours
+   * `disallowedTools`, which this method used to ignore — a `'*'` agent that
+   * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    if (!this.toolConfig) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    const asStrings = this.toolConfig.tools.filter(
-      (t): t is string => typeof t === 'string',
+    return toolConfigAllowsSkill(
+      this.toolConfig,
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
     );
-    const hasWildcard = asStrings.includes('*');
-    if (hasWildcard) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    // An explicit empty list has no tools at all — and no skill tool.
-    return asStrings.includes(ToolNames.SKILL);
   }
 
   /**
@@ -686,10 +700,20 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
             this.isToolExecutionAllowed(name),
         );
+      if (
+        allowedNames.some(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ) &&
+        toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        !allowedNames.includes(ToolNames.TOOL_SEARCH) &&
+        !isExcluded(ToolNames.TOOL_SEARCH) &&
+        this.isToolExecutionAllowed(ToolNames.TOOL_SEARCH)
+      ) {
+        allowedNames.push(ToolNames.TOOL_SEARCH);
+      }
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
@@ -844,6 +868,10 @@ export class AgentCore {
     );
   }
 
+  runInHookFrame<T>(fn: () => T): T {
+    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
+  }
+
   /**
    * Run `fn` inside both ALS frames this agent owns:
    * 1. {@link subagentNameContext} so token-attribution code resolves to
@@ -937,9 +965,11 @@ export class AgentCore {
           },
         ),
       );
-    return inheritedTeammateIdentity
-      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
-      : runInner();
+    return this.runInHookFrame(() =>
+      inheritedTeammateIdentity
+        ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+        : runInner(),
+    );
   }
 
   /**
@@ -1042,7 +1072,9 @@ export class AgentCore {
           ],
           config: {
             abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
+            tools: toolsList.length
+              ? [{ functionDeclarations: toolsList }]
+              : [],
             ...(stickyMaxOutputTokens !== undefined
               ? { maxOutputTokens: stickyMaxOutputTokens }
               : {}),
@@ -1272,7 +1304,7 @@ export class AgentCore {
 
         // Update token usage if available
         if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+          this.recordTokenUsage(lastUsage, cumulativeRounds, roundStreamStart);
         }
 
         if (functionCalls.length > 0) {
@@ -1730,12 +1762,13 @@ export class AgentCore {
     }
     if (this.executionAllowedTools === undefined) {
       // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
-      // keeps exposure 'exec' regardless of the allowed set), so a finite
-      // configured list that omits it must not refuse the only tool the model
-      // was shown — the same carve-out the executionAllowedTools branch
-      // applies below.
+      // keeps exposure 'exec' regardless of the allowed set), and prepareTools
+      // adds tool_search beside it, so a finite configured list that omits
+      // them must not refuse the tools the model was shown — the same
+      // carve-out the executionAllowedTools branch applies below. Both
+      // gateways apply the agent's scoped nested-tool allowlist themselves.
       if (
-        toolName === ToolNames.EXEC &&
+        (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
       ) {
         return true;
@@ -1747,7 +1780,7 @@ export class AgentCore {
       );
     }
     if (
-      toolName === ToolNames.EXEC &&
+      (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       return true;
@@ -2386,7 +2419,14 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
+        // Mirror `turn.ts`: the data-loss guard keys on the fact that the
+        // arguments arrived unterminated, which is independent of whether the
+        // output token limit was what cut them (QwenLM/qwen-code#12970).
+        ...(toolCallArgumentsWereIncomplete(fc)
+          ? { hadIncompleteArguments: true }
+          : {}),
+        ...((toolName === ToolNames.EXEC ||
+          toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
           ? {
               codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],

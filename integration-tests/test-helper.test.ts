@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestRig } from './test-helper.js';
 
@@ -39,6 +40,31 @@ describe('TestRig', () => {
     expect(existsSync(staleFile)).toBe(false);
     expect(rig.testDir).not.toBeNull();
     expect(existsSync(rig.testDir!)).toBe(true);
+  });
+
+  it('disables managed auto-memory by default and honors a suite override', async () => {
+    const rig = new TestRig();
+    await rig.setup('managed memory default off');
+
+    const written = JSON.parse(
+      readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(written.memory).toEqual({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+
+    const override = new TestRig();
+    await override.setup('managed memory opted back in', {
+      settings: { memory: { enableManagedAutoMemory: true } },
+    });
+    const overridden = JSON.parse(
+      readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(overridden.memory).toEqual({
+      enableManagedAutoMemory: true,
+      enableManagedAutoDream: false,
+    });
   });
 
   it('removes the test directory during cleanup', async () => {

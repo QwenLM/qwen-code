@@ -27,6 +27,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.aliyun.oss</groupId>
+            <artifactId>aliyun-sdk-oss</artifactId>
+            <version>3.18.4</version>
+        </dependency>
+        <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>qwencode-sdk</artifactId>
             <version>${qwencode-sdk.version}</version>
@@ -86,15 +91,44 @@
             <groupId>com.networknt</groupId>
             <artifactId>json-schema-validator</artifactId>
             <version>${json-schema-validator.version}</version>
-            <scope>test</scope>
         </dependency>
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>../../core/src/managed-runtime/contracts</directory>
+                <includes>
+                    <include>managed-tool-result-v1.schema.json</include>
+                </includes>
+                <targetPath>contracts</targetPath>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>workspace-bundle</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-bundle</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>operator-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>operator-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -153,7 +187,10 @@
                                 <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
-                            <forkedProcessTimeoutInSeconds>180</forkedProcessTimeoutInSeconds>
+                            <!-- The Hosted*IT classes share one fork; the file
+                                 history control calls roughly doubled the
+                                 ToolTurn driver's runtime. -->
+                            <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -168,6 +205,20 @@
             </build>
         </profile>
         <profile>
+            <id>hosted-process-crashes</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedProcessCrashIT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>480</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>hosted-workspace-tools</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -176,7 +227,7 @@
                 <configuration>
                     <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <forkedProcessTimeoutInSeconds>210</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

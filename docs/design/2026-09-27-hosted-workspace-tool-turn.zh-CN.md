@@ -4,6 +4,10 @@
 
 状态：已在私有门禁后实现，基于 main `daaac2223`。属于 proposal #12380，承接 Hosted 无工具路径和 W0c-3。这是私有集成切片，不是公开能力启用。
 
+> 审批更新（2026-09-30）：Hosted Workspace 工具回合现在可以在 Session 的审批模式不预批准的调用之前请求审批，因此下文“不实现交互式审批”一句描述的是之前的切片。详见 [Actions](2026-09-30-managed-agent-actions.zh-CN.md)。
+
+> 文件历史更新（2026-09-30）：Write/Edit 备份结算及私有仅文件撤销已在 [Hosted Workspace 文件历史](2026-09-30-hosted-file-history.zh-CN.md)中实现，涵盖持久化、reload、冲突检测与失败边界。下文对文件备份的排除描述的是之前的切片。
+
 ## 问题与现状
 
 Hosted Harness 已有持久化的无工具文本回合。W0c-3 独立支持通过持久化 Workspace 绑定执行工具，并持有 SQL 存储所有权。目前没有代码把模型的函数调用接到这条路径。变更前，通用 TypeScript Broker provider 依赖生产 Broker 尚未实现的 control、prepare 和 start 操作。本片补齐 prepare/start，但明确不实现该 provider 的通用 control 契约。
@@ -53,6 +57,8 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 派发前的准入或参数资源失败不会产生工具副作用。start 响应丢失后只查询原始执行。无法观察的结果、lease 丢失、结果提交失败或未验证取消会把 Session 阻塞在持久等待点。调用方可观察 recovery-required 状态。Harness 不发出正常 completed/cancelled 安全边界，也不允许新 prompt 忘记这些工作。
 
+Read/Write/Edit 的无效 `file_path` 在该批次获取 Workspace 或派发工具之前成为模型可纠正的拒绝。共用的 Workspace 相对路径校验器保持不变；Hosted 文件工具层将其路径错误以及缺失或非字符串参数转为指出 `file_path`、但不回显取值的函数错误。整批模型调用均被拒绝，每个同批调用得到明确的“未执行”响应。必须先提交完整 assistant 调用及全部拒绝响应，模型才能继续；提交失败或结果不确定时保持恢复阻断。模型在同一回合改用正确的相对路径后可以执行，不会重放已拒绝批次。
+
 取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。结果未知时仍持有 Workspace 存储，因此同一 Workspace 的其它 Session 会收到可恢复的 busy 错误，直到 W0e 恢复清除原持有者。
 
 私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
@@ -70,6 +76,7 @@ Java 产品 coordinator 和公开 Workspace 准入继续受门禁约束。私有
 - 对全局 CLI 做基线验证，记录其私有 profile 是否可达。区分全局入口不可用和源码无工具门禁的证据。
 - 故意延迟 Runtime 就绪，证明第一次模型请求更早开始；无工具回答不等待环境就绪即可完成。
 - 在两个 Workspace 目录中通过真实 worker 执行 Read/Write/Edit。在 Harness 启动目录放置诱饵文件，证明没有读写它。
+- 将绝对路径或越界的 `file_path` 与有效写入放进同一批次。验证两个调用都有按序持久化的错误、该批次不获取 Workspace 且无文件副作用；同一回合修正路径后恰好写入一次。重新加载后核对完整历史，并验证同一 Workspace 的后续 Session 可用。
 - 执行至少两轮模型/工具循环和后续 prompt；断言模型请求与持久回放中的调用/结果一一对应。
 - 验证 busy/unavailable 拒绝后可继续 prompt 和 reload，而 acquire 响应丢失及占用存储后的失败仍阻塞。在获取所有权前拒绝过大的输入和完整 assistant 记录，包括 UTF-8 和嵌套 JSON 转义。
 - 读取密集 CJK 文本，另行覆盖 outcome 合规但完整记录超限的边界。验证有界省略回执保留执行终态、进入模型与持久历史、允许后续缩小范围读取并释放 Workspace 所有权。覆盖 JSON 转义膨胀和错误输出，保持未知结果与持久化失败时的阻塞。
@@ -81,4 +88,4 @@ Java 产品 coordinator 和公开 Workspace 准入继续受门禁约束。私有
 
 ## 尚未完成的边界
 
-独立进程 O1c 发布器/回执桥接、完整 Shell 输出、文件备份/撤销结算、公开 actor 准入、产品 UI 启用、W0e 恢复及更广泛 G/H 工作，都不能由私有工具回合测试认证。worker 结果目前仍携带原生绝对路径；将其转换为面向模型的 Workspace 相对路径，以及为无效路径返回模型可纠正的函数错误，留待后续处理。扩围时必须先同步两种语言的设计与验收测试，再启用相应能力。
+独立进程 O1c 发布器/回执桥接、完整 Shell 输出、文件备份/撤销结算、公开 actor 准入、产品 UI 启用、W0e 恢复及更广泛 G/H 工作，都不能由私有工具回合测试认证。worker 结果目前仍携带原生绝对路径；将其转换为面向模型的 Workspace 相对路径仍待后续处理。扩围时必须先同步两种语言的设计与验收测试，再启用相应能力。

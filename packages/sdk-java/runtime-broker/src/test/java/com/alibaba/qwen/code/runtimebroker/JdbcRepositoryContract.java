@@ -57,7 +57,98 @@ public final class JdbcRepositoryContract {
         verifyExecution(dataSource, prefix);
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
+        ExecutionTakeoverContract.verify(new JdbcToolExecutionRepository(dataSource), prefix + "-takeover-scan");
         verifyLeaseDeadlines(dataSource, prefix);
+        RuntimeRecoveryContract.verify(new JdbcRuntimeBindingRepository(dataSource, protector(prefix)),
+                new JdbcRuntimeSessionRepository(dataSource), new JdbcToolExecutionRepository(dataSource),
+                prefix + "-recovery");
+    }
+
+    /** Writes the pre-recovery schema directly, without using new repositories. */
+    public static RuntimeProvisionRequest writeLegacyRows(DataSource source, String prefix) throws SQLException {
+        RuntimeScope scope = scope(prefix + "-tenant");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope, prefix + "-harness", "legacy");
+        Map<String, Object> placement = new LinkedHashMap<>();
+        placement.put("tenant_id", scope.getTenantId());
+        placement.put("workspace_id", scope.getWorkspaceId());
+        placement.put("workspace_generation", scope.getWorkspaceGeneration());
+        placement.put("canonical_cwd", scope.getCanonicalCwd());
+        placement.put("capability_digest", scope.getCapabilityDigest());
+        placement.put("isolation_class", scope.getIsolationClass());
+        Map<String, Object> slot = new LinkedHashMap<>(placement);
+        slot.put("request_key", JdbcRepositorySupport.requestKey(request));
+        slot.put("isolation_key", request.getIsolationKey());
+        slot.put("provisioner_kind", request.getProvisionerKind());
+        Map<String, Object> binding = new LinkedHashMap<>(slot);
+        slot.put("last_generation", 1);
+        slot.put("active_binding_id", prefix + "-binding");
+        binding.put("binding_id", prefix + "-binding");
+        binding.put("scope_key", JdbcRepositorySupport.scopeKey(scope));
+        binding.put("runtime_generation", 1);
+        binding.put("binding_state", "PROVISIONING");
+        binding.put("attestation_generation", 0);
+        binding.put("drain_requested", false);
+        binding.put("operation_generation", 0);
+        binding.put("record_version", 3);
+        binding.put("last_active_at", java.sql.Timestamp.from(START));
+        Map<String, Object> session = new LinkedHashMap<>(placement);
+        session.put("scope_key", JdbcRepositorySupport.scopeKey(scope));
+        session.put("runtime_session_id", prefix + "-session");
+        session.put("harness_session_id", prefix + "-harness");
+        session.put("turn_kind", "bootstrap");
+        session.put("binding_id", prefix + "-binding");
+        session.put("runtime_generation", 1);
+        session.put("session_state", "READY");
+        session.put("record_version", 4);
+        session.put("last_active_at", java.sql.Timestamp.from(START));
+        try (Connection connection = source.getConnection()) {
+            insertLegacy(connection, "qwen_runtime_binding_slot", slot);
+            insertLegacy(connection, "qwen_runtime_binding", binding);
+            insertLegacy(connection, "qwen_runtime_session", session);
+            for (String state : List.of("PREPARED", "UNKNOWN", "SETTLED")) {
+                String id = prefix + "-" + state;
+                Map<String, Object> execution = new LinkedHashMap<>();
+                execution.put("execution_call_id_hash", JdbcRepositorySupport.valueKey(id));
+                execution.put("execution_call_id", id);
+                execution.put("idempotency_key_hash", JdbcRepositorySupport.valueKey(id + "-key"));
+                execution.put("idempotency_key", id + "-key");
+                execution.put("binding_id", prefix + "-binding");
+                execution.put("runtime_generation", 1);
+                execution.put("harness_session_id", prefix + "-harness");
+                execution.put("runtime_session_id", prefix + "-session");
+                execution.put("runtime_session_key", JdbcRepositorySupport.valueKey(prefix + "-session"));
+                execution.put("turn_id", "turn");
+                execution.put("tool_call_id", "call");
+                execution.put("request_digest", "digest");
+                execution.put("reference_json", com.alibaba.fastjson2.JSON.toJSONString(Map.of(
+                        "sessionId", prefix + "-session", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+                execution.put("execution_state", state);
+                execution.put("last_sequence", 2);
+                execution.put("cancel_requested", false);
+                execution.put("dispatch_generation", 0);
+                execution.put("record_version", 5);
+                if ("SETTLED".equals(state)) {
+                    execution.put("execution_status", "success");
+                    execution.put("result_json", "{\"executionStatus\":\"success\"}");
+                    execution.put("settled_at", java.sql.Timestamp.from(START));
+                }
+                insertLegacy(connection, "qwen_tool_execution", execution);
+            }
+        }
+        return request;
+    }
+
+    private static void insertLegacy(Connection connection, String table, Map<String, Object> values)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("INSERT INTO " + table + " ("
+                + String.join(",", values.keySet()) + ") VALUES ("
+                + String.join(",", java.util.Collections.nCopies(values.size(), "?")) + ")")) {
+            int index = 1;
+            for (Object value : values.values()) {
+                statement.setObject(index++, value);
+            }
+            statement.executeUpdate();
+        }
     }
 
     // Every claim and renewal must persist a whole-second deadline that is
@@ -929,6 +1020,19 @@ public final class JdbcRepositoryContract {
                 prefix + "-prepared-runtime-session"));
         assertNull(second.claimDispatch(prepared.getExecutionCallId(),
                 prefix + "-dispatcher-a", Duration.ofMinutes(30)));
+
+        ToolExecutionRecord v3 = first.findOrCreate(ToolExecutionRecord.prepared(
+                prefix + "-v3-execution", prefix + "-v3-idempotency", prefix + "-v3-binding", 1,
+                prefix + "-v3-harness", prefix + "-v3-runtime", prefix + "-v3-turn", prefix + "-v3-call", "outer-digest",
+                Map.of("sessionId", prefix + "-v3-runtime", "promptId", prefix + "-v3-turn", "callId", prefix + "-v3-call",
+                        "runtimeProtocol", 3, "inputDigest", "b".repeat(64), "argsDigest", "outer-digest")));
+        second.requestCancel(v3.getExecutionCallId(), v3.getVersion());
+        ToolExecutionRecord v3Restored = reconstructed.findByExecutionCallId(v3.getExecutionCallId());
+        assertEquals("not_started", v3Restored.getExecutionStatus());
+        assertEquals(3, v3Restored.getReference().get("runtimeProtocol"));
+        assertEquals("b".repeat(64), v3Restored.getReference().get("inputDigest"));
+        assertTrue(v3Restored.getResult().containsKey("capture"));
+        assertNull(v3Restored.getResult().get("capture"));
 
         String stickyKey = prefix + "-sticky-idempotency";
         ToolExecutionRecord sticky = first.findOrCreate(execution(
