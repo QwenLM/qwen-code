@@ -44,6 +44,21 @@ execSync('tsc --build tsconfig.reference.json', {
   cwd: rootDir,
 });
 
+execSync(
+  'npx dts-bundle-generator --project tsconfig.build.json -o dist/daemon/index.d.ts src/daemon/index.ts',
+  {
+    stdio: 'inherit',
+    cwd: rootDir,
+  },
+);
+execSync(
+  'npx dts-bundle-generator --project tsconfig.build.json -o dist/daemon/transports.d.ts src/daemon/transports.ts',
+  {
+    stdio: 'inherit',
+    cwd: rootDir,
+  },
+);
+
 try {
   execSync(
     'npx dts-bundle-generator --project tsconfig.build.json -o dist/index.d.ts src/index.ts',
@@ -75,6 +90,8 @@ try {
 }
 
 assertTranscriptDeclaration(join(rootDir, 'dist', 'daemon', 'transcript.d.ts'));
+assertDaemonDeclaration(join(rootDir, 'dist', 'daemon', 'index.d.ts'));
+assertDaemonDeclaration(join(rootDir, 'dist', 'daemon', 'transports.d.ts'));
 
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'index.ts')],
@@ -336,16 +353,25 @@ function assertTranscriptBundle(filePath) {
 }
 
 function assertTranscriptDeclaration(filePath) {
+  assertSelfContainedDeclaration(filePath, 'Daemon transcript');
+}
+
+function assertDaemonDeclaration(filePath) {
+  assertSelfContainedDeclaration(filePath, 'Daemon');
+}
+
+function assertSelfContainedDeclaration(filePath, label) {
   const contents = readFileSync(filePath, 'utf8');
   const forbiddenReferences = [
     '@qwen-code/qwen-code-core',
     '@qwen-code/acp-bridge',
+    '../types/',
     'reference types="node"',
   ];
   const found = forbiddenReferences.find((token) => contents.includes(token));
   if (found) {
     throw new Error(
-      `Daemon transcript declaration leaks an internal dependency: ${found}`,
+      `${label} declaration leaks an internal dependency: ${found}`,
     );
   }
 }
