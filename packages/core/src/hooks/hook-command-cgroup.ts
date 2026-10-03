@@ -51,12 +51,20 @@ export class HookCommandCgroup {
   private static resolveRoot(root: string | undefined): string {
     if (process.platform !== 'linux' || !root || !isAbsolute(root))
       throw new HookCommandIsolationUnavailableError();
-    const resolved = realpathSync(root);
-    if (statfsSync(resolved).type !== 0x63677270)
+    try {
+      const resolved = realpathSync(root);
+      if (statfsSync(resolved).type !== 0x63677270)
+        throw new HookCommandIsolationUnavailableError();
+      if (
+        readFileSync(join(resolved, 'cgroup.type'), 'utf8').trim() !== 'domain'
+      )
+        throw new HookCommandIsolationUnavailableError();
+      return resolved;
+    } catch (cause) {
+      if (cause instanceof HookCommandIsolationUnavailableError) throw cause;
+      // A missing or unreadable root is indistinguishable from no delegation.
       throw new HookCommandIsolationUnavailableError();
-    if (readFileSync(join(resolved, 'cgroup.type'), 'utf8').trim() !== 'domain')
-      throw new HookCommandIsolationUnavailableError();
-    return resolved;
+    }
   }
 
   static create(
