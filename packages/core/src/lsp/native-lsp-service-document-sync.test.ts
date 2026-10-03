@@ -3105,5 +3105,82 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.error?.message).not.toContain('pyright');
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
+
+    it('keeps a clean answer from a ready server keyed by its server name', async () => {
+      // `.lsp.json` keys reach `languages` unvalidated, so a `pyright` key
+      // derives the guess `{'pyright'}`. That set proves nothing about
+      // main.py — the server does own the file — so its authoritative empty
+      // report is the backing and the query stays clean instead of failing.
+      addFile('main.py', 'x = 1\n');
+      withServers([
+        [
+          'pyright',
+          {
+            ...emptyReportHandle('pyright'),
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['pyright'],
+            },
+          },
+        ],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'main.py'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it.each(['pyright', 'remote-lsp'])(
+      'names a downed %s server keyed by its server name',
+      async (key) => {
+        // The unattributed guess must not excuse the failed server from the
+        // veto: it really could own main.py, so the sibling's empty report is
+        // no backing and the recorded cause has to reach the user.
+        addFile('main.py', 'x = 1\n');
+        withServers([
+          [
+            'healthy',
+            {
+              ...emptyReportHandle('healthy'),
+              config: {
+                ...handle.config,
+                name: 'healthy',
+                languages: ['python'],
+              },
+            },
+          ],
+          [
+            key,
+            {
+              ...handle,
+              config: { ...handle.config, name: key, languages: [key] },
+              status: 'FAILED',
+              connection: undefined,
+              error: new Error(`command not found: ${key}`),
+            },
+          ],
+        ]);
+        const result = await run(
+          lspTool()
+            .build({
+              operation: 'diagnostics',
+              filePath: path.join(directory, 'main.py'),
+            })
+            .execute(new AbortController().signal),
+        );
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(`${key} is failed`);
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
   });
 });

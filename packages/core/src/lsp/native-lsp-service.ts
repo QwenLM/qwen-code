@@ -741,10 +741,11 @@ export class NativeLspService {
    * Whether the queried file's extension positively proves this server
    * cannot own the file. Fails closed on every uncertainty: an undefined
    * extension (extensionless or unparseable file), an extension no known
-   * language mapping claims (`rs`, `mts`, `yml`, …), or a server declaring
-   * no extensions at all can prove nothing, so the veto stands. Only a
-   * positively attributable extension the server does not declare excuses
-   * it — `python`'s `py` vs a queried `.ts` is the canonical case.
+   * language mapping claims (`rs`, `mts`, `yml`, …), or a server whose
+   * declared set holds no attributable extension can prove nothing, so the
+   * veto stands. Only a positively attributable extension the server does
+   * not declare excuses it — `python`'s `py` vs a queried `.ts` is the
+   * canonical case.
    */
   private serverDeclaredIrrelevant(
     handle: LspServerHandle,
@@ -757,7 +758,15 @@ export class NativeLspService {
       return false;
     }
     const owned = this.declaredDiagnosticExtensions(handle);
-    return owned.size > 0 && !owned.has(extension);
+    // `.lsp.json` keys reach `languages` unvalidated, so a key that is a
+    // server name (`pyright`, `remote-lsp`) seeds `owned` with the guess
+    // `[id]`. A set made only of such guesses proves nothing about the
+    // queried file — reading it as proof both excuses a downed server from
+    // the veto and strips a ready one of its backing.
+    const attributed = [...owned].some((ext) =>
+      KNOWN_DIAGNOSTIC_EXTENSIONS.has(ext),
+    );
+    return attributed && !owned.has(extension);
   }
 
   /**
