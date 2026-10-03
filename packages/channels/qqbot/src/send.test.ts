@@ -2961,6 +2961,46 @@ describe('sendMessage', () => {
     saveSpy.mockRestore();
   });
 
+  it('does not roll back a seq a concurrent send consumed before a 429', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-429-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      // A sibling session anchored to the same msgId consumed a seq while this
+      // markdown attempt was in flight.
+      msgSeqMap.set('msg-429-race', 5);
+      return mockResponse(false, 429);
+    });
+
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
+
+    // The rollback is conditional: an unconditional one would forget the seq
+    // the sibling accepted and later sends would replay a deduped pair.
+    expect(msgSeqMap.get('msg-429-race')).toBe(5);
+  });
+
+  it('does not roll back a seq a concurrent send consumed before a markdown fallback', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-fb-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-fb-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      msgSeqMap.set('msg-fb-race', 7);
+      return mockResponse(false, 500);
+    });
+    // The active-markdown retry (no msg_id) succeeds.
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(msgSeqMap.get('msg-fb-race')).toBe(7);
+  });
+
   it('stops silently at 429 when no replyMsgId is set', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
 

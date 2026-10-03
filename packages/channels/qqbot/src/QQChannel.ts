@@ -1006,19 +1006,10 @@ export class QQChannel extends ChannelBase {
     const plainOutgoingText = this.formatAttributedText(text, sourceLabel);
 
     const route = await this.resolveRoute(chatId);
-    if (!route) {
-      // A route that failed for a disposed channel, an unusable chatId, or a
-      // chat type resolveRoute cannot accept can never resolve on a retry —
-      // the same exact 'group' | 'c2c' test resolveRoute applies, so a
-      // mis-typed config value is permanent, not a truthy value to retry on. A
-      // failed token refresh (or an empty token) can.
-      const routeType = this.chatTypeFor(chatId);
-      return this.disposed ||
-        !isValidChatId(chatId) ||
-        (routeType !== 'group' && routeType !== 'c2c')
-        ? 'permanent'
-        : 'transient';
-    }
+    // resolveRoute names the class next to the guard that produced it; the
+    // caller only forwards it, so a new guard cannot silently default to a
+    // retryable class here.
+    if ('block' in route) return route.block;
 
     // msgIdOverride is the per-session reply anchor captured when a streaming
     // response started (PR #8241). It takes precedence over the reply context
@@ -1290,12 +1281,16 @@ export class QQChannel extends ChannelBase {
    */
   private async resolveRoute(
     chatId: string,
-  ): Promise<{ base: string; path: string } | null> {
+  ): Promise<{ base: string; path: string } | { block: SendBlock }> {
+    // Each failure reports its own retry class, so this function is the single
+    // place that decides what a retry could fix: the caller used to re-derive
+    // the class from a mirrored copy of these guards, which meant a sixth
+    // guard added here would silently default to 'transient' and be retried.
     if (this.disposed) {
       process.stderr.write(
         `[QQ:${this.name}] resolveRoute: channel disposed, dropping message to ${sanitizeLogText(chatId, 64)}\n`,
       );
-      return null;
+      return { block: 'permanent' };
     }
     if (Date.now() >= this.tokenExpiresAt) {
       try {
@@ -1304,20 +1299,20 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}\n`,
         );
-        return null;
+        return { block: 'transient' };
       }
     }
     if (!this.accessToken) {
       process.stderr.write(
         `[QQ:${this.name}] resolveRoute: accessToken is empty after fetchToken\n`,
       );
-      return null;
+      return { block: 'transient' };
     }
     if (!isValidChatId(chatId)) {
       process.stderr.write(
         `[QQ:${this.name}] resolveRoute: invalid chatId rejected (length=${chatId.length})\n`,
       );
-      return null;
+      return { block: 'permanent' };
     }
     const base = getApiBase(Boolean(this.qqConfig.sandbox));
     const routeType = this.chatTypeFor(chatId);
@@ -1325,7 +1320,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] resolveRoute: no chat type for ${sanitizeLogText(chatId, 64)}, dropping message\n`,
       );
-      return null;
+      return { block: 'permanent' };
     }
     const path =
       routeType === 'group'
@@ -1797,9 +1792,12 @@ export class QQChannel extends ChannelBase {
       // timer that delivers its residual). It must stay untouched then: the
       // chain's identity guard (s === state) needs it to tear itself down —
       // dropping it here would strand the residual forever (its .then() sees
-      // `current !== state` and returns). This chunk belongs to the new turn
-      // and is consumed (dropped); once the chain settles the map is empty
-      // and the next chunk starts fresh.
+      // `current !== state` and returns). This chunk belongs to the new turn:
+      // while the parked entry still holds a residual it is stashed in the side
+      // buffer below (so this turn's opening survives the settle window),
+      // otherwise it is consumed (dropped). Once the chain settles and the
+      // stash has been drained, the map is empty and the next chunk starts
+      // fresh.
       if (state.buffer && this.pendingStreamDelete.has(sessionId)) {
         // Stash this turn's chunks in a side buffer so the HEAD of this
         // turn's reply is not silently dropped while the old chain settles
@@ -1843,14 +1841,22 @@ export class QQChannel extends ChannelBase {
           // Cap in UTF-16 units on code-point boundaries, so the cut cannot
           // split a surrogate pair.
           stashed.text = truncateUtf16Units(stashed.text, limit);
-          const dropped = before - stashed.text.length;
+          const droppedText = before - stashed.text.length;
           // `pre` is a prefix of `text` and is what onResponseComplete
-          // prepends, so trimming the tail must trim it too.
+          // prepends, so trimming the tail must trim it too — and that trim is
+          // its own loss, counted separately so the log reports what was
+          // actually discarded rather than only the buffer trim.
+          let droppedPre = 0;
           if (stashed.pre && stashed.pre.length > stashed.text.length) {
+            droppedPre = stashed.pre.length - stashed.text.length;
             stashed.pre = stashed.text;
           }
           process.stderr.write(
-            `[QQ:${this.name}] dropping ${dropped} chars of diverted turn ${currentTurn} stash over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
+            `[QQ:${this.name}] dropping ${droppedText} chars of diverted turn ${currentTurn} stash` +
+              (droppedPre > 0
+                ? ` and ${droppedPre} chars of its sealed pre`
+                : '') +
+              ` over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
           );
         }
         this.streamOrphanBuffer.set(sessionId, stashed);
@@ -2349,9 +2355,9 @@ export class QQChannel extends ChannelBase {
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
-            // Same re-seal as the parked branch above, under the same
-            // turn-ownership gate: a boundary during the flight strips the
-            // whole payload from fullText, but only the live turn may seal it.
+            // Same re-seal and turn-ownership gate as the parked branch above
+            // (see it for why the whole payload is sealed and `carriedSeal` is
+            // the backstop).
             if (this.ownsLiveTurn(sessionId, state)) {
               if (state.boundaryClearedInFlight !== undefined) {
                 current.sealedPre = this.sealClearedPayload(
@@ -2651,30 +2657,35 @@ export class QQChannel extends ChannelBase {
         Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
           ? anchorEntry.msgId
           : undefined;
-      if (captured) {
-        // Keep the [sender · task] attribution: sendMessage hardcodes an
-        // undefined sourceLabel, so the anchored send goes through the
-        // reply-context helper. The stale entry's own sourceLabel belongs to
-        // the old turn, so only this turn's label is used.
-        // Mark the send in flight for the release guard: the surviving
-        // streamState entry carries the OLD turn's msgId, so the
-        // streamState/flushingSessions check cannot see this send.
-        this.beginMsgSeqSend(captured);
-        try {
-          await this.sendMessageWithReplyContext(
-            chatId,
-            replyText,
-            undefined,
-            segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
-            captured,
-          );
-        } finally {
-          this.endMsgSeqSend(captured);
+      try {
+        if (captured) {
+          // Keep the [sender · task] attribution: sendMessage hardcodes an
+          // undefined sourceLabel, so the anchored send goes through the
+          // reply-context helper. The stale entry's own sourceLabel belongs to
+          // the old turn, so only this turn's label is used.
+          // Mark the send in flight for the release guard: the surviving
+          // streamState entry carries the OLD turn's msgId, so the
+          // streamState/flushingSessions check cannot see this send.
+          this.beginMsgSeqSend(captured);
+          try {
+            await this.sendMessageWithReplyContext(
+              chatId,
+              replyText,
+              undefined,
+              segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
+              captured,
+            );
+          } finally {
+            this.endMsgSeqSend(captured);
+          }
+          this.releaseSessionReplyAnchor(sessionId, captured);
+        } else {
+          await super.onResponseComplete(chatId, replyText, sessionId);
+          this.releaseSessionReplyAnchor(sessionId);
         }
-        this.releaseSessionReplyAnchor(sessionId, captured);
-      } else {
-        await super.onResponseComplete(chatId, replyText, sessionId);
-        this.releaseSessionReplyAnchor(sessionId);
+      } catch (e: unknown) {
+        this.logLostSealedHead(held?.pre, sessionId, e);
+        throw e;
       }
       return;
     }
@@ -2736,44 +2747,49 @@ export class QQChannel extends ChannelBase {
     // flushedSessions and makes onResponseComplete re-send that turn's text.
     this.pendingStreamDelete.delete(sessionId);
     if (remaining) {
-      if (capturedMsgId) {
-        // Final segment keeps this session's reply anchor (per-session msgId),
-        // consistent with how idleFlush/flushAndTrack send mid-stream chunks,
-        // and keeps the [sender · task] attribution: sendMessage hardcodes an
-        // undefined sourceLabel, so the anchored send goes through the
-        // reply-context helper instead (msgIdOverride still wins over the
-        // reply context, so the anchor is unchanged).
-        // Mark the send in flight for the release guard: the streamState
-        // entry was deleted above, so nothing else can tell the guard that
-        // this msgId's counter is still being used.
-        this.beginMsgSeqSend(capturedMsgId);
-        try {
-          await this.sendMessageWithReplyContext(
+      try {
+        if (capturedMsgId) {
+          // Final segment keeps this session's reply anchor (per-session msgId),
+          // consistent with how idleFlush/flushAndTrack send mid-stream chunks,
+          // and keeps the [sender · task] attribution: sendMessage hardcodes an
+          // undefined sourceLabel, so the anchored send goes through the
+          // reply-context helper instead (msgIdOverride still wins over the
+          // reply context, so the anchor is unchanged).
+          // Mark the send in flight for the release guard: the streamState
+          // entry was deleted above, so nothing else can tell the guard that
+          // this msgId's counter is still being used.
+          this.beginMsgSeqSend(capturedMsgId);
+          try {
+            await this.sendMessageWithReplyContext(
+              chatId,
+              remaining,
+              undefined,
+              sourceLabel,
+              capturedMsgId,
+            );
+          } finally {
+            this.endMsgSeqSend(capturedMsgId);
+          }
+        } else {
+          if (anchorEntry) {
+            // The anchor existed but outlived its TTL — a long turn whose final
+            // segment arrived late. Fall back to the session-aware base path
+            // (active send) and say so: a silent fallback here is what made the
+            // final segment race the chat-level entry in the first place.
+            process.stderr.write(
+              `[QQ:${this.name}] per-session reply anchor expired for final segment of ${sanitizeLogText(sessionId, 64)}\n`,
+            );
+          }
+          await this.sendResponseMessage(
             chatId,
             remaining,
-            undefined,
+            sessionId,
             sourceLabel,
-            capturedMsgId,
-          );
-        } finally {
-          this.endMsgSeqSend(capturedMsgId);
-        }
-      } else {
-        if (anchorEntry) {
-          // The anchor existed but outlived its TTL — a long turn whose final
-          // segment arrived late. Fall back to the session-aware base path
-          // (active send) and say so: a silent fallback here is what made the
-          // final segment race the chat-level entry in the first place.
-          process.stderr.write(
-            `[QQ:${this.name}] per-session reply anchor expired for final segment of ${sanitizeLogText(sessionId, 64)}\n`,
           );
         }
-        await this.sendResponseMessage(
-          chatId,
-          remaining,
-          sessionId,
-          sourceLabel,
-        );
+      } catch (e: unknown) {
+        this.logLostSealedHead(held?.pre, sessionId, e);
+        throw e;
       }
     }
     // Release the anchor only AFTER the final segment went out. Releasing
@@ -2784,6 +2800,24 @@ export class QQChannel extends ChannelBase {
     // ChannelBase's finally still runs onPromptEnd, which releases the anchor
     // (idempotent — a second release here is a no-op).
     this.releaseSessionReplyAnchor(sessionId);
+  }
+
+  /**
+   * A stash's sealed head has no other copy — the bridge cleared it from its
+   * collection at the boundary — so a delivery that fails after the entry was
+   * consumed must report the loss (length and error) instead of dropping it
+   * silently. Delete-before-send is deliberate: it stops a chunk arriving
+   * mid-send from draining the same stash twice.
+   */
+  private logLostSealedHead(
+    head: string | undefined,
+    sessionId: string,
+    error: unknown,
+  ): void {
+    if (!head) return;
+    process.stderr.write(
+      `[QQ:${this.name}] dropping ${head.length} chars of sealed head: delivery failed (${sanitizeLogText(error instanceof Error ? error.message : String(error), 160)}) for ${sanitizeLogText(sessionId, 64)}\n`,
+    );
   }
 
   private streamBufferLimit(state: QQStreamState): number {
@@ -4019,8 +4053,10 @@ export class QQChannel extends ChannelBase {
     }
     // A streaming reply anchored to this msgId may still be in flight
     // (per-session msgId, PR #8241): reclaimMsgSeq keeps its msg_seq counter
-    // alive while any remaining holder (a live session anchor, a buffered
-    // stream entry, an in-flight send) still needs it.
+    // alive while any remaining holder still needs it — a session anchor, the
+    // chat-level anchor, a buffered or in-flight stream entry, an anchored send
+    // in flight, or the replyContextByMessageId routing entry (the full set
+    // lives in isMsgSeqStillInUse).
     this.reclaimMsgSeq(context.msgId);
   }
 

@@ -2689,9 +2689,10 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     });
     mockSendQQMessage.mockReturnValue(sendPromise);
 
-    // Anchor the session so the re-flush chain's release is observable
-    // (the anchor and its msg_seq must survive until the tail's send has
-    // resolved its msg_seq from msgSeqMap, then be cascaded away).
+    // Anchor the session to msg-A so the residual tail resolves the same
+    // msg_id and continues its msg_seq. The anchor is released when the tail
+    // settles, but the counter is deliberately KEPT while the chat-level entry
+    // still names msg-A (both asserted below).
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
@@ -7121,6 +7122,43 @@ describe('round-1 robustness pins', () => {
     // backoff): re-arming at the shorter idle cadence would collapse that tier.
     expect(states.get('s1')!['timer']).toBe(armed);
     clearTimeout(armed);
+  });
+
+  it('drops stashed orphan text on disconnect', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    stash(ch, { turn: 1, text: 'STALE-AT-DISCONNECT ' });
+    const buffer = chp['streamOrphanBuffer'] as Map<string, unknown>;
+    expect(buffer.has('s1')).toBe(true);
+
+    ch.disconnect();
+
+    // resetRoutingState clears the side buffer: without that, every session
+    // that had stashed text keeps it for the process lifetime.
+    expect(buffer.has('s1')).toBe(false);
+  });
+
+  it('logs the sealed head a failed final delivery discards', async () => {
+    const ch = makeChannel();
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // A boundary-sealed head waiting in the side buffer for this turn.
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    mockSendQQMessage.mockRejectedValue(new Error('429 rate limited'));
+
+    await expect(onResponseComplete(ch, 'test-chat', '', 's1')).rejects.toThrow(
+      '429',
+    );
+
+    // The head has no other copy, so the failed delivery must say what was
+    // dropped and why (delete-before-send stays; there is no redelivery).
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('dropping 9 chars of sealed head');
+    expect(logged).toContain('429 rate limited');
+    stderrSpy.mockRestore();
   });
 
   it('logs the head a session death discards from the side buffer', () => {

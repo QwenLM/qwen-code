@@ -2843,7 +2843,7 @@ describe('resolveRoute chatTypes fallback', () => {
     expect(result!.path).toBe('/v2/groups/dual-chat-id/messages');
   });
 
-  it('returns null when neither chatTypeMap nor chatTypes has entry', async () => {
+  it('reports a permanent block when neither chatTypeMap nor chatTypes has entry', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     chp['accessToken'] = 'test-token';
@@ -2853,10 +2853,11 @@ describe('resolveRoute chatTypes fallback', () => {
     const result = await (
       pvt['resolveRoute'] as (
         chatId: string,
-      ) => Promise<{ base: string; path: string } | null>
+      ) => Promise<{ base: string; path: string } | { block: string }>
     )('unknown-chat');
 
-    expect(result).toBeNull();
+    // resolveRoute names the retry class beside the guard that produced it.
+    expect(result).toEqual({ block: 'permanent' });
   });
 });
 
