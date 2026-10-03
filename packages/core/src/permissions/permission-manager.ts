@@ -1325,11 +1325,26 @@ export class PermissionManager {
       // evaluate() escalates on raw per-line candidates, so relevance must
       // see them too: when a deny/ask rule matches only a heredoc body line
       // the projection strips, a false here keeps evaluate() from ever
-      // running and the tool default wins. Widening only — a spurious true
-      // costs one extra evaluate().
+      // running and the tool default wins. Allow rules are excluded on
+      // purpose: a body the projection proved inert must not demote the
+      // tool's own default ask to allow just because it mentions something
+      // an allow rule covers.
       if (
         rawRuleCandidates(command).some((candidate) =>
-          this.hasRelevantRules({ ...ctx, command: candidate }),
+          restrictiveRules.some((rule) =>
+            matchesRule(
+              rule,
+              toolName,
+              candidate,
+              filePath,
+              domain,
+              pathCtx,
+              specifier,
+              toolParams,
+              toolAliases,
+              'canonical',
+            ),
+          ),
         )
       ) {
         return true;

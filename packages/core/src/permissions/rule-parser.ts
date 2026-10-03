@@ -886,10 +886,9 @@ interface HeredocDelimiter {
 interface SimpleHeredocLine {
   receiver: string;
   delimiters: HeredocDelimiter[];
-  // The receiver provably never executes the body: it reads it as data (cat),
-  // as a commit message (git commit -F -), or as its program through the bare
-  // stdin idiom (python -), whose code is as opaque to shell rules as any
-  // script file or -c argument the guard never sees into either.
+  // The receiver provably never executes the body: it reads it as data (cat)
+  // or as a commit message (git commit -F -). An interpreter reading its
+  // program from stdin executes the body, so it is never a consumer.
   consumesData: boolean;
 }
 
@@ -1108,8 +1107,8 @@ function parseSimpleHeredocLine(
   if (typeof receiver !== 'string') return null;
   // An interpreter with an inline program (python -c, node -e, a script
   // path) can route stdin anywhere that program wants, so the body's fate is
-  // unprovable. The bare `-` idiom (read the script from stdin) is the same
-  // execution as no argument at all.
+  // unprovable. The bare `-` idiom reads its program from stdin, which is the
+  // same execution as the no-argument form, so it proves nothing either.
   const receiverIsInterpreter = /^(?:python\d*(?:\.\d+)*|node|ruby|perl)$/.test(
     receiver,
   );
@@ -1137,21 +1136,13 @@ function parseSimpleHeredocLine(
   return {
     receiver,
     delimiters,
+    // A leading NAME=value can choose which binary runs (PATH) or load code
+    // into it (LD_PRELOAD &co), so the receiver identity is only provable
+    // with no assignment in front of it.
     consumesData:
-      HEREDOC_DATA_CONSUMERS.has(receiver) ||
-      (receiverIsInterpreter && isStdinScriptIdiom) ||
-      gitCommitReadsStdin,
+      commandStart === 0 &&
+      (HEREDOC_DATA_CONSUMERS.has(receiver) || gitCommitReadsStdin),
   };
-}
-
-// Rule evaluation reads interpreter code as opaque either way: a body the
-// receiver reads as its program is no more visible to a shell rule than a
-// `-c` argument.
-function receiverBodyOpaqueToShellRules(parsed: SimpleHeredocLine): boolean {
-  return (
-    parsed.consumesData ||
-    /^(?:python\d*(?:\.\d+)*|node|ruby|perl)$/.test(parsed.receiver)
-  );
 }
 
 function quoteStateAtLineEnd(
@@ -1413,7 +1404,7 @@ function projectHeredocBodies(
     pending = parsed.delimiters;
     pendingRunsBody = SHELL_RECEIVER_NAME.test(parsed.receiver);
     keepPendingBody =
-      (!stripAllSimpleBodies && !receiverBodyOpaqueToShellRules(parsed)) ||
+      (!stripAllSimpleBodies && !parsed.consumesData) ||
       receiverRedefinedInCommand(executed.join('\n'), parsed.receiver);
   }
 

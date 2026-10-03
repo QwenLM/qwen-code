@@ -638,9 +638,11 @@ describe('splitCompoundCommand', () => {
     expect(split(command)).toEqual(parts);
   });
 
-  it('keeps a heredoc command as one segment', async () => {
+  it('keeps an interpreter heredoc body visible as executed lines', async () => {
+    // python reads its program from stdin here, so the body is code, not
+    // data: every line stays in rule evaluation.
     expect(split("python - <<'PY'\nimport os\nprint(os.getcwd())\nPY")).toEqual(
-      ["python - <<'PY'"],
+      ["python - <<'PY'", 'import os', 'print(os.getcwd())'],
     );
   });
 
@@ -656,9 +658,11 @@ describe('splitCompoundCommand', () => {
   it('handles the tab-stripping heredoc variant', async () => {
     // The trailing segment keeps the terminator observable: both mutants
     // (dropping the `-` skip, or matching the terminator without trim) must
-    // keep `echo done` visible rather than swallowing it into the body.
+    // keep `echo done` visible rather than swallowing it into the body. The
+    // interpreter body itself stays visible too, tabs stripped.
     expect(split('python <<-PY\n\timport os\n\tPY\necho done')).toEqual([
       'python <<-PY',
+      'import os',
       'echo done',
     ]);
   });
@@ -727,8 +731,11 @@ describe('splitCompoundCommand', () => {
   });
 
   it('recognizes a CRLF heredoc terminator', async () => {
+    // The interpreter body stays visible; a kept line carries its original
+    // bytes, CR included.
     expect(split("python <<'PY'\r\nprint('ok')\r\nPY\r\necho done")).toEqual([
       "python <<'PY'",
+      "print('ok')\r",
       'echo done',
     ]);
   });
@@ -1047,7 +1054,10 @@ describe('splitCompoundCommandSegments', () => {
   it('uses the same heredoc projection as the string API', async () => {
     expect(
       splitCompoundCommandSegments("python - <<'PY'\nprint('ok')\nPY"),
-    ).toEqual([{ command: "python - <<'PY'", terminator: '' }]);
+    ).toEqual([
+      { command: "python - <<'PY'", terminator: '\n' },
+      { command: "print('ok')", terminator: '' },
+    ]);
   });
 
   it('keeps the body visible when the receiver carries arguments', async () => {
@@ -1149,9 +1159,6 @@ describe('heredoc fail-closed projections', () => {
   it('still strips provably-inert bodies', () => {
     expect(splitCompoundCommand("cat <<'EOF'\nplain data\nEOF")).toEqual([
       "cat <<'EOF'",
-    ]);
-    expect(splitCompoundCommand('python - <<EOF\nprint(1)\nEOF')).toEqual([
-      'python - <<EOF',
     ]);
   });
 
@@ -1392,19 +1399,77 @@ describe('state-tracking heredoc projection', () => {
     expect(projectHeredocBodiesForStateTracking(visible)).toBe(visible);
   });
 
-  it('trusts only the bare-stdin idiom for interpreter receivers', () => {
-    // python - reads its program from stdin, as opaque to shell rules as any
-    // script file the guard never sees into; an argument after the dash ends
-    // the idiom, and a bare interpreter keeps its body visible.
+  it('never strips an interpreter heredoc body', () => {
+    // An interpreter reads its program from stdin, so the body executes and
+    // stays visible to rules whatever the receiver shape.
     const idiom = "python - <<'PY'\nimport os\nPY";
-    expect(heredocSafetyForStateTracking(idiom).safe).toBe(true);
-    expect(projectHeredocBodiesForStateTracking(idiom)).toBe("python - <<'PY'");
+    expect(heredocSafetyForStateTracking(idiom).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(idiom)).toBe(idiom);
     expect(
       heredocSafetyForStateTracking("python - X=1 <<'EOF'\nx\nEOF").safe,
     ).toBe(false);
     expect(heredocSafetyForStateTracking("python <<'EOF'\nx\nEOF").safe).toBe(
       false,
     );
+  });
+
+  it('keeps the body visible when an assignment prefix precedes the receiver', () => {
+    // A leading NAME=value can pick a different binary (PATH) or load code
+    // into it (LD_PRELOAD &co), so no receiver classification may strip.
+    expect(
+      splitCompoundCommand(
+        "LD_PRELOAD=/tmp/hijack.so cat <<'EOF'\nrm -rf /tmp/pwned\nEOF",
+      ),
+    ).toContain('rm -rf /tmp/pwned');
+    expect(
+      splitCompoundCommand(
+        "LD_LIBRARY_PATH=/tmp/x cat <<'EOF'\nrm -rf /tmp/pwned\nEOF",
+      ),
+    ).toContain('rm -rf /tmp/pwned');
+    expect(
+      heredocSafetyForStateTracking(
+        "LD_PRELOAD=/tmp/hijack.so cat <<'EOF'\nplain data\nEOF",
+      ).safe,
+    ).toBe(false);
+  });
+
+  it('keeps the tool default when only an allow rule matches a body line', async () => {
+    // The raw-candidate relevance pass exists so a deny/ask rule that only
+    // matches a heredoc body line still reaches evaluate(); an allow match
+    // there must not run evaluate() and replace the tool's own default.
+    const pm2 = new PermissionManager(
+      makeConfig({ permissionsAllow: ['Bash(npm *)'] }),
+    );
+    pm2.initialize();
+    const result = await evaluatePermissionRules(pm2, 'ask', {
+      toolName: 'run_shell_command',
+      command: "cat <<'EOF'\nnpm run build\nEOF",
+    });
+    expect(result.finalPermission).toBe('ask');
+  });
+
+  it('still escalates when a deny rule matches only a body line', async () => {
+    const pm2 = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(*rm -rf*)'] }),
+    );
+    pm2.initialize();
+    const result = await evaluatePermissionRules(pm2, 'ask', {
+      toolName: 'run_shell_command',
+      command: "python <<'PY'\nimport os\nos.system('rm -rf /important')\nPY",
+    });
+    expect(result.finalPermission).toBe('deny');
+  });
+
+  it('treats the bare-stdin interpreter idiom as executing its body', () => {
+    // python - runs the body as its program, the same execution as the
+    // no-argument form, so both keep the body visible and fail the gate.
+    const idiom = "python - <<'PY'\nimport os\nPY";
+    expect(heredocSafetyForStateTracking(idiom).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(idiom)).toBe(idiom);
+    expect(splitCompoundCommand('python - <<EOF\nprint(1)\nEOF')).toEqual([
+      'python - <<EOF',
+      'print(1)',
+    ]);
   });
 
   it('treats git commit -F - as reading its message from stdin', () => {
@@ -2070,10 +2135,11 @@ describe('PermissionManager', () => {
       },
     );
 
-    it('matches an allow prefix rule against a whole heredoc command', async () => {
-      // #9381: the heredoc body is stdin, not shell segments; without stripping
-      // it, each body line fell through to per-line evaluation and the prefix
-      // rule could never match.
+    it('an allow prefix on the receiver does not auto-allow an executing heredoc payload', async () => {
+      // #9381 stripped the body so the prefix rule could match the whole
+      // command, but the body is the program python runs: stripping it hid an
+      // executing payload from every rule. The body stays visible now, so the
+      // allow covers only the opener and the command asks.
       const pm2 = new PermissionManager(
         makeConfig({ permissionsAllow: ['Bash(python *)'] }),
       );
@@ -2083,7 +2149,7 @@ describe('PermissionManager', () => {
           toolName: 'run_shell_command',
           command: "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
         }),
-      ).toBe('allow');
+      ).toBe('ask');
     });
 
     it.each([
@@ -2168,8 +2234,9 @@ describe('PermissionManager', () => {
 
     it('an anchored deny rule does not over-claim an interpreter payload', async () => {
       // Bash(rm *) anchors at the command start, so it honestly does not see
-      // `os.system('rm -rf ...')` in a python body; the allowed receiver still
-      // allows. Substring deny rules are the ones that cover payloads.
+      // `os.system('rm -rf ...')` in a python body; the visible body lines
+      // match no allow rule either, so the command asks rather than
+      // auto-allowing. Substring deny rules are the ones that cover payloads.
       const pm2 = new PermissionManager(
         makeConfig({
           permissionsAllow: ['Bash(python *)', 'Bash(echo *)'],
@@ -2183,7 +2250,7 @@ describe('PermissionManager', () => {
           command:
             "python - <<'PY'\nimport os\nos.system('rm -rf /important')\nPY\necho done",
         }),
-      ).toBe('allow');
+      ).toBe('ask');
     });
 
     // Issue #4093: command substitution must never get a hard 'deny' from
