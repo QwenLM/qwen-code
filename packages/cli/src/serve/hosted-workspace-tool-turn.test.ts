@@ -986,6 +986,8 @@ it.each([
   { pattern: 7 },
   { pattern: '/**/*.ts' },
   { pattern: '../**/*' },
+  { pattern: '\\.\\./**/*' },
+  { pattern: 'src/{x,\\.\\.}/**/*' },
   // The guard must judge the value it dispatches, which is the trimmed one:
   // leading whitespace otherwise masks both shapes past this pre-acquisition
   // refusal and into a durable Runtime round trip.

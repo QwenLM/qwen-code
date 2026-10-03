@@ -23,16 +23,21 @@ describe('checkHostedGlobPattern', () => {
     'a/..b/*.ts',
     '[.][.]/**/*',
     '\\{a,b\\}',
+    'file\\?.txt',
   ])('admits %s', (pattern) => {
     expect(checkHostedGlobPattern(pattern)).toBe('ok');
   });
 
-  it.each(['/etc/host*', '../**/*', '{/etc,/zz}/host*', '{.,..}/**/*'])(
-    'refuses the escaping %s',
-    (pattern) => {
-      expect(checkHostedGlobPattern(pattern)).toBe('escapes');
-    },
-  );
+  it.each([
+    '/etc/host*',
+    '../**/*',
+    '{/etc,/zz}/host*',
+    '{.,..}/**/*',
+    '\\.\\./**/*',
+    'src/{x,\\.\\.}/**/*',
+  ])('refuses the escaping %s', (pattern) => {
+    expect(checkHostedGlobPattern(pattern)).toBe('escapes');
+  });
 
   it.each([
     ['a nesting bomb', '{a,'.repeat(3400) + 'x' + '}'.repeat(3400)],

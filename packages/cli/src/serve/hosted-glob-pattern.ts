@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { braceExpand } from 'minimatch';
+import { braceExpand, unescape } from 'minimatch';
 
 /** The longest Hosted glob pattern, matching the `path` argument's cap. */
 export const HOSTED_GLOB_PATTERN_MAX_LENGTH = 1024;
@@ -42,10 +42,10 @@ export function checkHostedGlobPattern(
   )
     return 'too-complex';
   // Segment equality, so a literal `a/..b/*.ts` stays usable.
-  return braceExpand(pattern).some(
-    (alternative) =>
-      path.isAbsolute(alternative) || alternative.split(/[\\/]/).includes('..'),
-  )
+  return braceExpand(pattern).some((alternative) => {
+    const shape = unescape(alternative);
+    return path.isAbsolute(shape) || shape.split(/[\\/]/).includes('..');
+  })
     ? 'escapes'
     : 'ok';
 }

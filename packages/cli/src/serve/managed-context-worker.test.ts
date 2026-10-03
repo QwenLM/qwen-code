@@ -1167,7 +1167,7 @@ describe('Managed context tool gate', () => {
     const bracedAbsolute = await glob('call-8', {
       pattern: '{/etc,/zz-nonexistent}/host*',
     });
-    // Character-class and escape spellings of `..` pass any string gate;
+    // Character-class spellings of `..` pass the segment gate;
     // the contained walk answers an existing and a missing outside file
     // identically, so neither is an existence oracle.
     const classExisting = await glob('call-9', {
@@ -1176,7 +1176,12 @@ describe('Managed context tool gate', () => {
     const classMissing = await glob('call-10', {
       pattern: '[.][.]/web/nope.txt',
     });
-    const escapedWalk = await glob('call-11', { pattern: '\\.\\./**/*' });
+    const escapedWalk = await glob('call-11', {
+      pattern: '\\.\\./web/secret.txt',
+    });
+    const escapedMissing = await glob('call-13', {
+      pattern: '\\.\\./web/nope.txt',
+    });
     // Range expansion is bounded before anything searches it.
     const rangeBomb = await glob('call-12', { pattern: '{1..100000}/passwd' });
 
@@ -1193,8 +1198,12 @@ describe('Managed context tool gate', () => {
     expect(
       JSON.stringify(classExisting.result).replaceAll('secret.txt', 'nope.txt'),
     ).toBe(JSON.stringify(classMissing.result));
-    expect(escapedWalk.result.executionStatus).toBe('success');
-    expect(JSON.stringify(escapedWalk)).toContain('src/index.ts');
+    for (const response of [escapedWalk, escapedMissing]) {
+      expect(response.result.executionStatus).toBe('error');
+      expect(JSON.stringify(response)).toContain(
+        'Glob pattern must stay within the Session working directory.',
+      );
+    }
     expect(rangeBomb.result.executionStatus).toBe('error');
     expect(JSON.stringify(rangeBomb)).toContain('64 brace alternatives');
     for (const response of [
@@ -1206,6 +1215,7 @@ describe('Managed context tool gate', () => {
       literalLink,
       classMissing,
       escapedWalk,
+      escapedMissing,
       rangeBomb,
     ]) {
       const text = JSON.stringify(response);
