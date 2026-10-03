@@ -10,10 +10,12 @@ import {
   createAwaitActionHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
+  createHookStoppedRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createNextTurnReadyHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
+  createTurnSettledHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointV1,
   tryParseHarnessCheckpointV1,
@@ -458,6 +460,34 @@ describe('harness checkpoint v1', () => {
     expect(ready.runtime?.bindings[0]?.state).toBe('settled');
     expect(parseHarnessCheckpointV1(bytesOf(ready))).toEqual(ready);
 
+    const stopped = createHookStoppedRuntimeHarnessCheckpoint({
+      previous: ready,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+    });
+    expect(stopped.continuation.phase).toBe('turn_settled');
+    expect(stopped.tools).toEqual(ready.tools);
+    expect(stopped.runtime).toEqual(ready.runtime);
+    expect(stopped.tools?.items[0]?.consumed).toBe(false);
+    expect(parseHarnessCheckpointV1(bytesOf(stopped))).toEqual(stopped);
+    expect(() =>
+      createTurnSettledHarnessCheckpoint({
+        previous: ready,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+      }),
+    ).toThrow('every Runtime receipt to be consumed');
+    expect(() =>
+      createHookStoppedRuntimeHarnessCheckpoint({
+        previous: wait,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+      }),
+    ).toThrow('settled Runtime results not yet consumed');
+
     const consumed = createConsumedRuntimeResultsHarnessCheckpoint({
       previous: ready,
       checkpointId: 'ckpt-7',
@@ -471,6 +501,14 @@ describe('harness checkpoint v1', () => {
       consumed: true,
     });
     expect(parseHarnessCheckpointV1(bytesOf(consumed))).toEqual(consumed);
+    expect(() =>
+      createHookStoppedRuntimeHarnessCheckpoint({
+        previous: consumed,
+        checkpointId: 'ckpt-8',
+        coveredSequence: 7,
+        previousCheckpointId: 'ckpt-7',
+      }),
+    ).toThrow('settled Runtime results not yet consumed');
   });
 
   it('settles multiple Runtime executions independently in reverse order', () => {

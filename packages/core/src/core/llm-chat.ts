@@ -24,6 +24,7 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import { beginRetryWait } from '../utils/retry-wait.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -1398,25 +1399,33 @@ function delay(
 } {
   let resolveRef: () => void;
   let timeoutId: ReturnType<typeof setTimeout>;
+  // Every settle path ends the announced retry wait synchronously — a skip or
+  // abort must not keep shielding the request until the generator resumes.
+  let endWait = () => {};
 
   const promise = new Promise<void>((resolve, reject) => {
-    resolveRef = resolve;
+    resolveRef = () => {
+      endWait();
+      resolve();
+    };
 
     if (signal?.aborted) {
       reject(signal.reason);
       return;
     }
 
-    timeoutId = setTimeout(resolve, delayMs);
+    timeoutId = setTimeout(resolveRef, delayMs);
 
     signal?.addEventListener(
       'abort',
       () => {
         clearTimeout(timeoutId);
+        endWait();
         reject(signal.reason);
       },
       { once: true },
     );
+    endWait = beginRetryWait(delayMs);
   });
 
   return {
@@ -2976,6 +2985,10 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // After a Managed Runtime call ended without a known outcome, the model
+    // must not continue: it could repeat a call that already took effect.
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) throw managedSessionBlock;
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -3344,6 +3357,7 @@ export class LlmChat {
       // Add user content to history ONCE before any attempts. Later object
       // spreads preserve the identity marked before compression.
       this.history.push(userContent);
+      this.syncReviewedSchemasForContent(userContent);
       currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
@@ -3440,6 +3454,9 @@ export class LlmChat {
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
+        if (currentUserContent) {
+          this.syncReviewedSchemasForContent(currentUserContent);
+        }
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
@@ -5488,6 +5505,9 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     this.completedToolCallIds = [];
+    if (!this.isForkedChat) {
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
+    }
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5504,6 +5524,7 @@ export class LlmChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
@@ -5519,6 +5540,19 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+  }
+
+  private syncReviewedSchemasForContent(content: Content): void {
+    if (
+      !this.isForkedChat &&
+      content.parts?.some(
+        (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
+      )
+    ) {
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
+    }
   }
 
   /**
@@ -5661,6 +5695,9 @@ export class LlmChat {
     // body costs at most one duplicate injection on the next invoke.
     if (!this.isForkedChat) {
       clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
   }
 
@@ -5681,6 +5718,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'truncateHistory',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
   }
@@ -5752,6 +5792,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
     return strippedEntries;

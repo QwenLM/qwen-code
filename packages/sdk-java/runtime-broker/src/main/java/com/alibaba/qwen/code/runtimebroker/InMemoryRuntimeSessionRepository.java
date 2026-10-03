@@ -83,6 +83,19 @@ public final class InMemoryRuntimeSessionRepository
     }
 
     @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findByBinding(String bindingId,
+            long generation, String afterSessionId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 Sessions");
+        }
+        return records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(record -> bindingId.equals(record.getBindingId())
+                        && generation == record.getRuntimeGeneration()
+                        && (afterSessionId == null || record.getRuntimeSessionId().compareTo(afterSessionId) > 0))
+                .sorted(Comparator.comparing(RuntimeSessionRecord::getRuntimeSessionId)).limit(limit).toList();
+    }
+
+    @Override
     public synchronized long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

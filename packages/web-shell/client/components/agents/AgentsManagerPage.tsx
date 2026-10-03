@@ -25,12 +25,8 @@ import {
   type AgentSelection,
   type AgentLevelFilter,
 } from './agents-manager-logic';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { AgentCreatePage } from './AgentCreatePage';
-/**
- * Advertised only while the daemon has the collaboration opt-in on; see
- * `CONDITIONAL_SERVE_FEATURES` in packages/cli/src/serve/capabilities.ts.
- */
-const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
 import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import {
   AlertDialog,
@@ -82,10 +78,11 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
-  initialAgentView?: 'agents' | 'tasks' | 'new-agent';
+  initialAgentView?: 'agents' | 'tasks' | 'runtime' | 'new-agent';
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
+  workspaceCwd?: string;
   /** Opens an agent's own session in the shell's session view. */
   onOpenAgentSession?: (sessionId: string) => void;
   onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
@@ -140,6 +137,7 @@ export function AgentsManagerPage({
   onClose,
   embedded,
   initialCreateScope,
+  workspaceCwd,
   onOpenAgentSession,
   onOpenThreadChat,
 }: AgentsManagerPageProps) {
@@ -177,8 +175,10 @@ export function AgentsManagerPage({
   const workspace = useWorkspace();
   const collaborationAvailable =
     onOpenThreadChat !== undefined &&
-    workspace.capabilities?.features.includes(AGENT_COLLABORATION_FEATURE) ===
-      true;
+    isAgentCollaborationEnabledForWorkspace(
+      workspace.capabilities,
+      workspaceCwd,
+    );
   const [agentsOpen, setAgentsOpen] = useState(
     () => !initialCreateScope && collaborationAvailable,
   );
@@ -357,6 +357,7 @@ export function AgentsManagerPage({
         {navigation}
         <LazyThreadsRoute
           initialView={initialAgentView}
+          workspaceCwd={workspaceCwd}
           onOpenThreadChat={onOpenThreadChat}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
           onOpenDefinitions={() => setAgentsOpen(false)}
