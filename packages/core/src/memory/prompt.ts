@@ -6,11 +6,14 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
+import {
+  INDEX_TRUNCATION_WARNING,
+  MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+  MAX_INDEX_CHARS,
+  trimIndexToBudget,
+} from './index-budget.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_PROMPT');
-
-const MAX_MANAGED_AUTO_MEMORY_INDEX_LINES = 200;
-const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
@@ -211,35 +214,29 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = indexContent.trim();
   const lines = trimmed.split('\n');
   const lineCount = lines.length;
-  const byteCount = trimmed.length;
+  const charCount = trimmed.length;
   const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
-  const wasByteTruncated = byteCount > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES;
+  const wasCharTruncated = charCount > MAX_INDEX_CHARS;
 
-  if (!wasLineTruncated && !wasByteTruncated) {
+  if (!wasLineTruncated && !wasCharTruncated) {
     return trimmed;
   }
 
-  let truncated = wasLineTruncated
-    ? lines.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES).join('\n')
-    : trimmed;
-
-  if (truncated.length > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf(
-      '\n',
-      MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
-    );
-    truncated = truncated.slice(
-      0,
-      cutAt > 0 ? cutAt : MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
-    );
-  }
+  // The writer's trailing warning is metadata, not a priority entry.
+  const noticeSuffix = ['\n\n', '\r\n\r\n']
+    .map((separator) => `${separator}${INDEX_TRUNCATION_WARNING}`)
+    .find((suffix) => trimmed.endsWith(suffix));
+  const entries = noticeSuffix
+    ? trimmed.slice(0, -noticeSuffix.length).split('\n')
+    : lines;
+  const truncated = trimIndexToBudget(entries);
 
   const reason =
-    wasByteTruncated && !wasLineTruncated
-      ? `${(byteCount / 1024).toFixed(1)} KB (limit: ${(MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES / 1024).toFixed(1)} KB) — index entries are too long`
-      : wasLineTruncated && !wasByteTruncated
+    wasCharTruncated && !wasLineTruncated
+      ? `${(charCount / 1024).toFixed(1)} KB (limit: ${(MAX_INDEX_CHARS / 1024).toFixed(1)} KB) — index entries are too long`
+      : wasLineTruncated && !wasCharTruncated
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
-        : `${lineCount} lines and ${(byteCount / 1024).toFixed(1)} KB`;
+        : `${lineCount} lines and ${(charCount / 1024).toFixed(1)} KB`;
 
   return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line under ~200 chars; move detail into topic files.`;
 }
