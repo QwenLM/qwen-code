@@ -55,6 +55,10 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import {
+  ACCESS_LOG_ERROR_CODE_LOCAL,
+  ACCESS_LOG_ERROR_REASON_LOCAL,
+} from './server/access-log.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedHookSession,
@@ -194,8 +198,24 @@ function object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function error(res: Response, status: number, code: string): void {
-  res.status(status).json({ error: code, code });
+function error(
+  res: Response,
+  status: number,
+  code: string,
+  reason?: string,
+): void {
+  const locals = res.locals as Record<string, unknown> | undefined;
+  if (locals) {
+    locals[ACCESS_LOG_ERROR_CODE_LOCAL] = code;
+    if (reason !== undefined) locals[ACCESS_LOG_ERROR_REASON_LOCAL] = reason;
+  }
+  res
+    .status(status)
+    .json(
+      reason === undefined
+        ? { error: code, code }
+        : { error: code, code, reason },
+    );
 }
 
 function identity(
@@ -1541,13 +1561,14 @@ export function registerHostedHarnessSessionRoutes(
           fileHistory.pendingUndo
             ? 'hosted_file_history_recovery_required'
             : 'hosted_turn_recovery_required',
+          fileHistory.pendingUndo ? 'undo_unsettled' : 'file_history_unsettled',
         );
         return;
       }
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
         await managed.close();
-        error(res, 409, 'hosted_turn_recovery_required');
+        error(res, 409, 'hosted_turn_recovery_required', 'restore_blocked');
         return;
       }
       let incompletePublication = false;
@@ -1560,9 +1581,17 @@ export function registerHostedHarnessSessionRoutes(
             restore.throughSequence,
           );
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
           await managed.close();
-          error(res, 409, 'hosted_turn_recovery_required');
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} restore verification refused: ${String(cause)}`,
+          );
+          error(
+            res,
+            409,
+            'hosted_turn_recovery_required',
+            'restore_verification_failed',
+          );
           return;
         }
       }
@@ -1579,7 +1608,12 @@ export function registerHostedHarnessSessionRoutes(
         // cancellation) and answer with the recovery snapshot.
         if (toolProfile === undefined || !brokerOptions) {
           await managed.close();
-          error(res, 409, 'hosted_turn_recovery_required');
+          error(
+            res,
+            409,
+            'hosted_turn_recovery_required',
+            'takeover_unsupported',
+          );
           return;
         }
         try {
@@ -1593,7 +1627,12 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (recovered === undefined) {
             await managed.close();
-            error(res, 409, 'hosted_turn_recovery_required');
+            error(
+              res,
+              409,
+              'hosted_turn_recovery_required',
+              'takeover_unrecovered',
+            );
             return;
           }
           recovery = recovered.report;
@@ -1609,7 +1648,7 @@ export function registerHostedHarnessSessionRoutes(
           // A failed takeover keeps the turn parked for the next attempt:
           // refuse exactly like a plain recovery refusal so the coordinator
           // retries instead of failing the Turn.
-          error(res, 409, 'hosted_turn_recovery_required');
+          error(res, 409, 'hosted_turn_recovery_required', 'takeover_failed');
           return;
         }
       } else if (
@@ -1716,16 +1755,24 @@ export function registerHostedHarnessSessionRoutes(
         // can hand back a lease the takeover acquired; release it here.
         await releaseLeaseNow(session);
         await managed.close();
-        error(res, 409, 'hosted_turn_recovery_required');
+        error(res, 409, 'hosted_turn_recovery_required', 'turn_unsettled');
         return;
       }
       if (!create && workspaceProfile) {
         try {
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
           await releaseLeaseNow(session);
           await managed.close();
-          error(res, 409, 'hosted_turn_recovery_required');
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} workspace writable check refused: ${String(cause)}`,
+          );
+          error(
+            res,
+            409,
+            'hosted_turn_recovery_required',
+            'workspace_not_writable',
+          );
           return;
         }
       }
@@ -1929,7 +1976,7 @@ export function registerHostedHarnessSessionRoutes(
       session.mcp?.hasPendingOperations() ||
       session.hooks?.hasPendingOperations
     )
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
@@ -2314,7 +2361,7 @@ export function registerHostedHarnessSessionRoutes(
       (session.blocked || session.mcp.hasPendingOperations()) &&
       !session.managed.authority.extensionRecord('mcp_operation', operationId)
     )
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     session.mcpBusy = true;
     void session.mcp
       .invoke(operationId, serverId, invocation)
@@ -2494,7 +2541,7 @@ export function registerHostedHarnessSessionRoutes(
     // the refusal rather than re-answer an admission that will never settle.
     if (session.blocked) {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     }
     // A continuation whose reply was lost is replayed by the coordinator: it
     // must get the watermark it was admitted at, running or settled, or the
@@ -2514,7 +2561,12 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (!session.toolProfile || !brokerOptions) {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        'recovery_unsupported',
+      );
     }
     if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
       if (settledReplay(session, promptId, res)) {
@@ -2541,7 +2593,12 @@ export function registerHostedHarnessSessionRoutes(
       continueAuthorization.checkpoint.continuation.phase !== 'results_ready'
     ) {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        'not_continuable',
+      );
     }
     const abort = new AbortController();
     session.active = { promptId, digest: '', abort };
@@ -2739,7 +2796,7 @@ export function registerHostedHarnessSessionRoutes(
     const { promptId, checkpointId, activationId } = request;
     if (session.blocked) {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     }
     // A cancellation whose reply was lost is replayed by the coordinator: it
     // must get the watermark it was admitted at, running or settled — the
@@ -2770,7 +2827,12 @@ export function registerHostedHarnessSessionRoutes(
     // Broker there is no way to prove the parked executions stopped.
     if (!session.toolProfile || !brokerOptions) {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        'recovery_unsupported',
+      );
     }
     // A checkpoint whose authorization is no longer readable cannot prove
     // its parked executions; refuse like the load path instead of settling
@@ -2786,7 +2848,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (cancelAuthorization?.status !== 'runnable') {
       releaseRecoveredRuntime(session);
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
     }
     session.admissions.set(promptId, {
       digest: recoveryDigest,
@@ -3069,12 +3131,19 @@ export function registerHostedHarnessSessionRoutes(
     if (session.hooksBusy || session.hooks?.hasUnsettledExecutions)
       return error(res, 409, 'hosted_hook_operation_active');
     if (session.blocked)
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     if (
       session.hooks?.hasPendingOperations ||
       session.managed.authority.currentActivation?.phase !== 'active'
     )
-      return error(res, 409, 'hosted_turn_recovery_required');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        session.hooks?.hasPendingOperations
+          ? 'hook_operation_active'
+          : 'activation_inactive',
+      );
     const body = object(req.body);
     const requestId = body?.['requestId'];
     const promptId = body?.['promptId'];

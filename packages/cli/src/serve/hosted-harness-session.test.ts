@@ -1325,6 +1325,7 @@ describe('Hosted Harness no-tool session', () => {
         ).send({ managedSessionStore: store() });
         expect(refused.status).toBe(409);
         expect(refused.body.code).toBe('hosted_turn_recovery_required');
+        expect(refused.body.reason).toBe('restore_verification_failed');
         damaged.mockRestore();
       }
       const reads = new Map<string, { kind: string; count: number }>();
@@ -3221,6 +3222,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('restore_verification_failed');
     expect(state.model).toHaveBeenCalledTimes(1);
     damaged.mockRestore();
     const loaded = await headers(
@@ -3313,6 +3315,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('restore_verification_failed');
     expect(
       damaged.mock.calls.some(([ref]) => ref.kind === 'managed-tool-outcome'),
     ).toBe(true);
@@ -3449,6 +3452,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('restore_verification_failed');
     expect(
       read.mock.calls.map(([ref]) => [ref.kind, ref.resourceId]),
     ).toContainEqual(['managed-tool-result-content', sealId]);
@@ -3575,6 +3579,7 @@ describe('Hosted Harness no-tool session', () => {
       ).send({ managedSessionStore: store() });
       expect(refused.status).toBe(409);
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      expect(refused.body.reason).toBe('restore_verification_failed');
       expect(state.model).not.toHaveBeenCalled();
       damaged.mockRestore();
       const loaded = await headers(
@@ -3633,6 +3638,7 @@ describe('Hosted Harness no-tool session', () => {
       ).send({ managedSessionStore: store() });
       expect(refused.status).toBe(409);
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      expect(refused.body.reason).toBe('restore_verification_failed');
       expect(state.model).not.toHaveBeenCalled();
       damaged.mockRestore();
       const retry = await headers(
@@ -3664,6 +3670,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store() });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('restore_verification_failed');
     expect(state.model).not.toHaveBeenCalled();
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -4398,6 +4405,7 @@ describe('Hosted Harness no-tool session', () => {
       ).send({ managedSessionStore: store() });
       expect(ownerLost.status).toBe(409);
       expect(ownerLost.body.code).toBe('hosted_turn_recovery_required');
+      expect(ownerLost.body.reason).toBe('workspace_not_writable');
       expect(state.model).toHaveBeenCalledOnce();
       expect(prepare).toHaveBeenCalledOnce();
       expect(execute).toHaveBeenCalledOnce();
@@ -4982,6 +4990,7 @@ describe('Hosted Harness no-tool session', () => {
       });
     expect(rejected.status).toBe(409);
     expect(rejected.body.code).toBe('hosted_turn_recovery_required');
+    expect(rejected.body.reason).toBe('turn_blocked');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
@@ -5050,6 +5059,7 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
@@ -5612,6 +5622,7 @@ describe('Hosted Harness tool approvals', () => {
     ).send({ managedSessionStore: store(), toolProfile: files });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
     expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
@@ -6666,6 +6677,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
     expect(execute).not.toHaveBeenCalled();
     expect(acquireSpy).not.toHaveBeenCalled();
   });
@@ -7215,6 +7227,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const { server, loaded } = await loadReplacement();
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('takeover_failed');
     // The takeover acquired the Runtime Session before the drive failed; the
     // refusal must hand the lease back or the Workspace stays pinned.
     expect(release).toHaveBeenCalled();
@@ -7439,6 +7452,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const replayed = await send();
     expect(replayed.status).toBe(409);
     expect(replayed.body.code).toBe('hosted_turn_recovery_required');
+    expect(replayed.body.reason).toBe('turn_blocked');
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

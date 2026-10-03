@@ -34,6 +34,14 @@ export const ACCESS_LOG_CONTROLLER_LOCAL = 'accessLogController';
 /** res.locals key the pre-auth gates set on their reject path. */
 export const ACCESS_LOG_REJECT_LOCAL = 'accessLogPreAuthReject';
 
+/**
+ * res.locals keys a route helper sets when it rejects a request with an
+ * `{error, code}` body: without these the access log records the status but
+ * never the branch that produced it.
+ */
+export const ACCESS_LOG_ERROR_CODE_LOCAL = 'accessLogErrorCode';
+export const ACCESS_LOG_ERROR_REASON_LOCAL = 'accessLogErrorReason';
+
 export interface AccessLogController {
   sealAndFlushSuppressed(): void;
 }
@@ -215,6 +223,17 @@ export function installAccessLogMiddleware(
         // where it is the only traceId link between a daemon log line and the
         // caller that sent the traceparent header.
         const inboundTraceId = getDaemonTelemetryInboundTraceId(res);
+        const locals = res.locals as Record<string, unknown> | undefined;
+        const errorCode =
+          status >= 400 &&
+          typeof locals?.[ACCESS_LOG_ERROR_CODE_LOCAL] === 'string'
+            ? (locals[ACCESS_LOG_ERROR_CODE_LOCAL] as string)
+            : undefined;
+        const errorReason =
+          status >= 400 &&
+          typeof locals?.[ACCESS_LOG_ERROR_REASON_LOCAL] === 'string'
+            ? (locals[ACCESS_LOG_ERROR_REASON_LOCAL] as string)
+            : undefined;
         const ctx = {
           route: route.value,
           ...(route.originalBytes
@@ -237,6 +256,8 @@ export function installAccessLogMiddleware(
               }
             : {}),
           ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
+          ...(errorCode ? { code: errorCode } : {}),
+          ...(errorReason ? { reason: errorReason } : {}),
           status,
           durationMs: Math.max(0, Math.round(monotonicNow() - startMs)),
         };
