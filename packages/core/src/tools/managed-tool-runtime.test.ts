@@ -1033,6 +1033,58 @@ describe('ManagedToolRuntime', () => {
     expect(hooks.post).not.toHaveBeenCalled();
   });
 
+  it('classifies a timed-out Shell result carrying an error as error, not cancelled', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command timed out.',
+      error: {
+        message: 'command exceeded its timeout',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command timed out.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: null,
+        pid: 123,
+        error: 'command exceeded its timeout',
+        outcome: 'timed_out',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('error');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'command exceeded its timeout',
+      false,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
   it('releases prepared work without changing completed invocation evidence', async () => {
     const completed = await prepare();
     await runtime.preflight(completed);
