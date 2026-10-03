@@ -275,6 +275,25 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
+    async (sessionId, realPath) => {
+      // `mount.resolve` returns canonical directories only, so a lexical
+      // relative check against each installed sibling is enough.
+      for (const [otherId, binding] of installations.bindings()) {
+        if (otherId === sessionId) continue;
+        const directory = await mount.resolve(binding.cwdRelative);
+        // An unresolved binding cannot prove the outside target is shared.
+        if (directory === undefined) return true;
+        const relative = path.relative(directory, realPath);
+        if (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
   );
   registerManagedRuntimeProviderRoute(
     app,

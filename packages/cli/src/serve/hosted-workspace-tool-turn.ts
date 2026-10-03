@@ -13,6 +13,20 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -81,8 +95,17 @@ import {
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
-export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
-export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+};
+
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -94,9 +117,6 @@ export function isRetryableWorkspaceAcquisition(
     (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
   );
 }
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
 
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
@@ -197,6 +217,32 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_GLOB_TOOL: FunctionDeclaration = {
+  name: 'glob',
+  description:
+    'Find files by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string' },
+      path: {
+        type: 'string',
+        description:
+          'Directory to search, relative to the saved Session working directory. Omit to search the whole working directory.',
+      },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+};
+export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -259,6 +305,7 @@ export class HostedWorkspaceToolTurn {
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
+    private readonly profile?: string,
     private readonly hooks?: HostedHookSession,
   ) {
     this.publication =
@@ -285,10 +332,15 @@ export class HostedWorkspaceToolTurn {
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
+    const search = isHostedWorkspaceSearchProfile(this.profile);
     this.advertised = [
       ...(this.publication || this.shell
-        ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS
+        ? search
+          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+          : HOSTED_WORKSPACE_SHELL_TOOLS
+        : search
+          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+          : HOSTED_WORKSPACE_FILE_TOOLS
       ).map((tool) =>
         ['write_file', 'edit'].includes(tool.name ?? '')
           ? {
@@ -771,6 +823,53 @@ export class HostedWorkspaceToolTurn {
           input = this.publication
             ? { ...args }
             : { ...args, is_background: false };
+        } else if (call.name === 'glob') {
+          input = { ...call.args };
+          const globError =
+            'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
+          const requestedPattern = call.args['pattern'];
+          const directory = call.args['path'];
+          // A pattern is a second search root: refuse the absolute/`..` and
+          // oversized shapes here, pre-acquisition, with the identical check
+          // the worker applies after dispatch — a refusal before acquisition
+          // stays model-correctable and costs no durable Runtime work
+          // (#13030). Validate the value that gets dispatched, never the raw
+          // one: glob treats an untrimmed pattern as a literal, so it matches
+          // nothing and the false negative is persisted.
+          const pattern =
+            typeof requestedPattern === 'string' ? requestedPattern.trim() : '';
+          const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
+          if (check === 'too-complex') {
+            validationError = HOSTED_GLOB_TOO_COMPLEX;
+          } else if (check === 'escapes') {
+            validationError = globError;
+          } else {
+            input['pattern'] = pattern;
+          }
+          if (!validationError && directory !== undefined) {
+            if (
+              directory === null ||
+              (typeof directory === 'string' && directory.trim() === '')
+            ) {
+              // A blank or `null` path is the omitted case: the declaration
+              // marks it optional, and the executor maps a missing key to the
+              // Session root — refusing it as traversal would also poison every
+              // valid sibling call in the batch.
+              delete input['path'];
+            } else if (typeof directory !== 'string') {
+              validationError = globError;
+            } else {
+              try {
+                input['path'] = normalizeWorkspaceRelativePath(
+                  directory.trim(),
+                );
+              } catch (cause) {
+                if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                  throw cause;
+                validationError = globError;
+              }
+            }
+          }
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -1460,6 +1559,28 @@ export class HostedWorkspaceToolTurn {
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
           !this.messageFitsInline('tool_result', converted, model)
         ) {
+          // A glob result is a path list: keep the prefix that fits rather
+          // than omitting the whole result, so the model can narrow and retry.
+          if (request.call.name === 'glob') {
+            const fits = (candidate: Part[]) =>
+              Buffer.byteLength(
+                JSON.stringify({ executionCallId, ...candidate[0] }),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+              this.messageFitsInline('tool_result', candidate, model);
+            const truncated = truncateHostedGlobResponse(converted, fits);
+            if (truncated) {
+              converted = truncated;
+              outcome = Buffer.from(
+                JSON.stringify({ executionCallId, ...converted[0] }),
+              );
+            }
+          }
+        }
+        if (
+          outcome.byteLength >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        ) {
           if (receipt)
             throw new Error(
               'Admitted Shell result exceeds the inline Session Store limit.',
@@ -2072,4 +2193,43 @@ export class HostedWorkspaceToolTurn {
   async close(): Promise<void> {
     await this.publisher?.close();
   }
+}
+
+const HOSTED_GLOB_TRUNCATION_HINT =
+  '\n---\n[Result truncated to fit the durable Session limit. Narrow the pattern or path.]';
+
+/**
+ * Keeps the longest whole-line prefix of a glob result that fits, followed by
+ * a narrowing hint. Returns undefined when the response has no text output to
+ * truncate or even the empty list does not fit.
+ */
+export function truncateHostedGlobResponse(
+  parts: Part[],
+  fits: (candidate: Part[]) => boolean,
+): Part[] | undefined {
+  const functionResponse = parts[0]?.functionResponse;
+  const response = functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  const output = response?.['output'];
+  if (!functionResponse || !response || typeof output !== 'string')
+    return undefined;
+  const lines = output.split('\n');
+  while (lines.length > 0) {
+    const candidate: Part[] = [
+      {
+        functionResponse: {
+          ...functionResponse,
+          response: {
+            ...response,
+            output: lines.join('\n') + HOSTED_GLOB_TRUNCATION_HINT,
+            outputTruncated: true,
+          },
+        },
+      },
+    ];
+    if (fits(candidate)) return candidate;
+    lines.pop();
+  }
+  return undefined;
 }

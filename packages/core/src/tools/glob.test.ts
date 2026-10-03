@@ -739,6 +739,73 @@ describe('GlobTool', () => {
     });
   });
 
+  describe('containmentRoot', () => {
+    let session: string;
+
+    beforeEach(async () => {
+      await mkdirp('session/src');
+      await mkdirp('web');
+      await put('session/src/index.ts');
+      await put('web/secret.txt', 'sibling');
+      await fs.symlink(
+        path.join('..', 'web'),
+        path.join(tempRootDir, 'session/peek'),
+      );
+      session = path.join(tempRootDir, 'session');
+    });
+
+    const contained = () =>
+      new GlobTool(mockConfig, { containmentRoot: session });
+
+    it.each([
+      '[.][.]/web/secret.txt',
+      '\\.\\./web/*',
+      '{.,..}/**/*',
+      'peek/**/*',
+      '{**/*.ts,peek/*}',
+    ])('never walks or reports outside the root: %s', async (pattern) => {
+      const result = await run({ pattern, path: session }, contained());
+      // The no-match message quotes the caller's own pattern back, so a leak
+      // has to be judged by the paths a walk would have reported — matching on
+      // the pattern's spelling of them fails on the pattern itself.
+      const reported = String(result.llmContent);
+      expect(reported).not.toContain(path.join(tempRootDir, 'web'));
+      expect(reported).not.toContain(path.join(session, 'peek', 'secret.txt'));
+    });
+
+    it('answers an existing and a missing outside file alike', async () => {
+      const existing = await run(
+        { pattern: '[.][.]/web/secret.txt', path: session },
+        contained(),
+      );
+      const missing = await run(
+        { pattern: '[.][.]/web/nope.txt', path: session },
+        contained(),
+      );
+      expect(existing.returnDisplay).toBe('No files found');
+      expect(missing.returnDisplay).toBe('No files found');
+    });
+
+    it('still finds and lists what is inside the root', async () => {
+      const result = await run({ pattern: '**/*', path: session }, contained());
+      expect(result.llmContent).toContain(
+        path.join(session, 'src', 'index.ts'),
+      );
+      // A merely listed outward symlink keeps its in-root name.
+      expect(result.llmContent).toContain(path.join(session, 'peek'));
+    });
+
+    it('leaves the ordinary tool able to search outside', async () => {
+      const result = await run({
+        pattern: '[.][.]/web/secret.txt',
+        path: session,
+      });
+      expect(result.collectedFilePaths).toContain(
+        path.join(tempRootDir, 'web/secret.txt'),
+      );
+    });
+  });
+
   describe('getDescription', () => {
     const descriptionOf = (params: GlobToolParams) =>
       globTool.build(params).getDescription();
