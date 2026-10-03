@@ -49,10 +49,6 @@ public class ManagedWorkspaceRegistry {
                 Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
     }
 
-    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        return createdSession(tenantId, actorId, sessionId);
-    }
-
     public boolean canRead(String tenantId, String actorId,
             String workspaceId) {
         if (actorId == null || actorId.isEmpty()) {

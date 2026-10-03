@@ -86,13 +86,6 @@ public final class ApiModels {
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
             boolean sessionUnarchive, boolean sessionDelete) {
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
-            this(tasks, artifacts, actions, false, false, false, false, false);
-        }
-
-        public WebShellSessionCapabilities(boolean tasks, boolean actions) {
-            this(tasks, false, actions, false, false, false, false, false);
-        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
