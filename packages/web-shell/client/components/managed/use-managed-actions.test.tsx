@@ -462,6 +462,36 @@ describe('useManagedActions', () => {
     expect(hook.latest?.loadError).toBeUndefined();
   });
 
+  it('restores the retry budget after a reload of the Session summary', async () => {
+    vi.useFakeTimers();
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockResolvedValueOnce([pending]);
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    for (const delay of [0, 2_000, 5_000, 10_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    expect(listPending).toHaveBeenCalledTimes(4);
+
+    // Refresh reloads the summary: the capability is unknown, then known again.
+    hook.rerender({ enabled: undefined });
+    hook.rerender({ enabled: true });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(listPending).toHaveBeenCalledTimes(5);
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(listPending).toHaveBeenCalledTimes(6);
+    expect(hook.latest?.action).toEqual(pending);
+    expect(hook.latest?.loadError).toBeUndefined();
+  });
+
   it('keeps the shown approval while the capability is unknown', async () => {
     const listPending = vi.fn().mockResolvedValue([pending]);
     const respond = vi.fn().mockResolvedValue(undefined);
