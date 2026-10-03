@@ -1033,6 +1033,45 @@ describe('auto-memory relevant recall', () => {
       expect(event.selector_skipped).toBeUndefined();
     });
 
+    it('leaves selector_skipped unset when an empty corpus short-circuits the recall', async () => {
+      // The short circuit at the top of the entry point never reaches the
+      // selector, so the recall made no skip decision. `false` here would read
+      // as "the selector ran and was not skipped" and would put a trivially
+      // fast recall into the ablation's control arm, which the treatment arm
+      // structurally cannot contain — a skip requires exactly one candidate.
+      mockSnapshot([]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'We hit provider fallback again.',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset for a whitespace-only query', async () => {
+      mockSnapshot([exact]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '   ',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
     it('keeps the selector when the unique strong fast document has a stale body', async () => {
       const stale = {
         ...exact,
@@ -1103,6 +1142,64 @@ describe('auto-memory relevant recall', () => {
 
       expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toHaveLength(2);
       expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when a second strong match sits below the published window', async () => {
+      // Uniqueness has to be judged against the pool the suppressed selector
+      // would have been handed, not just the published fast list. Doc B is a
+      // title match ranked 7th lexically, so `fallbackDocs` (top
+      // MAX_RELEVANT_DOCS) never contains it while `modelCandidates` does.
+      const ranked = 'deploy timeout provider fallback';
+      const strongTop = {
+        ...memoryDoc(
+          'a-deploy-timeout.md',
+          'reference',
+          'deploy timeout',
+          'runbook alpha',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 100,
+      };
+      // Each filler outscores B (one title token plus four body tokens) while
+      // carrying exactly one query token in its metadata, so no filler is a
+      // strong match and B stays below the published window.
+      const fillers = [1, 2, 3, 4, 5].map((n) => ({
+        ...memoryDoc(
+          `filler-${n}.md`,
+          'reference',
+          `deploy notes ${n}`,
+          'alpha group checklist',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 90 - n,
+      }));
+      const strongBelowWindow = {
+        ...memoryDoc(
+          'b-provider-glossary.md',
+          'reference',
+          'provider',
+          'glossary entry alpha',
+          'unrelated alpha text',
+        ),
+        mtimeMs: 1,
+      };
+      mockSnapshot([strongTop, ...fillers, strongBelowWindow]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        ranked,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([strongTop]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      // The suppressed selector would have seen B, so the recall was ambiguous.
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock.calls[0]?.[2] ??
+          [],
+      ).toContainEqual(strongBelowWindow);
+      expect(result.selectorSkipped).toBeUndefined();
     });
 
     it('keeps the selector when nothing matches strongly', async () => {

@@ -1756,9 +1756,12 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
    * True only when the model selector was skipped because the deterministic
    * fast result matched a title/keyword and its body was absent (#13003). Keeps a
    * deliberate skip apart from a selector failure, which also reports
-   * `strategy: 'heuristic'`. Undefined when the recall mode had no skip
-   * decision to make (legacy mode), so the metric dimension stays off a
-   * series the experiment cannot move.
+   * `strategy: 'heuristic'`. Undefined when the recall had no skip decision to
+   * make — legacy mode, or a structured recall that returned before the
+   * selector was reached (empty query, empty corpus, non-positive limit) — so
+   * the metric dimension stays off a series the experiment cannot move, and
+   * `false` keeps meaning "the selector ran and was not skipped" instead of
+   * absorbing trivially fast recalls into the ablation's control arm.
    */
   selector_skipped: boolean | undefined;
 

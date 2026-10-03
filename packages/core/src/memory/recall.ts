@@ -390,9 +390,28 @@ function selectModelCandidateDocuments(
   recentTools: readonly string[],
   fallbackLimit: number,
   useStructuredMetadata = true,
+  countStrongMatches = false,
 ): {
   modelCandidates: ScannedAutoMemoryDocument[];
   fallbackDocs: ScannedAutoMemoryDocument[];
+  /**
+   * How many of the scored `lexical` pool match a title or keyword, or
+   * `undefined` when `countStrongMatches` was off.
+   *
+   * The #13003 skip guard needs this because the selector it suppresses is
+   * handed `modelCandidates`, whose lexical half is the top
+   * `MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE` of `lexical`,
+   * while `fallbackDocs` is only the top `fallbackLimit`
+   * (`<= MAX_RELEVANT_DOCS`). Counting the published list alone would call a
+   * recall "unique" while a second strong match still sat in the suppressed
+   * selector's pool at ranks `fallbackLimit + 1` and beyond.
+   *
+   * Computed only while the guard is live: `matchesTitleOrKeyword` builds a
+   * RegExp per short keyword per document, and this pool is roughly 36x wider
+   * than the fast list, on a path that carries a latency budget for every
+   * structured recall including knob-off ones.
+   */
+  lexicalStrongMatchCount: number | undefined;
 } {
   const isActiveToolNoise = createActiveToolUsageFilter(
     recentTools,
@@ -408,6 +427,12 @@ function selectModelCandidateDocuments(
     ),
     useStructuredMetadata,
   );
+  // Reuse the already-scored `lexical` array rather than re-scoring the
+  // corpus: the guard only needs a count, and re-scoring would double the
+  // cost of the widest pool on this path.
+  const lexicalStrongMatchCount = countStrongMatches
+    ? lexical.filter((doc) => matchesTitleOrKeyword(query, doc)).length
+    : undefined;
   const modelLexical = lexical.slice(
     0,
     MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
@@ -425,6 +450,7 @@ function selectModelCandidateDocuments(
   return {
     modelCandidates,
     fallbackDocs: lexical.slice(0, fallbackLimit),
+    lexicalStrongMatchCount,
   };
 }
 
@@ -567,12 +593,22 @@ function logRecallResult(
     fastDurationMs: number;
     selectorDurationMs: number;
   },
+  selectorDecided: boolean,
 ): void {
   if (!config || abortSignal?.aborted) return;
   // The skip guard only exists in structured mode, so legacy recalls never
   // have a selector-skip decision to report: stamping `false` there would
   // mix a constant into the experiment's control series. Leave the field
   // unset and let the logger drop the dimension.
+  //
+  // A structured recall that returned before the selector was ever reached —
+  // the empty-query / empty-corpus / non-positive-limit short circuit — is in
+  // the same position: it made no skip decision, and `false` there would read
+  // as "the selector ran and was not skipped". That would put trivially fast
+  // recalls into the ablation's control arm, which the treatment arm
+  // structurally cannot contain (a skip requires exactly one candidate), and
+  // `recordMemoryRecallMetrics` carries only `strategy` and `selector_skipped`
+  // on the counter and histogram, so the samples could not be sliced back out.
   const legacy = (config.getMemoryRecallMode?.() ?? 'legacy') === 'legacy';
   logMemoryRecall(
     config,
@@ -585,7 +621,9 @@ function logRecallResult(
       scan_duration_ms: timings.scanDurationMs,
       fast_duration_ms: timings.fastDurationMs,
       selector_duration_ms: timings.selectorDurationMs,
-      ...(legacy ? {} : { selector_skipped: result.selectorSkipped === true }),
+      ...(legacy || !selectorDecided
+        ? {}
+        : { selector_skipped: result.selectorSkipped === true }),
     }),
   );
 }
@@ -683,6 +721,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       result,
       t0,
       timings(),
+      // Short circuit: the selector was never reached, so this recall made no
+      // skip decision and must not enter the control series as `false`.
+      false,
     );
     return result;
   }
@@ -691,12 +732,18 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   if (options.config) {
     try {
       const fastStartedAt = Date.now();
+      // Evaluate once, before the candidate pass: the same value decides
+      // whether the widened count is paid for and whether the guard below may
+      // fire, so the two cannot disagree if the environment changes mid-call.
+      const skipGateEnabled =
+        !legacy && isSkipSelectorOnUniqueStrongHitEnabled();
       const candidates = selectModelCandidateDocuments(
         query,
         docs,
         options.recentTools ?? [],
         limit,
         !legacy,
+        skipGateEnabled,
       );
       fallbackDocs = candidates.fallbackDocs;
       // Publish the deterministic candidates before blocking on the selector
@@ -732,11 +779,21 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       fastDurationMs = Date.now() - fastStartedAt;
       // Count before rendering: a second candidate trimmed by the prompt
       // budget must not turn an ambiguous recall into a selector skip.
+      //
+      // Count the selector's own pool for the same reason. `fastCandidateCount`
+      // only sees `fallbackDocs`, the top `limit` (<= MAX_RELEVANT_DOCS) of the
+      // lexical ranking, while the selector this guard suppresses would have
+      // been handed `candidates.modelCandidates` — the top
+      // MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE, roughly 36x
+      // wider. A second strong match ranked below `limit` is invisible to the
+      // published count, so without `lexicalStrongMatchCount` the guard would
+      // fire on an ambiguous recall and still report `selector_skipped: true`,
+      // counting it in the treatment arm as a *unique* strong hit.
       const uniqueStrongHit = publishedFast?.selectedDocs[0];
       if (
-        !legacy &&
-        isSkipSelectorOnUniqueStrongHitEnabled() &&
+        skipGateEnabled &&
         fastCandidateCount === 1 &&
+        (candidates.lexicalStrongMatchCount ?? 0) === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
         matchesTitleOrKeyword(query, uniqueStrongHit) &&
@@ -755,6 +812,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
           result,
           t0,
           timings(),
+          // This is the deliberate skip the field exists to report.
+          true,
         );
         return result;
       }
@@ -788,6 +847,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         result,
         t0,
         timings(),
+        // The selector ran, so `false` is a genuine control sample.
+        true,
       );
       return result;
     } catch (error) {
@@ -853,6 +914,11 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     result,
     t0,
     timings(),
+    // Heuristic fallback. `selectorStartedAt` is set the instant the selector
+    // is entered, so it separates "the selector ran and then failed" — a real
+    // control sample, `false` is correct — from a throw before it was reached,
+    // which made no skip decision and must stay off the series.
+    selectorStartedAt !== undefined,
   );
   return result;
 }

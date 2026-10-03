@@ -752,7 +752,7 @@ The following events are logged:
   - **Attributes**: `trigger` ("auto"/"manual"), `status` ("updated"/"noop"/"failed"/"cancelled"), `deduped_entries` (int), `touched_topics_count` (int), `touched_topics` (string), `duration_ms` (int)
 
 - `qwen-code.memory.recall`: Memory recall operation completed.
-  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int), `selector_skipped` (bool, optional — set for structured-mode recalls; false when the selector runs, including when the #13003 knob is off)
+  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int), `selector_skipped` (bool, optional — set for structured-mode recalls that made a skip decision, so not on the empty-query/empty-corpus short circuit; false when the selector runs, including when the #13003 knob is off)
 
 #### Prompt Suggestion & Speculation Events
 
