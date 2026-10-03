@@ -733,37 +733,57 @@ class Issue13181QueryBudgetTest {
                     + " can_create) VALUES (?, 'workspace', ?, TRUE, TRUE)",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
         }
+        // A second workspace where the actor reads but cannot create: its
+        // session exercises the grant's can_create term, and the page's two
+        // workspaces make the grant batch's single-query shape
+        // discriminable.
+        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+                + " (tenant_id, workspace_id, workspace_generation,"
+                + " storage_id, display_name, config_ref, policy_ref, state)"
+                + " VALUES (?, 'workspace2', 1, 'storage', 'Workspace2', ?,"
+                + " ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                + " (tenant_id, workspace_id, actor_id, can_read,"
+                + " can_create) VALUES (?, 'workspace2', ?, TRUE, TRUE)",
+                tenant, "actor".getBytes(StandardCharsets.UTF_8));
         List<String> ids = new ArrayList<>();
-        for (int index = 0; index < 6; index++) {
-            String creator = index < 4 ? "actor" : "other";
+        for (int index = 0; index < 7; index++) {
+            String creator = index < 4 || index == 6 ? "actor" : "other";
+            String workspace = index == 6 ? "workspace2" : "workspace";
             String key = "ws-" + index + "-" + UUID.randomUUID();
             String title = "w-" + index;
             ids.add(fixture.tx.execute(status -> fixture.store
                     .insertWorkspaceSessionCommand(tenant, creator, key,
                             "digest", "qwen-code", null, title,
                             List.of(), null,
-                            new WorkspaceSelection("workspace", ".")))
+                            new WorkspaceSelection(workspace, ".")))
                     .sessionId());
         }
         // One creator-owned session is closed: the shape gate fences it even
-        // for its creator.
+        // for its creator. The workspace2 grant then drops can_create: its
+        // session exercises the grant term.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
+        fixture.jdbc.update("UPDATE managed_workspace_access SET"
+                + " can_create = FALSE WHERE tenant_id = ? AND workspace_id"
+                + " = 'workspace2'", tenant);
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
                 null, 20).data();
-        assertThat(page).hasSize(6);
-        System.out.println("[issue-13181] listWebShellSessions(6 mixed"
+        assertThat(page).hasSize(7);
+        System.out.println("[issue-13181] listWebShellSessions(7 mixed"
                 + " creator rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the creator batch + the
-        // grant batch: constant, not two registry reads per row.
+        // grant batch across both workspaces: constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(5);
         assertThat(fixture.ledger.count(
                 "from managed_workspace_create_command")).isEqualTo(1);
         assertThat(fixture.ledger.count("from managed_workspace_registry"))
                 .isEqualTo(1);
-        // workspaceTurns holds exactly for the caller's own ACTIVE sessions.
+        // workspaceTurns holds exactly for the caller's own ACTIVE sessions
+        // on a workspace where the grant still allows creation.
         for (var row : page) {
             int index = ids.indexOf(row.sessionId());
             assertThat(row.capabilities().workspaceTurns())
