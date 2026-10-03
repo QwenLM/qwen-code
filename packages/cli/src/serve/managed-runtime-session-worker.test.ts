@@ -692,6 +692,7 @@ describe.skipIf(process.platform === 'win32')(
         },
         settle: async (input: Record<string, unknown>) => {
           if (outcomeFailures.settle) throw outcomeFailures.settle;
+          outcomeSignals.settle?.();
           if (outcomeWaiters.settle) await outcomeWaiters.settle;
           settlements.push(input);
         },
@@ -875,6 +876,11 @@ describe.skipIf(process.platform === 'win32')(
       outcomeWaiters.settle = new Promise((resolve) => {
         release = resolve;
       });
+      let entered!: () => void;
+      const settleStarted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      outcomeSignals.settle = entered;
       await env.prepare(
         {
           id: 'write',
@@ -888,8 +894,9 @@ describe.skipIf(process.platform === 'win32')(
         resolved = true;
         return value;
       });
-      // The worker settled; the commit has not landed, so the model loop
-      // waits.
+      // The settle commit entered, then paused; the commit has not landed,
+      // so the model loop waits even though the worker settled the call.
+      await settleStarted;
       await vi.waitFor(async () => {
         expect(await readFile(logFile, 'utf8')).toContain('"execute"');
       });
