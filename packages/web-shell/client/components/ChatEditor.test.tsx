@@ -147,6 +147,7 @@ const composerCoreState = vi.hoisted(() => ({
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
+  searchMode: false,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
   ingestFiles: vi.fn(),
@@ -156,6 +157,7 @@ const composerCoreState = vi.hoisted(() => ({
   navigatePrevHistory: vi.fn(),
   navigateNextHistory: vi.fn(),
   hasContent: false,
+  pendingImageBatchCount: 0,
   shellMode: false,
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
@@ -245,7 +247,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
-        pendingImageBatchCount: 0,
+        pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
         ingestFiles: composerCoreState.ingestFiles,
@@ -287,7 +289,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         currentMode: 'default',
         sessionName: undefined,
         searchState: {
-          searchMode: false,
+          searchMode: composerCoreState.searchMode,
           searchQuery: '',
           searchMatches: [],
           searchActiveIndex: 0,
@@ -371,6 +373,7 @@ afterEach(() => {
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
+  composerCoreState.searchMode = false;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.ingestFiles.mockReset();
@@ -383,6 +386,7 @@ afterEach(() => {
   composerCoreState.submitText.mockReset();
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
+  composerCoreState.pendingImageBatchCount = 0;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -403,6 +407,8 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
+    | 'btwEnabled'
+    | 'isPreparing'
     | 'contextChipPlacement'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
@@ -2102,6 +2108,109 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
+describe('ChatEditor BTW in the add menu', () => {
+  async function openBtw(props: ChatEditorRenderProps = {}) {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      btwEnabled: true,
+      ...props,
+    });
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    expect(portalRoot.querySelector('[role="menu"]')).not.toBeNull();
+    return portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-btw"]',
+    );
+  }
+
+  it.each(['', 'Explain this decision'])(
+    'prepares a side question from %j without sending',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw({ isRunning: true });
+      expect(item?.textContent).toContain('Ask a side question');
+      expect(item?.textContent).toContain('/btw');
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).toHaveBeenCalledWith(`/btw ${draft}`);
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/btw', '/btw already asked'])(
+    'keeps the existing prefix in %j',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw();
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    },
+  );
+
+  it('normalizes an existing uppercase command for the local BTW router', async () => {
+    composerCoreState.getText.mockReturnValue('  /BTW\nquestion');
+    const item = await openBtw();
+    await act(async () => item!.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(composerCoreState.setText).toHaveBeenCalledWith('/btw\nquestion');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it.each([
+    { pastedImages: [{ data: 'image', media_type: 'image/png' }] },
+    {
+      pastedFiles: [
+        { name: 'note.txt', media_type: 'text/plain', text: 'note' },
+      ],
+    },
+    {
+      composerTags: [
+        { id: 'file', type: 'file', label: 'note.txt', value: 'note.txt' },
+      ],
+    },
+  ] satisfies ChatEditorRenderProps[])(
+    'explains why attachments cannot become a side question: %j',
+    async (props) => {
+      const item = await openBtw(props);
+      expect(item?.hasAttribute('data-disabled')).toBe(true);
+      expect(item?.textContent).toContain('Remove attachments first');
+      await act(async () => item!.click());
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks pending image ingestion', async () => {
+    composerCoreState.pendingImageBatchCount = 1;
+    const item = await openBtw();
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('blocks preparation', async () => {
+    const item = await openBtw({ isPreparing: true });
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('requires the main chat to enable the entry', async () => {
+    expect(await openBtw({ btwEnabled: false })).toBeNull();
+  });
+
+  it('hides the entry in shell mode', async () => {
+    composerCoreState.shellMode = true;
+    expect(await openBtw()).toBeNull();
+  });
+});
+
 describe('ChatEditor Plan in the add menu', () => {
   const actions = ['addMenu', 'approvalMode', 'plan', 'model'] as const;
   const planButton = (container: HTMLElement) =>
@@ -3493,7 +3602,13 @@ describe('ChatEditor mobile composer actions', () => {
       cancelable: true,
     });
     previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
     composerCoreState.focus.mockClear();
     await clickButton('Previous input');
     await clickButton('Next input');
@@ -3502,6 +3617,46 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.focus).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(backend.textareaRef.current);
+  });
+
+  it('prevents mousedown default on the remaining migrated buttons', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: [] });
+
+    const actions = document.querySelector(
+      '[data-web-shell-mobile-editing-actions]',
+    )!;
+    const historyButton = actions.querySelector<HTMLButtonElement>(
+      '[aria-label="Input history"]',
+    )!;
+    const shellButton = Array.from(actions.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Shell mode',
+    )!;
+
+    const expectMousedownPrevented = (button: HTMLButtonElement) => {
+      const pointerDown = new Event('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(pointerDown);
+      expect(pointerDown.defaultPrevented).toBe(false);
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(mouseDown);
+      expect(mouseDown.defaultPrevented).toBe(true);
+    };
+
+    expectMousedownPrevented(historyButton);
+    expectMousedownPrevented(shellButton);
+
+    await clickButton('Expand editor');
+    expectMousedownPrevented(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] [aria-label="Hide keyboard"]',
+      )!,
+    );
   });
 
   it('disables both history buttons when the composer is disabled', () => {
@@ -3669,6 +3824,246 @@ describe('ChatEditor mobile composer actions', () => {
       expect(document.activeElement).not.toBe(backend.textareaRef.current);
     } finally {
       document.removeEventListener('click', onClick);
+    }
+  });
+
+  function historyPanelFit(container: HTMLElement) {
+    const panel = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-history-search]',
+    )!.parentElement!.parentElement!;
+    return {
+      room: panel.style.getPropertyValue('--chat-editor-search-room'),
+      shift: panel.style.getPropertyValue('--chat-editor-search-shift'),
+    };
+  }
+
+  // Only the composer surface and hidden-overflow ancestors get a real top, so
+  // measuring any other node changes the result.
+  function mockComposerGeometry(geometry: {
+    composerTop: number;
+    clipTop: number;
+  }) {
+    return vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { top: geometry.composerTop } as DOMRect;
+        }
+        return {
+          top: this.style.overflowY === 'hidden' ? geometry.clipTop : -1000,
+        } as DOMRect;
+      });
+  }
+
+  type CapturedResizeObserver = {
+    callback: ResizeObserverCallback;
+    targets: Set<Element>;
+  };
+
+  // The harness ResizeObserver stub never fires, so re-measure paths wired
+  // through observe() are only reachable when the test invokes the callback.
+  function captureResizeObservers(): {
+    observers: CapturedResizeObserver[];
+    restore: () => void;
+  } {
+    const observers: CapturedResizeObserver[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly captured: CapturedResizeObserver;
+      constructor(callback: ResizeObserverCallback) {
+        this.captured = { callback, targets: new Set() };
+        observers.push(this.captured);
+      }
+      observe(target: Element) {
+        this.captured.targets.add(target);
+      }
+      unobserve(target: Element) {
+        this.captured.targets.delete(target);
+      }
+      disconnect() {
+        this.captured.targets.clear();
+      }
+    } as typeof ResizeObserver;
+    return {
+      observers,
+      restore: () => {
+        globalThis.ResizeObserver = original;
+      },
+    };
+  }
+
+  function fireResize(
+    observers: readonly CapturedResizeObserver[],
+    target: Element,
+  ): void {
+    for (const observer of observers) {
+      if (observer.targets.has(target)) {
+        observer.callback([], {} as ResizeObserver);
+      }
+    }
+  }
+
+  it('limits the history panel to the room above the composer', () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 0 });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel and keeps it below a clipping ancestor', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const settle = (dispatch: () => void) =>
+      act(async () => {
+        dispatch();
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container).room).toBe('174px');
+
+      // A header above the clipping pane leaves less than the minimum height,
+      // so the panel moves down over the composer instead of under the header.
+      container.style.overflowY = 'hidden';
+      geometry.clipTop = 120;
+      await settle(() => window.dispatchEvent(new Event('resize')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '96px',
+        shift: '42px',
+      });
+
+      geometry.composerTop = 300;
+      await settle(() => container.dispatchEvent(new Event('scroll')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '172px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel when the composer itself resizes', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const { observers, restore } = captureResizeObservers();
+    try {
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // The composer grows (a multi-line draft, a new attachment); the panel
+      // re-fits through the ResizeObserver on the container.
+      geometry.composerTop = 300;
+      await act(async () => {
+        fireResize(observers, surface);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '292px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('fits the history panel to its rendered height, not its minimum', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 120 });
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('searchPanel') ? 70 : 0;
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // With no matches the panel is just the search bar (70px), so once the
+      // room drops to 54px the panel overlaps the composer by its own 16px
+      // overflow rather than the 42px the 96px minimum would charge. The
+      // re-measure arrives through the ResizeObserver on the panel, which a
+      // change in match count resizes without touching the container.
+      const panel = container.querySelector<HTMLElement>(
+        '[class*="searchPanel"]',
+      )!;
+      container.style.overflowY = 'hidden';
+      await act(async () => {
+        fireResize(observers, panel);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '70px',
+        shift: '16px',
+      });
+    } finally {
+      height.mockRestore();
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('adds the measured workspace row height to the composer cap', () => {
+    mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 92 : 0;
+      });
+    try {
+      // The branch usually arrives after the composer mounts.
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('');
+      rerenderChatEditor(container, { gitBranch: 'main' });
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('92px');
+
+      // A long branch can wrap an already-mounted row; only the
+      // ResizeObserver refreshes the allowance then.
+      const row = surface.querySelector<HTMLElement>(
+        '[class*="mobileContextRow"]',
+      )!;
+      height.mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 136 : 0;
+      });
+      act(() => fireResize(observers, row));
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('136px');
+    } finally {
+      height.mockRestore();
+      restore();
     }
   });
 

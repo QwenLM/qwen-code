@@ -150,6 +150,12 @@ export type HostSelfChecks = {
   audioOutput: boolean;
   globalShortcut: boolean;
   appshot: boolean;
+  /**
+   * Browser Hosts only: they answer `host.capture_visual` from a screen the
+   * user shares with the page. This Host captures through Appshot and never
+   * sets it.
+   */
+  screenShare?: boolean;
 };
 
 export type LiveCallState =

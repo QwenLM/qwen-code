@@ -93,9 +93,35 @@ export interface InterruptedWorkflowRun {
   hasJournal: boolean;
 }
 
-/** The checkpoint for a registered run. */
+/**
+ * What a checkpoint needs from a run. A registered `WorkflowTask` satisfies
+ * it, and so does the registration the runner is about to hand the registry
+ * -- which is what lets a resume record its checkpoint before it registers.
+ */
+export type WorkflowCheckpointSource = Pick<
+  WorkflowTask,
+  'runId' | 'startTime'
+> &
+  Partial<
+    Pick<
+      WorkflowTask,
+      | 'script'
+      | 'scriptPath'
+      | 'description'
+      | 'workflowName'
+      | 'resumeName'
+      | 'sourceRef'
+      | 'toolUseId'
+      | 'sourceRunId'
+      | 'startMode'
+      | 'tokenBudgetTotal'
+      | 'args'
+    >
+  >;
+
+/** The checkpoint for a run about to start, or one already registered. */
 export function checkpointFromTask(
-  task: WorkflowTask,
+  task: WorkflowCheckpointSource,
   context: { sessionId: string; meta: WorkflowMeta | null },
 ): WorkflowCheckpoint {
   return {
@@ -108,7 +134,7 @@ export function checkpointFromTask(
     script: task.script ?? '',
     ...(task.scriptPath ? { scriptPath: task.scriptPath } : {}),
     meta: context.meta,
-    description: context.meta?.name ?? task.description,
+    description: context.meta?.name ?? task.description ?? task.runId,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     ...(task.resumeName ? { resumeName: task.resumeName } : {}),
     ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
@@ -141,30 +167,43 @@ async function isRunDirSymlinked(
 }
 
 /**
- * Write a run's checkpoint. Best-effort: without one an interrupted run is
- * only invisible, which is how every run behaved before checkpoints, so a
- * failed write must not fail the run.
+ * What writing a run's checkpoint did.
+ *
+ * `unavailable` is not a failure: with no storage, or a run directory reached
+ * through a symlink, there is nowhere a checkpoint could live -- and nowhere
+ * another process would look for one either.
+ */
+export type WorkflowCheckpointWrite = 'written' | 'unavailable' | 'failed';
+
+/**
+ * Write a run's checkpoint.
+ *
+ * For a fresh run this is best-effort: without one an interrupted run is only
+ * invisible, which is how every run behaved before checkpoints, so a failed
+ * write must not fail the run. A resume is the exception -- see the caller in
+ * `WorkflowRunner.start` -- which is why the outcome is reported in three
+ * parts rather than as a boolean.
  */
 export async function writeWorkflowCheckpoint(
   config: Config,
   checkpoint: WorkflowCheckpoint,
-): Promise<boolean> {
+): Promise<WorkflowCheckpointWrite> {
   const file = checkpointPath(config, checkpoint.runId);
-  if (!file) return false;
+  if (!file) return 'unavailable';
   try {
-    if (await isRunDirSymlinked(config, file)) return false;
+    if (await isRunDirSymlinked(config, file)) return 'unavailable';
     await atomicWriteFile(file, JSON.stringify(checkpoint), {
       encoding: 'utf8',
       mode: 0o600,
       forceMode: true,
       noFollow: true,
     });
-    return true;
+    return 'written';
   } catch (error) {
     debugLogger.warn(
       `writeWorkflowCheckpoint failed for ${checkpoint.runId}: ${error}`,
     );
-    return false;
+    return 'failed';
   }
 }
 
@@ -323,11 +362,16 @@ async function claimOne(
       : {}),
     ...(checkpoint.sourceRunId ? { sourceRunId: checkpoint.sourceRunId } : {}),
     ...(checkpoint.startMode ? { startMode: checkpoint.startMode } : {}),
+    // Every checkpoint format has recorded the run's args, so one carrying
+    // neither them nor `argsOmitted` is a run that had none -- which a
+    // checkpoint written before `argsRecorded` existed could not say for
+    // itself. Without this the claimed run reads as "args unknown", and a
+    // retry of a run that never had args is refused for want of them.
     ...(checkpoint.argsOmitted
       ? { argsOmitted: true as const }
       : {
           ...(checkpoint.args !== undefined ? { args: checkpoint.args } : {}),
-          ...(checkpoint.argsRecorded ? { argsRecorded: true as const } : {}),
+          argsRecorded: true as const,
         }),
     meta: checkpoint.meta,
     status: 'failed',

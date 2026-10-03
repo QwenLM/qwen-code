@@ -150,6 +150,16 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './tools/managed-tool-runtime.js';
+export {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from './tools/managed-tool-protocol.js';
+export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
@@ -502,7 +512,10 @@ export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export * from './agents/workflow-checkpoint.js';
-export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
+export {
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+} from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -706,6 +719,7 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
+export * from './utils/git-worktrees.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/git-ignore.js';
@@ -895,6 +909,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -951,3 +969,10 @@ export type {
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';

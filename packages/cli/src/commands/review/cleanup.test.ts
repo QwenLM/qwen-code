@@ -149,6 +149,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const realpathSync = Object.assign(mocks.realpathSync, {
+    native: mocks.realpathSync,
+  });
   return {
     ...actual,
     default: {
@@ -159,7 +162,7 @@ vi.mock('node:fs', async (importOriginal) => {
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
-      realpathSync: mocks.realpathSync,
+      realpathSync,
       rmSync: mocks.rmSync,
     },
     accessSync: mocks.accessSync,
@@ -168,7 +171,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
-    realpathSync: mocks.realpathSync,
+    realpathSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -188,13 +191,13 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
     return lease
       ? {
           lease,
-          path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+          path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
         }
       : null;
   },
   reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+  reviewLeasePath: (_repositoryRoot: string, target: string) =>
+    `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   isReviewLeaseFile: (fileName: string) =>
     /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));
@@ -2008,7 +2011,9 @@ describe('runCleanup', () => {
     // the fast path will then reuse it" over a tree this command had already
     // removed, a recovery that cannot happen.
     expect(mocks.rmSync).toHaveBeenCalledWith(
-      '/repo/.qwen/review-leases/base-tree/pr-123/review-pr-123-base.lock',
+      expect.stringMatching(
+        /\/review-state\/[0-9a-f]{64}\/base-tree\/pr-123\/review-pr-123-base\.lock$/,
+      ),
       { recursive: true, force: true },
     );
   });
@@ -2028,7 +2033,7 @@ describe('runCleanup', () => {
 
     const hostSide = mocks.rmSync.mock.calls
       .map(([path]) => String(path))
-      .filter((path) => path.startsWith('/repo/.qwen/review-leases/base-tree'));
+      .filter((path) => path.includes('/review-state/'));
     expect(hostSide).toEqual([]);
   });
 

@@ -973,6 +973,93 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it.each([
+    ['file', '@README.md'],
+    ['mcp', '@mcp:o2'],
+    ['extension', '@ext:browser'],
+  ])('restores %s input annotations from saved user records', (kind, text) => {
+    const inputAnnotations = [
+      {
+        type: 'reference',
+        start: 0,
+        end: text.length,
+        text,
+        reference: { id: text, kind, value: text.slice(1), serialized: text },
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-tag', 'user', {
+        daemonPromptId: 'tag-prompt',
+        message: { role: 'user', parts: [{ text: 'expanded model input' }] },
+        systemPayload: { displayText: text, hookContext: '', inputAnnotations },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text },
+        _meta: expect.objectContaining({
+          inputAnnotations,
+          promptId: 'tag-prompt',
+          qwenTranscript: {
+            sourceRecordIds: ['user-tag'],
+            segmentId: 'user-tag:0',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it.each([undefined, null, 'invalid', {}, [null], ['x'], [[null]]])(
+    'ignores missing or non-array saved input annotations (%j)',
+    (inputAnnotations) => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-plain', 'user', {
+          message: { role: 'user', parts: [{ text: '@README.md' }] },
+          systemPayload: {
+            displayText: '@README.md',
+            hookContext: '',
+            inputAnnotations,
+          },
+        }),
+      );
+      expect(projected[0]._meta).not.toHaveProperty('inputAnnotations');
+      expect(projected[0]).toMatchObject({
+        content: { type: 'text', text: '@README.md' },
+      });
+    },
+  );
+
+  it('forwards only object elements from saved input annotations', () => {
+    const valid = {
+      type: 'reference',
+      start: 0,
+      end: 10,
+      text: '@README.md',
+      reference: {
+        id: '@README.md',
+        kind: 'file',
+        value: 'README.md',
+        serialized: '@README.md',
+      },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-mixed', 'user', {
+        message: { role: 'user', parts: [{ text: '@README.md' }] },
+        systemPayload: {
+          displayText: '@README.md',
+          hookContext: '',
+          inputAnnotations: [valid, null, 'x'],
+        },
+      }),
+    );
+    expect(projected[0]._meta).toMatchObject({ inputAnnotations: [valid] });
+  });
+
   it('strips only a complete final tag-only context part', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -1766,6 +1853,58 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
+  it.each(['completed', 'failed', 'cancelled', 'timed_out'] as const)(
+    'replays persisted structured shell %s results without flattening metadata',
+    (outcome) => {
+      const resultDisplay = {
+        type: 'shell_result' as const,
+        version: 1 as const,
+        text: 'Display text differs from model envelope',
+        output: outcome === 'completed' ? '' : 'partial 😀 output',
+        directory: '/workspace/项目',
+        exitCode: outcome === 'completed' ? 0 : null,
+        signal: outcome === 'cancelled' ? 15 : null,
+        pid: 42,
+        error: outcome === 'failed' ? 'execution failed' : null,
+        outcome,
+        notices: ['Output persisted', 'Retained notice'],
+        truncated: true,
+        outputFiles: ['/tmp/shell-output.log'],
+      };
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('shell-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'shell-1',
+            toolName: 'run_shell_command',
+            status: outcome === 'completed' ? 'success' : 'error',
+            resultDisplay,
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Legacy model-facing envelope' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(projected).toHaveLength(1);
+      expect(projected[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'shell-1',
+        status: outcome === 'completed' ? 'completed' : 'failed',
+        rawOutput: resultDisplay,
+      });
+      expect(projected[0]).toHaveProperty('rawOutput', resultDisplay);
+    },
+  );
+
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(
@@ -2342,6 +2481,39 @@ describe('ui_telemetry timing frames', () => {
     ]);
   });
 
+  it('uses recorded tool starts instead of the later batch log timestamp', () => {
+    const machine = timingMachine();
+    const starts = [1_760_000_000_000, 1_760_000_010_000];
+    const frames = starts.flatMap((startedAt, index) =>
+      timings(
+        machine,
+        telemetry(`timed-${index}`, {
+          ...TOOL_CALL_EVENT,
+          call_id: `timed-${index}`,
+          started_at: startedAt,
+          duration_ms: 4_000,
+        }),
+      ),
+    );
+    expect(
+      frames.map((frame) => [frame?.['startedAt'], frame?.['durationMs']]),
+    ).toEqual(starts.map((startedAt) => [startedAt, 4_000]));
+    const [legacy] = timings(machine, telemetry('legacy', TOOL_CALL_EVENT));
+    expect(legacy).not.toHaveProperty('startedAt');
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'omits an invalid recorded tool start: %s',
+    (started_at) => {
+      const [frame] = timings(
+        timingMachine(),
+        telemetry('invalid-start', { ...TOOL_CALL_EVENT, started_at }),
+      );
+      expect(frame).not.toHaveProperty('startedAt');
+      expect(frame).toMatchObject({ kind: 'tool', durationMs: 16 });
+    },
+  );
+
   it('omits bulky recorded fields the conversation already carries', () => {
     const [requestTiming] = timings(
       timingMachine(),
@@ -2726,14 +2898,50 @@ describe('ui_telemetry timing frames', () => {
     });
   });
 
-  it('gives a tool frame no start time, because none was recorded', () => {
+  it('derives no tool start time when the record carries none', () => {
     // logToolCall runs in one loop after the whole batch settles, so the
     // recorded timestamp is the batch's end for every tool in it. Subtracting
     // a fast tool's own duration from that would place it just before the
-    // batch ended rather than when it ran.
+    // batch ended rather than when it ran — so a record written before
+    // `started_at_ms` existed gets no start at all.
     const [toolTiming] = timings(
       timingMachine(),
       telemetry('tel-1', TOOL_CALL_EVENT),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
+    expect(toolTiming).not.toHaveProperty('startedAt');
+  });
+
+  it('carries the start time a tool record measured', () => {
+    // The shape a scheduled batch leaves behind: this call started at :01 and
+    // took 16 ms, but was only logged at :06.560 when its batch settled. The
+    // start must be the recorded one, not the log time minus the duration.
+    const startedAtMs = Date.parse('2026-07-14T00:00:01.000Z');
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', {
+        ...TOOL_CALL_EVENT,
+        started_at_ms: startedAtMs,
+        started_at: startedAtMs - 1000,
+      }),
+    );
+
+    expect(toolTiming).toMatchObject({
+      kind: 'tool',
+      durationMs: 16,
+      startedAt: startedAtMs,
+    });
+  });
+
+  it.each([
+    ['negative', -1],
+    ['not a number', Number.NaN],
+    ['a string', '2026-07-14T00:00:01.000Z'],
+  ])('drops a recorded tool start that is %s', (_label, value) => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, started_at_ms: value }),
     );
 
     expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
@@ -2780,6 +2988,49 @@ describe('ui_telemetry timing frames', () => {
 
     expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 0 });
   });
+
+  it.each([
+    ['error', 'started_at_ms'],
+    ['cancelled', 'started_at_ms'],
+    ['error', 'started_at'],
+    ['cancelled', 'started_at'],
+  ] as const)(
+    'keeps measured zero duration and status for %s with recorded %s',
+    (status, startField) => {
+      const [toolTiming] = timings(
+        timingMachine(),
+        telemetry('measured-zero', {
+          ...TOOL_CALL_EVENT,
+          duration_ms: 0,
+          [startField]: 1_760_000_000_000,
+          status,
+        }),
+      );
+      expect(toolTiming).toMatchObject({
+        kind: 'tool',
+        durationMs: 0,
+        startedAt: 1_760_000_000_000,
+        toolStatus: status,
+      });
+    },
+  );
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'does not treat an invalid start as measured zero timing: %s',
+    (started_at) => {
+      expect(
+        timings(
+          timingMachine(),
+          telemetry('invalid-zero', {
+            ...TOOL_CALL_EVENT,
+            duration_ms: 0,
+            started_at,
+            status: 'cancelled',
+          }),
+        ),
+      ).toEqual([]);
+    },
+  );
 
   it('consumes duplicate recorded ids in allocation order', () => {
     // Two calls recorded under one id: the first keeps it, the second is
@@ -2843,6 +3094,68 @@ describe('ui_telemetry timing frames', () => {
     expect(secondFrame[0]).toMatchObject({ callId: rewrittenCallId });
   });
 
+  it('pairs reused bridge call ids with resolved tool names across page state', () => {
+    const first = timingMachine();
+    const target = 'mcp__yuque__yuque_whoami';
+    const starts = ['assistant-1', 'assistant-2'].map((uuid) =>
+      updates(
+        first,
+        record(uuid, 'assistant', {
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'bridge-dup',
+                  name: 'tool_call',
+                  args: { name: target, arguments: {} },
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const callIds = starts.map(
+      (items) => (items[0] as unknown as { toolCallId: string }).toolCallId,
+    );
+    expect(callIds[0]).not.toBe(callIds[1]);
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    expect(carried.pendingToolCalls).toEqual([
+      expect.objectContaining({
+        toolName: 'tool_call',
+        resolvedToolName: target,
+      }),
+      expect.objectContaining({
+        toolName: 'tool_call',
+        resolvedToolName: target,
+        rawCallId: 'bridge-dup',
+      }),
+    ]);
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const frames = [515, 42].map(
+      (duration_ms, index) =>
+        timings(
+          next,
+          telemetry(`bridge-timing-${index}`, {
+            ...TOOL_CALL_EVENT,
+            call_id: 'bridge-dup',
+            function_name: target,
+            duration_ms,
+          }),
+        )[0],
+    );
+    expect(frames).toMatchObject([
+      { callId: callIds[0], toolName: target, durationMs: 515 },
+      { callId: callIds[1], toolName: target, durationMs: 42 },
+    ]);
+  });
+
   it('does not re-claim a call already matched on an earlier page', () => {
     const first = timingMachine();
     updates(first, assistantWithToolCall('assistant-1', 'call_dup'));
@@ -2874,4 +3187,70 @@ describe('ui_telemetry timing frames', () => {
       'qwen-code.tool_call',
     ]);
   });
+});
+
+it('keeps raw wrapper timings attached to distinct replay ids across snapshots', () => {
+  const initial = createTranscriptReplayMachine({ includeTiming: true });
+  const calls = ['first', 'second'].flatMap((uuid) =>
+    updates(
+      initial,
+      record(uuid, 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'duplicate',
+                name: 'tool_call',
+                args: { name: 'mcp__server__lookup', arguments: {} },
+              },
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  expect(calls).toMatchObject([
+    { toolCallId: 'duplicate' },
+    { toolCallId: 'duplicate:2' },
+  ]);
+  const resumed = createTranscriptReplayMachine({
+    includeTiming: true,
+    initialState: JSON.parse(JSON.stringify(initial.snapshot())),
+  });
+  const timings = [800, 900].flatMap((durationMs, index) =>
+    updates(
+      resumed,
+      record(`timing-${index}`, 'system', {
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': EVENT_TOOL_CALL,
+            call_id: 'duplicate',
+            function_name: 'tool_call',
+            status: 'cancelled',
+            duration_ms: durationMs,
+          },
+        },
+      }),
+    ),
+  );
+  expect(timings).toMatchObject([
+    { _meta: { timing: { callId: 'duplicate', durationMs: 800 } } },
+    { _meta: { timing: { callId: 'duplicate:2', durationMs: 900 } } },
+  ]);
+});
+
+it('marks goal runtime text as injected within the existing turn', () => {
+  const machine = createTranscriptReplayMachine();
+  expect(
+    updates(
+      machine,
+      record('goal', 'user', {
+        subtype: 'goal_runtime',
+        systemPayload: { displayText: 'Continue the goal' },
+        message: { role: 'user', parts: [{ text: 'Continue the goal' }] },
+      }),
+    ),
+  ).toMatchObject([{ _meta: { source: 'goal_runtime' } }]);
 });

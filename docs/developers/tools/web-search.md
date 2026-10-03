@@ -308,3 +308,68 @@ qwen mcp add web-search-prime \
 Replace `${GLM_API_KEY}` with your actual ZhipuAI API key, or set it as an environment variable.
 
 ---
+
+### Firecrawl
+
+The official hosted MCP server from Firecrawl, providing web search, page scraping, website crawling and mapping, browser interaction, and file parsing. Search results can include each page's content as Markdown, so the model can read its sources without a separate fetch step. The hosted server works without an API key for search, scrape, and parse. Search queries, the URLs you ask it to read, and any files you parse are sent to Firecrawl.
+
+- **Documentation:** https://docs.firecrawl.dev/mcp-server
+- **Cost:** No API key needed for search, scrape, and parse (daily limit per IP); paid plans for higher limits
+- **Get API Key:** https://www.firecrawl.dev/app/api-keys
+- **Best for:** Web search where the model also needs to read the pages it finds, and trying MCP web search without an API key
+
+#### Available Tools
+
+- `firecrawl_search` — Web search, optionally returning each result's page content as Markdown
+- `firecrawl_scrape` — Get a single page as clean Markdown
+- `firecrawl_parse` — Convert a local file (PDF, Word, spreadsheet, and more) to Markdown
+
+With an API key, the server also offers tools to map and crawl websites, interact with pages (click, type, navigate), and search developer sources like GitHub issues and docs.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add firecrawl \
+  -t http \
+  "https://mcp.firecrawl.dev/v2/mcp" \
+  -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
+```
+
+To try it without a key, leave out the `-H` line. You get `firecrawl_search`, `firecrawl_scrape`, and `firecrawl_parse` within a daily per-IP limit.
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl": {
+      "httpUrl": "https://mcp.firecrawl.dev/v2/mcp",
+      "headers": {
+        "Authorization": "Bearer ${FIRECRAWL_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environment variable. If the key is empty, the server still connects but only offers the three keyless tools.
+
+**Method 3: `settings.json` (Local NPX)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl-mcp": {
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp@latest"],
+      "env": {
+        "FIRECRAWL_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+---

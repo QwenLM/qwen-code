@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
+import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
@@ -54,6 +55,7 @@ const {
     mockSecondaryWorkspaceActions,
     mockWorkspace: {
       capabilities: {
+        features: [] as string[],
         workspaceCwd: '/primary',
         workspaces: [
           {
@@ -98,7 +100,22 @@ vi.mock('../terminal/TerminalPanel', () => ({
   ),
 }));
 
+vi.mock('../workspace-agents/ThreadsRoute', () => ({
+  ThreadsRoute: () => <div data-testid="workspace-agent-thread-route" />,
+}));
+
+const sideTaskPanelProps = vi.hoisted(() => ({
+  current: undefined as Record<string, unknown> | undefined,
+}));
+vi.mock('./SideTaskPanel', () => ({
+  SideTaskPanel: (props: Record<string, unknown>) => {
+    sideTaskPanelProps.current = props;
+    return <div data-testid="side-task-panel" />;
+  },
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
+type ArtifactPanelTab = Parameters<typeof ArtifactPanel>[0]['tabs'][number];
 const { useArtifactWorkspaceTarget } = await import(
   './useArtifactWorkspaceTarget'
 );
@@ -334,6 +351,7 @@ function scheduledTaskPanel(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  sideTaskPanelProps.current = undefined;
   // The boundary matrix spies on DOMParser.prototype per row; restore it so
   // the leak cannot skew call-count assertions in later tests.
   vi.restoreAllMocks();
@@ -365,6 +383,7 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
+  mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
   mockWorkspace.capabilities = {
     workspaceCwd: '/primary',
@@ -383,6 +402,57 @@ afterEach(() => {
       },
     ],
   };
+});
+
+it('does not mount restored agent activity when collaboration is disabled', async () => {
+  const node = document.createElement('div');
+  document.body.appendChild(node);
+  const root = createRoot(node);
+  mounted.push({ root, container: node });
+  const render = () => (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'agent-activity:/repo:thread-1',
+            kind: 'agent_activity',
+            title: 'Team',
+            threadId: 'thread-1',
+            workspaceCwd: '/repo',
+          },
+        ]}
+        activeTabId="agent-activity:/repo:thread-1"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+
+  act(() => root.render(render()));
+  // Let the lazy `ThreadsRoute` import settle before asserting absence, the
+  // same way the positive half below does: `<Suspense fallback={null}>`
+  // satisfies `toBeNull()` on its own, so without this flush the negative half
+  // still passes with the collaboration gate deleted and pins nothing.
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(
+    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+
+  mockWorkspace.capabilities.features = ['agent_collaboration_v1'];
+  act(() => root.render(render()));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(
+    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).not.toBeNull();
 });
 
 describe('ArtifactPanel context usage tabs', () => {
@@ -2057,6 +2127,52 @@ describe('ArtifactPanel add menu', () => {
     ).find((button) => button.textContent === 'New');
     act(() => reopenedCreate?.click());
     expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('forwards model management policy and the refusal callback to the side task panel', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const modelManagement = { allowAdd: false, allowDelete: false };
+    const onSideTaskInitialPromptRefused = vi.fn();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'side-task:1',
+                kind: 'side_task',
+                title: 'Side task',
+                parentSessionId: 'parent-session',
+                workspaceCwd: '/work/project',
+                sessionId: 'side-session-1',
+              },
+            ]}
+            activeTabId="side-task:1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            modelManagement={modelManagement}
+            onSideTaskInitialPromptRefused={onSideTaskInitialPromptRefused}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(sideTaskPanelProps.current?.modelManagement).toEqual(
+      modelManagement,
+    );
+    expect(sideTaskPanelProps.current?.onInitialPromptRefused).toBe(
+      onSideTaskInitialPromptRefused,
+    );
   });
 
   it('creates a side task directly from the empty page when there is no history', () => {
@@ -3858,5 +3974,144 @@ describe('ArtifactPanel workspace artifact previews', () => {
 
     expect(container.textContent).toMatch(/director/i);
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArtifactPanel trajectory entry', () => {
+  function renderPanel(props: {
+    items?: readonly WebShellRightPanelItem[];
+    onOpenTrajectory?: () => void;
+    trajectoryTabId?: string;
+    tabs?: ArtifactPanelTab[];
+    activeTabId?: string | null;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={props.tabs ?? []}
+            activeTabId={props.activeTabId ?? null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            {...(props.items ? { items: props.items } : {})}
+            {...(props.onOpenTrajectory
+              ? { onOpenTrajectory: props.onOpenTrajectory }
+              : {})}
+            {...(props.trajectoryTabId
+              ? { trajectoryTabId: props.trajectoryTabId }
+              : {})}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const entry = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="right-panel-open-trajectory"]',
+    );
+
+  it('stays hidden for a host that did not ask for it', () => {
+    // The default item set is unchanged by this feature, so a shell that
+    // never mentions the trajectory looks exactly as it did before.
+    const container = renderPanel({ onOpenTrajectory: () => {} });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('stays hidden when the host has no handler to open it with', () => {
+    const container = renderPanel({ items: ['trajectory'] });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('opens the trajectory from the empty state', () => {
+    const onOpenTrajectory = vi.fn();
+    const container = renderPanel({ items: ['trajectory'], onOpenTrajectory });
+    const button = entry(container);
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenTrajectory).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the entry once the session already has a trajectory tab', () => {
+    const container = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
+      tabs: [
+        {
+          id: 'trajectory:s-1',
+          kind: 'trajectory',
+          title: 'Trajectory',
+          sessionId: 's-1',
+        },
+      ],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(entry(container)).toBeNull();
+  });
+
+  it('keeps the entry when the open tab belongs to another session', () => {
+    // Tabs outlive the session they were opened for — split view opens one per
+    // pane, and a restored tab keeps its own. Hiding this session's entry
+    // because some other session's tab is open leaves no way in at all.
+    //
+    // The trajectory is the only item this host lists, so the add menu's
+    // trigger stands in for the item inside it: Radix does not render the
+    // content until it is opened.
+    const otherSessionTab: ArtifactPanelTab = {
+      id: 'trajectory:s-1',
+      kind: 'trajectory',
+      title: 'Trajectory',
+      sessionId: 's-1',
+    };
+    const addButton = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Add panel"]');
+
+    const other = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-2',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(other)).not.toBeNull();
+
+    const own = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      trajectoryTabId: 'trajectory:s-1',
+      tabs: [otherSessionTab],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(addButton(own)).toBeNull();
+  });
+
+  it('renders the trajectory tab body', () => {
+    const container = renderPanel({
+      items: ['trajectory'],
+      onOpenTrajectory: () => {},
+      tabs: [
+        {
+          id: 'trajectory:s-1',
+          kind: 'trajectory',
+          title: 'Trajectory',
+          sessionId: 's-1',
+        },
+      ],
+      activeTabId: 'trajectory:s-1',
+    });
+    expect(
+      container.querySelector('[data-testid="trajectory-panel"]'),
+    ).not.toBeNull();
   });
 });

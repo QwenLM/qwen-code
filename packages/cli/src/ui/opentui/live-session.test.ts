@@ -28,6 +28,7 @@ import {
   ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
+  nextLivePromptId,
   resetPromptCountForTesting,
   selectAutoApprovals,
   STARTUP_CHAT_WAIT_MS,
@@ -155,11 +156,28 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           for (let i = 0; i < 2; i++) {
             await this.opts.onToolCallsUpdate?.(
               calls.map((c) => {
-                const desc = ((c.args ?? {}) as { __invocationDesc?: string })
-                  .__invocationDesc;
+                const { __invocationDesc: desc, __resolvedName: resolvedName } =
+                  (c.args ?? {}) as {
+                    __invocationDesc?: string;
+                    __resolvedName?: string;
+                  };
                 return {
                   status: 'awaiting_approval',
-                  request: c,
+                  request: resolvedName
+                    ? {
+                        ...c,
+                        name: resolvedName,
+                        modelFacingName: c.name,
+                      }
+                    : c,
+                  ...(resolvedName
+                    ? {
+                        tool: {
+                          name: resolvedName,
+                          displayName: 'Advisor',
+                        },
+                      }
+                    : {}),
                   ...(desc
                     ? { invocation: { getDescription: () => desc } }
                     : {}),
@@ -352,6 +370,21 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+  });
+
+  it('seeds prompt ids past claims in the resumed transcript', () => {
+    const messages = [0, 1, 2].map((turn) => ({
+      type: 'user' as const,
+      sessionId: 'session-1',
+      promptId: `session-1########${turn}`,
+      message: { parts: [{ text: `prompt ${turn}` }] },
+    }));
+    const config = {
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => ({ conversation: { messages } }),
+    } as unknown as Config;
+
+    expect(nextLivePromptId(config)).toBe('session-1########3');
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -2002,6 +2035,36 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it('relabels a deferred consultation with the scheduler-resolved Advisor', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* () {
+      if (++calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'advisor-bridge',
+            name: 'tool_call',
+            args: {
+              __resolvedName: 'advisor',
+              __invocationDesc: 'advisor-model',
+            },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const events = await drain(
+      livePromptEvents(createFakeConfig(sendMessageStream), 'review'),
+    );
+    expect(events).toContainEqual({
+      type: 'tool-start',
+      id: 'advisor-bridge',
+      tool: 'advisor',
+      title: 'Advisor',
+    });
+  });
+
   it('emits no tool-description without an invocation (R1-104)', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -2155,9 +2218,6 @@ describe('livePromptEvents', () => {
       expect(events).toContainEqual({
         type: 'task-end',
         id: 'agent1',
-        tools: 2,
-        seconds: 12.4,
-        tokens: '2.1k',
       });
       // Progress for already-seen subagent tool calls is not repeated.
       expect(

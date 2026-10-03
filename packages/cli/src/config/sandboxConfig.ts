@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import { getPackageJson } from '../utils/package.js';
 import type { Settings } from './settings.js';
+import { validateExecutionSandboxSelection } from './execution-sandbox-settings.js';
 
 // This is a stripped-down version of the CliArgs interface from config.ts
 // to avoid circular dependencies.
@@ -26,7 +27,6 @@ const VALID_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
   'docker',
   'podman',
   'sandbox-exec',
-  'bwrap',
 ];
 
 /**
@@ -51,27 +51,6 @@ function isSandboxCommand(value: string): value is SandboxConfig['command'] {
 // daemon blocks startup for the full cap.
 const SANDBOX_PROBE_TIMEOUT_MS = 5_000;
 
-// `bwrap` is on PATH long before it is usable: `kernel.unprivileged_userns_clone=0`
-// or an LSM that denies `mount` both leave the binary in place and make every
-// launch fail. Only actually entering a minimal confinement proves the host can
-// run the profile, so the probe runs the same namespace-affecting flags the
-// profile uses (no `--bind`/`--chdir`: those depend on resolved roots, not on
-// host capability).
-const BWRAP_PROBE_ARGS: readonly string[] = [
-  '--ro-bind',
-  '/',
-  '/',
-  '--dev',
-  '/dev',
-  '--die-with-parent',
-  '--',
-  'true',
-];
-
-function probeArgsFor(command: SandboxConfig['command']): readonly string[] {
-  return command === 'bwrap' ? BWRAP_PROBE_ARGS : ['version'];
-}
-
 // `loadSandboxConfig` runs twice on a sandboxed startup — once for the sandbox
 // hop and once inside loadCliConfig — so selection is entered more than once
 // per process. Cache each command's probe outcome so a runtime is contacted at
@@ -90,9 +69,7 @@ export function resetSandboxProbeCacheForTest(): void {
  * PATH. A present container CLI is not a usable one: Docker Desktop may be
  * stopped, the daemon may be unreachable, or the user may not be in the
  * `docker` group. `version` is the cheapest command that still contacts the
- * daemon, so it fails exactly when the runtime would fail later. `bwrap` has no
- * daemon but the same gap between presence and usability, so it is probed by
- * entering a minimal confinement (see {@link BWRAP_PROBE_ARGS}).
+ * daemon, so it fails exactly when the runtime would fail later.
  *
  * `sandbox-exec` is a kernel facility rather than a daemon-backed client, so
  * its presence on PATH is already sufficient.
@@ -118,7 +95,7 @@ function runSandboxProbe(
   command: SandboxConfig['command'],
 ): string | undefined {
   try {
-    const result = spawnSync(command, [...probeArgsFor(command)], {
+    const result = spawnSync(command, ['version'], {
       encoding: 'utf8',
       stdio: 'pipe',
       timeout: SANDBOX_PROBE_TIMEOUT_MS,
@@ -140,10 +117,7 @@ function runSandboxProbe(
     // control characters strips to '', which is falsy — return that and the
     // caller reads the broken runtime as usable, the very bug this guards.
     const stripped = firstLine ? stripAnsiAndControl(firstLine).trim() : '';
-    // Name what was actually run: `docker version` for the daemon clients, the
-    // bare command for bwrap (whose probe is a confinement launch, not a
-    // subcommand).
-    const probeLabel = command === 'bwrap' ? command : `${command} version`;
+    const probeLabel = `${command} version`;
     return stripped || `'${probeLabel}' exited with ${result.status}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
@@ -261,6 +235,7 @@ export async function loadSandboxConfig(
   settings: Settings,
   argv: SandboxCliArgs,
 ): Promise<SandboxConfig | undefined> {
+  if (validateExecutionSandboxSelection(settings, argv)) return undefined;
   const sandboxOption = argv.sandbox ?? settings.tools?.sandbox;
   const command = getSandboxCommand(sandboxOption);
 

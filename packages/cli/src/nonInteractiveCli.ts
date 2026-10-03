@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
   ConcurrencyBatch,
@@ -1395,7 +1396,11 @@ export async function runNonInteractive(
           const sessionPath = config
             .getSessionService()
             .getWorktreeSessionPath(sessionId);
-          const restored = await restoreWorktreeContext(sessionPath);
+          const restored = await restoreWorktreeContext(
+            sessionPath,
+            (error) => debugLogger.warn('worktree restore warning:', error),
+            sessionId,
+          );
           if (restored.contextMessage) {
             initialPartList = withReminder(
               initialPartList,
@@ -2149,9 +2154,7 @@ export async function runNonInteractive(
               toolResponse.error,
               config,
               toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-              typeof toolResponse.resultDisplay === 'string'
-                ? toolResponse.resultDisplay
-                : undefined,
+              shellResultText(toolResponse.resultDisplay),
               { approvalRequired: toolResponse.approvalRequired === true },
             );
           }

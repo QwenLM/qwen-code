@@ -1266,10 +1266,14 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const startedAt = numberField(metadata, 'startedAt');
+  const durationMs = numberField(metadata, 'durationMs');
   return {
     ...base,
     type: 'tool.update',
     toolCallId,
+    ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),

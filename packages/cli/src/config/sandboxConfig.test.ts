@@ -339,52 +339,32 @@ describe('loadSandboxConfig sandbox command selection', () => {
     expect(spawnSync).not.toHaveBeenCalled();
   });
 
-  it.each(['bwrap', 'sandbox-exec'] as const)(
-    'keeps explicitly selected %s without a packaged image',
-    async (command) => {
-      installed(command);
-      spawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
-      vi.mocked(getPackageJson).mockResolvedValueOnce(undefined);
-      vi.stubEnv('QWEN_SANDBOX_IMAGE', undefined);
-      await expect(
-        loadSandboxConfig({}, { sandbox: command }),
-      ).resolves.toEqual({ command });
-      if (command === 'bwrap') {
-        expect(spawnSync).toHaveBeenCalledWith(
-          'bwrap',
-          [
-            '--ro-bind',
-            '/',
-            '/',
-            '--dev',
-            '/dev',
-            '--die-with-parent',
-            '--',
-            'true',
-          ],
-          expect.objectContaining({ timeout: 5000 }),
-        );
-      } else {
-        expect(spawnSync).not.toHaveBeenCalled();
-      }
+  it('keeps Seatbelt without a packaged image', async () => {
+    installed('sandbox-exec');
+    vi.mocked(getPackageJson).mockResolvedValueOnce(undefined);
+    vi.stubEnv('QWEN_SANDBOX_IMAGE', undefined);
+    await expect(
+      loadSandboxConfig({}, { sandbox: 'sandbox-exec' }),
+    ).resolves.toEqual({ command: 'sandbox-exec' });
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['argument', 'settings', 'environment', 'inherited'] as const)(
+    'rejects retired bwrap from %s without probing or starting it',
+    async (source) => {
+      installed('bwrap');
+      if (source === 'environment') vi.stubEnv('QWEN_SANDBOX', 'bwrap');
+      if (source === 'inherited') vi.stubEnv('SANDBOX', 'bwrap');
+      const settings =
+        source === 'settings' ? { tools: { sandbox: 'bwrap' } } : {};
+      const args = source === 'argument' ? { sandbox: 'bwrap' } : {};
+      await expect(loadSandboxConfig(settings, args)).rejects.toThrow(
+        /Whole-CLI bwrap has been removed.*tools.executionSandbox/,
+      );
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(commandExistsSync).not.toHaveBeenCalled();
     },
   );
-
-  it('reports an unusable bwrap functional probe and caches the failure', async () => {
-    installed('bwrap');
-    spawnSync.mockReturnValue({
-      status: 1,
-      stdout: '',
-      stderr: 'fixture mount refused',
-    });
-    await expect(loadSandboxConfig({}, { sandbox: 'bwrap' })).rejects.toThrow(
-      /installed but cannot run.*fixture mount refused/,
-    );
-    await expect(loadSandboxConfig({}, { sandbox: 'bwrap' })).rejects.toThrow(
-      /fixture mount refused/,
-    );
-    expect(spawnSync).toHaveBeenCalledTimes(1);
-  });
 
   it('returns undefined when the sandbox is disabled', async () => {
     installed('docker');

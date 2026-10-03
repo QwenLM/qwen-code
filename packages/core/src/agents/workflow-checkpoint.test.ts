@@ -9,6 +9,7 @@ import { promises as fs, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { WorkflowJournal } from './runtime/workflow-journal.js';
 import {
   checkpointFromTask,
   claimInterruptedWorkflowRun,
@@ -90,7 +91,7 @@ async function leaveRun(
     path.join(dir, 'journal.jsonl'),
     journalLines.map((line) => JSON.stringify(line) + '\n').join(''),
   );
-  expect(await writeWorkflowCheckpoint(config, cp)).toBe(true);
+  expect(await writeWorkflowCheckpoint(config, cp)).toBe('written');
 }
 
 const stopped = { isProcessRunning: () => false };
@@ -184,7 +185,7 @@ describe('writing and reading a checkpoint', () => {
   it('round-trips, and is gone once removed', async () => {
     await fs.mkdir(path.join(root, RUN_ID));
     const cp = checkpoint({ args: [1, 2] });
-    expect(await writeWorkflowCheckpoint(config, cp)).toBe(true);
+    expect(await writeWorkflowCheckpoint(config, cp)).toBe('written');
     expect(await readWorkflowCheckpoint(config, RUN_ID)).toEqual(cp);
     const mode = (await fs.stat(path.join(root, RUN_ID, 'checkpoint.json')))
       .mode;
@@ -192,6 +193,19 @@ describe('writing and reading a checkpoint', () => {
 
     await removeWorkflowCheckpoint(config, RUN_ID);
     expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeUndefined();
+  });
+
+  // A resume refuses to start on this answer, so it must mean the write did
+  // not happen -- not that there was nowhere to make it.
+  it('reports a write that failed, apart from one it could not attempt', async () => {
+    // No run directory: the write needs its parent to exist.
+    await expect(writeWorkflowCheckpoint(config, checkpoint())).resolves.toBe(
+      'failed',
+    );
+    const noStorage = { storage: undefined } as unknown as Config;
+    await expect(
+      writeWorkflowCheckpoint(noStorage, checkpoint()),
+    ).resolves.toBe('unavailable');
   });
 
   it('ignores a checkpoint that names another run', async () => {
@@ -209,7 +223,10 @@ describe('writing and reading a checkpoint', () => {
       const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-outside-'));
       try {
         await fs.symlink(outside, path.join(root, RUN_ID));
-        expect(await writeWorkflowCheckpoint(config, checkpoint())).toBe(false);
+        // Nowhere a checkpoint could live is not a failed write.
+        expect(await writeWorkflowCheckpoint(config, checkpoint())).toBe(
+          'unavailable',
+        );
         await expect(fs.readdir(outside)).resolves.toEqual([]);
       } finally {
         await fs.rm(outside, { recursive: true, force: true });
@@ -219,6 +236,33 @@ describe('writing and reading a checkpoint', () => {
 });
 
 describe('claimInterruptedWorkflowRuns', () => {
+  // A checkpoint from before `argsRecorded` existed says a run had no args
+  // the only way it could: by carrying neither them nor `argsOmitted`. Read
+  // as "unknown", such a run is refused a retry for want of args it never
+  // had, and its resume notice asks the user for them.
+  it('claims a run that had no args as a run that had none, not as one whose args are unknown', async () => {
+    await leaveRun({ ...checkpoint(), argsRecorded: undefined }, [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsRecorded).toBe(true);
+    expect(claimed[0]!.snapshot).not.toHaveProperty('args');
+    expect(claimed[0]!.snapshot.argsOmitted).toBeUndefined();
+  });
+
+  it('keeps a claimed run without args distinct from one whose args were too large', async () => {
+    await leaveRun(checkpoint({ argsOmitted: true }), [
+      { type: 'launched', version: 1 },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed[0]!.snapshot.argsOmitted).toBe(true);
+    expect(claimed[0]!.snapshot.argsRecorded).toBeUndefined();
+  });
+
   it('turns a run whose process is gone into failed history', async () => {
     await leaveRun(
       checkpoint({ args: { files: ['a.csv'] }, resumeName: 'audit' }),
@@ -262,6 +306,56 @@ describe('claimInterruptedWorkflowRuns', () => {
     await expect(
       fs.access(path.join(root, RUN_ID, 'journal.jsonl')),
     ).resolves.toBeUndefined();
+  });
+
+  it('excludes a pruned suffix from interrupted completion counts', async () => {
+    await leaveRun(checkpoint(), [
+      { type: 'launched', version: 1 },
+      { type: 'started', key: 'prefix', agentId: '1' },
+      { type: 'result', key: 'prefix', agentId: '1', result: 'kept' },
+      { type: 'started', key: 'suffix', agentId: '2' },
+      { type: 'result', key: 'suffix', agentId: '2', result: 'old' },
+    ]);
+    const journal = new WorkflowJournal(
+      path.join(root, RUN_ID, 'journal.jsonl'),
+      root,
+    );
+    await journal.retainReplayPrefix(new Set(['prefix']));
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.snapshot).toMatchObject({
+      agentsDispatched: 2,
+      agentsCompleted: 1,
+      status: 'failed',
+    });
+  });
+
+  it('counts only the latest successful attempts when claiming interrupted history', async () => {
+    await leaveRun(checkpoint(), [
+      { type: 'launched', version: 1 },
+      { type: 'started', key: 'prefix', agentId: '1' },
+      { type: 'result', key: 'prefix', agentId: '1', result: 'kept' },
+      { type: 'started', key: 'interrupted', agentId: '2' },
+      { type: 'result', key: 'interrupted', agentId: '2', result: 'old' },
+      { type: 'started', key: 'failed', agentId: '3' },
+      { type: 'result', key: 'failed', agentId: '3', result: 'old' },
+      { type: 'started', key: 'interrupted', agentId: '1' },
+      { type: 'failed', key: 'failed', agentId: '2' },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.snapshot).toMatchObject({
+      agentsDispatched: 3,
+      agentsCompleted: 1,
+      status: 'failed',
+    });
+    expect(await readWorkflowSnapshot(config, RUN_ID)).toEqual(
+      claimed[0]!.snapshot,
+    );
   });
 
   it('leaves a run alone while the process that wrote it is running', async () => {

@@ -20,6 +20,12 @@ import {
   voiceWebSocketProtocols,
 } from '../voice/capture-utils';
 import { LIVE_OUTPUT_SAMPLE_RATE, PcmPlayer } from './pcm-player';
+import {
+  canShareScreen,
+  startScreenShare,
+  type LiveScreenShareHandle,
+} from './screen-share';
+import { sampleScreen } from './screen-feed-sampler';
 // Emitted as a same-origin asset by the app build, which the Web Shell CSP
 // (`script-src 'self'`) lets `audioWorklet.addModule()` load.
 import captureWorkletUrl from './capture-worklet.js?url';
@@ -126,6 +132,32 @@ export interface UseLiveBrowserHostResult {
   /** Must run inside a user gesture: it asks for the microphone. */
   connect: (options?: { takeover?: boolean }) => void;
   disconnect: () => void;
+  /** What the model can see, and when it last looked. */
+  screenShare: LiveScreenShareState;
+  /** Must run inside a user gesture: it asks which screen to share. */
+  startSharingScreen: () => Promise<void>;
+  stopSharingScreen: () => void;
+  screenFeed: LiveScreenFeedState;
+}
+
+export interface LiveScreenFeedState {
+  supported: boolean;
+  feedId?: string;
+  phase: 'idle' | 'starting' | 'streaming' | 'stopped' | 'error';
+  message?: string;
+}
+
+export interface LiveScreenShareState {
+  /** False where `getDisplayMedia` is unavailable, so the share is never offered. */
+  supported: boolean;
+  sharing: boolean;
+  /** The track's own name for what is shared, e.g. a window title. */
+  label: string | undefined;
+  errorMessage: string | undefined;
+  /** `performance.now()` of the last frame the model was given, for the UI. */
+  lastLookAt: number | undefined;
+  /** The model asked while nothing was shared, so the UI can offer to start. */
+  requestedWhileIdle: boolean;
 }
 
 interface HostResources {
@@ -152,6 +184,15 @@ function closeReasonFor(
   return 'lost';
 }
 
+function describeShareError(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'NotAllowedError') {
+    return 'Screen sharing was not allowed.';
+  }
+  return error instanceof Error && error.message
+    ? error.message
+    : 'The screen could not be captured.';
+}
+
 function randomNonce(): string {
   return typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -167,6 +208,25 @@ export function useLiveBrowserHost({
   const [closeReason, setCloseReason] = useState<LiveBrowserHostCloseReason>();
   const [errorMessage, setErrorMessage] = useState<string>();
   const [captureMode, setCaptureMode] = useState<LiveCaptureMode>();
+  const [screenShare, setScreenShare] = useState<LiveScreenShareState>(() => ({
+    supported: canShareScreen(),
+    sharing: false,
+    label: undefined,
+    errorMessage: undefined,
+    lastLookAt: undefined,
+    requestedWhileIdle: false,
+  }));
+  const [screenFeed, setScreenFeed] = useState<LiveScreenFeedState>({
+    supported: false,
+    phase: 'idle',
+  });
+  const feedSupportedRef = useRef(false);
+  const feedAttemptRef = useRef<string | undefined>(undefined);
+  const feedRef = useRef<
+    { id: string; epoch: number; cancel?: () => void } | undefined
+  >(undefined);
+  const shareGenerationRef = useRef(0);
+  const shareRef = useRef<LiveScreenShareHandle | undefined>(undefined);
 
   const phaseRef = useRef<LiveBrowserHostPhase>('idle');
   const generationRef = useRef(0);
@@ -183,7 +243,128 @@ export function useLiveBrowserHost({
     setPhase(next);
   }, []);
 
+  const stopScreenFeed = useCallback(() => {
+    const feed = feedRef.current;
+    if (!feed) return;
+    feed.cancel?.();
+    feedRef.current = undefined;
+    const ws = resourcesRef.current.ws;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'host.screen_feed_stop',
+          epoch: feed.epoch,
+          feedId: feed.id,
+        }),
+      );
+    }
+    setScreenFeed((previous) => ({
+      ...previous,
+      phase: 'stopped',
+      message: undefined,
+    }));
+  }, []);
+
+  const startScreenFeed = useCallback(() => {
+    const ws = resourcesRef.current.ws;
+    const status = statusRef.current;
+    const attempt = `${epochRef.current}:${shareGenerationRef.current}`;
+    if (
+      !feedSupportedRef.current ||
+      !shareRef.current ||
+      !status ||
+      !STREAMING_STATES.has(status.state) ||
+      ws?.readyState !== WebSocket.OPEN ||
+      feedAttemptRef.current === attempt
+    )
+      return;
+    stopScreenFeed();
+    feedAttemptRef.current = attempt;
+    const feed = { id: randomNonce(), epoch: epochRef.current };
+    feedRef.current = feed;
+    setScreenFeed({ supported: true, phase: 'starting', feedId: feed.id });
+    ws.send(
+      JSON.stringify({
+        type: 'host.screen_feed_start',
+        epoch: feed.epoch,
+        feedId: feed.id,
+      }),
+    );
+  }, [stopScreenFeed]);
+
+  const stopSharingScreen = useCallback(() => {
+    shareGenerationRef.current += 1;
+    stopScreenFeed();
+    shareRef.current?.stop();
+    shareRef.current = undefined;
+    setScreenShare((previous) => ({
+      ...previous,
+      sharing: false,
+      label: undefined,
+      requestedWhileIdle: false,
+    }));
+  }, [stopScreenFeed]);
+
+  const startSharingScreen = useCallback(async () => {
+    const shareGeneration = ++shareGenerationRef.current;
+    stopScreenFeed();
+    shareRef.current?.stop();
+    shareRef.current = undefined;
+    setScreenShare((previous) => ({
+      ...previous,
+      sharing: false,
+      label: undefined,
+      errorMessage: undefined,
+    }));
+    let handle: LiveScreenShareHandle;
+    try {
+      handle = await startScreenShare(() => {
+        if (shareGeneration !== shareGenerationRef.current) return;
+        shareGenerationRef.current += 1;
+        stopScreenFeed();
+        // The user pressed the browser's own "Stop sharing".
+        shareRef.current = undefined;
+        setScreenShare((previous) => ({
+          ...previous,
+          sharing: false,
+          label: undefined,
+        }));
+      });
+    } catch (error) {
+      if (shareGeneration !== shareGenerationRef.current) return;
+      // A refused picker is a choice, not a failure worth reporting back.
+      const cancelled =
+        error instanceof DOMException &&
+        (error.name === 'NotAllowedError' || error.name === 'AbortError');
+      setScreenShare((previous) => ({
+        ...previous,
+        sharing: false,
+        label: undefined,
+        errorMessage: cancelled ? undefined : describeShareError(error),
+      }));
+      return;
+    }
+    if (shareGeneration !== shareGenerationRef.current) {
+      handle.stop();
+      return;
+    }
+    shareRef.current = handle;
+    setScreenShare((previous) => ({
+      ...previous,
+      sharing: true,
+      label: handle.label,
+      errorMessage: undefined,
+      requestedWhileIdle: false,
+    }));
+    startScreenFeed();
+  }, [stopScreenFeed, startScreenFeed]);
+
   const release = useCallback(() => {
+    shareGenerationRef.current += 1;
+    stopScreenFeed();
+    feedSupportedRef.current = false;
+    feedAttemptRef.current = undefined;
+    setScreenFeed({ supported: false, phase: 'idle' });
     const resources = resourcesRef.current;
     resourcesRef.current = {};
     if (resources.processor) resources.processor.onaudioprocess = null;
@@ -212,7 +393,18 @@ export function useLiveBrowserHost({
     statusRef.current = undefined;
     inputLevelRef.current = SILENT_INPUT;
     droppingUntilRef.current = 0;
-  }, []);
+    // The share exists to feed this Host; losing the Host ends it, so no page
+    // keeps a screen open that nothing can look at.
+    shareRef.current?.stop();
+    shareRef.current = undefined;
+    setScreenShare((previous) => ({
+      ...previous,
+      sharing: false,
+      label: undefined,
+      lastLookAt: undefined,
+      requestedWhileIdle: false,
+    }));
+  }, [stopScreenFeed]);
 
   const end = useCallback(
     (
@@ -396,6 +588,10 @@ export function useLiveBrowserHost({
               selfChecks: {
                 audioInput: stream.getAudioTracks().length > 0,
                 audioOutput: playback.state === 'running',
+                // Whether a screen is shared right now is not settled here:
+                // this says the daemon may ask, and an unshared screen is
+                // answered with a failure the model can relay.
+                screenShare: canShareScreen(),
               },
             }),
           );
@@ -421,14 +617,102 @@ export function useLiveBrowserHost({
             case 'host.state': {
               const status = message['status'] as DaemonLiveStatus | undefined;
               if (typeof message['epoch'] === 'number') {
+                if (message['epoch'] !== epochRef.current) {
+                  if (
+                    statusRef.current &&
+                    (STREAMING_STATES.has(statusRef.current.state) ||
+                      statusRef.current.state === 'starting')
+                  ) {
+                    stopSharingScreen();
+                  } else {
+                    stopScreenFeed();
+                  }
+                }
                 epochRef.current = message['epoch'];
               }
               if (status) {
+                if (!STREAMING_STATES.has(status.state)) stopScreenFeed();
+                if (
+                  statusRef.current &&
+                  (STREAMING_STATES.has(statusRef.current.state) ||
+                    statusRef.current.state === 'starting') &&
+                  !STREAMING_STATES.has(status.state) &&
+                  status.state !== 'starting'
+                )
+                  stopSharingScreen();
                 statusRef.current = status;
                 player.setMuted(status.outputMuted === true);
                 onStatusRef.current?.(status);
               }
-              if (message['type'] === 'host.welcome') applyPhase('connected');
+              if (message['type'] === 'host.welcome') {
+                feedSupportedRef.current = message['screenFeedV1'] === true;
+                setScreenFeed((previous) => ({
+                  ...previous,
+                  supported: feedSupportedRef.current,
+                }));
+                applyPhase('connected');
+              }
+              startScreenFeed();
+              return;
+            }
+            case 'host.screen_feed_state': {
+              const feed = feedRef.current;
+              const next = message['phase'];
+              if (
+                !feed ||
+                feed.id !== message['feedId'] ||
+                feed.epoch !== message['epoch'] ||
+                !['starting', 'streaming', 'stopped', 'error'].includes(
+                  String(next),
+                )
+              )
+                return;
+              setScreenFeed({
+                supported: true,
+                feedId: feed.id,
+                phase: next as LiveScreenFeedState['phase'],
+                message:
+                  typeof message['message'] === 'string'
+                    ? message['message'].slice(0, 2000)
+                    : undefined,
+              });
+              if (next === 'stopped' || next === 'error') {
+                feed.cancel?.();
+                feedRef.current = undefined;
+              } else if (!feed.cancel && shareRef.current) {
+                const share = shareRef.current;
+                feed.cancel = sampleScreen({
+                  grab: () => share.grab(),
+                  canSend: () =>
+                    isCurrent() &&
+                    feedRef.current === feed &&
+                    shareRef.current === share &&
+                    epochRef.current === feed.epoch &&
+                    !!statusRef.current &&
+                    STREAMING_STATES.has(statusRef.current.state) &&
+                    ws.readyState === WebSocket.OPEN &&
+                    ws.bufferedAmount === 0,
+                  send: (image) =>
+                    ws.send(
+                      JSON.stringify({
+                        type: 'host.screen_feed_frame',
+                        epoch: feed.epoch,
+                        feedId: feed.id,
+                        image,
+                      }),
+                    ),
+                  onError: (error) => {
+                    if (feedRef.current !== feed) return;
+                    stopScreenFeed();
+                    setScreenFeed({
+                      supported: true,
+                      feedId: feed.id,
+                      phase: 'error',
+                      message: describeShareError(error),
+                    });
+                  },
+                });
+              }
               return;
             }
             case 'host.ping':
@@ -446,6 +730,83 @@ export function useLiveBrowserHost({
                   : undefined,
               );
               return;
+            case 'host.capture_visual': {
+              const requestId = message['requestId'];
+              if (typeof requestId !== 'string' || !requestId) return;
+              const fail = (error: string) => {
+                if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
+                ws.send(
+                  JSON.stringify({
+                    type: 'host.visual_capture_result',
+                    requestId,
+                    success: false,
+                    error,
+                  }),
+                );
+              };
+              if (message['source'] !== 'screen') {
+                fail('This Host can only share a screen.');
+                return;
+              }
+              // The daemon drops a result whose call has since changed, but by
+              // then the frame has already left the machine. Refuse before
+              // reading the screen at all.
+              if (
+                typeof message['epoch'] === 'number' &&
+                message['epoch'] !== epochRef.current
+              ) {
+                fail('The Live call changed before the screen was read.');
+                return;
+              }
+              const share = shareRef.current;
+              if (!share) {
+                setScreenShare((previous) => ({
+                  ...previous,
+                  requestedWhileIdle: true,
+                }));
+                fail('The user is not sharing a screen.');
+                return;
+              }
+              const requestedEpoch = epochRef.current;
+              const requestedShareGeneration = shareGenerationRef.current;
+              void share
+                .grab()
+                .then((frame) => {
+                  if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
+                  if (
+                    shareRef.current !== share ||
+                    epochRef.current !== requestedEpoch ||
+                    shareGenerationRef.current !== requestedShareGeneration
+                  ) {
+                    fail(
+                      'The screen share or Live call changed before capture finished.',
+                    );
+                    return;
+                  }
+                  ws.send(
+                    JSON.stringify({
+                      type: 'host.visual_capture_result',
+                      requestId,
+                      success: true,
+                      source: 'screen',
+                      image: frame.image,
+                      width: frame.width,
+                      height: frame.height,
+                      appName: 'Shared screen',
+                      windowTitle: share.label,
+                      // A page cannot read the accessibility tree of whatever
+                      // it is shown; the image is the whole of the context.
+                      accessibilityText: '',
+                    }),
+                  );
+                  setScreenShare((previous) => ({
+                    ...previous,
+                    lastLookAt: performance.now(),
+                  }));
+                })
+                .catch((error: unknown) => fail(describeShareError(error)));
+              return;
+            }
             default:
               return;
           }
@@ -498,7 +859,15 @@ export function useLiveBrowserHost({
         sink.connect(capture.destination);
       })();
     },
-    [applyPhase, baseUrl, end, token],
+    [
+      applyPhase,
+      baseUrl,
+      end,
+      token,
+      stopScreenFeed,
+      stopSharingScreen,
+      startScreenFeed,
+    ],
   );
 
   useEffect(() => {
@@ -519,5 +888,9 @@ export function useLiveBrowserHost({
     inputLevel: inputLevelRef,
     connect,
     disconnect,
+    screenShare,
+    startSharingScreen,
+    stopSharingScreen,
+    screenFeed,
   };
 }

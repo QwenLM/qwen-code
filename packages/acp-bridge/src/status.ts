@@ -244,6 +244,17 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
+   * A paired Bridge sends a session-affecting workspace change, already
+   * persisted by the workspace-control engine or the daemon, to every other
+   * live engine. Params: `{ v: 1, revision, kind, tightening, cwd }` plus
+   * `enabled` for `sessionWorkflow` and `reason` for `skills`. The engine
+   * re-reads that setting, applies it to every live session before the
+   * session's next prompt, model request or tool dispatch, cancels a turn it
+   * cannot revalidate, and only then answers `{ v: 1, revision,
+   * acknowledged: true }`. Any other answer is not an acknowledgement.
+   */
+  workspaceChange: 'qwen/control/workspace/change',
+  /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
    * here — which the PARENT serve process calls DOWN into the `qwen --acp`
    * child — this one is called by the CHILD UP into the parent: a
@@ -653,6 +664,12 @@ export interface ServeContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
   startupContext?: number;
+  /**
+   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older servers report 0 there.
+   */
   messages: number;
   /** Provider total not accounted for by any category. Absent from older servers. */
   unattributed?: number;
@@ -1052,10 +1069,19 @@ export interface ServeSessionWorkflowTaskStatus {
    */
   isHistorical?: boolean;
   /**
-   * The run was launched with `args` too large for its snapshot to keep, so
-   * it cannot be retried or rerun from history.
+   * The run was launched with `args` too large for its snapshot to keep. It
+   * is one reason for {@link argsUnavailable}, reported separately so a
+   * client can say which.
    */
   argsOmitted?: true;
+  /**
+   * The run cannot be retried or rerun from history because its history does
+   * not have the `args` to start it with: they were too large to keep
+   * (`argsOmitted`), or the snapshot predates keeping them at all and so
+   * cannot say whether the run had any. Offer neither action when this is
+   * set -- the daemon answers both with `workflow_args_unavailable`.
+   */
+  argsUnavailable?: true;
   sourceRunId?: string;
   startMode?: 'retry' | 'rerun';
   label: string;
@@ -1237,6 +1263,22 @@ export interface ServeWorkspaceMemoryFile {
   scope: ServeContextFileScope;
   /** Size in bytes of the file's serialized contents on disk. */
   bytes: number;
+  /**
+   * File text, present only when the caller asked for content
+   * (`GET /workspace/memory?content=true`), the read succeeded, and the
+   * on-disk bytes are valid BOM-free UTF-8. A `mode:'replace'` client may
+   * treat it as the file's full text. Absent for non-UTF-8 or BOM'd
+   * files (a lossy decode is never served as replaceable text) and for
+   * reads that raced a concurrent write.
+   */
+  content?: string;
+  /**
+   * True when the served text is not the file's full content: either
+   * `content` stops at the daemon's read cap, or the read raced a
+   * concurrent write (byte count differed from `bytes`, in which case
+   * `content` is omitted entirely).
+   */
+  truncated?: boolean;
 }
 
 export interface ServeWorkspaceMemoryStatus {
