@@ -236,10 +236,11 @@ function workspaceInstallation(
 /** Activation request for a workspaceInstallation-installed Session. */
 function workspaceActivation(
   request: ReturnType<typeof workspaceInstallation>,
+  operation = 'activate',
 ) {
   return {
     protocolVersion: 1,
-    operation: 'activate',
+    operation,
     sessionId: request.sessionId,
     contextDigest: request.contextDigest,
     contextConfigRef: request.binding.contextConfigRef,
@@ -1057,6 +1058,19 @@ describe('Managed context tool gate', () => {
         glob('call-3', { pattern: '**/*', path: '..' }),
       )
     ).json();
+    // Glob declares no `file_path`, so a stray one — ordinary schema confusion
+    // with the file tools that share the turn — must not be read as a
+    // traversal attempt that refuses the whole search.
+    const strayFilePath = await (
+      await post(
+        origin,
+        EXECUTE,
+        glob('call-4', {
+          pattern: '**/*.ts',
+          file_path: '../web/secret.txt',
+        }),
+      )
+    ).json();
 
     expect(all.result.executionStatus).toBe('success');
     const text = JSON.stringify(all);
@@ -1069,6 +1083,9 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(outside)).toContain(
       'not within the Session working directory',
     );
+    expect(strayFilePath.result.executionStatus).toBe('success');
+    expect(JSON.stringify(strayFilePath)).toContain('index.ts');
+    expect(JSON.stringify(strayFilePath)).not.toContain('secret.txt');
   });
 
   it('refuses a read whose file is a symlink escaping the Workspace', async () => {
@@ -1295,6 +1312,13 @@ describe('Managed context tool gate', () => {
     const install1 = workspaceInstallation('session-1', 'services/api');
     await post(origin, CONTEXT, install1);
     await post(origin, ACTIVATION, workspaceActivation(install1));
+    // The sibling directory is protected because it is another installed
+    // Session's directory: the boundary names Sessions, not mount contents.
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
     const read = async (callId: string, filePath: string) =>
       (
         await post(origin, EXECUTE, {
@@ -1344,12 +1368,20 @@ describe('Managed context tool gate', () => {
     const install1 = workspaceInstallation('session-1', 'services/api');
     await post(origin, CONTEXT, install1);
     await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
 
     const created = await (
       await post(origin, EXECUTE, {
         ...shell('session-1', 'call-1', ''),
         toolName: 'write_file',
-        input: { file_path: 'peek/pwned.txt', content: 'written by session-1' },
+        input: {
+          file_path: 'peek/pwned.txt',
+          content: 'written by session-1',
+        },
       })
     ).json();
     expect(created.result.executionStatus).toBe('error');
@@ -1372,6 +1404,100 @@ describe('Managed context tool gate', () => {
     expect(
       fs.readFileSync(path.join(root, 'services/api/src/new.txt'), 'utf8'),
     ).toBe('mine too');
+  });
+
+  it('reads through a symlink to a shared directory that is no Session', async () => {
+    // The Session boundary protects sibling SESSIONS. A linked dependency
+    // inside the same mount (`node_modules/@acme/ui -> ../../packages/ui`)
+    // is no Session: refusing it narrows every /1 workspace that reads
+    // through linked dependencies — the pre-containment behavior.
+    const root = workspace([
+      'services/api/src',
+      'services/web',
+      'packages/ui/src',
+    ]);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    fs.mkdirSync(path.join(root, 'services/api/node_modules/@acme'), {
+      recursive: true,
+    });
+    fs.symlinkSync(
+      path.join('..', '..', '..', '..', 'packages', 'ui'),
+      path.join(root, 'services/api/node_modules/@acme/ui'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    // The shared dependency reads through; the sibling Session still does
+    // not — both halves of the boundary in one fixture.
+    const linkedDep = await read(
+      'call-1',
+      'node_modules/@acme/ui/src/index.ts',
+    );
+    expect(linkedDep.result.executionStatus).toBe('success');
+    expect(JSON.stringify(linkedDep)).toContain('ui-source');
+    const sibling = await read('call-2', 'peek/secret.txt');
+    expect(sibling.result.executionStatus).toBe('error');
+    expect(JSON.stringify(sibling)).not.toContain('sibling');
+  });
+
+  it('refuses a brace pattern with too many alternatives before expanding it', async () => {
+    // The bound is computed from the pattern's structure, never by
+    // expanding: twenty `{a,b}` groups are ~100 bytes that would otherwise
+    // block this shared worker's event loop for seconds.
+    const root = workspace(['services/api']);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+
+    const costly = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'glob',
+        // 13 groups exceed the alternative bound and stay fast even unguarded.
+        input: { pattern: '{a,b}'.repeat(13) + '/*' },
+      })
+    ).json();
+    expect(costly.result.executionStatus).toBe('error');
+    expect(JSON.stringify(costly)).toContain('64 brace alternatives');
+    // An ordinary brace pattern stays admitted.
+    const fine = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-2', ''),
+        toolName: 'glob',
+        input: { pattern: '*.{ts,tsx}' },
+      })
+    ).json();
+    expect(fine.result.executionStatus).not.toBe('error');
   });
 
   it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {
@@ -1673,32 +1799,13 @@ describe('Managed context tool gate', () => {
 });
 
 describe('Managed Workspace execution activation', () => {
-  function fixedInstallation(sessionId: string, cwd = '.') {
-    const request = installation(sessionId, cwd);
-    const binding = {
-      ...request.binding,
-      contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
-    };
-    return {
-      ...request,
-      binding,
-      contextDigest: computeManagedContextDigest(binding),
-    };
-  }
-
-  function activation(
-    request: ReturnType<typeof fixedInstallation>,
-    operation = 'activate',
-  ) {
-    return {
-      protocolVersion: 1,
-      operation,
-      sessionId: request.sessionId,
-      contextDigest: request.contextDigest,
-      contextConfigRef: request.binding.contextConfigRef,
-      profile: WORKSPACE_EXECUTION_PROFILE,
-    };
-  }
+  // The workspace activation envelope is built once, at module scope; these
+  // aliases only carry this block's shorter names and its `cwd` default, so a
+  // change to the request shape cannot leave half the suite posting a stale
+  // envelope.
+  const fixedInstallation = (sessionId: string, cwd = '.') =>
+    workspaceInstallation(sessionId, cwd);
+  const activation = workspaceActivation;
 
   it('pins the explicit frozen configuration and capability digests', () => {
     const refs = 'managed-runtime-tools/1\0preapproved-workspace-tools/1';

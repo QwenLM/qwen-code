@@ -985,7 +985,13 @@ it.each([
   { pattern: 7 },
   { pattern: '/**/*.ts' },
   { pattern: '../**/*' },
-  // Brace expansion composes what the literal segment check cannot see.
+  // The guard must judge the value it dispatches, which is the trimmed one:
+  // leading whitespace otherwise masks both shapes past this pre-acquisition
+  // refusal and into a durable Runtime round trip.
+  { pattern: ' ../**/*' },
+  { pattern: '\t/etc/host*' },
+  // Brace expansion composes what the literal segment check cannot see,
+  // and its cost is bounded before any expansion runs.
   { pattern: '{/etc,/zz-nonexistent}/host*' },
   { pattern: '{.,..}/**/*' },
   { pattern: 'src/{..,x}/**' },
@@ -1099,6 +1105,35 @@ it('treats a blank glob path as omitted and still dispatches', async () => {
   expect(broker.execute).toHaveBeenCalledOnce();
   const payload = JSON.parse(broker.execute.mock.calls[0][1]);
   expect(payload.input).toEqual({ pattern: '**/*.ts' });
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('treats a null glob path as omitted and still dispatches the whole batch', async () => {
+  // `null` is one more provider encoding of an unset optional. Argument
+  // validation is batch-wide, so refusing it as traversal would also cancel
+  // the valid sibling call in the same turn.
+  turn = createSearchTurn();
+  const nullPath = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts', path: null },
+  };
+  const sibling = { ...calls[1], name: 'glob', args: { pattern: '*.md' } };
+  const responses = await turn.execute(
+    [nullPath, sibling],
+    [nullPath, sibling].map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  for (const response of responses)
+    expect(response.functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual({
+    pattern: '**/*.ts',
+  });
   await turn.consumeResults();
   await turn.finish();
 });

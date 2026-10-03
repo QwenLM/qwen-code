@@ -57,16 +57,16 @@ describe('checkHostedGlobPattern', () => {
       return seed / 2 ** 31;
     };
     const tokens = ['{', '}', ',', 'a', 'b', '1', '..', '\\', '$', '/', '3'];
+    const oversized: string[] = [];
     for (let sample = 0; sample < 20000; sample++) {
       let pattern = '';
       const length = 1 + Math.floor(random() * 16);
       for (let index = 0; index < length; index++)
         pattern += tokens[Math.floor(random() * tokens.length)];
       if (checkHostedGlobPattern(pattern) === 'too-complex') continue;
-      expect(
-        braceExpand(pattern).length,
-        JSON.stringify(pattern),
-      ).toBeLessThanOrEqual(HOSTED_GLOB_MAX_ALTERNATIVES);
+      if (braceExpand(pattern).length > HOSTED_GLOB_MAX_ALTERNATIVES)
+        oversized.push(pattern);
     }
+    expect(oversized).toEqual([]);
   });
 });

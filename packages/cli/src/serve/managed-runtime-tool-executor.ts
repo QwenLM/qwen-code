@@ -353,6 +353,17 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
+    /**
+     * True when a realpath lands inside ANOTHER installed Session's
+     * directory. The file-tool boundary is the Session directory for that
+     * case (a sibling Session's files are never this Session's business);
+     * anywhere else inside the mount — a linked dependency's real location
+     * — keeps the pre-containment behavior of reading through the symlink.
+     */
+    private readonly ownsAnotherSessionDir?: (
+      sessionId: string,
+      realPath: string,
+    ) => Promise<boolean>,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -854,6 +865,12 @@ export class ManagedToolExecutor {
       if (
         directory &&
         entry.toolName !== ShellTool.Name &&
+        // Glob declares no `file_path`, so a stray one — schema confusion with
+        // the file tools that share the turn, or a hook that stamps the key on
+        // every call it sees — must not refuse the search: the tool never reads
+        // it, and glob's own pattern/output containment below covers every path
+        // it does consume.
+        entry.toolName !== GlobTool.Name &&
         typeof params['file_path'] === 'string' &&
         !path.isAbsolute(params['file_path'].trim())
       ) {
@@ -863,22 +880,43 @@ export class ManagedToolExecutor {
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
-        // refuse anything that lands outside the Session directory. A create
-        // resolves through its deepest existing ancestor so a symlinked
-        // parent is seen; a genuinely absent path stays lexical and keeps
-        // the tool's own not-found answer rather than a traversal accusation.
+        // refuse anything that lands outside the boundary. A create's leaf
+        // does not exist yet, so resolve the deepest ancestor that does —
+        // a genuinely absent path stays lexical and keeps the tool's own
+        // not-found answer rather than a traversal accusation.
+        const realTarget = await realpathDeepestExisting(
+          params['file_path'] as string,
+        );
         const relative = path.relative(
           await realpathDeepestExisting(directory),
-          await realpathDeepestExisting(params['file_path'] as string),
+          realTarget,
         );
         if (
           relative === '..' ||
           relative.startsWith(`..${path.sep}`) ||
           path.isAbsolute(relative)
         ) {
-          throw new Error(
-            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
-          );
+          // The boundary is the Session directory only when the target lands
+          // in ANOTHER installed Session's directory; anywhere else inside
+          // the mount — a linked dependency's real location — stays
+          // reachable, the behavior /1 Sessions had before containment.
+          const workspaceRoot = tools.workspaceRoot;
+          const inMount =
+            workspaceRoot !== undefined &&
+            !escapesSession(
+              path.relative(
+                await realpathDeepestExisting(workspaceRoot),
+                realTarget,
+              ),
+            );
+          if (
+            !inMount ||
+            (await this.ownsAnotherSessionDir?.(tools.sessionId, realTarget))
+          ) {
+            throw new Error(
+              `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+            );
+          }
         }
       }
       if (entry.toolName === GlobTool.Name) {
@@ -915,11 +953,7 @@ export class ManagedToolExecutor {
           await realpathDeepestExisting(root),
           await realpathDeepestExisting(resolved),
         );
-        if (
-          relative === '..' ||
-          relative.startsWith(`..${path.sep}`) ||
-          path.isAbsolute(relative)
-        ) {
+        if (escapesSession(relative)) {
           throw new Error(
             `Path '${requested}' is not within the Session working directory.`,
           );
@@ -990,22 +1024,22 @@ export class ManagedToolExecutor {
           throw new ManagedToolUnavailableError(
             'Managed context directory is unavailable.',
           );
-        // Contain the OUTPUT, not the pattern's grammar: brace expansion
-        // (`{.,..}/**/*`) and a symlink named as a literal pattern segment
-        // both resolve after every input-side check, so each hit is judged
-        // against the Session root's realpath and any escape refuses the
-        // result rather than certifying a sibling Session's files as local.
-        const resultPaths = (result as { resultFilePaths?: unknown })
-          .resultFilePaths;
+        // Contain the OUTPUT, over glob's full collected set — not the
+        // display slice: the header's count certifies every collected hit,
+        // and a Session's own recent files systematically fill the slice,
+        // so containing only `resultFilePaths` would certify a count drawn
+        // from outside the boundary. Each hit is judged by its lexical path
+        // plus its parent's realpath: realpathing the hit itself would
+        // punish an ordinary outward symlink that is merely listed, while
+        // the parent arm still refuses a file reached *through* a
+        // symlinked directory.
+        const resultPaths =
+          (result as { collectedFilePaths?: unknown }).collectedFilePaths ??
+          (result as { resultFilePaths?: unknown }).resultFilePaths;
         if (Array.isArray(resultPaths)) {
           const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
-            // Judge by the hit's lexical name plus its parent's realpath:
-            // realpathing the hit itself would punish an ordinary outward
-            // symlink (a venv's `.venv/bin/python`) that is merely listed,
-            // while the parent arm still refuses a file reached *through* a
-            // symlinked directory (`peek/secret.txt`).
             const relative = path.relative(
               realRoot,
               path.join(
@@ -1013,11 +1047,7 @@ export class ManagedToolExecutor {
                 path.basename(hit),
               ),
             );
-            if (
-              relative === '..' ||
-              relative.startsWith(`..${path.sep}`) ||
-              path.isAbsolute(relative)
-            ) {
+            if (escapesSession(relative)) {
               throw new Error(
                 'Glob results must stay within the Session working directory.',
               );
@@ -1315,6 +1345,15 @@ function relativizeGlobResult(
     };
   }
   return next;
+}
+
+/** The relative-shape test every containment check shares. */
+function escapesSession(relative: string): boolean {
+  return (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
 }
 
 /**
