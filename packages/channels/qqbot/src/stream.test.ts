@@ -41,85 +41,96 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
-vi.mock('@qwen-code/channel-base', () => ({
-  ChannelBase: class {
-    protected config: Record<string, unknown> = {};
-    protected bridge: Record<string, unknown> = {};
-    protected router: Record<string, unknown> = {};
-    protected name: string = '';
-    constructor(
-      name: string,
-      config: Record<string, unknown>,
-      bridge: Record<string, unknown>,
-      options?: Record<string, unknown>,
-    ) {
-      this.name = name;
-      this.config = config;
-      this.bridge = bridge;
-      this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
-    }
-    protected handleInbound(_env: unknown): Promise<void> {
-      return Promise.resolve();
-    }
-    protected getResponseMessageId(_sessionId: string): string | undefined {
-      return responseMessageIdRef.current;
-    }
-    protected getResponseSourceLabel(_sessionId: string): undefined {
-      return undefined;
-    }
-    protected formatMarkdownAttributedText(
-      text: string,
-      sourceLabel?: string,
-    ): string {
-      const label = sourceLabel?.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
-      return label ? `${label}\n${text}` : text;
-    }
-    protected formatAttributedText(text: string, sourceLabel?: string): string {
-      return sourceLabel ? `${sourceLabel} ${text}` : text;
-    }
-    protected async onResponseComplete(
-      _chatId: string,
-      fullText: string,
-      sessionId: string,
-    ): Promise<void> {
-      await (
-        this as unknown as {
-          sendResponseMessage: (
-            c: string,
-            t: string,
-            s: string,
-          ) => Promise<void>;
-        }
-      ).sendResponseMessage(_chatId, fullText, sessionId);
-    }
-    onSessionDied(_sessionId: string): void {
-      // no-op in mock; overridden by QQChannel
-    }
-  },
-  SessionRouter: class {
-    restoreSessions(): Promise<void> {
-      return Promise.resolve();
-    }
-  },
-  getGlobalQwenDir: () => '/tmp/test-qwen',
-  sanitizeLogText: (text: string, _maxLen: number): string =>
-    String(text).slice(0, 200),
-  sanitizeSenderName: (name: string): string => name || 'QQ User',
-  sanitizePromptText: (text: string): string => text,
-  truncateCodePoints: (text: string, max: number): string =>
-    [...text].slice(0, max).join(''),
-  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
-  // code-point boundaries, so a pair is never split.
-  truncateUtf16Units: (text: string, max: number): string => {
-    if (text.length <= max) return text;
-    let kept = '';
-    for (const ch of text) {
-      if (kept.length + ch.length > max) break;
-      kept += ch;
-    }
-    return kept;
-  },
-}));
+vi.mock('@qwen-code/channel-base', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/channel-base')>();
+  return {
+    // Spread the real module so tests assert against the shipped exports
+    // (truncateUtf16Units in particular) instead of hand-written mirrors; only
+    // the base classes, the path helper and the sanitizers listed below are
+    // stubbed.
+    ...actual,
+    ChannelBase: class {
+      protected config: Record<string, unknown> = {};
+      protected bridge: Record<string, unknown> = {};
+      protected router: Record<string, unknown> = {};
+      protected name: string = '';
+      constructor(
+        name: string,
+        config: Record<string, unknown>,
+        bridge: Record<string, unknown>,
+        options?: Record<string, unknown>,
+      ) {
+        this.name = name;
+        this.config = config;
+        this.bridge = bridge;
+        this.router = (options?.['router'] ?? {}) as Record<string, unknown>;
+      }
+      protected handleInbound(_env: unknown): Promise<void> {
+        return Promise.resolve();
+      }
+      /** Minimal stand-in for ChannelBase.setBridge (bridge crash-recovery). */
+      setBridge(bridge: Record<string, unknown>): void {
+        this.bridge = bridge;
+        (
+          this.router as { setBridge?: (b: Record<string, unknown>) => void }
+        ).setBridge?.(bridge);
+      }
+      protected getResponseMessageId(_sessionId: string): string | undefined {
+        return responseMessageIdRef.current;
+      }
+      protected getResponseSourceLabel(_sessionId: string): undefined {
+        return undefined;
+      }
+      protected formatMarkdownAttributedText(
+        text: string,
+        sourceLabel?: string,
+      ): string {
+        const label = sourceLabel?.replace(
+          /([\\`*_[\]{}()#+.!|>~-])/gu,
+          '\\$1',
+        );
+        return label ? `${label}\n${text}` : text;
+      }
+      protected formatAttributedText(
+        text: string,
+        sourceLabel?: string,
+      ): string {
+        return sourceLabel ? `${sourceLabel} ${text}` : text;
+      }
+      protected async onResponseComplete(
+        _chatId: string,
+        fullText: string,
+        sessionId: string,
+      ): Promise<void> {
+        await (
+          this as unknown as {
+            sendResponseMessage: (
+              c: string,
+              t: string,
+              s: string,
+            ) => Promise<void>;
+          }
+        ).sendResponseMessage(_chatId, fullText, sessionId);
+      }
+      onSessionDied(_sessionId: string): void {
+        // no-op in mock; overridden by QQChannel
+      }
+    },
+    SessionRouter: class {
+      restoreSessions(): Promise<void> {
+        return Promise.resolve();
+      }
+    },
+    getGlobalQwenDir: () => '/tmp/test-qwen',
+    sanitizeLogText: (text: string, _maxLen: number): string =>
+      String(text).slice(0, 200),
+    sanitizeSenderName: (name: string): string => name || 'QQ User',
+    sanitizePromptText: (text: string): string => text,
+    truncateCodePoints: (text: string, max: number): string =>
+      [...text].slice(0, max).join(''),
+  };
+});
 
 const { QQChannel } = await import('./QQChannel.js');
 
@@ -636,11 +647,23 @@ describe('idle-flush timer', () => {
     await drain();
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
-    const msgIds = mockSendQQMessage.mock.calls
-      .map((c) => (c[3] as Record<string, unknown>)['msg_id'])
-      .sort();
+    // Assert the (msg_id, content) pairing, not just the multiset of ids: a
+    // regression that resolves a sibling session's anchor produces the same
+    // sorted ids ['msg-A','msg-B'] while cross-posting each session's text.
+    const delivered = mockSendQQMessage.mock.calls
+      .map((c) => {
+        const body = c[3] as Record<string, unknown>;
+        return [
+          body['msg_id'],
+          (body['markdown'] as Record<string, string>).content,
+        ];
+      })
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
     // Each session's chunk goes under the msgId that triggered it.
-    expect(msgIds).toEqual(['msg-A', 'msg-B']);
+    expect(delivered).toEqual([
+      ['msg-A', 'part-A '],
+      ['msg-B', 'part-B '],
+    ]);
   });
 
   it('a stream anchored to an overwritten msgId keeps its msg_seq counter (not reset by setReplyMsgId)', async () => {
@@ -1181,10 +1204,14 @@ describe('onResponseComplete', () => {
     seqMap.set('msg-A', 2);
 
     // A concurrent message overwrites the chat-level entry mid-stream via
-    // the real setReplyMsgId path. sess-A still anchors msg-A, so the
-    // isMsgIdAnchoredBySession guard inside setReplyMsgId must keep msg-A's
-    // seq counter alive — the previous version wrote the map directly and
-    // never exercised that guard.
+    // the real setReplyMsgId path. sess-A still anchors msg-A, and
+    // setReplyMsgId deliberately does not reclaim the previous msgId's
+    // counter (see its NOTE); the surviving replyContextByMessageId entry
+    // keeps it reachable. No guard inside setReplyMsgId is exercised here —
+    // isMsgIdAnchoredBySession is reached only through isMsgSeqStillInUse on
+    // the release paths, and it is replyContextByMessageId that vetoes the
+    // reclaim if one is ever attempted. This assertion pins that the counter
+    // is not dropped on the overwrite.
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     expect(seqMap.get('msg-A')).toBe(2);
 
@@ -1862,7 +1889,12 @@ describe('error recovery paths', () => {
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
 
     // Turn 1 streams and its flush stays in flight (msg-A's seq recorded).
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    // Deliberately NO setReplyMsgId for msg-A: a chat-level routing entry
+    // would keep msg-A's counter alive through every release via
+    // isMsgSeqStillInUse's replyContextByMessageId clause, making the
+    // permanent-failure release below unobservable. With only the live stream
+    // entry and the flush marker vetoing while the send is in flight, the
+    // settle release is the sole owner of msg-A's counter.
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'part1', 'sess-1');
     vi.advanceTimersByTime(2000);
@@ -1908,15 +1940,10 @@ describe('error recovery paths', () => {
     expect(streamState(ch).get('sess-1')!.turn).toBe(2);
     expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-B');
     expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-B');
-    // ...but the superseded turn's counter is not orphaned either: the release
-    // ran and the counter is retained because replyContextByMessageId still
-    // names msg-A. Evicting that routing entry reclaims it.
-    expect(seqMap.has('msg-A')).toBe(true);
-    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
-      chatId: 'test-chat',
-      msgId: 'msg-A',
-      timestamp: Date.now(),
-    });
+    // ...but the superseded turn's counter is not orphaned: the settle release
+    // ran outside the identity guard (current !== state) and reclaimed msg-A
+    // now that the in-flight stream entry that vetoed it is gone. Scoping that
+    // release to `current === state` leaves the counter to the 60s sweep.
     expect(seqMap.has('msg-A')).toBe(false);
     // The permanent failure sent exactly once (the superseded 'part1'); the
     // replacement entry's 'turn-2' buffer is never sent before teardown.
@@ -3853,6 +3880,15 @@ describe('cancel/flush coordination', () => {
     await vi.advanceTimersByTimeAsync(61_000);
     await drain();
     expect(msgSeqMap.has('msg-A')).toBe(true);
+    // Prove the tick actually evicted the naming entries: the seeded ages are
+    // hardcoded mirrors of REPLY_MSG_ID_TTL_MS and the 60s interval, so if
+    // either drifts the test would otherwise pass vacuously (nothing evicted,
+    // nothing to protect) instead of exercising the in-flight registration.
+    expect(sessionAnchors.has('s1')).toBe(false);
+    expect(contexts.has('msg-A')).toBe(false);
+    expect((chp['replyMsgId'] as Map<string, unknown>).has('test-chat')).toBe(
+      false,
+    );
 
     // The retry then succeeds and continues the counter instead of restarting
     // at 1, which QQ would dedupe against the accepted (msg-A, 1).
@@ -5689,7 +5725,9 @@ describe('an in-flight flush must not clear a newer seal', () => {
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     await onResponseComplete(ch, 'test-chat', '', 's1');
     await drain();
-    expect(sentContents().at(-1)).toBe('HEADBC');
+    // The full sequence, not just the last send: a duplicate completion
+    // delivery would append another 'HEADBC' and pass an .at(-1) check.
+    expect(sentContents()).toEqual(['HEADB', 'HEADBC', 'HEADBC', 'HEADBC']);
   });
 
   it('re-seals a residual whose text repeats the carried seal', async () => {
@@ -5731,7 +5769,9 @@ describe('an in-flight flush must not clear a newer seal', () => {
     await onResponseComplete(ch, 'test-chat', '', 's1');
     await drain();
     // The whole collected text, exactly once — not just the failed payload.
-    expect(sentContents().at(-1)).toBe('HEADHEAD');
+    // The full sequence, not just the last send: a duplicated completion
+    // delivery would append another 'HEADHEAD' and pass an .at(-1) check.
+    expect(sentContents()).toEqual(['HEAD', 'HEADHEAD', 'HEADHEAD']);
   });
 
   it('keeps a residual seal that repeats the carried seal when the head send succeeds', async () => {
@@ -6005,8 +6045,10 @@ describe('an in-flight flush must not clear a newer seal', () => {
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     await onResponseComplete(ch, 'test-chat', '', 's1');
     await drain();
-    // And the head rides that payload exactly once.
-    expect(sentContents().at(-1)).toBe('HEADRESID');
+    // And the head rides that payload exactly once. The full sequence, not
+    // just the last send: a duplicate completion delivery would append another
+    // 'HEADRESID' and pass an .at(-1) check.
+    expect(sentContents()).toEqual(['HEAD', 'HEADRESID', 'HEADRESID']);
   });
 
   it('recovers the carried seal when a permanent re-seal marker was missed', async () => {
@@ -6059,8 +6101,10 @@ describe('an in-flight flush must not clear a newer seal', () => {
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     await onResponseComplete(ch, 'test-chat', '', 's1');
     await drain();
-    // The recovered head is delivered exactly once, not duplicated.
-    expect(sentContents().at(-1)).toBe('HEADRESID');
+    // The recovered head is delivered exactly once, not duplicated. The full
+    // sequence, not just the last send: a duplicate delivery would append
+    // another 'HEADRESID' and pass an .at(-1) check.
+    expect(sentContents()).toEqual(['HEAD', 'HEADRESID']);
   });
 
   it('seals the residual a hook-suppressed boundary stripped from a flush in flight', async () => {
@@ -7184,6 +7228,62 @@ describe('round-1 robustness pins', () => {
     // resetRoutingState clears the side buffer: without that, every session
     // that had stashed text keeps it for the process lifetime.
     expect(buffer.has('s1')).toBe(false);
+  });
+
+  it('moves the responseBoundary observer to a swapped bridge', () => {
+    const bridgeA = new EventEmitter();
+    const bridgeB = new EventEmitter();
+    const ch = makeChannel({}, bridgeA as unknown as Record<string, unknown>);
+    const chp = ch as unknown as Record<string, unknown>;
+
+    // The constructor observed the first bridge.
+    expect(bridgeA.listenerCount('responseBoundary')).toBe(1);
+    expect(chp['bridgeBoundarySealAttached']).toBe(true);
+
+    ch.setBridge(bridgeB as never);
+
+    // The observer must move with the bridge. Left on A it would never see the
+    // live bridge's boundaries, and because attachBridgeBoundarySeal
+    // early-returns on the still-true flag it could never re-attach.
+    expect(bridgeA.listenerCount('responseBoundary')).toBe(0);
+    expect(bridgeB.listenerCount('responseBoundary')).toBe(1);
+    expect(chp['bridgeBoundarySealAttached']).toBe(true);
+
+    // Behavioural pin: a boundary on the live bridge still seals the stash.
+    stash(ch, { turn: 1, text: 'HEAD ' });
+    bridgeB.emit('responseBoundary', 's1');
+    expect(
+      (chp['streamOrphanBuffer'] as Map<string, { pre?: string }>).get('s1')!
+        .pre,
+    ).toBe('HEAD ');
+  });
+
+  it('re-attaches the responseBoundary observer after disconnect, on the next READY', () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const chp = ch as unknown as Record<string, unknown>;
+    expect(bridge.listenerCount('responseBoundary')).toBe(1);
+
+    ch.disconnect();
+    // resetRoutingState detaches the observer; only finalizeReady re-attaches
+    // it, so the flag must be false here for the re-attach to do anything.
+    expect(bridge.listenerCount('responseBoundary')).toBe(0);
+    expect(chp['bridgeBoundarySealAttached']).toBe(false);
+
+    // finalizeReady early-returns without a socket, so give it one.
+    chp['ws'] = {};
+    chp['disposed'] = false;
+    (chp['finalizeReady'] as () => void).call(ch);
+
+    expect(bridge.listenerCount('responseBoundary')).toBe(1);
+    expect(chp['bridgeBoundarySealAttached']).toBe(true);
+    // And the re-attached observer is live, not merely counted.
+    stash(ch, { turn: 1, text: 'HEAD ' });
+    bridge.emit('responseBoundary', 's1');
+    expect(
+      (chp['streamOrphanBuffer'] as Map<string, { pre?: string }>).get('s1')!
+        .pre,
+    ).toBe('HEAD ');
   });
 
   it('logs the sealed head a failed final delivery discards', async () => {
