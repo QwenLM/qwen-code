@@ -1097,6 +1097,40 @@ it('drains async execution before lifecycle hooks and retains the Runtime owner 
   expect(release.mock.instances[0]).toBe(hooks.broker);
 });
 
+it('names a hold-fenced current-owner release instead of leaking the refusal', async () => {
+  await hooks.ensureReady();
+  await hooks.acquire();
+  const owned = hooks.broker.runtimeSessionId;
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === owned)
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'managed_runtime_identity_conflict',
+        );
+    },
+  );
+  await expect(hooks.close()).rejects.toBeInstanceOf(
+    HostedHookRecoveryRequiredError,
+  );
+});
+
+it('still leaks a current-owner release refusal that is not a hold fence', async () => {
+  await hooks.ensureReady();
+  await hooks.acquire();
+  const owned = hooks.broker.runtimeSessionId;
+  const refusal = new HostedWorkspaceBrokerRejection(
+    409,
+    'runtime_session_busy',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === owned) throw refusal;
+    },
+  );
+  await expect(hooks.close()).rejects.toBe(refusal);
+});
+
 it('releases its broker when a tool turn acquired it after catalog restoration', async () => {
   await hooks.ensureReady();
   const replacement = new HostedHookSession(options, session, pin);
@@ -1176,18 +1210,29 @@ it.each(['catalog', 'settled', 'lost-ack'])(
 );
 
 it.each([
-  { status: 404, code: 'runtime_session_not_found', allowed: true },
-  { status: 404, code: 'other_not_found', allowed: false },
-  { status: 409, code: 'runtime_session_busy', allowed: false },
-  { status: 409, code: 'managed_runtime_identity_conflict', allowed: true },
+  {
+    status: 404,
+    code: 'runtime_session_not_found',
+    allowed: true,
+    retried: false,
+  },
+  { status: 404, code: 'other_not_found', allowed: false, retried: false },
+  { status: 409, code: 'runtime_session_busy', allowed: false, retried: false },
+  {
+    status: 409,
+    code: 'managed_runtime_identity_conflict',
+    allowed: true,
+    retried: true,
+  },
   {
     status: 409,
     code: 'managed_runtime_provider_operation_failed',
     allowed: true,
+    retried: true,
   },
 ])(
   'reconciles only absent or hold-fenced earlier owners ($code)',
-  async ({ status, code, allowed }) => {
+  async ({ status, code, allowed, retried }) => {
     await hooks.ensureReady();
     await hooks.close();
     await reopenSession();
@@ -1211,6 +1256,20 @@ it.each([
       }),
     );
     expect(Boolean(replacement.broker.runtime)).toBe(allowed);
+    if (allowed) {
+      // A hold-fenced owner is left unreleased so a later pass retries it; an
+      // absent owner is booked released and must never be attempted again.
+      release.mockClear();
+      await replacement.close();
+      await replacement.acquire();
+      expect(
+        release.mock.contexts.some(
+          (context): context is HostedWorkspaceBroker =>
+            context instanceof HostedWorkspaceBroker &&
+            context.runtimeSessionId === unacquired.broker.runtimeSessionId,
+        ),
+      ).toBe(retried);
+    }
   },
 );
 

@@ -1043,8 +1043,12 @@ describe('ManagedHookRuntime', () => {
     const modulePath = path.join(directory, 'over-budget-handler.mjs');
     await writeFile(
       modulePath,
-      `await new Promise((resolve) => setTimeout(resolve, 900));
-       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 900));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
     );
     const instance = runtime([
       {
@@ -1070,6 +1074,12 @@ describe('ManagedHookRuntime', () => {
       () => expect(instance.hasHolds('runtime-session')).toBe(false),
       { timeout: 3000 },
     );
+    // After the fence the receipt stays identical, and an evaluation that
+    // finishes late never dispatches its callback into a settled occurrence.
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
   });
   it('settles a stuck module evaluation as cancelled without wedging close', async () => {
     const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
