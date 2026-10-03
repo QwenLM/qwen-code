@@ -126,6 +126,15 @@ const EN: Messages = {
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
+  'managed.approval.failed':
+    'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
+  'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
+  'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
+  'managed.approval.retry': 'Retry loading approvals',
+  'managed.approval.forbidden':
+    'Only the Session creator can answer this approval.',
+  'managed.approval.argumentsUnavailable':
+    'Tool arguments are unavailable for this approval.',
   'managed.result.range': (v) => `Bytes ${v?.start}–${v?.end} of ${v?.total}`,
   'managed.result.outputs': 'Outputs',
   'managed.result.view': 'View output',
@@ -168,7 +177,7 @@ const EN: Messages = {
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
-    'Workspace is bound. Message execution is not available in this service yet.',
+    'Workspace is bound. You cannot send messages in this Session.',
   'managed.workspaceSharedFiles':
     'Sessions in the same Workspace share files. Directory availability is checked before execution.',
   'managed.workspaceEmpty': 'No readable Workspaces are available.',
@@ -4333,6 +4342,13 @@ const ZH: Messages = {
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
+  'managed.approval.failed':
+    '无法确认审批回答的结果。请重试同一选项，或刷新以查看状态。',
+  'managed.approval.loadFailed': '待审批请求加载失败。',
+  'managed.approval.refreshFailed': '待审批请求刷新失败。',
+  'managed.approval.retry': '重新读取审批',
+  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
   'managed.result.range': (v) => `字节 ${v?.start}–${v?.end}，共 ${v?.total}`,
   'managed.result.outputs': '输出',
   'managed.result.view': '查看输出',
@@ -4371,7 +4387,7 @@ const ZH: Messages = {
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
-    '工作区已绑定；当前服务暂未开放消息执行。',
+    '工作区已绑定；你不能在此会话中发送消息。',
   'managed.workspaceSharedFiles':
     '同一工作区的会话共享文件；目录可用性将在执行前验证。',
   'managed.workspaceEmpty': '没有可读取的工作区。',
