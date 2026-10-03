@@ -60,14 +60,16 @@ if (
   );
 }
 
-if (inflightFailover || continuationFailover) {
-  throw new Error(
-    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} is not yet enabled: the mode drives its assertion through a physical tool execution, but the Hosted Harness no-tool slice (#12713) refuses every tool call by design, so the run fails with "Hosted Harness no-tool turn refused a tool call" before the Broker sees any request. The mode stays gated until the tool-capable Hosted turn tracked in #12380 lands. Use --session-failover for the durable-owner failover check that runs on the current slice.`,
-  );
-}
-
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
+const workspaceTurns = inflightFailover || continuationFailover;
+// The tool-driven modes take over a dead Runtime binding, which needs the
+// durable local-Worker reclaim from the W0e line — Linux-only today.
+if (workspaceTurns && process.platform !== 'linux') {
+  throw new Error(
+    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
+  );
+}
 // The Stage A acceptance criterion names a 15-second Runtime delay; the
 // real-provider TTFT margin under it is unrecorded (tracked in #12941).
 const modelBeforeRuntimeAssertionDelayMs = 15_000;
@@ -128,16 +130,16 @@ const mysqlSocket = path.join(temporary, 'mysql.sock');
 const mysqlError = path.join(temporary, 'mysql-error.log');
 const trustedFolders = path.join(temporary, 'trusted-folders.json');
 const delayedNode = path.join(temporary, 'delayed-node');
-const sideEffect = path.join(workspace, 'managed-agent-real-e2e.txt');
+const sideEffectName = 'managed-agent-real-e2e.txt';
 const sideEffectContent = 'managed agent real model tool execution complete';
-const inflightSideEffectScript = path.join(
-  workspace,
-  'managed-inflight-side-effect.cjs',
-);
-const inflightSideEffect = path.join(
-  workspace,
-  'managed-inflight-side-effect.txt',
-);
+const workspaceMount = path.join(temporary, 'workspace-mount');
+const sideEffect = path.join(workspaceMount, sideEffectName);
+const boundWorkspaceId = 'e2e-workspace';
+const boundStorageId = 'e2e-storage';
+const trustedActorHeader = 'x-qwen-e2e-trusted-actor';
+const trustedActor = 'e2e-actor';
+const inflightSideEffectName = 'managed-inflight-side-effect.txt';
+const inflightSideEffect = path.join(workspaceMount, inflightSideEffectName);
 const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
 const workspaceId = createHash('sha256')
   .update(workspace)
@@ -153,11 +155,17 @@ try {
           path.join(replacementRuntimeHome, '.qwen'),
         ]
       : []),
+    workspaceMount,
     path.join(runtimeHome, '.qwen'),
     runtimeState,
     mysqlData,
   ]) {
-    mkdirSync(directory, { recursive: true });
+    // The durable local-Runtime store refuses a directory not private to its
+    // owner, so the state directory gets owner-only permissions.
+    mkdirSync(directory, {
+      recursive: true,
+      ...(directory === runtimeState && workspaceTurns ? { mode: 0o700 } : {}),
+    });
   }
   if (durableFailover) {
     for (const home of [harnessHome, replacementHarnessHome]) {
@@ -259,11 +267,6 @@ try {
     `#!/bin/sh\n/bin/sleep ${runtimeDelayMs / 1000}\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$@"\n`,
     { mode: 0o700 },
   );
-  writeFileSync(
-    inflightSideEffectScript,
-    `const { appendFileSync } = require('node:fs');\nappendFileSync(process.argv[2], ${JSON.stringify(inflightSideEffectContent)}, 'utf8');\nprocess.stdout.write('managed inflight tool complete');\n`,
-    { mode: 0o600 },
-  );
 } catch (error) {
   rmSync(temporary, { recursive: true, force: true });
   throw error;
@@ -279,10 +282,6 @@ const cleanEnvironment = Object.fromEntries(
       !/(api_?key|token|secret|password|credentials?)$/i.test(key),
   ),
 );
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
 
 type Child = { child: ChildProcess; log: () => string; name: string };
 const children: Child[] = [];
@@ -384,6 +383,8 @@ async function crashProcess(child: ChildProcess, name: string): Promise<void> {
   }
 }
 
+const allocatedPorts = new Set<number>();
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -398,6 +399,8 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve, reject) =>
     server.close((error) => (error ? reject(error) : resolve())),
   );
+  if (allocatedPorts.has(address.port)) return freePort();
+  allocatedPorts.add(address.port);
   return address.port;
 }
 
@@ -423,6 +426,7 @@ async function startHeldExecutionStartProxy(
       }
       const target = new URL(request.url ?? '/', targetOrigin);
       const method = request.method ?? 'GET';
+      observations.push(`${method} ${target.pathname} received`);
       if (
         holdExecutionStart &&
         method === 'POST' &&
@@ -482,9 +486,10 @@ async function startHeldExecutionStartProxy(
       response.end(String(error));
     });
   });
+  const port = await freePort();
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve();
     });
@@ -597,6 +602,13 @@ interface PublicList<T> {
   data: T[];
 }
 
+function tenantHeaders(tenant: string): Record<string, string> {
+  return {
+    'x-qwen-tenant-id': tenant,
+    [trustedActorHeader]: trustedActor,
+  };
+}
+
 async function waitForTerminal(
   springUrl: string,
   tenant: string,
@@ -612,7 +624,7 @@ async function waitForTerminal(
     async () => {
       const page = await fetchJson<PublicList<PublicEvent>>(
         `${springUrl}/v1/agents/sessions/${sessionId}/events?after=${cursor}&limit=100`,
-        { headers: { 'x-qwen-tenant-id': tenant } },
+        { headers: tenantHeaders(tenant) },
       );
       for (const event of page.data) {
         events.push(event);
@@ -646,15 +658,25 @@ let fake: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
 let heldStartProxy: HeldExecutionStartProxy | undefined;
 let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
 let failure: unknown;
+let dumpPort: number | undefined;
 try {
-  const mysqlPort = await freePort();
-  const springPort = await freePort();
-  const harnessPort = await freePort();
-  const brokerPort = await freePort();
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
   const credentialKey = randomBytes(32).toString('base64');
   const capabilityDigest = `sha256:${randomBytes(32).toString('hex')}`;
+  const tenant = continuationFailover
+    ? 'managed-continuation-failover-e2e'
+    : inflightFailover
+      ? 'managed-inflight-failover-e2e'
+      : sessionFailover
+        ? 'managed-session-failover-e2e'
+        : 'real-model-e2e';
+  const springArguments = ['-jar', springJar];
+  springArguments.push(
+    `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
+    `--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=${boundStorageId}`,
+    `--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=${workspaceMount}`,
+  );
 
   if (durableFailover) {
     fake = await startFakeOpenAIServer(({ body }) => {
@@ -665,10 +687,10 @@ try {
           return {
             toolCalls: [
               fakeToolCall(
-                'run_shell_command',
+                'write_file',
                 {
-                  command: `${shellQuote(process.execPath)} ${shellQuote(inflightSideEffectScript)} ${shellQuote(inflightSideEffect)}`,
-                  is_background: false,
+                  file_path: inflightSideEffectName,
+                  content: inflightSideEffectContent,
                 },
                 'call_managed_continuation_failover',
               ),
@@ -689,10 +711,10 @@ try {
           return {
             toolCalls: [
               fakeToolCall(
-                'run_shell_command',
+                'write_file',
                 {
-                  command: `${shellQuote(process.execPath)} ${shellQuote(inflightSideEffectScript)} ${shellQuote(inflightSideEffect)}`,
-                  is_background: false,
+                  file_path: inflightSideEffectName,
+                  content: inflightSideEffectContent,
                 },
                 'call_managed_inflight_failover',
               ),
@@ -719,6 +741,12 @@ try {
   if (durableFailover && fakeBaseUrl === undefined) {
     throw new Error('Fake model server did not start');
   }
+
+  const mysqlPort = await freePort();
+  dumpPort = mysqlPort;
+  const springPort = await freePort();
+  const harnessPort = await freePort();
+  const brokerPort = await freePort();
 
   const initialized = spawnSync(
     mysqld,
@@ -773,7 +801,7 @@ try {
 
   const spring = start(
     java,
-    ['-jar', springJar],
+    springArguments,
     {
       env: {
         ...cleanEnvironment,
@@ -794,6 +822,20 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+        // Trusted reboot recovery stays pinned off in every runner mode;
+        // durable local process follows workspaceTurns. Both pins keep each
+        // mode's previously verified behavior and keep the runner starting
+        // off Linux.
+        QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
+        QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
+        QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+        ...(workspaceTurns
+          ? {
+              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+            }
+          : {
+              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
+            }),
         ...(durableFailover
           ? {
               QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
@@ -822,6 +864,10 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
               QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
+              QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
+              QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
+              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '60s',
+              QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE:
                 runtimeDelayMs === 0 ? process.execPath : delayedNode,
               QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
@@ -840,6 +886,14 @@ try {
     },
     60_000,
     spring,
+  );
+  runMysql(
+    mysqlPort,
+    `INSERT INTO qwen_managed_agent.managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, 1, ${sqlString(boundStorageId)}, 'E2E', 'managed-runtime-tools/1', 'preapproved-workspace-tools/1', 'ACTIVE')`,
+  );
+  runMysql(
+    mysqlPort,
+    `INSERT INTO qwen_managed_agent.managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, ${sqlString(trustedActor)}, TRUE, TRUE)`,
   );
   if (inflightFailover) {
     heldStartProxy = await startHeldExecutionStartProxy(
@@ -862,6 +916,11 @@ try {
       '--no-web',
       '--workspace',
       workspace,
+      '--managed-runtime-broker-url',
+      heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
+      // Joined form: a base64url token can start with '-', which argv
+      // would otherwise parse as another flag.
+      `--managed-runtime-broker-token=${brokerToken}`,
     ],
     {
       env: {
@@ -901,17 +960,12 @@ try {
   );
 
   if (durableFailover) {
-    const tenant = continuationFailover
-      ? 'managed-continuation-failover-e2e'
-      : inflightFailover
-        ? 'managed-inflight-failover-e2e'
-        : 'managed-session-failover-e2e';
     const createResponse = await fetch(`${springUrl}/v1/agents/sessions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'idempotency-key': `failover-create-${Date.now()}`,
-        'x-qwen-tenant-id': tenant,
+        ...tenantHeaders(tenant),
       },
       body: JSON.stringify({
         agent_id: 'qwen-code',
@@ -925,6 +979,9 @@ try {
                 : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
+        ...(workspaceTurns
+          ? { workspace: { workspace_id: boundWorkspaceId } }
+          : {}),
         metadata: {
           title: continuationFailover
             ? 'Managed continuation owner failover E2E'
@@ -980,7 +1037,7 @@ try {
         async () => {
           const page = await fetchJson<PublicList<PublicEvent>>(
             `${springUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
-            { headers: { 'x-qwen-tenant-id': tenant } },
+            { headers: tenantHeaders(tenant) },
           );
           return page.data.some(
             (event) =>
@@ -1118,7 +1175,7 @@ try {
     const replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
     const replacementSpring = start(
       java,
-      ['-jar', springJar],
+      springArguments,
       {
         env: {
           ...cleanEnvironment,
@@ -1139,6 +1196,16 @@ try {
           QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
           QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
           QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+          QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
+          QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
+          QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+          ...(workspaceTurns
+            ? {
+                QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+              }
+            : {
+                QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
+              }),
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
           QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
@@ -1192,6 +1259,10 @@ try {
         '--no-web',
         '--workspace',
         workspace,
+        '--managed-runtime-broker-url',
+        replacementBrokerProxy?.baseUrl ??
+          `http://127.0.0.1:${replacementBrokerPort}`,
+        `--managed-runtime-broker-token=${brokerToken}`,
       ],
       {
         env: {
@@ -1335,7 +1406,7 @@ try {
       );
       const finalEvents = await fetchJson<PublicList<PublicEvent>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
-        { headers: { 'x-qwen-tenant-id': tenant } },
+        { headers: tenantHeaders(tenant) },
       );
       const recoveredTerminal = finalEvents.data.find(
         (event) => event.terminal,
@@ -1391,7 +1462,7 @@ try {
         replacementBootId === firstBootId ||
         terminalCount !== 1 ||
         initialModelRequests.length !== 1 ||
-        continuationRequests.length < 2 ||
+        continuationRequests.length !== 2 ||
         sideEffectBytes !== inflightSideEffectContent
       ) {
         throw new Error(
@@ -1405,8 +1476,8 @@ try {
             executionCallId: originalExecutionCallId,
             firstHarnessBootId: firstBootId,
             replacementHarnessBootId: replacementBootId,
-            promptReplayed: false,
-            physicalToolExecutions: 1,
+            promptReplayed: initialModelRequests.length !== 1,
+            physicalToolExecutions: executionCount,
             continuationModelRequests: continuationRequests.length,
             visibleText,
             terminalTurns: terminalCount,
@@ -1424,7 +1495,7 @@ try {
           headers: {
             'content-type': 'application/json',
             'idempotency-key': `failover-second-${Date.now()}`,
-            'x-qwen-tenant-id': tenant,
+            ...tenantHeaders(tenant),
           },
           body: JSON.stringify({
             type: 'agent.session.input.message',
@@ -1523,19 +1594,21 @@ try {
       );
     }
   } else {
-    const tenant = 'real-model-e2e';
     const idempotencyKey = `create-${Date.now()}`;
     const prompt = [
       'Before using any tool, emit the visible text MODEL_READY.',
       'Then call write_file exactly once to write the exact text',
       JSON.stringify(sideEffectContent),
-      'to this absolute path:',
-      JSON.stringify(sideEffect),
+      'to the relative path',
+      JSON.stringify(sideEffectName),
+      'under the session working directory.',
+      'Call no other tool before or after it.',
       'After the tool succeeds, reply TOOL_DONE. Do not ask a question.',
     ].join(' ');
     const body = JSON.stringify({
       agent_id: 'qwen-code',
       input: [{ type: 'text', text: prompt }],
+      workspace: { workspace_id: boundWorkspaceId },
       metadata: { title: 'Real model cold Runtime E2E' },
     });
     const requestStartedAt = Date.now();
@@ -1544,7 +1617,7 @@ try {
       headers: {
         'content-type': 'application/json',
         'idempotency-key': idempotencyKey,
-        'x-qwen-tenant-id': tenant,
+        ...tenantHeaders(tenant),
       },
       body,
     });
@@ -1565,7 +1638,7 @@ try {
       async () => {
         const page = await fetchJson<PublicList<PublicEvent>>(
           `${springUrl}/v1/agents/sessions/${session.id}/events?after=${after}&limit=100`,
-          { headers: { 'x-qwen-tenant-id': tenant } },
+          { headers: tenantHeaders(tenant) },
         );
         const now = Date.now();
         for (const event of page.data) {
@@ -1587,13 +1660,10 @@ try {
     const runtimeReady = ordered.find(
       ({ event }) => event.type === 'environment.ready',
     );
-    const tool = ordered.find(
-      ({ event }) => event.type === 'item.tool_call.updated',
-    );
     const terminal = ordered.find(({ event }) => event.terminal);
-    if (!firstModel || !runtimeReady || !tool || !terminal) {
+    if (!firstModel || !runtimeReady || !terminal) {
       throw new Error(
-        `Expected model, Runtime, tool, and terminal events; got ${ordered.map(({ event }) => event.type).join(', ')}`,
+        `Expected model, Runtime, and terminal events; got ${ordered.map(({ event }) => event.type).join(', ')}`,
       );
     }
     if (terminal.event.type !== 'turn.completed') {
@@ -1618,13 +1688,33 @@ try {
     if (readFileSync(sideEffect, 'utf8') !== sideEffectContent) {
       throw new Error('Tool side effect content did not match');
     }
+    // Tool calls execute through the Broker worker, which does not publish
+    // item.tool_call.* public events without O2 publication; the durable
+    // execution record is the public-feed-independent proof.
+    const executions = runMysql(
+      mysqlPort,
+      `SELECT COUNT(*), GROUP_CONCAT(DISTINCT execution_state) FROM qwen_managed_agent.qwen_tool_execution`,
+    ).split('\t');
+    if (executions[0] !== '1' || executions[1] !== 'SETTLED') {
+      // The temporary MySQL data dir is deleted on exit, so the failure
+      // message is the only place the offending executions can still be
+      // identified: two tool_call_ids mean the model called another tool,
+      // one tool_call_id across two rows means a duplicate dispatch.
+      const rows = runMysql(
+        mysqlPort,
+        'SELECT execution_call_id, tool_call_id, execution_state FROM qwen_managed_agent.qwen_tool_execution',
+      );
+      throw new Error(
+        `Tool execution audit failed: ${executions.join(',')}\n${rows}`,
+      );
+    }
 
     const replay = await fetch(`${springUrl}/v1/agents/sessions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'idempotency-key': idempotencyKey,
-        'x-qwen-tenant-id': tenant,
+        ...tenantHeaders(tenant),
       },
       body,
     });
@@ -1636,9 +1726,13 @@ try {
     ) {
       throw new Error('Idempotent create replay did not return the Session');
     }
+    // The probe carries an actor holding a read grant on the Session's
+    // Workspace, so its 404 can only come from the tenant scope: without the
+    // actor, a bound Session 404s through the grant check and would mask a
+    // tenant-scoping leak.
     const crossTenant = await fetch(
       `${springUrl}/v1/agents/sessions/${session.id}`,
-      { headers: { 'x-qwen-tenant-id': 'other-tenant' } },
+      { headers: tenantHeaders('other-tenant') },
     );
     if (crossTenant.status !== 404) {
       throw new Error(`Cross-tenant lookup returned ${crossTenant.status}`);
@@ -1679,6 +1773,15 @@ try {
 } catch (error) {
   failure = error;
   console.error(error);
+  if (dumpPort !== undefined) {
+    try {
+      console.error(
+        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.managed_agent_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.managed_agent_event ORDER BY sequence_id')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head')}`,
+      );
+    } catch (dumpError) {
+      console.error(`Durable state dump failed: ${String(dumpError)}`);
+    }
+  }
   if (replacementBrokerProxy !== undefined) {
     console.error(
       `\n--- Replacement Runtime Broker requests ---\n${replacementBrokerProxy.observations().join('\n')}`,
@@ -1700,7 +1803,11 @@ try {
   await replacementBrokerProxy?.close();
   releaseContinuationHold();
   await fake?.close();
-  rmSync(temporary, { recursive: true, force: true });
+  if (failure && process.env['QWEN_MANAGED_E2E_KEEP_TMP'] === '1') {
+    console.error(`Keeping temporary directory: ${temporary}`);
+  } else {
+    rmSync(temporary, { recursive: true, force: true });
+  }
   process.removeListener('SIGINT', handleSignal);
   process.removeListener('SIGTERM', handleSignal);
 }

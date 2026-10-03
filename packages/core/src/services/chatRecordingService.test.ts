@@ -723,6 +723,44 @@ describe('ChatRecordingService', () => {
         systemPayload: { displayText: 'Dependency completed', backgroundTask },
       });
     });
+
+    it('persists deliveredTurn only on the delivered notification turn', async () => {
+      // Producer guard for the `deliveredTurn` stamp. Session recovery reads
+      // it back off the persisted JSONL record
+      // (`isSystemNotificationRecord`, session-api-history.ts), so the
+      // argument has to survive recordNotification -> recordNotificationLike
+      // -> createNotificationRecord -> appendRecord. Without this case the
+      // reader-side tests in session-recovery.test.ts and
+      // session-api-history.test.ts stay green on hand-built records even if
+      // no record on disk ever carries the stamp.
+      svc.recordNotification(
+        [{ text: 'dependency completed' }],
+        'Dependency completed',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+      );
+      svc.recordNotification(
+        [{ text: 'persisted before the turn ran' }],
+        'Persisted early',
+      );
+
+      const [delivered, cold] = await flushedAll();
+      expect(delivered).toMatchObject({
+        subtype: 'notification',
+        provenance: 'system',
+        deliveredTurn: true,
+      });
+      expect(cold).toMatchObject({
+        subtype: 'notification',
+        provenance: 'system',
+      });
+      // Absence, not `false`: a `deliveredTurn: false` key would satisfy the
+      // reader just as well, but undelivered records must stay byte-identical
+      // to pre-stamp transcripts so old and new cold records compare equal.
+      expect(cold).toBeDefined();
+      expect('deliveredTurn' in (cold as object)).toBe(false);
+    });
   });
 
   describe('recordBranchCheckpointTransaction', () => {
@@ -1137,6 +1175,11 @@ describe('ChatRecordingService', () => {
           backgroundTask: workerTask,
         },
       });
+      // The cold record must never carry the stamp: it is written before
+      // admission, so a stamp would also mark turns later refused or
+      // deferred (turn-interruption.ts). `toMatchObject` ignores extra
+      // keys, so the absence has to be pinned by key.
+      expect('deliveredTurn' in written()).toBe(false);
     });
 
     it('rejects instead of acknowledging an inactive recorder', async () => {

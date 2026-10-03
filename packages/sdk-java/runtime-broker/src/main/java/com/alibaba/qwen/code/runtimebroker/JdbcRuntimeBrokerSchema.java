@@ -32,6 +32,7 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_runtime_binding", "storage_id", "VARCHAR(256)");
             addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
             addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
             addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
         } catch (SQLException exception) {

@@ -8,14 +8,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -54,6 +58,44 @@ class ManagedTurnQueryTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private ManagedAgentStore store;
+
+    @ParameterizedTest
+    @ValueSource(longs = {1_000, 2_000})
+    void latestTurnAndEnvironmentFollowAdmissionOrder(long firstCreatedAt)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        turn(tenant, sessionId, "turn_z", "COMPLETED", firstCreatedAt,
+                3_000L, null);
+        turn(tenant, sessionId, "turn_a", "RUNNING", 1_000, null, null);
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_z",
+                "turn.accepted", Map.of("input", List.of()), false,
+                "accepted:first");
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_z",
+                "environment.ready", Map.of(), false, "ready:first");
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_a",
+                "turn.accepted", Map.of("input", List.of()), false,
+                "accepted:second");
+
+        assertThat(store.findLatestTurn(tenant, sessionId)).get()
+                .satisfies(turn -> assertThat(turn.turnId()).isEqualTo("turn_a"));
+        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).isEmpty();
+
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_a",
+                "environment.ready", Map.of(), false, "ready:second");
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_z",
+                "environment.failed", Map.of("code", "runtime_warm_failed"),
+                false, "failed:first");
+
+        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).get()
+                .satisfies(event -> {
+                    assertThat(event.turnId()).isEqualTo("turn_a");
+                    assertThat(event.type()).isEqualTo("environment.ready");
+                });
+    }
 
     @Test
     void pagesNewestFirstAndBreaksTiesByTurnId() throws Exception {

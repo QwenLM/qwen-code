@@ -6,6 +6,8 @@
 
 > 审批更新（2026-09-30）：Hosted Workspace 工具回合现在可以在 Session 的审批模式不预批准的调用之前请求审批，因此下文“不实现交互式审批”一句描述的是之前的切片。详见 [Actions](2026-09-30-managed-agent-actions.zh-CN.md)。
 
+> 文件历史更新（2026-09-30）：Write/Edit 备份结算及私有仅文件撤销已在 [Hosted Workspace 文件历史](2026-09-30-hosted-file-history.zh-CN.md)中实现，涵盖持久化、reload、冲突检测与失败边界。下文对文件备份的排除描述的是之前的切片。
+
 ## 问题与现状
 
 Hosted Harness 已有持久化的无工具文本回合。W0c-3 独立支持通过持久化 Workspace 绑定执行工具，并持有 SQL 存储所有权。目前没有代码把模型的函数调用接到这条路径。变更前，通用 TypeScript Broker provider 依赖生产 Broker 尚未实现的 control、prepare 和 start 操作。本片补齐 prepare/start，但明确不实现该 provider 的通用 control 契约。

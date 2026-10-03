@@ -173,6 +173,8 @@ interface ManagedSessionResourceStore {
 
 主键为 `(tenant_id, session_id)`。每个变更事务通过唯一键锁定这一行。InnoDB locking read 为 head CAS 提供所需的行级串行化。[MySQL InnoDB locking](https://dev.mysql.com/doc/refman/8.0/en/innodb-best-practices.html)
 
+writer API 的 `leaseUntil` 与 publication/activation 到期值均为 Unix epoch 毫秒，不能使用 JDBC 将数据库本地 `DATETIME` 解码后得到的偏移 epoch。内部租约计算和持久化 `DATETIME` 保持不变，仅在标量 epoch 边界由数据库转换。绑定整秒并单独加回原小数部分，保留 MariaDB 精度。在原加锁 SQL 查询中检查 producer writer 是否存活，避免按 JVM 时区转换 `LocalDateTime`。JDBC/JVM/数据库时区不同时，获取、重复获取、续约和接管的返回值都必须与持久化 SQL Unix epoch 一致；activation 即使 phase 仍为 active，到期后也应拒绝。本修正不增加时区设置或 schema 迁移。混版滚动升级对它不是安全路径：只要仍有旧版本实例写入偏移的到期值，已修正的实例就会回收它们，于是进行中的 tool publication 是丢失，而不是被排空。必须先停止所有旧版本实例，这与[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)为其自身迁移设定的边界一致。
+
 ### 6.2 `qwen_managed_session_journal_tx`
 
 每个已提交 Managed 事务一行：

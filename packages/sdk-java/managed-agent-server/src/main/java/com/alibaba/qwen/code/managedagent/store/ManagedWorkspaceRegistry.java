@@ -26,6 +26,33 @@ public class ManagedWorkspaceRegistry {
         this.jdbc = jdbc;
     }
 
+    /**
+     * Whether the actor created this Workspace-bound Session. Its later Turns
+     * run under the creator's grants, so only the creator may submit them.
+     */
+    public boolean createdSession(String tenantId, String actorId,
+            String sessionId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return false;
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_create_command"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                + " AND actor_id = ?",
+                Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
+    }
+
+    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
+        return createdSession(tenantId, actorId, sessionId);
+    }
+
     public boolean canRead(String tenantId, String actorId,
             String workspaceId) {
         if (actorId == null || actorId.isEmpty()) {

@@ -53,6 +53,7 @@ const managedAgentJavaProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 export const MANAGED_AGENT_JAVA_ROUTE_PROXY = '/api/agent/web-shell/v1';
+export const MANAGED_AGENT_PUBLIC_ROUTE_PROXY = '/v1/agents';
 
 // Exact-path on purpose. A bare `/brand` prefix would also match
 // `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
@@ -187,6 +188,7 @@ export default defineConfig(({ command }) => ({
     port: 5173,
     proxy: {
       [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
+      [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
@@ -204,6 +206,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
+      '/agent-hosts': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,

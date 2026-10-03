@@ -14,10 +14,12 @@ public class ManagedAgentProperties {
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
     private final ToolPublication toolPublication = new ToolPublication();
+    private final Artifacts artifacts = new Artifacts();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private String agentRevision = "1";
+    private String trustedActorHeader = "";
 
     public Harness getHarness() {
         return harness;
@@ -29,6 +31,10 @@ public class ManagedAgentProperties {
 
     public ToolPublication getToolPublication() {
         return toolPublication;
+    }
+
+    public Artifacts getArtifacts() {
+        return artifacts;
     }
 
     public Dispatch getDispatch() {
@@ -49,6 +55,14 @@ public class ManagedAgentProperties {
 
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
+    }
+
+    public String getTrustedActorHeader() {
+        return trustedActorHeader;
+    }
+
+    public void setTrustedActorHeader(String trustedActorHeader) {
+        this.trustedActorHeader = trustedActorHeader;
     }
 
     @PostConstruct
@@ -223,6 +237,13 @@ public class ManagedAgentProperties {
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
         private Duration maxVerificationTimeout;
+        private boolean gcEnabled;
+        private Duration deletionGrace = Duration.ofHours(24);
+
+        public boolean isGcEnabled() { return gcEnabled; }
+        public void setGcEnabled(boolean value) { gcEnabled = value; }
+        public Duration getDeletionGrace() { return deletionGrace; }
+        public void setDeletionGrace(Duration value) { deletionGrace = value; }
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -252,6 +273,25 @@ public class ManagedAgentProperties {
         public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
         public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
         public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
+    }
+
+    public static class Artifacts {
+        private boolean enabled;
+        private boolean publishOriginal;
+        private boolean publishPreview;
+        private int maxConcurrentReads = 4;
+        private Duration readTimeout = Duration.ofMinutes(2);
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean value) { enabled = value; }
+        public boolean isPublishOriginal() { return publishOriginal; }
+        public void setPublishOriginal(boolean value) { publishOriginal = value; }
+        public boolean isPublishPreview() { return publishPreview; }
+        public void setPublishPreview(boolean value) { publishPreview = value; }
+        public int getMaxConcurrentReads() { return maxConcurrentReads; }
+        public void setMaxConcurrentReads(int value) { maxConcurrentReads = value; }
+        public Duration getReadTimeout() { return readTimeout; }
+        public void setReadTimeout(Duration value) { readTimeout = value; }
     }
 
     public static class Dispatch {
@@ -380,8 +420,8 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
-        private boolean durableLocalProcess;
-        private boolean trustedLocalRebootRecovery;
+        private boolean durableLocalProcess = true;
+        private boolean trustedLocalRebootRecovery = true;
         private boolean operatorRecoveryEnabled;
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
