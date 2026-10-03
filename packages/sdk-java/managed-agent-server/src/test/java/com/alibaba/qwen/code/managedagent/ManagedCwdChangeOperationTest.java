@@ -551,6 +551,32 @@ class ManagedCwdChangeOperationTest {
                 .isEqualTo("workspace_unavailable");
     }
 
+    // The #13112 handshake from the W2 side: an open cwd operation is a
+    // busy barrier for a bound later Turn, exactly as it is for another
+    // operation; once the change settles, the Turn path is free again.
+    @Test
+    void anOpenOperationBlocksABoundLaterTurn() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        assertThatThrownBy(() -> fixture.store.insertTurnCommand(TENANT,
+                "SUBMIT", "turn", "digest", sessionId, List.of(),
+                "payload"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+
+        OperationRecord claimed = claim(fixture, sessionId, operationId,
+                "owner");
+        assertThat(fixture.store.completeCwdChangeOperation(TENANT,
+                sessionId, operationId, "owner",
+                claimed.claimGeneration()).completed()).isTrue();
+        var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
+                "turn", "digest", sessionId, List.of(), "payload");
+        assertThat(admitted.turnId()).isNotBlank();
+    }
+
     // A warmer with no Workspace Runtime cannot answer the probe: the
     // interface default refuses terminally, never loops the operation.
     @Test

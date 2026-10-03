@@ -95,11 +95,12 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 ## Prerequisites
 
 - Java 21
+- Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in initial Workspace
-file Turn described in the G0 section below.
+process. It supports durable no-tool Sessions and the opt-in Workspace file
+Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -190,9 +191,16 @@ never means that tools stopped. After the Hosted Harness restarts, its calls fai
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`, and a failed rename leaves a `PENDING` command that the
-same idempotency key can safely resume. One lifecycle change runs at a time. A
-retry with the same key from the same actor returns the original operation.
+`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
+while retaining its receipt and request digest. The same
+key retries the same content with the replay flag set; changed content or a
+different Session conflicts. A successful concurrent request can still complete
+the receipt, and a failing sibling cannot overwrite that completed outcome.
+Retries do not re-append the original `requested` event. If the command store
+is unavailable during cleanup, the original API failure is preserved and the
+same key can resume its receipt when storage returns. Only an in-flight
+lifecycle change blocks another one. A retry with the same key from the same
+actor returns the original operation once it has completed.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -348,10 +356,15 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Bound close, archive and delete ship through the durable operation machinery
-(#13135/#13194); later submit/cancel and broad Workspace capability
-advertisement remain gated, and controlled cwd changes are below. Shell and
-in-flight recovery are separate slices.
+Later Turns may be submitted by the Session's creator under the
+same opt-in while they can still read and create in the Workspace (the
+per-caller `workspaceTurns` capability flag reflects the caller's current
+grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
+the Session's running Turns and rename the Session. Workspace close follows
+its separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable Workspace
+close. Controlled cwd changes ship below (W2); broad Workspace capability
+advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -517,7 +530,16 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The opt-in W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above. Later public submit, cancel and lifecycle operations remain gated;
+in G0 above and to later Turns submitted by the Session's creator under the same
+opt-in while they can still read and create in the Workspace (the per-caller
+`workspaceTurns` capability flag reflects the caller's current grants and the
+registry's `ACTIVE` state); the creator may also cancel the Session's running
+Turns and rename the Session. Later Turns run
+under the creator's Workspace grants, so any other actor keeps the existing
+refusal: `workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. Public close follows its separate close
+capability and lifecycle admission. Archive, delete and unarchive follow their
+separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
@@ -599,8 +621,9 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace resume/next-turn admission still requires product-route integration; this
-internal guard is not a public resume capability yet.
+Workspace next-turn admission for the Session's creator under the G0 opt-in
+described above has landed; public Workspace resume still requires product-route
+integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:
 
@@ -614,10 +637,17 @@ artifacts, before enabling the local-process provisioner in a container.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. The optional
-real-MySQL profile also verifies schema upgrade, exact bytes, public
-Item/Snapshot projection, and the independent-JVM Managed Session Store
-crash/takeover path:
+Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
+warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To run the static
+gates without the test suite, use `mvn verify -DskipTests` — it also runs
+Checkstyle and the Spring Boot repackage, and the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
+optional real-MySQL profile also verifies schema upgrade,
+exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+Session Store crash/takeover path:
 
 ```bash
 mvn -Pmysql-integration \
@@ -645,7 +675,8 @@ script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
 starts its own temporary MySQL server and exits before starting anything else
 when a command or a required file is missing.
 
-Build the required artifacts first, then run:
+Build the required artifacts first, then run (the Maven steps need Maven
+3.8.9+ — the SpotBugs gate rides the `verify` phase that `install` traverses):
 
 ```bash
 npm run build && npm run bundle

@@ -823,9 +823,43 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
     ).toContain('services/api');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('You cannot send messages in this Session');
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('lets the creator send a later Turn to a bound Session', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    await render('bound');
+
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).not.toContain('You cannot send messages in this Session');
+    expect(container.querySelector('textarea')).not.toBeNull();
+    await input('Run it again');
+    await click('Send');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      'bound',
+      { text: 'Run it again' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
   });
 
   async function click(label: string) {
