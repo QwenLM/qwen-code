@@ -5,7 +5,10 @@
  */
 
 import { once } from 'node:events';
-import type { ManagedChildRunProcess , ChildRunExitEvidence } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import type {
+  ManagedChildRunProcess,
+  ChildRunExitEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type {
@@ -119,15 +122,20 @@ export class ManagedBackgroundShellRegistry {
               process.child.once('exit', () => resolve(process.evidence));
             });
       evidence = await ended;
-      const complete = evidence?.exitCode === 0;
-      // The pipe EOF can trail the exit event; finish what actually arrived.
+      // A stream seals only after its pipe EOF actually arrived; the exit
+      // event may lead it, so wait for each end first.
+      const eof = { stdout: false, stderr: false };
       await Promise.allSettled([
         process.child.stdout?.ended
-          ? undefined
-          : once(process.child.stdout!, 'end'),
+          ? Promise.resolve((eof.stdout = true))
+          : once(process.child.stdout!, 'end').then(() => {
+              eof.stdout = true;
+            }),
         process.child.stderr?.ended
-          ? undefined
-          : once(process.child.stderr!, 'end'),
+          ? Promise.resolve((eof.stderr = true))
+          : once(process.child.stderr!, 'end').then(() => {
+              eof.stderr = true;
+            }),
       ]);
       sink.setStarted(process.child.pid ?? 0);
       sink.setProcessResult({
@@ -138,8 +146,8 @@ export class ManagedBackgroundShellRegistry {
         error: null,
         aborted: false,
       } as Parameters<ManagedShellCaptureSink['setProcessResult']>[0]);
-      await sink.finish('stdout', complete);
-      await sink.finish('stderr', complete);
+      await sink.finish('stdout', eof.stdout && evidence !== null);
+      await sink.finish('stderr', eof.stderr && evidence !== null);
       const envelope = await sink.finalize(
         evidence?.exitCode === 0 ? 'success' : 'error',
         [],

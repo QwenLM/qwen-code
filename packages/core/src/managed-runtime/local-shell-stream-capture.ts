@@ -1,0 +1,420 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { createHash } from 'node:crypto';
+import { constants } from 'node:os';
+import type { ShellRawCaptureSink } from '../services/shellExecutionService.js';
+import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import {
+  MANAGED_TOOL_RESULT_KINDS,
+  MANAGED_TOOL_RESULT_LIMITS,
+  MANAGED_TOOL_RESULT_PROTOCOL,
+  parseToolResultManifest,
+  parseToolResultManifestBytes,
+  parseToolResultPage,
+  type ToolResultContentDescriptor,
+  type ToolResultEnvelope,
+  type ToolResultPageReference,
+  type ToolResultSegment,
+} from './managed-tool-result.js';
+import type {
+  ToolResultExpectedIdentity,
+  ToolResultSegmentStore,
+} from './managed-tool-result-store.js';
+
+// H3 of #12827: the open-ended counterpart of LocalShellResultCapture. A
+// foreground invocation seals once at exit; a background Shell keeps writing
+// for its whole life, so this sink publishes bounded segments and pages as
+// they arrive and refreshes the manifest into the next revision at each
+// page, keeping `executionStatus: 'unknown'` and streams `open` until exit,
+// so a reader never waits for the process to end. Exit seals the streams
+// and publishes the final revision with the physical fields. Worker
+// replacement does not continue a stream here — the pipe died with the old
+// worker; recovery attaches the unit and caps the stream (see
+// docs/design/2026-10-03-managed-shell-monitor-runtime.md).
+
+const SEGMENT_BYTES = 1024 * 1024;
+const SEGMENTS_PER_PAGE = 512;
+
+type StreamId = 'stdout' | 'stderr';
+const BOTH: readonly StreamId[] = ['stdout', 'stderr'];
+
+interface StreamState {
+  readonly id: StreamId;
+  buffer: Buffer;
+  readonly hash: ReturnType<typeof createHash>;
+  readonly pages: ToolResultPageReference[];
+  readonly pendingSegments: ToolResultSegment[];
+  used: number;
+  byteLength: number;
+  ordinal: number;
+  pageOffset: number;
+  pageOrdinal: number;
+  ended: boolean;
+  sealed: boolean;
+  queue: Promise<void>;
+}
+
+function stream(id: StreamId): StreamState {
+  return {
+    id,
+    buffer: Buffer.allocUnsafe(SEGMENT_BYTES),
+    hash: createHash('sha256'),
+    pages: [],
+    pendingSegments: [],
+    used: 0,
+    byteLength: 0,
+    ordinal: 0,
+    pageOffset: 0,
+    pageOrdinal: 0,
+    ended: false,
+    sealed: false,
+    queue: Promise.resolve(),
+  };
+}
+
+interface BrokenCapture {
+  readonly reason: 'quota_exhausted' | 'size_limit' | 'storage_failed';
+}
+
+export class LocalShellStreamCapture implements ShellRawCaptureSink {
+  private readonly streams = {
+    stdout: stream('stdout'),
+    stderr: stream('stderr'),
+  };
+  private started = false;
+  private broken: BrokenCapture | null = null;
+  private revision = 0;
+  private manifestRef: ManagedSessionDurableRef | null = null;
+  private finalEnvelope: ToolResultEnvelope | null = null;
+  private processOutcome: {
+    readonly exitCode: number | null;
+    readonly signalName: string | null;
+  } | null = null;
+
+  constructor(
+    private readonly store: ToolResultSegmentStore,
+    private readonly resources: ManagedSessionResourceStore,
+    readonly identity: ToolResultExpectedIdentity,
+    private readonly assertWritable: () => Promise<void> = async () => {},
+    private readonly options: { readonly segmentsPerPage: number } = {
+      segmentsPerPage: SEGMENTS_PER_PAGE,
+    },
+  ) {}
+
+  setStarted(_pid: number): void {
+    this.started = true;
+  }
+
+  setProcessResult(result: {
+    exitCode: number | null;
+    signal: number | null;
+  }): void {
+    this.processOutcome = {
+      exitCode: result.exitCode,
+      signalName: signalName(result.signal),
+    };
+  }
+
+  get brokenReason(): BrokenCapture | null {
+    return this.broken;
+  }
+
+  get currentManifest(): ManagedSessionDurableRef | null {
+    return this.manifestRef;
+  }
+
+  async open(): Promise<ManagedSessionDurableRef> {
+    if (this.manifestRef !== null) return this.manifestRef;
+    return await this.publish('unknown', null, null);
+  }
+
+  write(id: StreamId, chunk: Buffer): Promise<void> {
+    const state = this.streams[id];
+    return (state.queue = state.queue.then(() => this.append(state, chunk)));
+  }
+
+  private async append(state: StreamState, chunk: Buffer): Promise<void> {
+    if (this.broken || state.ended) return;
+    try {
+      for (let offset = 0; offset < chunk.byteLength; ) {
+        const length = Math.min(
+          SEGMENT_BYTES - state.used,
+          chunk.byteLength - offset,
+        );
+        chunk.copy(state.buffer, state.used, offset, offset + length);
+        state.used += length;
+        offset += length;
+        if (state.used === SEGMENT_BYTES) await this.publishSegment(state);
+      }
+    } catch (cause) {
+      this.fail(cause);
+    }
+  }
+
+  finish(id: StreamId, complete: boolean): Promise<void> {
+    const state = this.streams[id];
+    return (state.queue = state.queue.then(() => this.end(state, complete)));
+  }
+
+  private async end(state: StreamState, complete: boolean): Promise<void> {
+    if (state.ended) return;
+    state.ended = true;
+    try {
+      if (!this.broken && state.used > 0) await this.publishSegment(state);
+      if (!this.broken && complete) {
+        const sealed = await this.store.seal({
+          captureId: this.identity.captureId,
+          streamId: state.id,
+          segmentCount: state.ordinal,
+          byteLength: state.byteLength,
+          digest: state.hash.copy().digest('hex'),
+        });
+        if (sealed.status !== 'ok') throw new Error(sealed.code);
+        state.sealed = true;
+      }
+    } catch (cause) {
+      this.fail(cause);
+    } finally {
+      state.buffer = Buffer.alloc(0);
+      state.used = 0;
+    }
+  }
+
+  private fail(cause: unknown): void {
+    if (this.broken) return;
+    this.broken = {
+      reason:
+        cause instanceof Error && cause.message === 'size_limit'
+          ? 'size_limit'
+          : cause instanceof Error && cause.message === 'quota_exhausted'
+            ? 'quota_exhausted'
+            : 'storage_failed',
+    };
+  }
+
+  private async publishSegment(state: StreamState): Promise<void> {
+    await this.assertWritable();
+    if (state.ordinal > MANAGED_TOOL_RESULT_LIMITS.maxOrdinal) {
+      throw new Error('size_limit');
+    }
+    const bytes = state.buffer.subarray(0, state.used);
+    const published = await this.store.publish({
+      captureId: this.identity.captureId,
+      streamId: state.id,
+      ordinal: state.ordinal,
+      bytes,
+    });
+    if (published.status !== 'ok') throw new Error(published.code);
+    state.hash.update(bytes);
+    state.byteLength += bytes.byteLength;
+    state.pendingSegments.push({
+      byteLength: published.result.byteLength,
+      digest: published.result.digest,
+    });
+    state.ordinal++;
+    state.used = 0;
+    if (state.pendingSegments.length === this.options.segmentsPerPage) {
+      await this.publishPage(state);
+    }
+  }
+
+  private async publishPage(state: StreamState): Promise<void> {
+    if (state.pendingSegments.length === 0) return;
+    await this.flushPage(state);
+    await this.publish('unknown', null, null);
+  }
+
+  /**
+   * Publishes the contents of the pending page without refreshing the
+   * manifest — `publish` calls back here rather than recursing.
+   */
+  private async flushPage(state: StreamState): Promise<void> {
+    if (state.pendingSegments.length === 0) return;
+    await this.assertWritable();
+    if (state.pages.length >= MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream) {
+      throw new Error('size_limit');
+    }
+    const page = parseToolResultPage({
+      toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+      type: 'page',
+      captureId: this.identity.captureId,
+      streamId: state.id,
+      firstOrdinal: state.pageOrdinal,
+      offset: state.pageOffset,
+      segments: state.pendingSegments,
+    });
+    const bytes = Buffer.from(JSON.stringify(page));
+    if (bytes.byteLength > MANAGED_TOOL_RESULT_LIMITS.maxPageBytes) {
+      throw new Error('size_limit');
+    }
+    const ref = await this.resources.publish(
+      MANAGED_TOOL_RESULT_KINDS.page,
+      bytes,
+    );
+    const byteLength = state.pendingSegments.reduce(
+      (length, segment) => length + segment.byteLength,
+      0,
+    );
+    state.pages.push({
+      ref,
+      segmentCount: state.pendingSegments.length,
+      byteLength,
+    });
+    state.pageOffset += byteLength;
+    state.pageOrdinal += state.pendingSegments.length;
+    state.pendingSegments.length = 0;
+  }
+
+  /**
+   * Publishes the next manifest revision: `unknown` and `open` while
+   * running, settled fields once sealed. Only a pending revision gains a
+   * successor, by the shared `isToolResultManifestSuccessor` rules.
+   */
+  private async publish(
+    executionStatus: 'success' | 'error' | 'cancelled' | 'unknown',
+    exitCode: number | null,
+    signal: string | null,
+  ): Promise<ManagedSessionDurableRef> {
+    for (const id of BOTH) await this.flushPage(this.streams[id]);
+    const contents: ToolResultContentDescriptor[] = BOTH.map((id) => {
+      const state = this.streams[id];
+      return {
+        streamId: state.id,
+        role: state.id,
+        mimeType: 'application/octet-stream',
+        state: state.sealed ? 'sealed' : state.ended ? 'incomplete' : 'open',
+        // The used buffer is still in memory, so its bytes sit behind the
+        // running digest chain: byteLength counts only published segments.
+        byteLength: state.byteLength,
+        digest: state.hash.copy().digest('hex'),
+        // Only an ended-but-unsealed stream reports a missing tail: an
+        // open stream has nothing provably missing yet.
+        missingRanges:
+          state.ended && !state.sealed
+            ? [{ start: state.byteLength, end: null }]
+            : [],
+        body: {
+          pages: [...state.pages],
+        } as ToolResultContentDescriptor['body'],
+      };
+    });
+    const broken = this.broken;
+    const captureStatus = broken
+      ? captureStatusFor(contents, true)
+      : captureStatusFor(contents, false);
+    const manifest = parseToolResultManifest({
+      toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+      type: 'manifest',
+      ...this.identity,
+      revision: this.revision + 1,
+      executionStatus,
+      exitCode,
+      signal,
+      captureScope: 'process_pipes',
+      capturePolicy: 'complete_required',
+      captureStatus,
+      captureReason:
+        captureStatus === 'pending' || captureStatus === 'complete'
+          ? null
+          : (broken?.reason ?? 'producer_lost'),
+      upstreamTruncated: false,
+      contents,
+    });
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    if (bytes.byteLength > MANAGED_TOOL_RESULT_LIMITS.maxManifestBytes) {
+      throw new Error('size_limit');
+    }
+    await this.assertWritable();
+    this.manifestRef = await this.resources.publish(
+      MANAGED_TOOL_RESULT_KINDS.manifest,
+      bytes,
+    );
+    this.revision += 1;
+    return this.manifestRef;
+  }
+
+  async finalize(
+    executionStatus: Exclude<
+      ToolResultEnvelope['executionStatus'],
+      'not_started'
+    >,
+    responseParts: readonly unknown[],
+    error: { readonly message: string; readonly type?: string } | undefined,
+    outcome?: {
+      readonly exitCode: number | null;
+      readonly signalName: string | null;
+    },
+  ): Promise<ToolResultEnvelope> {
+    if (this.finalEnvelope) return this.finalEnvelope;
+    if (!this.started) {
+      this.finalEnvelope = {
+        executionStatus: 'not_started',
+        responseParts,
+        ...(error ? { error } : {}),
+        capture: null,
+      };
+      return this.finalEnvelope;
+    }
+    const settled = outcome ?? this.processOutcome;
+    if (!settled) {
+      throw new Error('Finalized Shell capture has no physical outcome.');
+    }
+    for (const id of BOTH) {
+      if (!this.streams[id].ended) await this.finish(id, false);
+    }
+    // The last revision contracts the unfinished tail to the boundary of
+    // the sealed, retained prefix; anything lost mid-write is a gap, not
+    // admitted bytes.
+    const ref = await this.publish(
+      executionStatus,
+      settled.exitCode,
+      settled.signalName,
+    );
+    const contents = parseToolResultManifestBytes(
+      await this.resources.read(ref),
+    );
+    this.finalEnvelope = {
+      executionStatus,
+      responseParts,
+      ...(error ? { error } : {}),
+      capture: {
+        captureStatus: contents.captureStatus,
+        captureReason: contents.captureReason,
+        manifest: ref,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    };
+    return this.finalEnvelope;
+  }
+}
+
+function captureStatusFor(
+  contents: readonly ToolResultContentDescriptor[],
+  _broken: boolean,
+): 'pending' | 'complete' | 'partial' | 'unavailable' {
+  if (contents.some((entry) => entry.state === 'open')) return 'pending';
+  if (contents.every((entry) => entry.state === 'sealed')) return 'complete';
+  if (
+    contents.every(
+      (entry) => entry.state === 'incomplete' && entry.byteLength === 0,
+    )
+  ) {
+    return 'unavailable';
+  }
+  return 'partial';
+}
+
+function signalName(value: number | null): string | null {
+  if (value === null) return null;
+  return (
+    Object.entries(constants.signals).find(
+      ([name, number]) => name.startsWith('SIG') && number === value,
+    )?.[0] ?? null
+  );
+}
