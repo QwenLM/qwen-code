@@ -428,25 +428,43 @@ describe('agent versioned store', () => {
     );
   });
 
-  it('rejects a malformed persisted Host result receipt', async () => {
-    await writeRaw(
-      getThreadPath(PROJECT_ROOT, 'th_root'),
-      thread({
-        runs: [
-          run(1, 0, {
-            hostResultReceipt: {
-              attempt: 1,
-              leaseId: 'lease',
-              digest: 'invalid',
-            },
-          }),
-        ],
-      }),
-    );
-    await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
-      /Malformed/,
-    );
-  });
+  // Each receipt breaks exactly one term of `isValidHostResultReceipt`, so the
+  // attempt and leaseId cases carry a well-formed digest and cannot be refused
+  // by the digest term instead. The non-record case is `null` rather than a
+  // string: `null['attempt']` throws instead of validating, which is what tells
+  // that term apart from the ones after it.
+  const malformedReceipts: [string, unknown][] = [
+    [
+      'digest is not sha256 hex',
+      { attempt: 1, leaseId: 'lease', digest: 'invalid' },
+    ],
+    [
+      'attempt is not a positive integer',
+      { attempt: 0, leaseId: 'lease', digest: 'a'.repeat(64) },
+    ],
+    ['leaseId is empty', { attempt: 1, leaseId: '', digest: 'a'.repeat(64) }],
+    ['digest is missing', { attempt: 1, leaseId: 'lease' }],
+    ['receipt is not a record', null],
+  ];
+
+  it.each(malformedReceipts)(
+    'rejects a persisted Host result receipt whose %s',
+    async (_term, receipt) => {
+      await writeRaw(
+        getThreadPath(PROJECT_ROOT, 'th_root'),
+        thread({
+          runs: [
+            run(1, 0, {
+              hostResultReceipt: receipt as ThreadRun['hostResultReceipt'],
+            }),
+          ],
+        }),
+      );
+      await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
+        /Malformed/,
+      );
+    },
+  );
 
   it('persists a run counter allocation before any thread write', async () => {
     await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
