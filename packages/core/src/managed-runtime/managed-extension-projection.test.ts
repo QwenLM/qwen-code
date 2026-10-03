@@ -71,6 +71,7 @@ interface FixtureSuite {
   readonly brokerExecutionCases: ReadonlyArray<{
     readonly id: string;
     readonly execution: string;
+    readonly dispatchGeneration: number;
     readonly inspection: ManagedRuntimeExecutionView;
     readonly harnessExecution: string;
   }>;
@@ -204,11 +205,14 @@ describe('managed-extension-projection/1 fixtures', () => {
     },
   );
 
-  it('reads the Broker as Java does except where the wire hides a claim', () => {
+  it('reads the Broker as Java does except where the wire hides evidence', () => {
+    // The wire folds an unsent claim into `executing` and carries no dispatch
+    // generation, so the Harness reads the never-claimed cancellation as
+    // settled where the record mapping proves it never started.
     expect(
       fixtures.brokerExecutionCases
         .filter((each) => each.harnessExecution !== each.execution)
         .map((each) => each.id),
-    ).toEqual(['dispatching']);
+    ).toEqual(['dispatching', 'settled-cancelled-not-claimed']);
   });
 });

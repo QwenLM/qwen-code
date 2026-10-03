@@ -48,7 +48,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 7. **grant 由已提交的事实导出。** authority 为一条已提交的记录签发 grant：其 operation 是开启该记录的命令，因此一个命令至多开启一条记录；其修订号是该记录当前的修订号；其计划是该修订的资源。owner、Workspace 代数与阶段由调用方提供，生命周期、信任与阶段的检查由登记阶段的切片加入。grant 不需要自己的日志条目，重启后的 authority 会再签发相同的修订。Runtime 的 gate 按 H0b 的替换规则安装它，因此再次签发即为续期，而更换 owner 或范围需要该记录的新修订。gate 绝不重新开启已撤销的修订，被撤销的 grant 仍约束下一个 grant。格式错误的撤销会被拒绝，而不是悄悄错过它指向的 grant。gate 保存在 Runtime 的内存中：重启后的 Runtime 从空的 gate 开始，因此撤销只在收到它的进程存活期间有效；接入 gate 的 H1 负责决定撤销是否必须成为已提交的事实。
 8. **任务身份是两侧都能计算的哈希。** 记录键是对 Session ID、domain 与记录身份以 NUL 连接后求 SHA-256，任务 ID 为 `task_` 加上该键。该 ID 满足公开接口 128 字符的上限，且不暴露任何内部标识。
 9. **提供列表与详情，不提供事件与取消。** 四条读取路由改为 `partial`，每个 Session 都报告 `capabilities.tasks`，因为每个 Session 都提供这些路由。任务事件保持 `planned`，直到有任务产生输出；取消保持 `planned`，直到有 owner 能停止任务；`PublicCommandOperation.task_id` 与 `WebShellCommandOperation.taskId` 随取消保持 `planned`。因此 H0c 的任务不宣告任何操作，也不带 Artifact。
-10. **Runtime 的报告映射到执行状态线。** Broker 记录处于 `PREPARED` 或 `DISPATCHING` 时为 `intent`，`EXECUTING` 或 `CANCEL_REQUESTED` 为 `dispatch_started`，`UNKNOWN` 与 `ABANDONED`（W0e：原 Runtime 的日志已永久丢失）为 `outcome_unknown`；`SETTLED` 在状态为 `not_started` 时为 `not_started_proven`，否则为 `settled`。Harness 按同样的方式读取线上状态，唯一的区别是把 `executing` 视为已派发：线上无法区分尚未发送的认领和已发送的调用，而把可能已发送的调用当作未发送，可能导致它被执行两次。只有 Runtime 自己给出的 `not_started` 回答能证明调用未发送；Broker 从不推导出它。结算为 `cancelled` 的调用可能在发送之前或之后被取消，记录中没有任何字段能区分这两种情况（见 H0b），因此两种读法都把它当作 `settled`，绝不当作 `not_started_proven`。要区分从未发送就被取消的调用，需要结算记录之外的证据，这由接入该映射的切片提供。
+10. **Runtime 的报告映射到执行状态线。** Broker 记录处于 `PREPARED` 或 `DISPATCHING` 时为 `intent`，`EXECUTING` 或 `CANCEL_REQUESTED` 为 `dispatch_started`，`UNKNOWN` 与 `ABANDONED`（W0e：原 Runtime 的日志已永久丢失）为 `outcome_unknown`；`SETTLED` 在状态为 `not_started` 时为 `not_started_proven`，否则为 `settled`。Harness 按同样的方式读取线上状态，唯一的区别是把 `executing` 视为已派发：线上无法区分尚未发送的认领和已发送的调用，而把可能已发送的调用当作未发送，可能导致它被执行两次。只有 Runtime 自己给出的 `not_started` 回答能证明调用未发送；Broker 从不推导出它。结算为 `cancelled` 的调用可能在发送之前或之后被取消，而记录自身的 `dispatchGeneration` 能为从未被认领的调用区分这两种情况：0 是记录自带的证明（见 H0b），因此记录映射把 `SETTLED` 且执行状态为 `cancelled`、代数为 0 的记录读作 `not_started_proven`，把每一次已认领的取消读作 `settled`。线上状态不携带代数，因此 Harness 读法把每个结算为 `cancelled` 的记录都当作 `settled`——这是 `DISPATCHING` 之外的第二种读法分歧。已认领但可能从未发送的取消是两种读法都无法证明的残留情形；它属于 H3 的边界，不属于本切片。
 
 ## 提交记录
 
@@ -101,10 +101,10 @@ authority 打开时，会按同样的规则重放日志中的每条 Stage H 修�
 
 Flyway `V18` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、开启它的命令的哈希、最新修订及其资源、任务投影与交付状态线。一个索引服务任务列表，另一个服务开启命令的检查。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
 
-1. 以与 authority 读取器同样严格的方式解析事务的每一行记录：不允许重复键或尾随内容，嵌套不超过 64 层（由共享的存储契约固定），数字必须有限。然后挑出有正文的 domain 的 `domain.committed` 事件。
-2. 按 authority 读取器的方式检查每个这样的事件：事件封闭且没有 subject（authority 从不为它设置 subject）；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；键封闭且属于本 Session；payload 封闭且其引用指向该 domain 的版本 1 记录。携带这类事件的事务只能依次包含它的事件和提交标记。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。
+1. 以与 authority 读取器同样严格的方式解析事务的每一行记录：不允许重复键或尾随内容，嵌套不超过 64 层（由共享的存储契约固定），数字必须有限。未知的记录副类型只在 Managed 头之前容忍，正如 genesis 事务；头部行与提交标记行按约定限制字节数。每条事件行都按 authority 重开读取器的方式检查：位于事务已声明事件之内的封闭信封、属于共享词表的事件类型、可选的 subject、范围内的时间，以及属于本 Session 的键；事件 ID 不得占用 Stage H 修订链的 `<domain>:<计数>` 空间。然后挑出 `domain.committed` 事件，每一个都必须指出一个已登记的 domain，并携带一个封闭的、引用该 domain 版本 1 记录的 payload。
+2. 对每一个有正文的 domain 的这类事件，按 authority 读取器对 Stage H 一侧的要求检查：事件封闭且没有 subject（authority 从不为它设置 subject）；Session 键指向本 Session。携带这类事件的事务只能依次包含它的事件和提交标记，且一个事务至多携带一条 Stage H 修订。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。
 3. 对照存储中的最新修订检查首修订规则或后继规则，并借助每行保存的开启命令哈希，检查开启记录的命令没有开启过另一条记录。然后用 `ManagedExtensionProjection` 投影任务视图，插入或更新该行。
-4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，追加一个带 `data.taskId` 与 `data.state` 的 `task.updated` 事件；事件带有去重键，重放的事务不会重复宣告。它先锁住 Session 所在的行再读取状态，因此能看到在 Session 存储事务进行期间已提交的删除。该事件与其他 Session 事件一样追加：它会推进 Session 的 `updated_at` 与版本；若它落在两段流式文本增量之间，会像任何穿插进来的事件一样把文本分段拆开。
+4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，在任务事件 outbox（`qwen_managed_session_task_event`）中写入一条宣告，携带任务 ID、新状态、修订号与该修订的日志位置。这条行与修订在同一事务中提交，而重放的事务在以下任何一步之前就已返回，因此不会重复宣告。存储先锁住 Session 所在的行再读取状态，因此能看到在 Session 存储事务进行期间已提交的删除。outbox 不进入 Session 事件流——消息投影把穿插的事件视为内容边界：落在两段流式文本增量之间的事件会把已存储的文本段拆开，而 Monitor 每次视图变化都会宣告一次，可能把一条消息反复切碎。任务事件路由会消费这个 outbox（H3）。
 
 被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在，无论事务是否携带 Stage H 记录，每一行记录都必须是 authority 读取器能够接受的 JSON 对象，否则返回 `400 managed_session_invalid_request`。authority 写出的行一直满足这一点。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
 
@@ -115,7 +115,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 - `listSessionTasks`、`getSessionTask`、`queryWebShellTasks` 与 `getWebShellTask` 改为 `partial` 并已映射，它们返回的任务 schema 与枚举也一样。
 - 提供 `SessionCapabilities.tasks`，并与其他已提供的标志一样列为必填。`WebShellSession.capabilities` 改为命名 schema `WebShellSessionCapabilities`，其中 `tasks` 已提供且必填，其余标志仍为 `planned`。
 - 任务时间戳注明为 epoch 毫秒。
-- 列表路由说明了 `task.updated` 事件；事件类型是开放字符串，因此无需改动 schema。
+- 列表路由说明了宣告的去向：计划中的任务事件路由将要消费的任务事件 outbox，而不是 Session 事件流。无需改动 schema。
 - 列表游标错误为 `400 invalid_cursor`，limit 不在 1 到 100 之间为 `400 invalid_limit`，任务不存在为 `404 task_not_found`。
 - `output_cursor` 与 `outputCursor` 随它所指向的任务事件路由保持 `planned`。`TaskActionCapability` 的取值会进入生成类型，尽管 H0c 的任务不宣告其中任何一个，因为枚举值无法带上标记，这一点 H0a 已就 `task_cancel` 说明过。
 
@@ -130,9 +130,9 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 - 50 个运行起始用例与 32 个 Monitor 起始用例；
 - 45 个单修订视图与 11 段运行历史，附带各自的 outbox 归属；
 - 2 条 Monitor 修订链，两侧分别通过各自的 authority 或存储提交；另有 12 条两侧都必须拒绝的修订链：其中一条复用了已开启另一条记录的命令，另有三条在相同或更旧的代数下、或未经未知结果就重新挂接 Runtime；
-- 10 个 Broker 用例，Broker 台账的每个执行状态各一个，每个都附带 Broker 为它上报的线上状态以及 Harness 据此读出的执行状态；另有 8 个线上状态执行用例。
+- 11 个 Broker 用例，覆盖 Broker 台账的每一个执行状态——包括结算取消的已认领与从未认领两臂——每个都附带 Broker 为它上报的线上状态、记录携带的派发代数以及 Harness 据此读出的执行状态；另有 8 个线上状态执行用例。
 
-标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。Java 映射每个 Broker 用例的状态；TypeScript 映射它的线上状态以及线上状态用例，并检查两种读法只在 `DISPATCHING` 上不同，与决策 10 一致；Broker 的 `ManagedExtensionExecutionContractTest` 则检查 Broker 确实上报这些线上状态。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
+标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。Java 映射每个 Broker 用例的状态与派发代数；TypeScript 映射它的线上状态以及线上状态用例，并检查两种读法只在 `DISPATCHING` 与从未认领的取消上不同，与决策 10 一致；Broker 的 `ManagedExtensionExecutionContractTest` 则检查 Broker 确实上报这些线上状态。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
 
 `managed-extension-journal-v1.fixtures.json` 保存了 TypeScript authority 通过其 HTTP 存储发出的请求，对应一个含两条 Monitor 修订的 Session，其中第二条带有通知输入及其唤醒。写入端的输出一旦变化，HTTP 存储测试就会失败；以 `QWEN_WRITE_GOLDEN=1` 运行时会重写该文件。`ManagedSessionStoreIntegrationTest` 把同样的请求发给 Java 存储，后者必须全部接受并投影出相同的任务。
 
@@ -151,7 +151,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 ## 验证计划
 
 - **TypeScript：** 回放 fixture；authority 测试套件覆盖修订链、发布前的拒绝、重放以及提交时未带记录的命令、通知与唤醒、事务一提交记录即可见、绕过防护、保留的事件 ID、未开放的 domain、冷重建、正文缺失、接不上修订链或共用开启命令，以及 grant；gate 对照 H0b 的替换用例、撤销语义与格式错误的输入；HTTP 存储覆盖嵌套资源、经 HTTP 的冷重建以及写入端发出的请求。
-- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、authority 无法解析的记录行、重放、宣告与已删除的 Session；经 HTTP 路由回放 TypeScript 写入端的请求；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 与 MySQL 8.4 上运行，并证明被拒绝的修订不会留下任何资源、资源引用或日志行，且在 Stage H 提交期间已提交的删除不会在其终止事件之后收到 `task.updated`。
+- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、authority 无法解析的记录行、重放、宣告与已删除的 Session；经 HTTP 路由回放 TypeScript 写入端的请求；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 与 MySQL 8.4 上运行，并证明被拒绝的修订不会留下任何资源、资源引用或日志行，且在 Stage H 提交期间已提交的删除不会在其终止事件之后把宣告写进任务事件 outbox。
 - **Broker：** 每个执行状态对应上报的线上状态。
 - **生成类型：** WebShell 生成器测试。
 - **变异检查：** 依次禁用投影规则、起始与修订链规则、authority 的拒绝以及存储的检查，每一处都有测试失败。
@@ -177,8 +177,8 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 
 ## 后续工作
 
-| 切片  | 范围                                                                                                    |
-| ----- | ------------------------------------------------------------------------------------------------------- |
-| H1–H2 | MCP 与 Hooks 的正文和阶段；决定哪些提交需要出示 grant，并在提交时校验。                                 |
-| H3    | 开放 `monitor_run` 与后台 Shell；任务事件与输出；`draining`；限制重建开销；让旧读取器远离相关 Session。 |
-| H4–H5 | 子任务与 Channel 的正文；排空 outbox 的派发器；任务取消。                                               |
+| 切片  | 范围                                                                                                                            |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------- |
+| H1–H2 | MCP 与 Hooks 的正文和阶段；决定哪些提交需要出示 grant，并在提交时校验。                                                         |
+| H3    | 开放 `monitor_run` 与后台 Shell；任务事件与输出，由任务事件 outbox 消费；`draining`；限制重建开销；让旧读取器远离相关 Session。 |
+| H4–H5 | 子任务与 Channel 的正文；排空 outbox 的派发器；任务取消。                                                                       |

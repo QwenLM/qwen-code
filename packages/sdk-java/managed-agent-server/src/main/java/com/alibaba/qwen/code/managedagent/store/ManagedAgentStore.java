@@ -1839,26 +1839,19 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public void appendLiveSessionEventIfAbsent(String tenantId,
-            String sessionId, String type, Map<String, Object> data,
-            String sourceKey) {
+    public boolean isLivePublicSession(String tenantId, String sessionId) {
         // A locking read sees the latest committed status, where a plain one
         // could still see the snapshot taken before a deletion committed.
-        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
+        return jdbc.query("SELECT status FROM managed_agent_session WHERE"
+                        + " tenant_id = ?"
                         + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND"
                         + " session_id = ? FOR UPDATE",
-                sessionMapper, tenantId, tenantId, sessionId).stream()
-                .findFirst();
-        if (session.isEmpty() || "DELETING".equals(session.get().status())
-                || "DELETED".equals(session.get().status())) {
-            return;
-        }
-        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
-            appendEvent(tenantId, sessionId, null, type, data, false,
-                    sourceKey, clock.millis());
-        }
+                (result, row) -> result.getString("status"),
+                tenantId, tenantId, sessionId).stream().findFirst()
+                .map(status -> !"DELETING".equals(status)
+                        && !"DELETED".equals(status))
+                .orElse(false);
     }
 
     public SessionRecord requireSession(String tenantId, String sessionId) {
