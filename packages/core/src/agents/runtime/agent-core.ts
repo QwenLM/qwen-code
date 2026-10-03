@@ -1351,6 +1351,17 @@ export class AgentCore {
             }
           }
           if (terminateMode === AgentTerminateMode.LOOP_DETECTED) {
+            // This round's calls already executed — files were written,
+            // commands ran — but breaking here skips the send that would put
+            // their results into history. Record them, as the client-side
+            // halt does (client.ts), so the model's functionCall turn stays
+            // paired: left dangling, a later send on this chat (a blocking
+            // SubagentStop hook continues it) runs the orphan repair, which
+            // tells the model those calls were lost to a crash and should be
+            // retried — including the ones in this batch that succeeded.
+            for (const content of toolCallResult.messages) {
+              chat.addHistory(content);
+            }
             break;
           }
           currentMessages = toolCallResult.messages;

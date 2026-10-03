@@ -423,6 +423,7 @@ describe('subagent.ts', () => {
   describe('AgentHeadless', () => {
     let mockSendMessageStream: Mock;
     let mockGetHistoryToolCallFingerprints: Mock;
+    let mockAddHistory: Mock;
 
     const defaultModelConfig: ModelConfig = { model: 'qwen3-coder-plus' };
     const defaultRunConfig: RunConfig = { max_time_minutes: 5, max_turns: 10 };
@@ -451,12 +452,14 @@ describe('subagent.ts', () => {
       mockGetHistoryToolCallFingerprints = vi.fn(
         () => new Map<string, string>(),
       );
+      mockAddHistory = vi.fn();
       vi.mocked(LlmChat).mockImplementation(
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
             setLastPromptTokenCount: vi.fn(),
             getHistoryToolCallFingerprints: mockGetHistoryToolCallFingerprints,
+            addHistory: mockAddHistory,
           }) as unknown as LlmChat,
       );
 
@@ -1672,6 +1675,45 @@ describe('subagent.ts', () => {
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
         expect(finishEvents).toHaveLength(1);
         expect(finishEvents[0].loopType).toBe('repeated_tool_error');
+      });
+
+      it('records the halting round results in history so the calls stay paired (issue #10887)', async () => {
+        // The halting round's calls already executed. If its results are not
+        // written to the chat, a later send on the same chat (a blocking
+        // SubagentStop hook continues the run) repairs the dangling calls
+        // with "not recorded ... retry", including calls that succeeded.
+        const failing = vi.fn().mockResolvedValue({
+          llmContent: 'fatal: not a git repository',
+          returnDisplay: 'fatal: not a git repository',
+          error: {
+            message: 'fatal: not a git repository',
+            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+          },
+        });
+        const { config, toolConfig } = await setupReadTool(
+          decl('run_shell_command', 'Runs a shell command'),
+          invocation({ command: 'git status' }, 'Run shell', failing),
+          'Shell',
+          'Runs shell commands',
+        );
+        respond(
+          [call('run_shell_command', { command: 'git status' }, 'err_1')],
+          [call('run_shell_command', { command: 'git status -s' }, 'err_2')],
+          [call('run_shell_command', { command: 'git -C r status' }, 'err_3')],
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(mockAddHistory).toHaveBeenCalledTimes(1);
+        const recorded = mockAddHistory.mock.calls[0][0] as {
+          role: string;
+          parts: Part[];
+        };
+        expect(recorded.role).toBe('user');
+        expect(recorded.parts.map((p) => p.functionResponse?.id)).toEqual([
+          'err_3',
+        ]);
       });
 
       it('bounds the error streak to the prompt when an external message starts a new one (issue #10887)', async () => {
