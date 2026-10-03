@@ -171,10 +171,10 @@ public final class ToolPublicationRetentionStore {
             public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
                 lease.check();
                 guard.run();
-                int result = in.read(bytes, offset, length);
+                int result = in.readNBytes(bytes, offset, Math.min(length, 1024 * 1024));
                 lease.check();
                 guard.run();
-                return result;
+                return result == 0 && length > 0 ? -1 : result;
             }
         };
     }

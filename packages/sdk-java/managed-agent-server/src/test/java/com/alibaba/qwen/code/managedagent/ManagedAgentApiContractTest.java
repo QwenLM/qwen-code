@@ -1356,7 +1356,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
                         .isEqualTo(json("""
-                                {"tasks":true,"artifacts":false,"actions":false,"sessionClose":true,
+                                {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
                                  "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true}
                                 """));
             }
