@@ -50,7 +50,12 @@ attestation discipline: `POST` on an exact path, protocol version 2, closed
 JSON bodies, `no-store` on both directions, bearer authentication before
 parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
 request so a tool call's `input` fits; `status` and `cancel` accept up to 16 KiB.
-Every operation answers at most 1 MiB.
+Every operation answers at most 1 MiB. After authorization, every answer also
+names the worker's incarnation in `X-Qwen-Managed-Runtime-Incarnation`. No
+request carries the incarnation, so a client can tell its worker's answers from
+those of a process that took the port after the worker exited; the
+ordinary-host Managed engine reads no result or state from an answer without
+it.
 Larger tool outputs travel through the artifact delivery track, never through
 these envelopes; its contract is the
 [Managed Tool Result Contract](2026-09-26-managed-tool-result-contract.md),
