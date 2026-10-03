@@ -178,10 +178,14 @@ class HostedPublicWorkspaceIT {
         register("workspace-0", "storage-0");
         register("workspace-1", "storage-1");
         Map<String, Object> creation = Map.of("agent_id", "qwen-code",
-                "input", List.of(), "workspace",
+                "input", List.of(Map.of("type", "input_text", "text",
+                        "G0_FILES")), "workspace",
                 Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
         String session = request("POST", "/v1/agents/sessions", creation,
                 "w2-create", "actor", 202).path("id").asText();
+        // The Session first runs a real tool Turn in the original
+        // directory, so the later Turn has something to escape from.
+        awaitTurn(session, null, "child", roots.get(0));
 
         Map<String, Object> change = Map.of("cwd_relative", "child2//",
                 "expected_context_revision", 1);
@@ -338,6 +342,7 @@ class HostedPublicWorkspaceIT {
             assertThat(polled.path("result_context_revision").asLong())
                     .isEqualTo(4);
         });
+
         events = request("GET", "/v1/agents/sessions/" + session + "/events",
                 null, null, "actor", 200);
         long changedEvents = 0;
@@ -352,29 +357,66 @@ class HostedPublicWorkspaceIT {
 
         // #13112 landed the missing half of the pivot: a bound later Turn
         // installs the committed binding on its fresh Runtime Session, so
-        // the turn's file writes land only in the changed directory.
+        // the turn's file writes land only in the changed directory — a
+        // stale-runtime reuse would land them back in the original one.
         String laterTurn = request("POST",
                 "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.input.message", "input",
                         List.of(Map.of("type", "input_text", "text",
                                 "G0_FILES"))),
                 "w2-later-turn", "actor", 202).path("turn_id").asText();
-        await().atMost(Duration.ofSeconds(35)).untilAsserted(() ->
-                assertThat(jdbc.queryForObject("SELECT status FROM"
-                        + " managed_agent_turn WHERE session_id = ? AND"
-                        + " turn_id = ?", String.class, session, laterTurn))
-                        .isEqualTo("COMPLETED"));
+        awaitTurn(session, laterTurn, "child2", roots.get(0));
         assertThat(Files.readString(roots.get(0).resolve("child2")
                 .resolve("proof.txt"))).isEqualTo("after");
         assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
-        try (var childEntries = Files.list(roots.get(0).resolve("child"))) {
-            assertThat(childEntries.toList()).isEmpty();
-        }
+        // The initial Turn's own file stays where it was written —
+        // evidence the later Turn escaped to the committed directory
+        // instead of reusing the pre-change installation back in `child`.
+        assertThat(Files.readString(roots.get(0).resolve("child")
+                .resolve("proof.txt"))).isEqualTo("after");
     }
 
     private static void assertRefusal(JsonNode refusal, String code) {
         assertThat(refusal.path("error").path("code").asText())
                 .isEqualTo(code);
+    }
+
+    // Waits a Turn out to COMPLETED with the same diagnostics the sibling
+    // flows dump on failure, and pins the directory it was supposed to
+    // write in — the pivot evidence for the later Turn.
+    private void awaitTurn(String session, String turnId, String cwd,
+            Path workspaceRoot) throws Exception {
+        await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+            if ("FAILED".equals(turnStatus(session, turnId))) {
+                throw new AssertionError(String.format("Turn failed. Turn:"
+                        + " %s; events: %s; model requests: %s; Harness: %s",
+                        jdbc.queryForList("SELECT status, error_code FROM"
+                                + " managed_agent_turn WHERE session_id = ?",
+                                session),
+                        jdbc.queryForList("SELECT event_type, data_json FROM"
+                                + " managed_agent_event WHERE session_id = ?",
+                                session), modelRequests.size(),
+                        Files.readString(
+                                temporary.resolve("harness.log"))));
+            }
+        }).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(turnStatus(session, turnId))
+                    .isEqualTo("COMPLETED");
+        });
+        assertThat(workspaceRoot.resolve(cwd).resolve("proof.txt"))
+                .exists();
+    }
+
+    private String turnStatus(String session, String turnId) {
+        if (turnId == null) {
+            return jdbc.queryForObject("SELECT status FROM"
+                    + " managed_agent_turn WHERE session_id = ?",
+                    String.class, session);
+        }
+        return jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                + " WHERE session_id = ? AND turn_id = ?", String.class,
+                session, turnId);
     }
 
     private List<Path> boot() throws Exception {

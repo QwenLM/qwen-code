@@ -984,6 +984,12 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, workspaceTenant)
                         .header(IDEMPOTENCY_KEY, "cwd-contract-noactor"),
                 cwdBody);
+        // 401 precedes the key-form check on the wire, on both surfaces.
+        exchange(drift, "changeSessionCwd", 401,
+                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+                        .header(TENANT, workspaceTenant)
+                        .header(IDEMPOTENCY_KEY, "not a key with space"),
+                cwdBody);
         exchange(drift, "changeSessionCwd", 400,
                 post("/v1/agents/sessions/{id}/cwd", sessionId)
                         .header(TENANT, tenant).principal(actor(tenant))
@@ -1017,6 +1023,13 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellChangeCwd", 401,
                 post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant), webCwdBody);
+        String webCwdBadKeyBody = """
+                {"sessionId":"%s","idempotencyKey":"not a key",
+                 "cwdRelative":"services/api","expectedContextRevision":1}
+                """.formatted(webBoundId);
+        exchange(drift, "webShellChangeCwd", 401,
+                post(WEB_SHELL + "/sessions/cwd/change")
+                        .header(TENANT, workspaceTenant), webCwdBadKeyBody);
         exchange(drift, "webShellChangeCwd", 409,
                 post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant).principal(actor),

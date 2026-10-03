@@ -117,11 +117,13 @@ public class SessionLifecycleService {
     private OperationAdmission admitCwdChange(String tenantId, String actorId,
             String sessionId, String idempotencyKey, String cwdRelative,
             Long expectedContextRevision) {
-        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        // Actor before key, on the service itself: the published refusal
+        // order must not rest on argument-evaluation order at the routes.
         if (actorId == null || actorId.isEmpty()) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "actor_required",
                     "A trusted actor is required.");
         }
+        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (cwdRelative == null) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request",
                     "cwd_relative is required.");

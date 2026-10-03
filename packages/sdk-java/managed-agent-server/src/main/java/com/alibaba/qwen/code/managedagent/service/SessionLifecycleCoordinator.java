@@ -186,16 +186,16 @@ public class SessionLifecycleCoordinator {
                     operation.targetCwdRelative());
         } catch (RuntimeBrokerException error) {
             if (store.failCwdChangeOperation(tenantId, sessionId, operationId,
-                    owner, operation.claimGeneration(),
-                    "workspace_unavailable")) {
+                    owner, operation.claimGeneration(), error.getCode())) {
                 LOG.info("Managed Session cwd change refused tenant={}"
-                                + " session={} operation={} failure={}",
-                        tenantId, sessionId, operationId,
-                        "workspace_unavailable");
+                                + " session={} operation={} code={}"
+                                + " failure={} {}", tenantId, sessionId,
+                        operationId, error.getCode(),
+                        error.getClass().getSimpleName(), error.getMessage());
             } else {
                 LOG.warn("Managed Session cwd change refusal lost its lease"
-                                + " tenant={} session={} operation={}",
-                        tenantId, sessionId, operationId);
+                                + " tenant={} session={} operation={} code={}",
+                        tenantId, sessionId, operationId, error.getCode());
             }
             return;
         }

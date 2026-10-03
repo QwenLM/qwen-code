@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -76,10 +77,14 @@ final class WorkspaceRuntimeResolver {
 
     /**
      * The W2 settlement probe: proves for the target directory of a cwd
-     * change what a later acquisition proves for the current one — the
+     * change exactly what a later acquisition would prove for it — the
      * administrator mount mapping and continuity, the storage guard when
-     * enabled, and the directory rule {@code acquire()} enforces — without
+     * enabled against the *candidate* binding, and the directory rule
+     * {@code acquire()} enforces including its readability checks — without
      * claiming storage or contacting a worker. Read-only and idempotent.
+     * Verifying the candidate instead of the current binding keeps a
+     * change *away from* a destroyed directory reachable, the escape this
+     * feature exists for.
      */
     void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
         Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
@@ -87,8 +92,19 @@ final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
-        authority.verifyMount(binding);
         requireDirectory(mount.root().toString(), targetCwdRelative);
+        try {
+            authority.verifyMount(new ContextBinding(binding.getTenantId(),
+                    binding.getWorkspaceId(),
+                    binding.getWorkspaceGeneration(),
+                    binding.getStorageId(),
+                    WorkspaceRelativePath.normalize(targetCwdRelative),
+                    binding.getContextConfigRef(),
+                    binding.getContextRevision()));
+        } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace
+                .WorkspaceException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     private static void verifyMountIntact(Mount mount) {
@@ -107,8 +123,12 @@ final class WorkspaceRuntimeResolver {
         try {
             Path base = Path.of(root);
             Path directory = base.resolve(cwdRelative).normalize();
+            // The worker's install runs fs.access(R_OK|X_OK); the shared
+            // rule must not pass anything it would refuse later, after the
+            // storage claim, as an untyped wedge.
             if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
-                    || !directory.toRealPath().equals(directory)) {
+                    || !directory.toRealPath().equals(directory)
+                    || !Files.isReadable(directory) || !Files.isExecutable(directory)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {

@@ -109,7 +109,9 @@ class WorkspaceRuntimeInstallProbeTest {
         ContextBinding bound = binding("services/api");
         assertThatCode(() -> guarded.verifyInstallable(bound, "services/b"))
                 .doesNotThrowAnyException();
-        org.mockito.Mockito.verify(guard).verify(bound);
+        org.mockito.Mockito.verify(guard).verify(
+                org.mockito.ArgumentMatchers.argThat(candidate ->
+                        "services/b".equals(candidate.getCwdRelative())));
 
         org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
                 .when(guard).verify(
@@ -131,6 +133,58 @@ class WorkspaceRuntimeInstallProbeTest {
                         error -> org.assertj.core.api.Assertions.assertThat(
                                 error.getCode())
                                 .isEqualTo("workspace_unavailable"));
+    }
+
+    // The guard verifies the candidate binding, not the current one: a
+    // Session whose present directory is already gone must still be
+    // movable — that is the escape this feature exists for.
+    @Test
+    void theGuardVerifiesTheCandidateBindingNotTheDestroyedCurrentOne()
+            throws Exception {
+        Path root = Files.createDirectory(temporary.resolve("mount"))
+                .toRealPath();
+        Files.createDirectories(root.resolve("gone"));
+        Files.createDirectories(root.resolve("next"));
+        Files.delete(root.resolve("gone"));
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        when(guard.enabled()).thenReturn(true);
+        var dataSource = new DriverManagerDataSource(
+                "jdbc:h2:mem:probe-candidate;MODE=MySQL;DB_CLOSE_DELAY=-1",
+                "sa", "");
+        WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
+                null, new WorkspaceExecutionStore(new JdbcTemplate(
+                        dataSource),
+                        new DataSourceTransactionManager(dataSource), guard),
+                mountProperties(root));
+
+        assertThatCode(() -> guarded.verifyInstallable(binding("gone"),
+                "next")).doesNotThrowAnyException();
+        org.mockito.Mockito.verify(guard).verify(
+                org.mockito.ArgumentMatchers.argThat(candidate ->
+                        "next".equals(candidate.getCwdRelative())));
+    }
+
+    // The worker's install runs fs.access(R_OK|X_OK); the shared rule must
+    // refuse everything it would — before any claim can be stranded.
+    @Test
+    void theProbeRefusesAnUnreadableOrUnsearchableTarget() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file
+                .FileSystems.getDefault().supportedFileAttributeViews()
+                .contains("posix"));
+        Path root = Files.createDirectory(temporary.resolve("mount"))
+                .toRealPath();
+        Path sealed = Files.createDirectory(root.resolve("sealed"));
+        Files.setPosixFilePermissions(sealed,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("---------"));
+        try {
+            WorkspaceRuntimeResolver resolver = resolver(root);
+            assertProbeRefused(resolver, "sealed");
+        } finally {
+            Files.setPosixFilePermissions(sealed,
+                    java.nio.file.attribute.PosixFilePermissions
+                            .fromString("rwx------"));
+        }
     }
 
     private WorkspaceRuntimeResolver resolver(Path root) {

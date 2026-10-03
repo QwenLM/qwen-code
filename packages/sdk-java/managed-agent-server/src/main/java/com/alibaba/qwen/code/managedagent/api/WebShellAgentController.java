@@ -212,7 +212,7 @@ public class WebShellAgentController {
                 request.requestId());
         return ResponseEntity.accepted().body(
                 lifecycle.admitWebShellCwdChange(tenant.tenantId(),
-                        tenant.requireActorId(), request.sessionId(),
+                        tenant.actorId(), request.sessionId(),
                         request.idempotencyKey(), request.cwdRelative(),
                         request.expectedContextRevision()));
     }

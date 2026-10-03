@@ -456,11 +456,16 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session already has an active Turn.");
         }
-        // The W2 handshake: an open operation on a bound Session is the
-        // busy barrier its settlement re-verifies at commit; a later Turn
-        // must not slide in underneath it.
+        // The W2 handshake: an open execution operation on a bound Session
+        // is the busy barrier the settlement re-verifies at commit; a
+        // later Turn must not slide in underneath it. Narrower than
+        // requireNoOpenOperation on purpose: a stuck display mutation
+        // (PENDING rename command) or an in-flight ACTION_RESPONSE would
+        // otherwise wedge every Turn admission without any recovery scan
+        // reading those tables — while the operation-ledger barriers that
+        // intentionally cover them stay untouched.
         if (session.workspace() != null
-                && hasOpenOperation(tenantId, sessionId)) {
+                && hasOpenExecutionOperation(tenantId, sessionId)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "session_context_busy",
                     "The Session has an open operation.");
@@ -801,14 +806,13 @@ public class ManagedAgentStore implements AgentStateStore {
                     "unsupported_feature",
                     "The Session has no Workspace context.");
         }
-        // Invisibility comes before the deployment gate and the replay
-        // lookup, exactly as the sibling lifecycle admission: a caller
-        // without read access must not learn that a Session or a key
-        // exists, and must not read the deployment flag from its refusal.
+        // Invisibility comes before any refusal that diagnoses facts:
+        // a caller without read access must not learn whether a Session,
+        // a key or the deployment flag exists. The replay follows it, so a
+        // lost 202 always resolves to the original operation even when the
+        // deployment has since disabled execution — the idempotency
+        // contract outranks the flag gate, exactly as beginLifecycle does.
         requireCwdChangeActor(session, actorId);
-        if (!workspaceFilesEnabled) {
-            throw workspaceExecutionUnavailable();
-        }
         Optional<OperationRecord> existing = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
                         + " session_id = ? AND operation_kind = ? AND"
@@ -826,6 +830,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing.get(), true);
+        }
+        if (!workspaceFilesEnabled) {
+            throw workspaceExecutionUnavailable();
         }
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
@@ -1002,6 +1009,20 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private boolean hasOpenOperation(String tenantId, String sessionId) {
         return hasOpenOperation(tenantId, sessionId, null);
+    }
+
+    // The bound later-Turn barrier: context-changing operations only —
+    // pending command rows and permission-action operations are excluded,
+    // matching the recovery scan's own population.
+    private boolean hasOpenExecutionOperation(String tenantId,
+            String sessionId) {
+        Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_kind <>"
+                        + " 'ACTION_RESPONSE' AND state IN ('PENDING',"
+                        + " 'RUNNING', 'RECOVERY_BLOCKED')",
+                Integer.class, tenantId, sessionId);
+        return operations != null && operations > 0;
     }
 
     private boolean hasOpenOperation(String tenantId, String sessionId,
@@ -2739,7 +2760,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return result.wasNull() ? null : value;
     }
 
-    // The cwd columns arrive with V34; an operation read against an
+    // The cwd columns arrive with V35; an operation read against an
     // additive-upgrade schema that predates them (the pinned-schema upgrade
     // ITs construct exactly that) must treat them as absent instead of
     // erroring the whole query.

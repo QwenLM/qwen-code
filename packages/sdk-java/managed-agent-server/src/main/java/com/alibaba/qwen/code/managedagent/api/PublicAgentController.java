@@ -155,7 +155,7 @@ public class PublicAgentController {
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ChangeCwdRequest request) {
         return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
-                tenant.tenantId(), tenant.requireActorId(), sessionId,
+                tenant.tenantId(), tenant.actorId(), sessionId,
                 idempotencyKey, request.cwdRelative(),
                 request.expectedContextRevision()));
     }
