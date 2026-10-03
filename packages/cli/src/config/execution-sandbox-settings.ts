@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import path from 'node:path';
 import stripJsonComments from 'strip-json-comments';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
@@ -19,7 +20,7 @@ export interface ExecutionSandboxSettings {
   network: 'open' | 'closed';
 }
 
-export class InvalidExecutionSandboxConfigError extends Error {}
+export class InvalidExecutionSandboxConfigError extends FatalConfigError {}
 
 export function stripUtf8Bom(content: string): string {
   return content.startsWith('\uFEFF') ? content.slice(1) : content;
@@ -139,14 +140,13 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
     userSettingsPath,
     getSystemSettingsPath(),
   ].map((file) => {
-    if (!fs.existsSync(file)) return {};
     let source: string;
     try {
       source = fs.readFileSync(file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
       throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}`,
+        `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
       );
     }
     try {
@@ -168,7 +168,7 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
         }
       }
       throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}`,
+        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
       );
     }
   });

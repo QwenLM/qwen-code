@@ -18,12 +18,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from './approval-mode.js';
-import { Config, type ConfigParameters } from './config.js';
+import { Config, deriveConfig, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import { MCPServerConfig } from './mcp-server-config.js';
 import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
 import { McpClientManager } from '../tools/mcp-client-manager.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
 import {
   ManagedSessionRecordRefusedError,
   type ChatRecord,
@@ -1435,5 +1439,237 @@ describe('Managed host tools', () => {
     await config.reinitializeMcpServers(mcpServers);
     expect(getToolRegistry).not.toHaveBeenCalled();
     await config.closeSessionWriter();
+  });
+});
+
+describe('Managed Runtime tools', () => {
+  function runtimeEnvironment(): ExecutionEnvironment {
+    return {
+      toolNames: MANAGED_RUNTIME_TOOL_NAMES,
+      prepare: vi.fn(),
+      permission: vi.fn(),
+      confirmation: vi.fn(),
+      confirm: vi.fn(),
+      execute: vi.fn(),
+      modificationContent: vi.fn(),
+      release: vi.fn(),
+      invalidateReadCache: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+    };
+  }
+
+  it('registers the first-phase tools to execute in its environment', async () => {
+    const environment = runtimeEnvironment();
+    const factory = vi.fn(() => environment);
+    const config = managedConfig({ managedRuntimeEnvironment: factory });
+
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    await registry.warmAll({ strict: true });
+    expect(registry.getAllToolNames().sort()).toEqual([
+      'edit',
+      'read_file',
+      'run_shell_command',
+      'write_file',
+    ]);
+    for (const tool of registry.getAllTools()) {
+      expect((tool as { environment?: unknown }).environment).toBe(environment);
+    }
+    // One environment per session, built for this Config.
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(factory).toHaveBeenCalledExactlyOnceWith(config);
+  });
+
+  it('keeps the permission decisions on registration', async () => {
+    const config = managedConfig({
+      managedRuntimeEnvironment: runtimeEnvironment,
+      disabledTools: ['read_file'],
+    });
+    vi.spyOn(config, 'getPermissionManager').mockReturnValue({
+      getToolRegistrationStatus: async (name: string) =>
+        name === 'write_file'
+          ? 'disabled'
+          : name === 'edit'
+            ? 'deferred'
+            : 'registered',
+    } as unknown as ReturnType<Config['getPermissionManager']>);
+
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames().sort()).toEqual([
+      'edit',
+      'run_shell_command',
+    ]);
+    expect(registry.isPermissionDeferred('edit')).toBe(true);
+    expect(registry.isPermissionDeferred('run_shell_command')).toBe(false);
+  });
+
+  it('admits no other tool through the Runtime-backed path', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const registry = new ToolRegistry(config);
+    const hostTool = { name: 'read_file' } as unknown as AnyDeclarativeTool;
+    // Another name, or another session's environment.
+    registry.registerRuntimeBackedFactory(
+      'image_gen',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    registry.registerRuntimeBackedFactory(
+      'edit',
+      async () => hostTool,
+      runtimeEnvironment(),
+      false,
+    );
+    expect(registry.getAllToolNames()).toEqual([]);
+    // A tool under an admitted name that does not run in the environment.
+    registry.registerRuntimeBackedFactory(
+      'read_file',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    await expect(registry.ensureTool('read_file')).rejects.toThrow(
+      'not Runtime-backed',
+    );
+
+    const legacy = new ToolRegistry(
+      managedConfig({ sessionExecutionEngine: 'legacy' }),
+    );
+    legacy.registerRuntimeBackedFactory(
+      'read_file',
+      async () => hostTool,
+      environment,
+      false,
+    );
+    expect(legacy.getAllToolNames()).toEqual([]);
+  });
+
+  it('builds no environment for another engine or a derived Config', async () => {
+    const factory = vi.fn(runtimeEnvironment);
+    const legacy = managedConfig({
+      sessionExecutionEngine: 'legacy',
+      managedRuntimeEnvironment: factory,
+    });
+    const registry = await legacy.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(legacy.getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(
+      registry
+        .getAllTools()
+        .some((tool) => (tool as { environment?: unknown }).environment),
+    ).toBe(false);
+    expect(factory).not.toHaveBeenCalled();
+
+    const config = managedConfig({ managedRuntimeEnvironment: factory });
+    expect(deriveConfig(config).getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing it could cache', () => {
+    expect(managedConfig().getFileReadCacheDisabled()).toBe(true);
+    expect(
+      managedConfig({
+        sessionExecutionEngine: 'legacy',
+      }).getFileReadCacheDisabled(),
+    ).toBe(false);
+  });
+
+  it('stops its environment before the session writer closes', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const order: string[] = [];
+    vi.mocked(environment.dispose).mockImplementation(async () => {
+      // A slow stop: the writer must wait for it.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      order.push('dispose');
+    });
+    const closeSessionWriter = config.closeSessionWriter.bind(config);
+    vi.spyOn(config, 'closeSessionWriter').mockImplementation(async () => {
+      order.push('closeSessionWriter');
+      await closeSessionWriter();
+    });
+    await config.shutdown({ shutdownTelemetry: false });
+    expect(order).toEqual(['dispose', 'closeSessionWriter']);
+  });
+
+  it('stays in the directory its Runtime worker is bound to', async () => {
+    const below = path.join(projectDir, 'below');
+    await mkdir(below);
+    const config = managedConfig();
+    await expect(
+      config.relocateWorkingDirectory(below, undefined, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).rejects.toThrow('A Managed session cannot change its directory.');
+    expect(config.getTargetDir()).toBe(projectDir);
+  });
+
+  it('builds no environment once its Runtime is closed or it shuts down', async () => {
+    const factory = vi.fn(runtimeEnvironment);
+    const closed = managedConfig({ managedRuntimeEnvironment: factory });
+    await closed.closeManagedRuntime();
+    expect(closed.getManagedRuntimeEnvironment()).toBeUndefined();
+
+    const shutDown = managedConfig({ managedRuntimeEnvironment: factory });
+    await shutDown.shutdown({ shutdownTelemetry: false });
+    expect(shutDown.getManagedRuntimeEnvironment()).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('hands out no environment after closing the one it built', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    expect(config.getManagedRuntimeEnvironment()).toBe(environment);
+    await config.closeManagedRuntime();
+    expect(environment.dispose).toHaveBeenCalledOnce();
+    // A stopped worker serves no later registry.
+    expect(config.getManagedRuntimeEnvironment()).toBeUndefined();
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toEqual([]);
+  });
+
+  it('stops its environment once, and still finishes the log when it cannot', async () => {
+    const environment = runtimeEnvironment();
+    const failure = new Error('process groups survived');
+    vi.mocked(environment.dispose).mockRejectedValue(failure);
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    config.getManagedRuntimeEnvironment();
+    const closeSessionWriter = vi.spyOn(config, 'closeSessionWriter');
+
+    await expect(config.closeManagedRuntime()).rejects.toBe(failure);
+    await config.shutdown({
+      shutdownTelemetry: false,
+      strictResourceCleanup: true,
+    });
+    expect(environment.dispose).toHaveBeenCalledOnce();
+    expect(closeSessionWriter).toHaveBeenCalled();
+  });
+
+  it('keeps the first reason it was blocked for, from any derived Config', () => {
+    const config = managedConfig();
+    expect(config.getManagedSessionBlock()).toBeUndefined();
+    const first = new Error('first');
+    deriveConfig(config).blockManagedSession(first);
+    config.blockManagedSession(new Error('second'));
+    expect(config.getManagedSessionBlock()).toBe(first);
+    expect(deriveConfig(config).getManagedSessionBlock()).toBe(first);
   });
 });
