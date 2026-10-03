@@ -1103,18 +1103,21 @@ async function resolvePersistedSessionIdForRestore(
 }
 
 /**
- * A paired Bridge names the engine it selected; this host only executes
- * Legacy sessions, so any other selection is refused before session work.
+ * A paired Bridge names the engine it selected; a host executes only its own
+ * engine, so any other selection is refused before session work. A Managed
+ * host serves only its paired Bridge, which always names the engine.
  */
 function requestedExecutionEngine(
   meta: Record<string, unknown> | null | undefined,
   sessionId: string | undefined,
+  hostEngine: SessionExecutionEngine,
 ): SessionExecutionEngine | undefined {
   const engine = meta?.[SESSION_EXECUTION_ENGINE_META_KEY];
-  if (engine === undefined || engine === 'legacy') return engine;
+  if (engine === hostEngine) return hostEngine;
+  if (hostEngine === 'legacy' && engine === undefined) return undefined;
   throw new RequestError(
     -32024,
-    'This ACP host only executes legacy sessions.',
+    `This ACP host only executes ${hostEngine} sessions.`,
     {
       errorKind: 'session_execution_engine_unavailable',
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -1132,6 +1135,16 @@ function withExecutionEngineReceipt<
   };
 }
 
+function mapSessionExecutionEngineRequestError(
+  error: SessionExecutionEngineError,
+  sessionId: string | undefined,
+): RequestError {
+  return new RequestError(-32024, error.message, {
+    errorKind: error.errorKind,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  });
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
@@ -1139,10 +1152,7 @@ function mapSessionRestoreRequestError(
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
   if (error instanceof SessionExecutionEngineError) {
-    return new RequestError(-32024, error.message, {
-      errorKind: error.errorKind,
-      sessionId,
-    });
+    return mapSessionExecutionEngineRequestError(error, sessionId);
   }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
@@ -3015,6 +3025,8 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     conversationsRuntimeProvenance?: boolean;
+    /** Accepted by the CLI entry point only from a private ACP parent. */
+    executionEngine?: 'managed';
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
@@ -3029,11 +3041,14 @@ export async function runAcpAgent(
   // process lifetime alongside the writer-lease snapshot.
   const conversationsRuntimeProvenance =
     options?.conversationsRuntimeProvenance === true;
+  const hostExecutionEngine: SessionExecutionEngine =
+    options?.executionEngine ?? 'legacy';
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
-  // within one ACP process lifetime.
+  // within one ACP process lifetime. A Managed Session log requires the lease.
   const sessionWriterLeaseEnabledAtStartup =
     conversationsRuntimeProvenance ||
+    hostExecutionEngine === 'managed' ||
     (typeof config.isSessionWriterLeaseEnabled === 'function'
       ? config.isSessionWriterLeaseEnabled()
       : settings.merged.experimental?.sessionWriterLease === true);
@@ -3051,6 +3066,14 @@ export async function runAcpAgent(
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
+    );
+  }
+  if (
+    hostExecutionEngine === 'managed' &&
+    privateParentCapability === undefined
+  ) {
+    throw new Error(
+      'A Managed ACP host is available only to a private managed ACP parent.',
     );
   }
 
@@ -3193,6 +3216,7 @@ export async function runAcpAgent(
         managedToolInvocationGuard,
         externalToolGuardProviderAttached,
         conversationsRuntimeProvenance,
+        hostExecutionEngine,
       );
       return agentInstance;
     }, stream);
@@ -5146,6 +5170,7 @@ class QwenAgent implements Agent {
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
+    private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
   ) {
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
@@ -5622,6 +5647,7 @@ class QwenAgent implements Agent {
     const executionEngine = requestedExecutionEngine(
       params._meta,
       requestedSessionId,
+      this.hostExecutionEngine,
     );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
@@ -5764,7 +5790,11 @@ class QwenAgent implements Agent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -6336,7 +6366,11 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -15156,9 +15190,15 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw sessionId && restoreOptions
-        ? mapSessionRestoreRequestError(error, sessionId)
-        : error;
+      if (sessionId && restoreOptions) {
+        throw mapSessionRestoreRequestError(error, sessionId);
+      }
+      // A session the host's engine cannot record or own, such as a Managed
+      // one without chat recording, is refused rather than degraded.
+      if (error instanceof SessionExecutionEngineError) {
+        throw mapSessionExecutionEngineRequestError(error, sessionId);
+      }
+      throw error;
     }
   }
 
@@ -15178,6 +15218,8 @@ class QwenAgent implements Agent {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
     );
+    const agentHostReadOnly =
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE;
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -15185,7 +15227,7 @@ class QwenAgent implements Agent {
     // `.mcp.json` (#4615).
     const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
-    for (const server of mcpServers) {
+    for (const server of agentHostReadOnly ? [] : mcpServers) {
       const stdioServer = toStdioServer(server);
       if (stdioServer) {
         const env: Record<string, string> = {};
@@ -15242,7 +15284,9 @@ class QwenAgent implements Agent {
       experimental: {
         ...settings.merged.experimental,
         sessionWriterLease: this.sessionWriterLeaseEnabledAtStartup,
-        ...(sessionSource?.sourceType === 'channel' ? { cron: false } : {}),
+        ...(sessionSource?.sourceType === 'channel' || agentHostReadOnly
+          ? { cron: false }
+          : {}),
       },
     };
 
@@ -15256,7 +15300,10 @@ class QwenAgent implements Agent {
           };
     const argvForSession = {
       ...this.argv,
-      ...(provisionalWorkspace ? { experimentalLsp: false } : {}),
+      ...(provisionalWorkspace || agentHostReadOnly
+        ? { experimentalLsp: false }
+        : {}),
+      ...(agentHostReadOnly ? { mcpConfig: undefined } : {}),
       // Docker sandbox relaunch injects a fixed --sandbox-session-id into
       // the ACP process argv. Without clearing it, every newSession()
       // inherits the same ID and the second session collides with the
@@ -15271,24 +15318,25 @@ class QwenAgent implements Agent {
       mergedSettings,
       argvForSession,
       cwd,
-      // ACP sessions do not provide an extension override. Passing [] is a
-      // truthy override and prevents default/argv extension commands from
-      // loading, so leave it unset to preserve normal CLI behavior.
-      undefined,
+      // Ordinary ACP sessions preserve normal extension behavior. Agent Host
+      // sessions pass [] because their workspace is a read-only capability.
+      agentHostReadOnly ? [] : undefined,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      agentHostReadOnly
+        ? {}
+        : {
+            systemHooks: settings.getSystemHooks(),
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
       // CRITICAL: close over the per-request `settings` (LoadedSettings
       // instance), NOT over the `mergedSettings` snapshot built above.
       // `LoadedSettings.setValue` replaces `_merged`, so a closure over the
       // snapshot would never see workspace toggles applied during the
       // session. ACP/Zed sessions otherwise leak persisted disabled skills
       // into the first <available_skills> at cold start.
-      buildDisabledSkillNamesProvider(settings),
-      sessionMcpServers,
+      agentHostReadOnly ? undefined : buildDisabledSkillNamesProvider(settings),
+      agentHostReadOnly ? undefined : sessionMcpServers,
       // The daemon owns the settings watcher lifecycle.
       undefined,
       // A duplicate caller-supplied session id must fail this one request,
@@ -15298,12 +15346,14 @@ class QwenAgent implements Agent {
       this.managedToolInvocationGuard ||
         restoreOptions ||
         provisionalWorkspace ||
+        agentHostReadOnly ||
         executionEngine
         ? {
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),
             ...(executionEngine ? { executionEngine } : {}),
+            ...(agentHostReadOnly ? { agentHostReadOnly: true as const } : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),
@@ -15322,13 +15372,18 @@ class QwenAgent implements Agent {
               : {}),
           }
         : undefined,
-      buildEnabledSkillNamesProvider(settings),
+      agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
-    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
-    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
+    config.setArtifactSnapshotsEnabled(
+      !agentHostReadOnly && this.isTrustedManagedParent(),
+    );
+    if (
+      !agentHostReadOnly &&
+      this.clientCapabilities?._meta?.['qwen.goalProposals'] === true
+    ) {
       config.setGoalProposalHostSupported(true);
     }
     if (chatRecording !== false) {
@@ -15351,11 +15406,21 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
-    // ACP sessions run with piped stdio (non-TTY), so the default
-    // interactive-based gating disables file checkpointing. Enable it
-    // explicitly so /rewind works across daemon session resume.
+    // Ordinary ACP sessions explicitly enable checkpoints so /rewind works
+    // across daemon resume. Agent Host sessions must remain workspace-read-only.
+    const effectiveInitializeOptions: ConfigInitializeOptions =
+      agentHostReadOnly
+        ? {
+            ...initializeOptions,
+            skipHooks: true,
+            skipMcpDiscovery: true,
+            skipSkillManager: true,
+            skipFileCheckpointing: true,
+            lenientToolWarmup: true,
+          }
+        : initializeOptions;
     if (
-      !initializeOptions.skipFileCheckpointing &&
+      !effectiveInitializeOptions.skipFileCheckpointing &&
       typeof config.enableFileCheckpointing === 'function'
     ) {
       config.enableFileCheckpointing();
@@ -15374,6 +15439,7 @@ class QwenAgent implements Agent {
     // Guarded + additive: no runtime servers ⇒ no-op, and settings-based MCP
     // servers (already re-read by `loadCliConfig`) are untouched.
     if (
+      !agentHostReadOnly &&
       typeof this.config.getRuntimeMcpServers === 'function' &&
       typeof config.addRuntimeMcpServer === 'function'
     ) {
@@ -15387,6 +15453,7 @@ class QwenAgent implements Agent {
     // Inject the workspace-shared MCP transport pool BEFORE
     // `config.initialize()` so the ToolRegistry picks it up.
     if (
+      !agentHostReadOnly &&
       this.mcpPool !== undefined &&
       typeof config.setMcpTransportPool === 'function'
     ) {
@@ -15403,6 +15470,7 @@ class QwenAgent implements Agent {
     // a configured budget keep the per-session callback.
     const skipPerSessionBudgetCallback = this.workspaceMcpBudget !== undefined;
     if (
+      !agentHostReadOnly &&
       !skipPerSessionBudgetCallback &&
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
@@ -15433,13 +15501,15 @@ class QwenAgent implements Agent {
     }
     try {
       await config.initialize({
-        ...initializeOptions,
+        ...effectiveInitializeOptions,
         // Reverse tool channel (issue #5626, Phase 2): bind the session
         // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
         // client-hosted (extension) MCP server added at runtime reaches the
         // daemon WS. Servers that aren't client-hosted never use this callback
         // (the daemon only adds SDK-type runtime servers for client MCP).
-        sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
+        sendSdkMcpMessage: agentHostReadOnly
+          ? undefined
+          : this.buildClientMcpSender(wiredSessionId),
       });
       // initialize() creates the definition manager. Resolve the identity
       // afterwards, but before publishing or prompting this session.
@@ -15520,13 +15590,13 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
-    if (!provisionalWorkspace) {
+    if (!provisionalWorkspace && !agentHostReadOnly) {
       startNonInteractiveOpenAILogHousekeeping(config, settings);
     }
     // ACP sessions served to browser clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
-    if (!provisionalWorkspace) {
+    if (!provisionalWorkspace && !agentHostReadOnly) {
       void this.surfaceMcpFailuresWhenReady(config);
     }
     return config;

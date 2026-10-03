@@ -1246,7 +1246,10 @@ export class LlmClient {
     }
     const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
+    // Some providers reject an empty tool list; offer none instead.
+    const tools: Tool[] = toolDeclarations.length
+      ? [{ functionDeclarations: toolDeclarations }]
+      : [];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
@@ -1879,6 +1882,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
+    // tool_search results leave with the history, so tool_call must not
+    // run a hidden tool on a review the new session never saw (#12569).
+    this.config.getToolRegistry().clearReviewedDeclarations?.();
     await runWithHookExecutionOwner(hookOwner, () =>
       this.startChat(undefined, SessionStartSource.Clear),
     );
@@ -2658,6 +2664,7 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.syncReviewedDeclarations?.(extraHistory ?? []);
       const codeModeOnly =
         this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
@@ -3387,7 +3394,8 @@ export class LlmClient {
     if (!turnBudget) return;
     const sessionId = this.config.getSessionId();
     if (
-      messageType === SendMessageType.Retry &&
+      (messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.UserQuery) &&
       turnBudget.current(sessionId)?.promptId === promptId
     ) {
       return;
@@ -4029,6 +4037,17 @@ export class LlmClient {
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
       // interaction missing from chat recording entirely.
+      //
+      // `deliveredTurn: true` because this record IS the turn's user entry,
+      // written once the send path has admitted the turn: that is what
+      // separates it from a cold notification record the daemon persisted
+      // before any turn ran, which no other persisted field can tell apart
+      // (`backgroundTurn` vanishes on the `channelTask` admission branch).
+      // The stamp does not claim the model accepted a request — the pre-send
+      // refusal gates below all return after this write — and it cannot move
+      // under them without losing the resumed info item this record exists to
+      // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
+      // and the test pinning it.
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -4036,6 +4055,7 @@ export class LlmClient {
           options?.notificationDisplayText,
           undefined,
           goalPermit,
+          /* deliveredTurn */ true,
         );
     }
 
