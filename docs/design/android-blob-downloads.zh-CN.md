@@ -10,6 +10,8 @@ Web Shell 通过 Blob URL 和下载链接导出会话、工作流历史和工作
 
 添加 Web Shell 内部 Blob 保存辅助函数及原生控制器。现有导出调用方等待该函数，并通过已有错误界面显示失败；预览下载链接仅在原生能力存在时使用它。普通浏览器和桌面外壳保持下载链接行为：点击停止传播到宿主导航处理器，并在一秒宽限期后才撤销对象 URL，让浏览器有时间读取内容。仅用于预览的对象 URL 不变。原生传输仅处理已获取的字节，不执行带认证的网络请求或远程 URL 获取。
 
+独立 transcript 构建保留浏览器保存及来源取消检查，但在编译时排除应用专用的原生传输。导出的 HTML transcript 是浏览器文档，不是已配置的交互式 Web Shell 源。其现有下载操作不会获得原生 16 MiB 限制，并继续执行不变的 transcript 包大小门槛。交互式构建和完整库构建保留原生保存。
+
 产物链接直接传入原始 Blob；图片标签页在本地解码 data URL。测试中的 WebView 在守护进程的 `connect-src 'self'` 策略下阻止 `fetch(blob:...)` 和 `fetch(data:...)`，因此辅助函数不会获取这两种 URL。只有 Blob URL 而没有原始字节时，会显示重新打开或使用浏览器的提示，不放宽 CSP，也不静默失败。
 
 Android 在加载配置的源之前通过 AndroidX WebMessageListener 注入 `qwenAndroidDownloadV1`。必须同时支持 `WEB_MESSAGE_LISTENER` 和 `WEB_MESSAGE_ARRAY_BUFFER`。监听器验证实际来源、主框架标志、当前挂载的 WebView 和文档生命周期。响应使用绑定到框架的 JavaScriptReplyProxy。不引入通配来源或无限制的 JavaScript 接口。

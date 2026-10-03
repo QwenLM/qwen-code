@@ -71,6 +71,7 @@ describe('saveBlob', () => {
       .qwenAndroidDownloadV1;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.useRealTimers();
   });
 
@@ -110,6 +111,30 @@ describe('saveBlob', () => {
     } finally {
       window.removeEventListener('click', hostClick);
     }
+  });
+
+  it('keeps standalone transcript saving browser-only even when a bridge is present', async () => {
+    vi.stubEnv('MODE', 'transcript');
+    vi.stubGlobal('Blob', NodeBlob);
+    vi.useFakeTimers();
+    const { bridge } = installBridge();
+    const create = vi.fn().mockReturnValue('blob:transcript');
+    const revoke = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: create, revokeObjectURL: revoke });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+    const blob = new Blob([new Uint8Array(16 * 1024 * 1024 + 1)]);
+    await saveBlob(blob, 'transcript.bin');
+    expect(create).toHaveBeenCalledExactlyOnceWith(blob);
+    expect(click).toHaveBeenCalledOnce();
+    expect(bridge.postMessage).not.toHaveBeenCalled();
+    await expect(saveBlob(blob, 'cancelled.bin', () => true)).rejects.toThrow(
+      'no longer active',
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1000);
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:transcript');
   });
 
   it('transfers exact binary bytes in bounded, identified, ordered frames', async () => {

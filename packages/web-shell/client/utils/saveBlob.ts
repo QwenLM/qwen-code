@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 import { base64ToBlob } from './base64.js';
 
 type DownloadBridge = {
@@ -35,7 +37,9 @@ export async function saveBlob(
       throw new Error('The download source is no longer active.');
   };
   checkCurrent();
-  const bridge = nativeBridge();
+  // Standalone transcript exports retain browser saving, not the app bridge.
+  const bridge =
+    import.meta.env.MODE === 'transcript' ? undefined : nativeBridge();
   if (!bridge) {
     const url = URL.createObjectURL(blob);
     try {
