@@ -4,11 +4,11 @@
 
 ## 部署决策
 
-物理回收保持关闭。O2/O3、O4-1 与恢复后的 O4-2 均已合入 main。retention 使用 V30，依次为 recovery V31、close V32、AgentDefinition V33、collection V34；落地前联合 SQL、Java 两个迁移目录再次核对 main 最新编号。临时 close 或 collection 数据库历史需要显式核对或重建，不自动执行 Flyway repair。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
+物理回收保持关闭。O2/O3、O4-1、恢复后的 O4-2 及 O4-3 均已合入 main。retention 使用 V30，依次为 recovery V31、close V32、AgentDefinition V33、collection V34；落地前联合 SQL、Java 两个迁移目录再次核对 main 最新编号。临时 close 或 collection 数据库历史需要显式核对或重建，不自动执行 Flyway repair。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
 
 默认 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED=false`，删除宽限期为 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE=24h`。物理回收关闭时仍执行观察。close、archive、ACK、事件过期及 Runtime 回收不会退役 Session 保留根。Session 成功删除建立不可逆的退役时间；修改宽限期不会重置时间。部署保持 24 小时策略，零宽限期仅用于全新隔离测试。
 
-当前基线绑定 Workspace 的 Session DELETE 仍返回 `workspace_unavailable`；已合入的 close/drain 路径不会退役输出。因此，公开删除原子性测试使用关联私有输出 owner 的 legacy 公开 Session fixture。O4 提供受保护的完成屏障，不启用尚未完成的 Workspace 删除路径。完整 Hosted 门禁首先必须确认实际删除路径进入同一完成屏障。
+已合入的 L1/L2 生命周期（#13194）支持已结束 `files/1` Workspace Session 的公开 archive/delete。带 Hooks 的活跃 Session（L3）及 Shell/MCP 生命周期（L4）仍是独立前提。O4 公开删除原子性 fixture 使用关联私有输出 owner 的 legacy 公开 Session，不能证明实际公开 Shell Session 可以完成 close 和 delete。完整 Hosted 前台 Shell 门禁必须确认真实删除路径进入同一受保护的完成屏障。
 
 只有下面的真实数据库、真实 OSS 及完整 Hosted 前台 Shell 门禁在目标部署 revision 上全部通过后，才能启用物理回收。不可用或跳过的门禁不算通过。本文不授权开启生产 GC。
 
@@ -74,7 +74,9 @@ WHERE retention_state IN ('RETIRING', 'DELETING') GROUP BY gc_blocker;
 
 `gc_blocker` 由启用后的清理尝试填写；观察期间 NULL 不代表符合条件。逻辑 used 字节不包含 inline/OSS 副本的存储放大。应按 catalog 精确 key 及对应 inline 列核对物理容量，不能从配额推算或扫描桶前缀。
 
-预期阻塞包括宽限期、活跃 reader、未解决 PUT、operation/object 证据未完成、历史写入证据缺失、隔离、接纳未完成及恢复保护。未解决写入和持续 `collection_retry` 应与正常宽限等待分别处理。每个 tick 最多检查 32 个到期候选并最多回收一页。宽限期等待将下次尝试设为原始退役时间加配置宽限期，避免在 24 小时窗口内每分钟轮询。其他阻塞、删除或 SQL 确认失败保持配额，一分钟后重试，允许健康 publication 继续推进。每页最多 100 key，对象间续租 claim，旧 generation 不可确认。多实例恢复在 claim 过期后重复幂等删除。
+预期阻塞包括宽限期、活跃 reader、未解决 PUT、operation/object 证据未完成、历史写入证据缺失、隔离、接纳未完成及恢复保护。未解决写入和持续 `collection_retry` 应与正常宽限等待分别处理。每个 tick 最多检查 32 个到期候选并最多回收一页。宽限期等待将下次尝试设为原始退役时间加配置宽限期，避免在 24 小时窗口内每分钟轮询。历史写入证据缺失、隔离、接纳未完成和恢复保护在两次复查间等待 24 小时，因为不可逆退役后，普通生产进度不会解除这些保护。每次到期尝试仍在原有锁下完整复查资格；延迟是有限的，不意味着允许回收受保护行。其他阻塞、删除或 SQL 确认失败保持配额，一分钟后重试。这样减少首次遍历后的重复锁与 SQL 开销；大量新到期积压仍需按每个 tick 至多 32 个候选完成首次扫描，并可能延迟健康 publication。对稳定保护的授权修复，检测延迟可达 24 小时。该固定内部重试间隔独立于删除宽限期，不改变 observer 每分钟观察及有界采样。每页最多 100 key，对象间续租 claim，旧 generation 不可确认。多实例恢复在 claim 过期后重复幂等删除。
+
+修改宽限期不会主动重排已持久化的 `gc_next_at`。如果某行已按原始退役时间加较长宽限期延后，此后缩短宽限期，回收仍可能等到已存截止时间。到期后使用当前配置宽限期复查资格，因此增加宽限期不会导致提前删除。部署保持 24 小时策略，策略调整时记录这一延迟；不要批量重置截止时间或修改退役、证据来强制推进。
 
 不能通过清除 UNKNOWN/IN_FLIGHT attempt、给历史行填 `write_evidence`/`accepted_complete`、释放配额、清除恢复保护、修改退役 generation 或删除墓碑来消除积压。旧证据继续受到保护；过期 publication 恢复属于 #13019。拥有对象存储权限的管理员若绕过 managed writer 路径重建 key，会破坏保证；这类写入不在回收契约内。
 

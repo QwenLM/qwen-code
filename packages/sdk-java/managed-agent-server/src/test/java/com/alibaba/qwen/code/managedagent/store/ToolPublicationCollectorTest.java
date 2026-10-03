@@ -70,6 +70,104 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     }
 
     @Test
+    void protectedBacklogWaitsForDailyRecheckAndYieldsAfterItsFirstSweep() {
+        var blockers = List.of("legacy_write_evidence_missing", "quarantined",
+                "not_accepted_complete", "recovery_protected");
+        for (String blocker : blockers) {
+            String heldSession = "held-" + blocker;
+            for (int index = 0; index < 40; index++) {
+                String publication = blocker + "-" + index;
+                String heldScope = addPublication(publication, heldSession);
+                jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                                + " resource_id, resource_kind, byte_length, sha256, inline_bytes, state, operation_id, created_at)"
+                                + " VALUES (?, ?, 'inline', ?, 'managed-tool-result-content', 1, ?, ?,"
+                                + " 'VERIFIED', 'op', CURRENT_TIMESTAMP(6))", heldScope, publication, publication,
+                        scope, new byte[] {4});
+            }
+            tx.executeWithoutResult(status -> {
+                ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, heldSession);
+                ToolPublicationRetentionStore.retire(jdbc, tenant, heldSession, "delete-" + blocker);
+            });
+            switch (blocker) {
+                case "legacy_write_evidence_missing" -> jdbc.update("UPDATE qwen_tool_publication"
+                        + " SET write_evidence = FALSE WHERE session_id = ?", heldSession);
+                case "quarantined" -> jdbc.update("UPDATE qwen_tool_publication"
+                        + " SET quarantined = TRUE WHERE session_id = ?", heldSession);
+                case "not_accepted_complete" -> jdbc.update("UPDATE qwen_tool_publication"
+                        + " SET accepted_complete = FALSE WHERE session_id = ?", heldSession);
+                case "recovery_protected" -> jdbc.update("UPDATE qwen_output_session_retirement"
+                        + " SET recovery_protected = TRUE WHERE session_id = ?", heldSession);
+                default -> throw new AssertionError(blocker);
+            }
+        }
+        addObject("healthy", "healthy/exact-key", null);
+        retire();
+        jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 1 WHERE scope_key = ?", scope);
+        var evaluations = new java.util.concurrent.atomic.AtomicInteger();
+        var template = new org.springframework.jdbc.core.JdbcTemplate(jdbc.getDataSource()) {
+            @Override public java.util.Map<String, Object> queryForMap(String sql, Object... args) {
+                var row = super.queryForMap(sql, args);
+                if (sql.startsWith("SELECT * FROM qwen_tool_publication")
+                        && "RETIRING".equals(row.get("retention_state"))) { evaluations.incrementAndGet(); }
+                return row;
+            }
+        };
+        var objects = new DeletingObjects();
+        var gc = collector(template, objects, true);
+        long before = ToolPublicationRetentionStore.now(jdbc);
+        for (int tick = 0; tick < 6 && !"COLLECTED".equals(state()); tick++) { gc.runOnce(); }
+        long after = ToolPublicationRetentionStore.now(jdbc);
+        assertThat(state()).isEqualTo("COLLECTED");
+        assertThat(held()).isZero();
+        assertThat(objects.deleted).containsExactly("healthy/exact-key");
+        assertThat(evaluations.get()).isEqualTo(161);
+        for (String blocker : blockers) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication WHERE session_id = ?"
+                            + " AND retention_state = 'RETIRING' AND gc_blocker = ? AND gc_next_at BETWEEN ? AND ?"
+                            + " AND capture_held_bytes + producer_held_bytes + admission_held_bytes = 3000"
+                            + " AND capture_used_bytes = 123", Long.class, "held-" + blocker, blocker,
+                    before + Duration.ofHours(24).toMillis(), after + Duration.ofHours(24).toMillis())).isEqualTo(40);
+        }
+        jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = gc_next_at - 120000 WHERE retention_state = 'RETIRING'");
+        assertThat(gc.runOnce()).isFalse();
+        assertThat(evaluations.get()).isEqualTo(161);
+        jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 0 WHERE publication_id = 'quarantined-0'");
+        assertThat(gc.runOnce()).isFalse();
+        assertThat(evaluations.get()).isEqualTo(162);
+        assertThat(jdbc.queryForObject("SELECT gc_next_at FROM qwen_tool_publication"
+                + " WHERE publication_id = 'quarantined-0'", Long.class))
+                .isGreaterThanOrEqualTo(after + Duration.ofHours(24).toMillis());
+        assertThat(jdbc.queryForList("SELECT inline_bytes FROM qwen_tool_publication_object"
+                + " WHERE publication_id <> 'pub-1'", byte[].class)).hasSize(160)
+                .allSatisfy(bytes -> assertThat(bytes).containsExactly((byte) 4));
+        assertThat(objects.deleted).containsExactly("healthy/exact-key");
+    }
+
+    @Test
+    void activeReaderKeepsMinuteRetryAndCollectsAfterItsLeaseCloses() {
+        addObject("one", "reader/exact-key", null);
+        var objects = new DeletingObjects();
+        var gc = collector(objects);
+        try (var lease = retention.read(key)) {
+            lease.check();
+            retire();
+            long before = ToolPublicationRetentionStore.now(jdbc);
+            assertThat(gc.runOnce()).isFalse();
+            long after = ToolPublicationRetentionStore.now(jdbc);
+            assertThat(blocker()).isEqualTo("reader_active");
+            assertThat(jdbc.queryForObject("SELECT gc_next_at FROM qwen_tool_publication WHERE scope_key = ?",
+                    Long.class, scope)).isBetween(before + 60000, after + 60000);
+            assertThat(held()).isEqualTo(3000);
+            assertThat(objects.deleted).isEmpty();
+        }
+        retryNow();
+        assertThat(gc.runOnce()).isTrue();
+        assertThat(state()).isEqualTo("COLLECTED");
+        assertThat(held()).isZero();
+        assertThat(objects.deleted).containsExactly("reader/exact-key");
+    }
+
+    @Test
     void graceCandidatesYieldToAnEligiblePublicationAndWaitUntilTheirDeadline() {
         String heldSession = "held-session";
         for (int index = 0; index < 150; index++) { addPublication("held-" + index, heldSession); }
