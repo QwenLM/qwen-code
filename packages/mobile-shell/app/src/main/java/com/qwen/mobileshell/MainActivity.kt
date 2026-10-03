@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
     private var connectionAttempt = 0
+    private var recovery: ConnectionRecovery? = null
     private val filePicker: NativeFilePicker by lazy { NativeFilePicker(this) { filePickerLauncher.launch(it) } }
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         filePicker.result(it.resultCode, it.data)
@@ -81,16 +82,29 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
-        loadProfiles()
+        loadProfiles(ConnectionRecovery.fromBundle(savedInstanceState?.getBundle("connection-recovery")))
     }
 
-    private fun loadProfiles() {
+    private fun loadProfiles(snapshot: ConnectionRecovery? = null) {
         try {
             val storage = store ?: AndroidProfileStore(this).also { store = it }
             state = storage.vault.load()
             retireBrowserProfiles()
-            showProfiles()
+            if (snapshot == null) showProfiles() else restoreConnection(snapshot)
         } catch (_: Exception) { showStorageError() }
+    }
+
+    private fun restoreConnection(snapshot: ConnectionRecovery) {
+        val profile = snapshot.findProfile(state) ?: return showProfiles()
+        if (snapshot.retryRequired) showRecovery(snapshot)
+        else connect(profile, snapshot.navigation)
+    }
+
+    private fun showRecovery(snapshot: ConnectionRecovery) {
+        recovery = snapshot.copy(retryRequired = true)
+        showMessage(getString(R.string.connection_interrupted), getString(R.string.connection_resume_hint)) {
+            restoreConnection(snapshot.copy(retryRequired = false))
+        }
     }
 
     private fun retireBrowserProfiles() {
@@ -207,12 +221,13 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun connect(profile: ConnectionProfile) {
+    private fun connect(profile: ConnectionProfile, navigation: ConnectionNavigation = ConnectionNavigation()) {
         destroyConnection()
         try { state = store!!.vault.load() }
         catch (_: Exception) { showStorageError(); return }
         val current = state.profiles.find { it.id == profile.id && it.browserId == profile.browserId }
             ?: return showProfiles()
+        recovery = ConnectionRecovery(current.id, current.browserId, navigation)
         val major = WebViewCompat.getCurrentWebViewPackage(this)?.versionName?.substringBefore('.')?.toIntOrNull()
         if (major == null || major < 111) {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
@@ -223,7 +238,7 @@ class MainActivity : AppCompatActivity() {
                 val profiles = ProfileStore.getInstance()
                 if (BrowserProfilePreparation.isPending(current.browserName)) {
                     activeProfile = current
-                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                     return
                 }
                 if (!current.needsBrowserInitialization(profiles.allProfileNames)) {
@@ -234,7 +249,7 @@ class MainActivity : AppCompatActivity() {
                 if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
                     activeProfile = current
                     if (!BrowserProfilePreparation.reserve(current.browserName)) {
-                        showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                        showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                         return
                     }
                     val attempt = connectionAttempt
@@ -255,7 +270,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     } catch (_: Exception) {
                         BrowserProfilePreparation.release(current.browserName)
-                        showMessage(getString(R.string.browser_preparation_failed), getString(R.string.preparing_browser_hint)) { connect(current) }
+                        showMessage(getString(R.string.browser_preparation_failed), getString(R.string.preparing_browser_hint)) { connect(current, navigation) }
                     }
                 } else showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             } catch (_: Exception) { showStorageError() }
@@ -272,7 +287,7 @@ class MainActivity : AppCompatActivity() {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             return
         }
-        val loadUrl = Uri.parse(profile.origin).buildUpon()
+        val loadUrl = Uri.parse(recovery?.navigation?.url(profile.origin) ?: profile.origin).buildUpon()
             .encodedFragment(profile.token?.let { "token=${Uri.encode(it)}" }).build().toString()
         webView = view
         activeProfile = profile
@@ -332,6 +347,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                if (view === webView && OriginPolicy.isSameOrigin(profile.origin, url)) {
+                    recovery = recovery?.copy(navigation = ConnectionNavigation.capture(profile.origin, url))
+                }
+            }
+
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (view === webView) {
                     filePicker.cancel()
@@ -360,8 +381,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (view === webView) {
+                    val snapshot = recovery ?: ConnectionRecovery(profile.id, profile.browserId)
                     destroyConnection()
-                    showMessage(getString(R.string.renderer_stopped), getString(R.string.retry_connection)) { connect(profile) }
+                    showRecovery(snapshot)
                 }
                 return true
             }
@@ -380,18 +402,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
-        filePicker.cancel()
-        cancelMicrophone()
-        if (microphoneAuthorized) {
-            destroyConnection()
-            showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) { connect(profile) }
-            return
-        }
-        cancelDialog()
-        (view.parent as? ViewGroup)?.removeView(view)
-        showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) {
-            if (view === webView) connect(profile)
-        }
+        if (view !== webView) return
+        val snapshot = recovery ?: ConnectionRecovery(profile.id, profile.browserId)
+        destroyConnection()
+        showRecovery(snapshot)
     }
 
     private fun showMessage(title: String, message: String, retry: (() -> Unit)? = null) {
@@ -445,6 +459,7 @@ class MainActivity : AppCompatActivity() {
         val previous = webView
         webView = null
         activeProfile = null
+        recovery = null
         (previous?.parent as? ViewGroup)?.removeView(previous)
         previous?.stopLoading()
         previous?.destroy()
@@ -503,6 +518,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        val profile = activeProfile
+        val view = webView
+        if (microphoneAuthorized) {
+            recovery = null
+        } else if (profile != null && view != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())) {
+            recovery = recovery?.copy(navigation = ConnectionNavigation.capture(profile.origin, view.url))
+        }
+        recovery?.let { outState.putBundle("connection-recovery", it.toBundle()) }
         outState.putBoolean("microphone-in-flight", microphone.awaitingResult)
         outState.putBoolean("file-picker-in-flight", filePicker.awaitingResult)
         super.onSaveInstanceState(outState)
