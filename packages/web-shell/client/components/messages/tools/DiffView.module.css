@@ -87,6 +87,7 @@
 }
 
 .content {
-  white-space: pre;
-  overflow-x: auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
