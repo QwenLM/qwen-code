@@ -371,6 +371,55 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  it.each([false, true])(
+    'names a failed workflow in its completion notification (background: %s)',
+    async (runInBackground) => {
+      const { config, registry } = configWithRegistry();
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `export const meta = { name: 'locale-audit', description: 'Audit locales' }; throw new Error('missing fr');`,
+        args: undefined,
+        runInBackground,
+        notifyOnCompletion: true,
+        dispatch: async () => 'unused',
+      });
+      await handle.completion;
+      expect(completion).toHaveBeenCalledOnce();
+      const [display, model] = completion.mock.calls[0];
+      expect(display).toContain('"locale-audit" failed.');
+      if (!runInBackground)
+        expect(display).toContain(`Run ID: ${handle.runId}`);
+      expect(model).toContain(handle.runId);
+      expect(model).toContain('locale-audit');
+      expect(model).toContain('missing fr');
+    },
+  );
+
+  it('keeps an explicit failed workflow description', async () => {
+    const { config, registry } = configWithRegistry();
+    registry.setRegisterCallback((entry) => {
+      entry.description = 'caller description';
+    });
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `export const meta = { name: 'locale-audit', description: 'Audit locales' }; throw new Error('missing fr');`,
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await handle.completion;
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][0]).toContain(
+      '"caller description" failed.',
+    );
+  });
+
   // The only path from the Workflow tool's authoring hint to a backgrounded
   // run's notification goes through the runner's registration. A backgrounded
   // run has no trailer; without this the hint would never reach it.
@@ -1582,29 +1631,54 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('cancelled');
   });
 
-  it('settles an externally failed run as failed even if its script still completes', async () => {
-    // The settlement guard must cover every terminal status, not only
-    // 'cancelled': resolvePendingApproval's contingency fails the entry
-    // and aborts the handle, and the success arm still delivers held
-    // successful dispatches on abort — so the script can finish
-    // normally while the registry entry, snapshot, and telemetry say
-    // 'failed'. The handle must not report ok: true.
-    const { config, registry } = configWithRegistry();
-    const { held, handle } = await startHeld(config, { runInBackground: true });
-    registry.fail(
-      handle.runId,
-      'Failed to resolve workflow approval: wfap_1',
-      Date.now(),
-    );
-    handle.abort();
-    held.resolve?.('done');
+  it.each([false, true])(
+    'names an externally failed run before its script settles (background: %s)',
+    async (runInBackground) => {
+      // The settlement guard must cover every terminal status, not only
+      // 'cancelled': resolvePendingApproval's contingency fails the entry
+      // and aborts the handle, and the success arm still delivers held
+      // successful dispatches on abort — so the script can finish
+      // normally while the registry entry, snapshot, and telemetry say
+      // 'failed'. The handle must not report ok: true.
+      const { config, registry } = configWithRegistry();
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      let finishDispatch: ((value: string) => void) | undefined;
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `export const meta = { name: 'locale-audit', description: 'Audit locales' }; return await agent("work")`,
+        args: undefined,
+        runInBackground,
+        notifyOnCompletion: true,
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      registry.fail(
+        handle.runId,
+        'Failed to resolve workflow approval: wfap_1',
+        Date.now(),
+      );
+      const [display, model] = completion.mock.calls[0] ?? [];
+      handle.abort();
+      finishDispatch?.('done');
 
-    await expect(handle.completion).resolves.toMatchObject({
-      ok: false,
-      message: 'Failed to resolve workflow approval: wfap_1',
-    });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
-  });
+      await expect(handle.completion).resolves.toMatchObject({
+        ok: false,
+        message: 'Failed to resolve workflow approval: wfap_1',
+      });
+      expect(registry.get(handle.runId)?.status).toBe('failed');
+      expect(completion).toHaveBeenCalledOnce();
+      expect(display).toContain('"locale-audit" failed.');
+      expect(model).toContain('locale-audit');
+      expect(model).toContain(handle.runId);
+      if (!runInBackground)
+        expect(display).toContain(`Run ID: ${handle.runId}`);
+    },
+  );
 
   describe('resuming across a restart', () => {
     // A resume replays a journal. With none on disk it used to dispatch every

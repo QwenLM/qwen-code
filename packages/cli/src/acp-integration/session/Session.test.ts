@@ -16764,7 +16764,7 @@ describe('Session', () => {
       expect(summaryRecordIndex).toBeGreaterThanOrEqual(0);
       expect(summaryRecordIndex).toBeLessThan(itemRecordIndex);
       expect(recordingCalls[summaryRecordIndex]?.[1]).toBe(
-        'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+        '1 background notification not delivered to the model (queue full): 1 shell result (shell-0).',
       );
       expect(recordingCalls[summaryRecordIndex]?.[2]).toBeUndefined();
       expect(recordingCalls[itemRecordIndex]).toEqual([
@@ -16782,7 +16782,7 @@ describe('Session', () => {
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: 'Dropped 1 background notification (queue full): 1 shell result (shell-0).',
+            text: '1 background notification not delivered to the model (queue full): 1 shell result (shell-0).',
           },
           _meta: {
             source: 'background_notification',
@@ -16845,7 +16845,9 @@ describe('Session', () => {
       expect(summaryRecord?.[0]).not.toContainEqual({
         text: '<worker-persisted />',
       });
-      expect(summaryRecord?.[1]).toContain('Dropped 1 background notification');
+      expect(summaryRecord?.[1]).toContain(
+        '1 background notification not delivered to the model',
+      );
       expect(summaryRecord?.[2]).toBeUndefined();
     });
 
