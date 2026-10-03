@@ -232,5 +232,39 @@
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
         </profile>
+        <profile>
+            <id>o4-mysql-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/O4MySqlGate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                    <argLine>-Xmx256m</argLine>
+                    <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>o4-oss-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/O4OssGate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                    <argLine>-Xmx256m</argLine>
+                    <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>5400</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
     </profiles>
 </project>
