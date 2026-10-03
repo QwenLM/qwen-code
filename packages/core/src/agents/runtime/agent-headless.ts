@@ -225,7 +225,10 @@ export class AgentHeadless implements SubagentExecutor {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      enforceTimeLimitDuringRetryWait?: boolean;
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -247,7 +250,12 @@ export class AgentHeadless implements SubagentExecutor {
 
     try {
       await this.core.runInHookFrame(() =>
-        this.executeTurn(context, externalSignal, !resetStats),
+        this.executeTurn(
+          context,
+          externalSignal,
+          !resetStats,
+          options.enforceTimeLimitDuringRetryWait,
+        ),
       );
     } finally {
       this.executing = false;
@@ -269,6 +277,7 @@ export class AgentHeadless implements SubagentExecutor {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    enforceTimeLimitDuringRetryWait?: boolean,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
@@ -402,6 +411,7 @@ export class AgentHeadless implements SubagentExecutor {
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+            enforceTimeLimitDuringRetryWait,
           },
         );
 

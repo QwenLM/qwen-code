@@ -661,8 +661,13 @@ launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
 separate worker bundle exists. The G0 integration test
 (`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
 
-The real-model run below has not been executed as evidence for this
-integration, so treat it as intended verification, not passing evidence. The
+The real-model run below creates its Session through the public route as a
+Workspace-bound G0 Session, and proves the physical tool execution through
+the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
+than a public `item.tool_call.*` event — Broker-worker tool calls are not
+published without O2 tool publication. The run needs live model credentials,
+so no CI job executes it; it has been run locally as evidence (macOS,
+qwen3.8-max), and a green CI run therefore says nothing about this mode. The
 script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
 starts its own temporary MySQL server and exits before starting anything else
 when a command or a required file is missing.
@@ -691,11 +696,14 @@ owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
 The in-flight and continuation variants run the same replacement-owner proof
-through a physical Workspace file tool execution. The runner seeds the
-Workspace registry and access grant as deployment data, enables the G0 file
-admission, and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local
-actor, so the Session is created through the public route like any other
-Workspace-bound Session:
+through a physical Workspace file tool execution. The runner configures the
+G0 public Workspace admission for every mode — it seeds the Workspace
+registry and access grant as deployment data, enables the G0 file admission,
+and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local actor — and
+the real-model check and both tool-driven variants create their Sessions
+through the public route as Workspace-bound Sessions, while
+`--session-failover` deliberately stays unbound to exercise the plain
+durable-owner takeover:
 
 ```bash
 npm run test:e2e:managed-inflight-failover
@@ -719,9 +727,8 @@ requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
 
-Once the missing integration lands, a zero-delay run can check the real-model
-path. A controlled cold-start delay can then test output before Runtime
-readiness:
+A zero-delay run checks the real-model path as shown above; a controlled
+cold-start delay additionally tests output before Runtime readiness:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \
