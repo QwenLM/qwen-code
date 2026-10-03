@@ -285,10 +285,12 @@ panel to this Spring service.
 The one-shot launcher starts the ordinary daemon and the private Hosted
 Harness from TypeScript source, writes the Harness wiring
 (`QWEN_MANAGED_AGENT_HARNESS_*` and the rotating capability digest) to a
-mode-0600 `spring.env` under the OS temp directory (kept outside the served
-workspace; a PowerShell `spring.env.ps1` sibling is written next to it),
-waits for `/actuator/health` on the Spring service (`--skip-java-wait`
-bypasses), then opens the WebShell with the Managed panel selected:
+`spring.env` under the OS temp directory — kept outside the served
+workspace, mode-0600 on POSIX (on Windows NTFS ACLs scope the per-user temp
+directory instead, and a PowerShell `spring.env.ps1` sibling is written next
+to it) — waits for `/actuator/health` on the Spring service
+(`--skip-java-wait` bypasses), then opens the WebShell with the Managed
+panel selected:
 
 ```bash
 npm run dev:managed-agent
@@ -297,8 +299,12 @@ npm run dev:managed-agent
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
 # One-time, on a fresh MySQL 8 (creates the database and user the URL names):
-mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost';"
-# Every run; the launcher prints this spring.env path at startup:
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"
+# (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never
+#  matches TCP clients; a containerized MySQL sees the gateway address — grant at
+#  'qwen'@'%' or the container-visible host instead)
+# Every run; the launcher prints this spring.env path at startup (on Windows,
+# the printed path is the spring.env.ps1 sibling):
 source <printed spring.env path>
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
 export SPRING_DATASOURCE_USERNAME='qwen'

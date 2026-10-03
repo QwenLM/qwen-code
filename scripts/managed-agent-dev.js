@@ -28,7 +28,6 @@ import {
   lstatSync,
   mkdirSync,
   realpathSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -219,6 +218,15 @@ export function springEnvPs1FilePath(rootPath) {
   return join(springEnvDir(rootPath), 'spring.env.ps1');
 }
 
+function lstatOrNull(path) {
+  try {
+    return lstatSync(path);
+  } catch (err) {
+    if (err && typeof err === 'object' && err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 function refuseUnlessOwned(path, stat) {
   if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
     throw new Error(
@@ -236,24 +244,32 @@ function refuseUnlessOwnedRegularFile(path, stat) {
   refuseUnlessOwned(path, stat);
 }
 
-// Fail-closed credential write: the directory must be ours and 0700, each
-// target must be absent or a regular file we own (a planted symlink to a
-// victim file is refused, not truncated), and the 0600 mode is applied by
-// chmod so it also holds on the overwrite path, where writeFileSync's mode
-// is a no-op.
+// Fail-closed credential write. Nothing in it resolves through symlinks:
+// stat() and existsSync() would follow a planted link at the directory or at
+// a (possibly dangling) target, so every check reads lstat and refuses the
+// link itself, never follows it. The directory must be ours and 0700, each
+// target absent or a regular file we own, and 0600 is applied by chmod so it
+// also holds on the overwrite path where writeFileSync's mode is a no-op.
+// Mode/chmod enforcement is POSIX-only: on Windows stat().mode masks
+// privilege bits from ACLs and chmod 0600 sets the read-only attribute;
+// NTFS already scopes the per-user TEMP directory by ACL.
 export function writeSpringEnvFiles({
   directory,
   springEnv,
   springPs1Env,
   isWinPlatform,
 }) {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const dirStat = statSync(directory);
+  const dirLstat = lstatOrNull(directory);
+  if (dirLstat && dirLstat.isSymbolicLink()) {
+    throw new Error(
+      `[managed-agent-dev] ${directory} is a symlink — refusing to write credentials through it`,
+    );
+  }
+  if (dirLstat === null) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  const dirStat = dirLstat ?? lstatSync(directory);
   refuseUnlessOwned(directory, dirStat);
-  // Mode/chmod enforcement is POSIX-only: on Windows stat().mode masks
-  // privilege bits from ACLs (a normal user dir reads 777), and chmod 0600
-  // would set the read-only attribute and break the next run's overwrite.
-  // NTFS already scopes the per-user TEMP directory by ACL.
   if (!isWinPlatform && (dirStat.mode & 0o077) !== 0) {
     throw new Error(
       `[managed-agent-dev] ${directory} must be 0700 (found ${(
@@ -261,18 +277,17 @@ export function writeSpringEnvFiles({
       ).toString(8)})`,
     );
   }
-  const springEnvPath = join(directory, 'spring.env');
-  if (existsSync(springEnvPath)) {
-    refuseUnlessOwnedRegularFile(springEnvPath, lstatSync(springEnvPath));
-  }
-  writeFileSync(springEnvPath, springEnv, { mode: 0o600 });
-  if (!isWinPlatform) chmodSync(springEnvPath, 0o600);
-  if (isWinPlatform) {
-    const ps1Path = join(directory, 'spring.env.ps1');
-    if (existsSync(ps1Path)) {
-      refuseUnlessOwnedRegularFile(ps1Path, lstatSync(ps1Path));
+  const writeOne = (filePath, content, applyChmod) => {
+    const targetLstat = lstatOrNull(filePath);
+    if (targetLstat !== null) {
+      refuseUnlessOwnedRegularFile(filePath, targetLstat);
     }
-    writeFileSync(ps1Path, springPs1Env, { mode: 0o600 });
+    writeFileSync(filePath, content, { mode: 0o600 });
+    if (applyChmod) chmodSync(filePath, 0o600);
+  };
+  writeOne(join(directory, 'spring.env'), springEnv, !isWinPlatform);
+  if (isWinPlatform) {
+    writeOne(join(directory, 'spring.env.ps1'), springPs1Env, false);
   }
 }
 
@@ -288,7 +303,8 @@ export function buildSpringRecipeLines({
   springPs1Path,
 }) {
   const lines = [
-    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost';"`,
+    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"`,
+    `  # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never matches TCP clients; a containerized MySQL sees the gateway address — grant at 'qwen'@'%' or the container-visible host instead)`,
     '  # one-time: mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install',
     '  #           mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install',
   ];
@@ -385,12 +401,12 @@ export function findWebPort(excludedPorts) {
 // `qwen serve` retries EADDRINUSE by bumping regardless of whether the port
 // was explicitly pinned, so a busy pinned port would leave the launcher
 // polling an address the child never bound. Fail fast instead.
-export async function ensurePortFree(port, label, probeHost = HOST) {
+export async function ensurePortFree(port, label) {
   const probe = net.createServer();
   try {
     await new Promise((resolveListen, rejectListen) => {
       probe.once('error', rejectListen);
-      probe.listen(port, probeHost, resolveListen);
+      probe.listen(port, HOST, resolveListen);
     });
   } catch (err) {
     if (err && typeof err === 'object' && err.code === 'EADDRINUSE') {
@@ -489,6 +505,8 @@ export function buildServeStages({
   daemonToken,
   serveEnv,
   harnessWiring,
+  pinnedDaemonPort,
+  pinnedHarnessPort,
 }) {
   const daemonUrl = `http://${HOST}:${daemonPort}`;
   const harnessUrl = `http://${HOST}:${harnessWiring.harnessPort}`;
@@ -521,6 +539,9 @@ export function buildServeStages({
             ? true
             : 'expected an ordinary daemon (no hostedHarness section)',
       },
+      ...(pinnedDaemonPort === undefined
+        ? {}
+        : { pinnedPort: pinnedDaemonPort, pinnedLabel: '--daemon-port' }),
     },
     {
       label: 'harness',
@@ -542,6 +563,9 @@ export function buildServeStages({
           return 'not a hosted-harness responder';
         },
       },
+      ...(pinnedHarnessPort === undefined
+        ? {}
+        : { pinnedPort: pinnedHarnessPort, pinnedLabel: '--harness-port' }),
     },
   ];
 }
@@ -549,19 +573,61 @@ export function buildServeStages({
 // Spawns and health-gates each stage in turn. The serialized interleaving
 // matters: dev.js does a destructive re-stage (rmSync + cpSync) of the
 // shared browser-use runtime directory on every boot, so two concurrent
-// children race and majority-silently tear the tree.
-export async function runServeStages(stages, { spawnStage, waitStage }) {
+// children race and majority-silently tear the tree. preflightStage runs
+// immediately before the stage's own spawn — a pinned port is re-checked
+// there, not minutes earlier before an older sibling stage's boot.
+export async function runServeStages(
+  stages,
+  { preflightStage, spawnStage, waitStage },
+) {
   for (const stage of stages) {
+    if (typeof preflightStage === 'function') await preflightStage(stage);
     spawnStage(stage);
     await waitStage(stage);
     console.log(`[${stage.label}] healthy`);
   }
 }
 
-export function healthFailureAction(label) {
-  // Spring is external: timing out on it must not tear down the healthy
-  // children the launcher owns. A failed daemon/harness wait is fatal.
-  return label === 'java' ? 'continue' : 'abort';
+// Java gate handling, exported so the teardown-interrupted path stays
+// test-reachable: a child dying (or Ctrl-C/SIGHUP/SIGQUIT arriving) during
+// the wait must print NOTHING beyond the error — the "daemon and harness
+// stay up" continuation line is the misleading one on precisely that path.
+// A genuine Spring timeout still prints both warnings and lets the launch
+// proceed (Spring is external; its failure must never tear down children
+// the launcher owns). Outcomes: 'skipped' | 'continue' | 'teardown'.
+export async function runJavaGate({
+  skipJavaWait,
+  javaHealthUrl,
+  isShuttingDownNow,
+  reuseWarning,
+  healthWait = waitForHttpOk,
+}) {
+  if (skipJavaWait) {
+    console.log(
+      '[java] skipping /actuator/health wait (--skip-java-wait); the Managed panel will fail until Spring is up',
+    );
+    return 'skipped';
+  }
+  console.log(
+    `[java] waiting for ${javaHealthUrl} (up to 10 min; start Spring now, or pass --skip-java-wait to bypass)...`,
+  );
+  try {
+    await healthWait(javaHealthUrl, {
+      timeoutMs: 600_000,
+      intervalMs: 1_000,
+      expectBody: springHealthExpectBody,
+    });
+    console.log('[java] healthy');
+    if (reuseWarning) console.warn(reuseWarning);
+    return 'continue';
+  } catch (err) {
+    if (isShuttingDownNow()) return 'teardown';
+    console.warn(`[java] ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(
+      '[java] continuing anyway — the daemon and harness stay up; the Managed panel needs Spring (same end state as --skip-java-wait).',
+    );
+    return 'continue';
+  }
 }
 
 export function springHealthExpectBody(body) {
@@ -580,12 +646,16 @@ export function buildWebShellLaunch({
 }) {
   return {
     command: 'npm',
-    // The open path carries the daemon token, so it travels by environment,
-    // never by argv: npm echoes expanded argv to the inherited stdio and
-    // argv is world-readable in /proc/<pid>/cmdline. Vite consumes it via
-    // server.open in packages/web-shell/vite.config.ts. --strictPort keeps
-    // Vite fail-closed on a taken port instead of silently relocating past
-    // the probed value; --host pins the same bind family the probe used.
+    // The open path carries the daemon token, so it travels by environment
+    // rather than npm's argv, which npm echoes to its inherited stdio and
+    // which is world-readable in /proc/<pid>/cmdline. Vite consumes it via
+    // server.open in packages/web-shell/vite.config.ts. Caveat: when Vite
+    // opens the tab, the full token-bearing URL rides the BROWSER launcher's
+    // argv (a world-readable spawn argument on POSIX) — this transport
+    // removes only the npm hop's echo; it does not make the token invisible
+    // locally. --strictPort keeps Vite fail-closed on a taken port instead
+    // of silently relocating past the probed value; --host pins the same
+    // bind family the probe used.
     args: [
       'run',
       'dev',
@@ -604,6 +674,34 @@ export function buildWebShellLaunch({
       QWEN_WEB_SHELL_OPEN_PATH: webShellPath,
     },
   };
+}
+
+// Resolves the web port at the last moment — before the Java wait ends a
+// squatter in that (up to 12-minute) window would otherwise win the probed
+// port and --strictPort would turn the loss into a full teardown. Returns
+// false without touching anything once teardown has begun.
+export async function launchWebShell({
+  isShuttingDownNow,
+  isTTY,
+  webShellPath,
+  daemonUrl,
+  javaUrl,
+  excludedPorts,
+  resolveWebPort = findWebPort,
+  spawnShell,
+}) {
+  if (isShuttingDownNow()) return false;
+  const webPort = await resolveWebPort(excludedPorts);
+  if (isTTY) {
+    console.log(
+      `web-shell: ${buildWebShellUrl({ port: webPort, webShellPath })}`,
+    );
+    console.log('  (the URL contains the daemon token — treat it as secret)');
+  }
+  spawnShell(
+    buildWebShellLaunch({ webShellPath, webPort, daemonUrl, javaUrl }),
+  );
+  return true;
 }
 
 export async function waitForHttpOk(
@@ -680,10 +778,16 @@ export async function waitForHttpOk(
 const children = [];
 let shuttingDown = false;
 
-function spawnDevProcess(label, command, commandArgs, options) {
+export function isLiveChild(child) {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+export function spawnDevProcess(label, command, commandArgs, options) {
   const child = spawn(command, commandArgs, {
     stdio: 'inherit',
     shell: options.shell ?? false,
+    // POSIX children lead their own process group so a negative-pid kill
+    // reaps the dev.js grandchild that owns the socket.
     detached: !isWin,
     ...options,
   });
@@ -711,10 +815,10 @@ function spawnDevProcess(label, command, commandArgs, options) {
 }
 
 function killChild(child) {
-  // Re-entrancy guard: shutdown() iterates every still-live child and the
-  // exit hook reaps the same set. child.killed only tracks child.kill(), so
-  // a second pass on the group/taskkill plans is at worst one redundant
-  // signal to an already-dying tree, never a new kill of a reused pid.
+  // shutdown() iterates every still-live child and the exit hook reaps the
+  // same set. child.killed only tracks child.kill(), so a second pass on
+  // the group/taskkill plans is at worst one redundant signal to an
+  // already-dying tree, never a new kill of a reused pid.
   if (child.killed) return;
   const plan = buildKillPlan(isWin, Boolean(child.pid));
   try {
@@ -724,13 +828,13 @@ function killChild(child) {
   }
 }
 
-function shutdown(code) {
+export function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
 
   let pending = 0;
   for (const child of children) {
-    if (child.exitCode !== null || child.signalCode === null) continue;
+    if (!isLiveChild(child)) continue;
     pending += 1;
     child.on('close', () => {
       pending -= 1;
@@ -739,45 +843,68 @@ function shutdown(code) {
     killChild(child);
   }
   if (pending === 0) process.exit(code);
-  setTimeout(() => process.exit(code), 5_000).unref();
+  // Grace budget for those close events; whoever loses it is force-reaped
+  // instead of being left credentialed and orphaned.
+  setTimeout(() => {
+    forceKillAll(children);
+    process.exit(code);
+  }, 5_000).unref();
+}
+
+export function forceKillAll(childrenList) {
+  for (const child of childrenList) {
+    if (!isLiveChild(child)) continue;
+    if (isWin) {
+      try {
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore',
+        });
+      } catch {
+        // taskkill /F is already forced; nothing harder to escalate to.
+      }
+    } else {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // The process is already gone.
+        }
+      }
+    }
+  }
 }
 
 // SIGHUP is what a closing terminal tab, a dropped SSH session or a killed
-// tmux pane actually delivers; without it the launcher dies via Node's
-// default action and the detached children live on, credentialed. POSIX-only
-// by design: on Windows the children share the console and get the
-// console-close event directly.
+// tmux pane delivers, and Ctrl-\ (SIGQUIT) is the standard escalation of a
+// hung Ctrl-C; without them the launcher dies via Node's default action and
+// the detached children live on, credentialed. POSIX-only by design: on
+// Windows the children share the console and get the console-close event
+// directly, and there are no POSIX signals to trap.
 export const TEARDOWN_SIGNALS = [
   'SIGINT',
   'SIGTERM',
-  ...(isWin ? [] : ['SIGHUP']),
+  ...(isWin ? [] : ['SIGHUP', 'SIGQUIT']),
 ];
 
 export function installTeardownHandlers() {
   for (const signal of TEARDOWN_SIGNALS) {
     process.on(signal, () => shutdown(0));
   }
-  // Signal-independent reaping: whichever way out the process takes, no
-  // credentialed child may survive the launcher. killChild is synchronous
-  // (process.kill/child.kill()/spawnSync taskkill), legal in an exit hook.
+  // Reaps on any exit path Node can run a handler for. Paths with no
+  // handler — an unlisted signal, a V8 abort, SIGKILL itself — cannot be
+  // covered from inside this process; the 5-second SIGKILL escalation in
+  // shutdown() bounds what a handled path strands, and harder cases belong
+  // to a launcher-external supervisor rather than to this script.
   process.on('exit', () => {
-    for (const child of children) {
-      if (child.exitCode === null && child.signalCode === null) {
-        killChild(child);
-      }
-    }
+    forceKillAll(children);
   });
 }
 
 async function main() {
   const options = parseLauncherArgs(args);
 
-  if (options.daemonPort !== undefined) {
-    await ensurePortFree(options.daemonPort, '--daemon-port');
-  }
-  if (options.harnessPort !== undefined) {
-    await ensurePortFree(options.harnessPort, '--harness-port');
-  }
   const daemonPort =
     options.daemonPort ??
     (await findAvailablePort(
@@ -816,7 +943,6 @@ async function main() {
     tenant: options.tenant,
     daemonToken,
   });
-  const webPort = await findWebPort(new Set([daemonPort, harnessPort]));
 
   const tsxLoaderUrl = pathToFileURL(
     join(root, 'node_modules', 'tsx', 'dist', 'esm', 'index.mjs'),
@@ -859,9 +985,17 @@ async function main() {
     daemonToken,
     serveEnv,
     harnessWiring,
+    pinnedDaemonPort: options.daemonPort,
+    pinnedHarnessPort: options.harnessPort,
   });
   try {
     await runServeStages(stages, {
+      preflightStage: (stage) => {
+        if (stage.pinnedPort !== undefined) {
+          return ensurePortFree(stage.pinnedPort, stage.pinnedLabel);
+        }
+        return undefined;
+      },
       spawnStage: (stage) =>
         spawnDevProcess(stage.label, 'node', stage.args, {
           cwd: root,
@@ -882,65 +1016,31 @@ async function main() {
     return;
   }
 
-  const javaHealthUrl = `${options.javaUrl}/actuator/health`;
-  if (options.skipJavaWait) {
-    console.log(
-      `[java] skipping /actuator/health wait (--skip-java-wait); the Managed panel will fail until Spring is up`,
-    );
-  } else {
-    console.log(
-      `[java] waiting for ${javaHealthUrl} (up to 10 min; start Spring now, or pass --skip-java-wait to bypass)...`,
-    );
-    try {
-      await waitForHttpOk(javaHealthUrl, {
-        timeoutMs: 600_000,
-        intervalMs: 1_000,
-        expectBody: springHealthExpectBody,
-      });
-      console.log('[java] healthy');
-      if (reuseWarning) console.warn(reuseWarning);
-    } catch (err) {
-      if (healthFailureAction('java') === 'abort') {
-        console.error(
-          `[managed-agent-dev] ${err instanceof Error ? err.message : String(err)}`,
-        );
-        shutdown(1);
-        return;
-      }
-      console.warn(
-        `[java] ${err instanceof Error ? err.message : String(err)}`,
-      );
-      console.warn(
-        '[java] continuing anyway — the daemon and harness stay up; the Managed panel needs Spring (same end state as --skip-java-wait).',
-      );
-    }
-  }
+  const javaOutcome = await runJavaGate({
+    skipJavaWait: options.skipJavaWait,
+    javaHealthUrl: `${options.javaUrl}/actuator/health`,
+    isShuttingDownNow: () => shuttingDown,
+    reuseWarning,
+  });
+  if (javaOutcome === 'teardown' || shuttingDown) return;
 
-  // A child can die while the Java wait runs; teardown is already reaping
-  // in that case, so do not advertise a URL or spawn Vite into a dying group
-  // (the exit hook would reap it anyway, but the output would mislead).
-  if (shuttingDown) return;
-
-  if (process.stdout.isTTY) {
-    console.log(
-      `web-shell: ${buildWebShellUrl({ port: webPort, webShellPath })}`,
-    );
-    console.log('  (the URL contains the daemon token — treat it as secret)');
-  }
-
-  const launch = buildWebShellLaunch({
+  await launchWebShell({
+    isShuttingDownNow: () => shuttingDown,
+    isTTY: process.stdout.isTTY,
     webShellPath,
-    webPort,
     daemonUrl,
     javaUrl: options.javaUrl,
-  });
-  spawnDevProcess('web-shell', launch.command, launch.args, {
-    cwd: root,
-    env: launch.env,
-    // npm is npm.cmd on Windows, which per Node's docs cannot be launched
-    // without the shell option. The args carry no '&' (the open path travels
-    // by env), so cmd's quote-stripping re-parse is harmless here.
-    shell: isWin,
+    excludedPorts: new Set([daemonPort, harnessPort]),
+    spawnShell: (launch) =>
+      spawnDevProcess('web-shell', launch.command, launch.args, {
+        cwd: root,
+        env: launch.env,
+        // npm is npm.cmd on Windows, which per Node's docs cannot be
+        // launched without the shell option. The args carry no '&' (the
+        // open path travels by env), so cmd's quote-stripping re-parse is
+        // harmless here.
+        shell: isWin,
+      }),
   });
 }
 
