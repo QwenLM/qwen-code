@@ -374,8 +374,8 @@ coordinated rollout remains required before writing ABANDONED rows.
 
 The [durable local adoption implementation](2026-09-27-local-runtime-adoption.md)
 adds a Linux identity store (enabled by default; opt out with
-`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` and
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`), a boot
+`runtime-broker.durable-local-process=false` and
+`runtime-broker.trusted-local-reboot-recovery=false`), a boot
 barrier with durable PID/start-tick
 registration, permanent launch locks, and adoption after Broker restart. The
 ephemeral mode retains the W0e-1 behavior and remains available behind that

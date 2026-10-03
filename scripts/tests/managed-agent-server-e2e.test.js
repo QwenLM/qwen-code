@@ -151,13 +151,13 @@ describe('managed-agent-server e2e runner', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(
       source.match(
-        /QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false'/g,
+        /QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:\s*'false'/g,
       ),
       'both Spring launch sites must pin trusted reboot recovery off',
     ).toHaveLength(2);
     expect(
       source.match(
-        /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false'/g,
+        /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'false'/g,
       ),
       'both non-workspaceTurns branches must pin durable local process off',
     ).toHaveLength(2);

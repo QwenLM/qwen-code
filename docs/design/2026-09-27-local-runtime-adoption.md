@@ -104,8 +104,10 @@ durable modes. A package-private local store owns locking and durable records.
 `RuntimeProvisioner` and the Workspace wrapper expose narrowly scoped startup
 recovery support. `RuntimeBrokerService` permits observation of supported saved
 startup records. Embedded configuration enables the mode by default (opt out
-with `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`) and rejects
+with `runtime-broker.durable-local-process=false` together with
+`runtime-broker.trusted-local-reboot-recovery=false`; the packaged server maps
+these to `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS` and
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY`) and rejects
 a recovery directory under any configured Workspace root. No database migration
 or public API changes are needed. Existing constructors stay ephemeral; the
 default configuration uses the durable mode.

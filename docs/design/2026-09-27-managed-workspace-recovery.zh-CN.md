@@ -120,7 +120,7 @@ Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement 
 
 ## 6b. W0e-2 实现
 
-[本地持久接管实现](2026-09-27-local-runtime-adoption.zh-CN.md) 增加默认启用的 Linux 身份存储（设置 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` 与 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` 可退出）、带持久 PID/启动 tick 登记的 boot 屏障、永久启动锁和 Broker 重启后的接管。临时模式保留 W0e-1 行为，仍可通过该退出获得。两种模式均不在仅 worker 死亡时证明写入者已停止；W0e-3 物理回收仍单独实现。
+[本地持久接管实现](2026-09-27-local-runtime-adoption.zh-CN.md) 增加默认启用的 Linux 身份存储（设置 `runtime-broker.durable-local-process=false` 与 `runtime-broker.trusted-local-reboot-recovery=false` 可退出）、带持久 PID/启动 tick 登记的 boot 屏障、永久启动锁和 Broker 重启后的接管。临时模式保留 W0e-1 行为，仍可通过该退出获得。两种模式均不在仅 worker 死亡时证明写入者已停止；W0e-3 物理回收仍单独实现。
 
 ## 6c. W0e-3 实现
 
