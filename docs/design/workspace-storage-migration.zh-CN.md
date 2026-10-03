@@ -24,13 +24,13 @@
 
 最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。反向迁移需要新操作/capture 和更高 revision。
 
-长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close 和 V33–V34 定义/回收迁移字节，W1c 新增 V35。
+长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close 和 V33–V34 定义/回收迁移字节，W1c 新增 V35，V36 为历史 Session 和已完成迁移查询增加索引。
 
 ## 部署与 Runtime 路由
 
 运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有 Node 探针使用现有 Storage 解析器和继承环境，固定真实绝对 QWEN_HOME/历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
 
-新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
+新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。非唯一 Runtime Session ID 索引先定位候选，再检查完整 tenant/Harness 身份和歧义；单列 VARCHAR(512) 在 utf8mb4 下仅需 2048 字节，不新增摘要字段或回填。独立 Broker 初始化同步 schema，并为已有表补齐索引。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
 
 ## 验证与验收
 

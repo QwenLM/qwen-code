@@ -10,6 +10,7 @@ final class WorkspaceMigrationAdmission {
     }
 
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
+        // Fence installation and admission share this lock before any Session lock.
         jdbc.execute((ConnectionCallback<Void>) connection -> {
             JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
             return null;
@@ -37,6 +38,10 @@ final class WorkspaceMigrationAdmission {
 
     static void sessionAdmission(JdbcTemplate jdbc, String tenant, String session) {
         lockTenant(jdbc, tenant);
+        requireSessionOpen(jdbc, tenant, session);
+    }
+
+    static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session) {
         List<String> storage = jdbc.queryForList("SELECT workspace_storage_id FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session);
         if (!storage.isEmpty()) {

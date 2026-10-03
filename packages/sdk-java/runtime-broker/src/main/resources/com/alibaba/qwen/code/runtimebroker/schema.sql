@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
         (scope_key, isolation_key, binding_state),
-    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class)
+    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class),
+    INDEX qwen_runtime_storage_bindings_idx (storage_id, binding_id)
 );
 
 CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (
@@ -102,7 +103,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_session (
     last_active_at DATETIME(6) NOT NULL,
     PRIMARY KEY (scope_key, runtime_session_id),
     INDEX idx_runtime_session_binding
-        (binding_id, runtime_generation, session_state)
+        (binding_id, runtime_generation, session_state),
+    INDEX idx_runtime_session_id (runtime_session_id)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_tool_execution (

@@ -24,13 +24,13 @@ The only target-tree exception is the exact root `.qwen-managed-storage.json`: i
 
 The final SQL transaction checks operation ownership, original revision/fence, complete source cut and old-placement stop evidence, installs target root/identity/new registration UUID, increments revision once, persists completion and clears migration admission. Failed precommit steps preserve the original fenced registration. Marker publication before SQL is resumable. Abort preserves retired facts and W1a fence; it neither deletes the target nor reopens service. Reverse migration requires a fresh operation/capture and a higher revision.
 
-Long file scans hold no database locks. Final conditional reads follow existing lock ordering and use a fresh locked authority check. Add new Flyway migrations only, retaining V31 W1b, V32 close and V33–V34 definition/collection bytes; W1c adds V35.
+Long file scans hold no database locks. Final conditional reads follow existing lock ordering and use a fresh locked authority check. Add new Flyway migrations only, retaining V31 W1b, V32 close and V33–V34 definition/collection bytes; W1c adds V35 and V36 lookup indexes for historical Sessions and completed migrations.
 
 ## Deployment and Runtime routing
 
 Operators change deployment mounts and restart Broker/Harness after completion. Configuration that disagrees with SQL identity fails closed. A private Node probe uses the existing Storage resolver and inherited environment to pin actual absolute QWEN_HOME/history identity outside source, target and bundle. New admission/provisioning checks environment and directory identity without scanning backups per Turn. No Worker boot/attestation wire expansion is required.
 
-Fresh file Turns and undo acquire new placement/context/attestation/activation receipts. Old status/cancel/release retain saved binding/generation/scope. Historical Runtime Session lookup must use exact tenant/Harness/Runtime identity rather than today's mount scope, rejecting ambiguity. No saved cwd, durable handle, execution ID or attestation is rewritten.
+Fresh file Turns and undo acquire new placement/context/attestation/activation receipts. Old status/cancel/release retain saved binding/generation/scope. Historical Runtime Session lookup must use exact tenant/Harness/Runtime identity rather than today's mount scope, rejecting ambiguity. A nonunique Runtime Session ID index locates candidates before full tenant/Harness identity and ambiguity checks; the single VARCHAR(512) column uses 2048 bytes under utf8mb4 without new hash columns or backfill. Standalone Broker initialization keeps the same schema and adds missing indexes to existing tables. No saved cwd, durable handle, execution ID or attestation is rewritten.
 
 ## Validation and acceptance
 
