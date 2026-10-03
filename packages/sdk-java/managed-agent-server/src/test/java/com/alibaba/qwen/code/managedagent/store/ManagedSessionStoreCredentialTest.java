@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,5 +36,31 @@ class ManagedSessionStoreCredentialTest {
                     assertThat(error.getCode())
                             .isEqualTo("writer_credential_invalid");
                 });
+    }
+
+    @Test
+    void publicationWriterLockAdmitsTheIssuedCredential() {
+        JdbcDataSource dataSource = new JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:credential-accept;MODE=MySQL;"
+                + "DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        ManagedSessionStore store = new ManagedSessionStore(
+                new JdbcTemplate(dataSource));
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setBindingKey(KEY);
+        WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
+        store.setCredentials(policy);
+
+        // Any outcome other than the credential refusal means the issued
+        // credential passed the gate; the session itself does not exist.
+        try {
+            store.lockPublicationWriter("tenant", "workspace", "session",
+                    "writer", 1,
+                    policy.issue("tenant", "workspace", "session"));
+        } catch (ApiException error) {
+            assertThat(error.getCode())
+                    .isNotEqualTo("writer_credential_invalid");
+        }
     }
 }

@@ -15,6 +15,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.core.Ordered;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -178,7 +179,7 @@ class SignatureAuthFilterTest {
         ServerProperties server = new ServerProperties();
         server.setAddress(InetAddress.getByName("127.0.0.1"));
         SignatureAuthFilter filter = filter(
-                new BrokerSecurity(properties, server));
+                new BrokerSecurity(properties, server, new WebMvcProperties()));
 
         // Two seconds old: inside the default 5m, outside the 1s window.
         String timestamp = Long.toString(
@@ -221,6 +222,156 @@ class SignatureAuthFilterTest {
                 .getUserPrincipal()).isNotNull();
     }
 
+    @Test
+    void coversTheBareCollectionRouteAndNormalizedSpellings()
+            throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        for (String path : new String[] {"/v1/agents", "/v1/%61gents",
+                "/v1/agents;jsessionid=abc"}) {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            filter.doFilter(request("POST", path), response,
+                    new MockFilterChain());
+            assertThat(response.getStatus()).as(path).isEqualTo(401);
+            assertThat(response.getContentAsString()).as(path)
+                    .contains("authentication_required");
+        }
+
+        String timestamp = now();
+        MockHttpServletRequest signedRequest = request("POST", "/v1/agents");
+        signedRequest.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        signedRequest.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER,
+                timestamp);
+        signedRequest.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/agents", "tenant-a", "actor-a", timestamp));
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(signedRequest, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+    }
+
+    @Test
+    void requiresEachSignatureHeader() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+        String signature = sign("GET", "/v1/agents/sessions", "tenant-a",
+                "actor-a", timestamp);
+        for (String omitted : new String[] {SignatureAuthFilter.ACTOR_HEADER,
+                SignatureAuthFilter.SIGNATURE_HEADER,
+                SignatureAuthFilter.TIMESTAMP_HEADER}) {
+            MockHttpServletRequest request = request("GET",
+                    "/v1/agents/sessions");
+            if (!omitted.equals(SignatureAuthFilter.ACTOR_HEADER)) {
+                request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+            }
+            if (!omitted.equals(SignatureAuthFilter.SIGNATURE_HEADER)) {
+                request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                        signature);
+            }
+            if (!omitted.equals(SignatureAuthFilter.TIMESTAMP_HEADER)) {
+                request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER,
+                        timestamp);
+            }
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            filter.doFilter(request, response, new MockFilterChain());
+            assertThat(response.getStatus()).as(omitted).isEqualTo(401);
+            assertThat(response.getContentAsString()).as(omitted)
+                    .contains("authentication_required");
+        }
+    }
+
+    @Test
+    void rejectsARepeatedIdempotencyKey() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+        MockHttpServletRequest request = request("POST",
+                "/v1/agents/sessions");
+        request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/agents/sessions", "tenant-a", "actor-a",
+                        timestamp, new byte[0], "key-1"));
+        request.addHeader(SignatureAuthFilter.IDEMPOTENCY_HEADER, "key-1");
+        request.addHeader(SignatureAuthFilter.IDEMPOTENCY_HEADER, "key-2");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, new MockFilterChain());
+        assertThat(response.getStatus()).isEqualTo(400);
+        assertThat(response.getContentAsString()).contains("invalid_request");
+    }
+
+    @Test
+    void boundsTheBufferedBody() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setMaxSignedBodyBytes(1024);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(new BrokerSecurity(properties,
+                server, new WebMvcProperties()));
+
+        MockHttpServletRequest oversized = request("POST",
+                "/v1/agents/sessions");
+        oversized.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        oversized.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, now());
+        oversized.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                "v1=" + "0".repeat(64));
+        oversized.setContent(new byte[2048]);
+        MockHttpServletResponse refused = new MockHttpServletResponse();
+        filter.doFilter(oversized, refused, new MockFilterChain());
+        assertThat(refused.getStatus()).isEqualTo(413);
+        assertThat(refused.getContentAsString())
+                .contains("payload_too_large");
+
+        // Under the limit the request reaches the signature check.
+        String timestamp = now();
+        byte[] body = new byte[512];
+        MockHttpServletRequest within = request("POST", "/v1/agents/sessions");
+        within.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        within.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        within.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/agents/sessions", "tenant-a", "actor-a",
+                        timestamp, body, null));
+        within.setContent(body);
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(within, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+    }
+
+    @Test
+    void signsTheQueryString() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+        String signature = sign("GET", "/v1/agents/sessions", "limit=2",
+                "tenant-a", "actor-a", timestamp, new byte[0], null);
+
+        MockHttpServletRequest matching = request("GET",
+                "/v1/agents/sessions");
+        matching.setQueryString("limit=2");
+        matching.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        matching.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        matching.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(matching, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+
+        // The same signature replayed against another query is refused.
+        MockHttpServletRequest replayed = request("GET",
+                "/v1/agents/sessions");
+        replayed.setQueryString("limit=100");
+        replayed.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        replayed.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        replayed.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+        MockHttpServletResponse denied = new MockHttpServletResponse();
+        filter.doFilter(replayed, denied, new MockFilterChain());
+        assertThat(denied.getStatus()).isEqualTo(401);
+        assertThat(denied.getContentAsString()).contains("invalid_signature");
+    }
+
     private static MockHttpServletRequest request(String method,
             String path) {
         MockHttpServletRequest request = new MockHttpServletRequest(method,
@@ -236,7 +387,7 @@ class SignatureAuthFilterTest {
     private static BrokerSecurity open() throws Exception {
         ServerProperties server = new ServerProperties();
         server.setAddress(InetAddress.getByName("127.0.0.1"));
-        return new BrokerSecurity(new ManagedAgentProperties(), server);
+        return new BrokerSecurity(new ManagedAgentProperties(), server, new WebMvcProperties());
     }
 
     private static BrokerSecurity signed() throws Exception {
@@ -245,7 +396,7 @@ class SignatureAuthFilterTest {
         properties.getAuth().setSigningKey(KEY);
         ServerProperties server = new ServerProperties();
         server.setAddress(InetAddress.getByName("127.0.0.1"));
-        return new BrokerSecurity(properties, server);
+        return new BrokerSecurity(properties, server, new WebMvcProperties());
     }
 
     private static String now() {
@@ -260,9 +411,16 @@ class SignatureAuthFilterTest {
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp, byte[] body, String idempotencyKey)
             throws Exception {
+        return sign(method, uri, "", tenant, actor, timestamp, body,
+                idempotencyKey);
+    }
+
+    private static String sign(String method, String uri, String query,
+            String tenant, String actor, String timestamp, byte[] body,
+            String idempotencyKey) throws Exception {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
-                + "\n" + sha256Hex(body) + "\n"
+                + "\n" + (query == null ? "" : query) + "\n" + tenant + "\n"
+                + actor + "\n" + timestamp + "\n" + sha256Hex(body) + "\n"
                 + (idempotencyKey == null ? "" : idempotencyKey);
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(KEY.getBytes(StandardCharsets.UTF_8),

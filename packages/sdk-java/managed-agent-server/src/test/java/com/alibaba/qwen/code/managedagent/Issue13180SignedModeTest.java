@@ -9,11 +9,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import java.util.UUID;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -42,6 +38,9 @@ class Issue13180SignedModeTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String KEY = "0123456789abcdef0123456789abcdef";
     private static final String TENANT = "tenant-signed";
+    private static final String DEFINITION_BODY = "{\"model\":{},"
+            + "\"instructions\":\"test\",\"tools\":[],"
+            + "\"permission_policy\":{}}";
 
     @LocalServerPort private int port;
     private final HttpClient http = HttpClient.newHttpClient();
@@ -64,9 +63,9 @@ class Issue13180SignedModeTest {
         String timestamp = now();
         HttpResponse<String> wrongKey = call("GET", "/v1/agents/sessions",
                 TENANT, "actor-a", timestamp,
-                signWith("ffffffffffffffffffffffffffffffff", "GET",
-                        "/v1/agents/sessions", TENANT, "actor-a", timestamp,
-                        new byte[0], null));
+                BrokerSignatures.sign("ffffffffffffffffffffffffffffffff",
+                        "GET", "/v1/agents/sessions", TENANT, "actor-a",
+                        timestamp));
         assertThat(wrongKey.statusCode()).as(wrongKey.body()).isEqualTo(401);
         assertThat(wrongKey.body()).contains("invalid_signature");
     }
@@ -146,6 +145,7 @@ class Issue13180SignedModeTest {
                         StandardCharsets.UTF_8));
         assertThat(first.statusCode()).as(first.body()).isEqualTo(202);
         String session = JSON.readTree(first.body()).path("id").asText();
+        assertThat(session).isNotBlank();
 
         String secondTimestamp = now();
         HttpResponse<String> second = call("POST", "/v1/agents/sessions",
@@ -155,10 +155,43 @@ class Issue13180SignedModeTest {
                 idempotencyKey, new String(createBody,
                         StandardCharsets.UTF_8));
         assertThat(second.statusCode()).as(second.body()).isEqualTo(202);
-        assertThat(JSON.readTree(second.body()).path("id").asText())
-                .isEqualTo(session);
+        String replayed = JSON.readTree(second.body()).path("id").asText();
+        assertThat(replayed).isNotBlank();
+        assertThat(replayed).isEqualTo(session);
         assertThat(second.headers().firstValue("X-Qwen-Idempotent-Replay"))
                 .hasValue("true");
+    }
+
+    /** The bare collection route and its normalized spellings are covered. */
+    @Test
+    void theBareCollectionRouteRequiresASignature() throws Exception {
+        for (String path : new String[] {"/v1/agents", "/v1/%61gents",
+                "/v1/agents;jsessionid=abc"}) {
+            HttpResponse<String> unsigned = http.send(
+                    HttpRequest.newBuilder(URI.create(
+                                    "http://127.0.0.1:" + port + path))
+                            .header("X-Qwen-Tenant-Id", TENANT)
+                            .header("Idempotency-Key",
+                                    UUID.randomUUID().toString())
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(
+                                    DEFINITION_BODY))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(unsigned.statusCode()).as(path + ": " + unsigned.body())
+                    .isEqualTo(401);
+            assertThat(unsigned.body()).contains("authentication_required");
+        }
+
+        byte[] body = DEFINITION_BODY.getBytes(StandardCharsets.UTF_8);
+        String idempotencyKey = UUID.randomUUID().toString();
+        String timestamp = now();
+        HttpResponse<String> signed = call("POST", "/v1/agents", TENANT,
+                "actor-a", timestamp,
+                sign("POST", "/v1/agents", TENANT, "actor-a", timestamp, body,
+                        idempotencyKey),
+                idempotencyKey, DEFINITION_BODY);
+        assertThat(signed.statusCode()).as(signed.body()).isEqualTo(202);
     }
 
     private HttpResponse<String> call(String method, String path,
@@ -195,34 +228,15 @@ class Issue13180SignedModeTest {
     }
 
     private static String sign(String method, String uri, String tenant,
-            String actor, String timestamp) throws Exception {
-        return signWith(KEY, method, uri, tenant, actor, timestamp,
-                new byte[0], null);
+            String actor, String timestamp) {
+        return BrokerSignatures.sign(KEY, method, uri, tenant, actor,
+                timestamp);
     }
 
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp, byte[] body,
-            String idempotencyKey) throws Exception {
-        return signWith(KEY, method, uri, tenant, actor, timestamp, body,
-                idempotencyKey);
-    }
-
-    private static String signWith(String key, String method, String uri,
-            String tenant, String actor, String timestamp, byte[] body,
-            String idempotencyKey) throws Exception {
-        String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
-                + "\n" + sha256Hex(body) + "\n"
-                + (idempotencyKey == null ? "" : idempotencyKey);
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8),
-                "HmacSHA256"));
-        return "v1=" + HexFormat.of().formatHex(
-                mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String sha256Hex(byte[] body) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest(body));
+            String idempotencyKey) {
+        return BrokerSignatures.sign(KEY, method, uri, null, tenant, actor,
+                timestamp, body, idempotencyKey);
     }
 }

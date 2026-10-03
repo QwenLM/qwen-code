@@ -364,21 +364,28 @@ Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admiss
 ### Broker authentication and writer credentials
 
 `QWEN_MANAGED_AGENT_AUTH_MODE` selects how the public surface
-(`/v1/agents/**` and the WebShell adapter) authenticates its caller:
+(`/v1/agents/**` — including the bare `POST /v1/agents` collection route —
+and the WebShell adapter) authenticates its caller:
 `auto` (the default) resolves to `open` when `server.address` is loopback
 and refuses to start otherwise, `open` keeps the header-asserted tenant and
 the optional trusted-actor stand-in for local runs, and `signed` requires
 every public request to carry `X-Qwen-Actor-Id`,
 `X-Qwen-Signature-Timestamp` (epoch seconds, within
 `QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`, minimum `1s`) and
-`X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>` over
-`"qwen-broker-auth-v1\n" + METHOD + "\n" + undecoded request path + "\n" +
-raw query string (empty when absent) + "\n" + tenant + "\n" + actor + "\n"
+`X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>` over the canonical string
+below, keyed by `QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` (at least 32 bytes):
 
-- timestamp + "\n" + lowercase hex SHA-256 of the raw request body + "\n" +
-  the Idempotency-Key header value (empty when absent)`, keyed by
-`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY`(at least 32 bytes). Signed mode
-cannot be combined with`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
+```text
+"qwen-broker-auth-v1\n" + METHOD + "\n" + undecoded request path + "\n"
++ raw query string (empty when absent) + "\n" + tenant + "\n" + actor + "\n"
++ timestamp + "\n" + lowercase hex SHA-256 of the raw request body + "\n"
++ the Idempotency-Key header value (empty when absent)
+```
+
+A repeated `Idempotency-Key` header answers 400 invalid_request, and a body
+beyond `QWEN_MANAGED_AGENT_AUTH_MAX_SIGNED_BODY_BYTES` (default 10 MiB)
+answers 413 payload_too_large. Signed mode cannot be combined with
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
 
 `QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` switches writer tokens from
 self-minted to broker-provisioned: the writer credential becomes an HMAC

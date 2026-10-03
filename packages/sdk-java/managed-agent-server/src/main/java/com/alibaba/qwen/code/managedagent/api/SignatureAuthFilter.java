@@ -53,9 +53,10 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         if (security.getMode() != BrokerSecurity.Mode.SIGNED) {
             return true;
         }
-        String path = request.getRequestURI();
-        return !path.startsWith("/v1/agents/")
-                && !path.startsWith("/api/agent/web-shell/v1/");
+        // Coverage follows the routed path (as the tenant filter does); the
+        // canonical string still signs the raw request URI.
+        return !PublicSurface.covers(
+                PublicSurface.pathWithinApplication(request));
     }
 
     @Override
@@ -72,31 +73,59 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         String signature = request.getHeader(SIGNATURE_HEADER);
         String timestamp = request.getHeader(TIMESTAMP_HEADER);
         if (actorId == null || signature == null || timestamp == null) {
-            reject(request, response, "authentication_required",
+            reject(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                    "authentication_required",
                     "Signed mode requires the " + ACTOR_HEADER + ", "
                             + SIGNATURE_HEADER + " and " + TIMESTAMP_HEADER
                             + " headers.");
+            return;
+        }
+        // getHeader signs the first value while the controllers bind the
+        // comma-joined pair, so a repeated key must be refused outright.
+        if (java.util.Collections.list(
+                request.getHeaders(IDEMPOTENCY_HEADER)).size() > 1) {
+            reject(request, response, HttpServletResponse.SC_BAD_REQUEST,
+                    "invalid_request",
+                    "The " + IDEMPOTENCY_HEADER + " header is repeated.");
             return;
         }
         long signedAt;
         try {
             signedAt = Long.parseLong(timestamp.trim());
         } catch (NumberFormatException error) {
-            reject(request, response, "invalid_signature",
+            reject(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                    "invalid_signature",
                     "The signature timestamp is invalid.");
             return;
         }
         long drift = Math.abs(signedAt
                 - System.currentTimeMillis() / 1000L);
         if (drift > security.getAllowedDrift().getSeconds()) {
-            reject(request, response, "invalid_signature",
+            reject(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                    "invalid_signature",
                     "The signature timestamp is outside the allowed drift.");
             return;
         }
         // The body is signed, so it is buffered here and re-exposed to the
         // chain; without it a captured signature would authorize any
-        // substitute body on the same method and path inside the window.
-        byte[] body = request.getInputStream().readAllBytes();
+        // substitute body on the same method and path inside the window. The
+        // buffer is bounded so an unsigned caller cannot pace heap growth.
+        long maxBody = security.getMaxSignedBodyBytes();
+        if (request.getContentLengthLong() > maxBody) {
+            reject(request, response,
+                    HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                    "payload_too_large",
+                    "The request body exceeds the signed-body limit.");
+            return;
+        }
+        byte[] body = readBounded(request.getInputStream(), maxBody);
+        if (body == null) {
+            reject(request, response,
+                    HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                    "payload_too_large",
+                    "The request body exceeds the signed-body limit.");
+            return;
+        }
         String expected = PREFIX + sign(request.getMethod(),
                 request.getRequestURI(), request.getQueryString(), tenantId,
                 actorId, timestamp.trim(), body,
@@ -104,7 +133,8 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         if (!MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.US_ASCII),
                 signature.trim().getBytes(StandardCharsets.US_ASCII))) {
-            reject(request, response, "invalid_signature",
+            reject(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+                    "invalid_signature",
                     "The request signature is invalid.");
             return;
         }
@@ -198,10 +228,29 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         }
     }
 
-    private void reject(HttpServletRequest request,
-            HttpServletResponse response, String code, String message)
+    // Returns null once the stream runs past the limit, so a chunked or
+    // under-declared body cannot outgrow the bound.
+    private static byte[] readBounded(java.io.InputStream source, long max)
             throws IOException {
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        java.io.ByteArrayOutputStream buffer =
+                new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        long total = 0;
+        int read;
+        while ((read = source.read(chunk)) != -1) {
+            total += read;
+            if (total > max) {
+                return null;
+            }
+            buffer.write(chunk, 0, read);
+        }
+        return buffer.toByteArray();
+    }
+
+    private void reject(HttpServletRequest request,
+            HttpServletResponse response, int status, String code,
+            String message) throws IOException {
+        response.setStatus(status);
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         objectMapper.writeValue(response.getOutputStream(),

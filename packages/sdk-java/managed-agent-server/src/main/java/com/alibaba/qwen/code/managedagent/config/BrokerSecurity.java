@@ -10,6 +10,7 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.stereotype.Component;
 
 /**
@@ -36,13 +37,15 @@ public class BrokerSecurity {
     private final byte[] signingKey;
     private final Duration allowedDrift;
     private final boolean allowInsecureBind;
+    private final long maxSignedBodyBytes;
 
     public BrokerSecurity(ManagedAgentProperties properties,
-            ServerProperties server) {
+            ServerProperties server, WebMvcProperties mvc) {
         ManagedAgentProperties.Auth auth = properties.getAuth();
         String configured = auth.getMode() == null
                 ? "auto" : auth.getMode().trim().toLowerCase(Locale.ROOT);
         this.allowInsecureBind = auth.isAllowInsecureBind();
+        java.util.List<String> skippedGuards = new java.util.ArrayList<>();
         InetAddress publicAddress = server.getAddress();
         boolean publicLoopback = publicAddress != null
                 && publicAddress.isLoopbackAddress();
@@ -53,6 +56,16 @@ public class BrokerSecurity {
             // context path would silently bypass.
             throw new IllegalStateException(
                     "server.servlet.context-path is not supported by the"
+                            + " Managed Agent Broker; mount the service at"
+                            + " the root.");
+        }
+        String servletPath = mvc.getServlet().getPath();
+        if (servletPath != null && !servletPath.isBlank()
+                && !"/".equals(servletPath)) {
+            // Same bypass as a context path: the filters must see the same
+            // paths the dispatcher routes.
+            throw new IllegalStateException(
+                    "spring.mvc.servlet.path is not supported by the"
                             + " Managed Agent Broker; mount the service at"
                             + " the root.");
         }
@@ -75,11 +88,15 @@ public class BrokerSecurity {
                     "qwen.managed-agent.auth.mode must be auto, open or"
                             + " signed.");
         }
-        if (mode == Mode.OPEN && !publicLoopback && !allowInsecureBind) {
-            throw new IllegalStateException(
-                    "qwen.managed-agent.auth.mode=open requires a loopback"
-                            + " server.address; set auth.allow-insecure-bind"
-                            + "=true to override.");
+        if (mode == Mode.OPEN && !publicLoopback) {
+            if (!allowInsecureBind) {
+                throw new IllegalStateException(
+                        "qwen.managed-agent.auth.mode=open requires a"
+                                + " loopback server.address; set"
+                                + " auth.allow-insecure-bind"
+                                + "=true to override.");
+            }
+            skippedGuards.add("public-bind");
         }
         if (mode == Mode.SIGNED) {
             byte[] key = auth.getSigningKey() == null
@@ -143,26 +160,36 @@ public class BrokerSecurity {
                 || properties.getToolPublication().isEnabled();
         boolean internalLoopback = internal.getPort() > 0
                 && isLoopback(internal.getAddress());
-        if (internalExposed && !allowInsecureBind
-                && bindingKeyBytes == null
+        if (internalExposed && bindingKeyBytes == null
                 && !(internal.getPort() > 0 ? internalLoopback
                         : publicLoopback)) {
-            throw new IllegalStateException(
-                    "The internal surface requires a configured"
-                            + " qwen.managed-agent.session-store.binding-key"
-                            + " before it can leave a loopback address; set"
-                            + " auth.allow-insecure-bind=true to override.");
+            if (!allowInsecureBind) {
+                throw new IllegalStateException(
+                        "The internal surface requires a configured"
+                                + " qwen.managed-agent.session-store.binding-key"
+                                + " before it can leave a loopback address; set"
+                                + " auth.allow-insecure-bind=true to override.");
+            }
+            skippedGuards.add("internal-binding-key");
         }
         if (internal.getPort() > 0
                 && properties.getSessionStore().isEnabled()) {
             checkStoreBaseUrlPort(properties.getSessionStore().getBaseUrl(),
                     internal.getPort());
         }
-        checkHarnessTransport(properties);
+        checkStoreBaseUrlTransport(properties.getSessionStore());
+        checkHarnessTransport(properties, skippedGuards);
+        this.maxSignedBodyBytes = auth.getMaxSignedBodyBytes();
+        if (mode == Mode.SIGNED && maxSignedBodyBytes < 1) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.auth.max-signed-body-bytes must be"
+                            + " positive.");
+        }
         LOG.info(
                 "Managed Agent Broker security: mode={} internalPort={}"
                         + " writerBinding={} allowInsecureBind={}"
-                        + " allowedDrift={}",
+                        + " allowedDrift={}" + (skippedGuards.isEmpty() ? ""
+                                : " skipped=" + skippedGuards),
                 mode, internal.getPort() > 0 ? internal.getPort() : "shared",
                 bindingKeyBytes != null ? "bound" : "unbound",
                 allowInsecureBind, allowedDrift);
@@ -198,9 +225,38 @@ public class BrokerSecurity {
                 + " the internal listener.", advertised, internalPort);
     }
 
+    // The advertised store URL must satisfy the same literal-only loopback
+    // rule the TypeScript client enforces, or every harness refuses it.
+    private void checkStoreBaseUrlTransport(
+            ManagedAgentProperties.SessionStore store) {
+        if (!store.isEnabled()) {
+            return;
+        }
+        String baseUrl = store.getBaseUrl();
+        if (baseUrl == null || baseUrl.isBlank()) {
+            return;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(baseUrl);
+        } catch (IllegalArgumentException error) {
+            return;
+        }
+        if ("http".equalsIgnoreCase(uri.getScheme())
+                && !isLiteralLoopbackHost(uri.getHost())
+                && !store.isAllowInsecureHttp()) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.session-store.base-url uses plaintext"
+                            + " http on a non-loopback host; every harness"
+                            + " refuses it. Use https, a loopback address, or"
+                            + " set session-store.allow-insecure-http=true.");
+        }
+    }
+
     // The broker→harness attach leg carries the issued writer credential.
-    private void checkHarnessTransport(ManagedAgentProperties properties) {
-        if (!properties.getHarness().isEnabled() || allowInsecureBind) {
+    private void checkHarnessTransport(ManagedAgentProperties properties,
+            java.util.List<String> skippedGuards) {
+        if (!properties.getHarness().isEnabled()) {
             return;
         }
         String baseUrl = properties.getHarness().getBaseUrl();
@@ -215,12 +271,33 @@ public class BrokerSecurity {
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
                 && !isLoopback(uri.getHost())) {
-            throw new IllegalStateException(
-                    "qwen.managed-agent.harness.base-url uses plaintext http"
-                            + " on a non-loopback host, exposing provisioned"
-                            + " writer credentials; use https or set"
-                            + " auth.allow-insecure-bind=true to override.");
+            if (!allowInsecureBind) {
+                throw new IllegalStateException(
+                        "qwen.managed-agent.harness.base-url uses plaintext"
+                                + " http on a non-loopback host, exposing"
+                                + " provisioned writer credentials; use https"
+                                + " or set auth.allow-insecure-bind=true to"
+                                + " override.");
+            }
+            skippedGuards.add("harness-transport");
         }
+    }
+
+    // Matches the client's literal-only loopback set (localhost, *.localhost,
+    // 127.0.0.0/8, [::1]); the resolver is never consulted here.
+    private static boolean isLiteralLoopbackHost(String host) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        String value = host.trim().toLowerCase(Locale.ROOT);
+        if (value.startsWith("[") && value.endsWith("]")) {
+            return "[::1]".equals(value);
+        }
+        if ("localhost".equals(value) || value.endsWith(".localhost")
+                || "::1".equals(value)) {
+            return true;
+        }
+        return value.matches("^127(\\.[0-9]{1,3}){0,3}$");
     }
 
     public Mode getMode() {
@@ -233,6 +310,10 @@ public class BrokerSecurity {
 
     public Duration getAllowedDrift() {
         return allowedDrift;
+    }
+
+    public long getMaxSignedBodyBytes() {
+        return maxSignedBodyBytes;
     }
 
     public boolean isAllowInsecureBind() {

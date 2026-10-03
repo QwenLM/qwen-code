@@ -3213,6 +3213,18 @@ describe('Hosted Harness no-tool session', () => {
     expect(created.body.message).toContain('plaintext HTTP');
   });
 
+  it('answers 400 with the reason when the descriptor itself is rejected', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'short' },
+    });
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain('writerToken is invalid');
+  });
+
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     const server = await app(true);

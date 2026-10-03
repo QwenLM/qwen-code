@@ -255,6 +255,7 @@ public class ManagedAgentProperties {
         private String signingKey = "";
         private Duration allowedDrift = Duration.ofMinutes(5);
         private boolean allowInsecureBind;
+        private long maxSignedBodyBytes = 10 * 1024 * 1024;
 
         public String getMode() {
             return mode;
@@ -270,6 +271,14 @@ public class ManagedAgentProperties {
 
         public void setSigningKey(String signingKey) {
             this.signingKey = signingKey;
+        }
+
+        public long getMaxSignedBodyBytes() {
+            return maxSignedBodyBytes;
+        }
+
+        public void setMaxSignedBodyBytes(long maxSignedBodyBytes) {
+            this.maxSignedBodyBytes = maxSignedBodyBytes;
         }
 
         public Duration getAllowedDrift() {

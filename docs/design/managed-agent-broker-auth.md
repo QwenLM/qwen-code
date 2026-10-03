@@ -125,6 +125,18 @@ Mode resolution at startup:
   standard error envelope. `TenantContextFilter` then cross-checks the
   principal exactly as it does today, so no controller changes.
 
+  Two fail-closed details: the coverage decision uses the routed path
+  (`UrlPathHelper.getPathWithinApplication`, shared with the tenant filter
+  via `PublicSurface`), so the bare `POST /v1/agents` collection route and
+  normalized spellings (percent-encoding, path parameters) cannot slip past
+  while the canonical string keeps signing the raw request URI; and a
+  repeated `Idempotency-Key` header is refused with `400 invalid_request`
+  because the servlet contract would sign the first value while the
+  controllers bind the comma-joined pair. The buffered body is bounded by
+  `qwen.managed-agent.auth.max-signed-body-bytes` (default 10 MiB) — an
+  over-limit request answers `413 payload_too_large` before the signature
+  comparison, so an unsigned caller cannot pace broker heap growth.
+
 - `auto`: resolves to `open` when `server.address` is loopback (the
   shipped default `127.0.0.1`), otherwise startup fails and names
   `signed` mode. This keeps every shipped dev/E2E topology working while a
@@ -138,13 +150,24 @@ Startup guards (all fail fast with a named property):
 - `trusted-actor-header` set while the resolved mode is `signed`
   (contradictory: the header stand-in must not be able to inject a
   principal behind the signature filter).
-- a non-empty `server.servlet.context-path` (the path-prefix filters
-  assume a root mount and would be silently bypassed).
+- a non-empty `server.servlet.context-path` or non-root
+  `spring.mvc.servlet.path` (the path-prefix filters assume a root mount
+  and would be silently bypassed).
 - an `allowed-drift` below one second (truncates to a zero window).
 - with `internal-server.port` set, a loopback `session-store.base-url`
   naming a different port (the harness's store calls would 404).
 - `harness.enabled` with a plaintext non-loopback `harness.base-url` (the
   attach payload carries the provisioned writer credential).
+- `session-store.enabled` with a plaintext `session-store.base-url` whose
+  host is outside the client's literal-only loopback set (`localhost`,
+  `*.localhost`, `127.0.0.0/8`, `[::1]`) and no
+  `session-store.allow-insecure-http` — every harness would refuse the
+  advertised URL at attach time, so the broker refuses at startup instead.
+
+`allow-insecure-bind` disables three of these guards (public bind, internal
+binding key, harness transport); the startup posture line enumerates the
+guards it skipped as `skipped=...` so the blast radius is visible in the
+log.
 
 The OpenAPI contract gains a `qwenSignature` apiKey scheme
 (`X-Qwen-Signature`) whose description pins the canonical string and the
@@ -210,7 +233,10 @@ New configuration `qwen.managed-agent.internal-server`:
   connector and an `InternalSurfaceConfiguration.RoutingFilter` (highest
   precedence) routes by `request.getLocalPort()`: `/internal/**` on the
   public connector answers `404`, and anything outside `/internal/**` on
-  the internal connector answers `404`.
+  the internal connector answers `404`. The surface check classifies on
+  the routed path (`PublicSurface.pathWithinApplication`), so spellings
+  like `/%69nternal/...` or `/internal;/...` that Spring maps to the
+  internal handlers cannot cross the listener boundary.
 - When `port = 0`, today's single-port shape is preserved.
 - Startup guard: any non-loopback listen address (public or internal)
   requires the matching protection — `signed` mode for the public surface,

@@ -74,7 +74,7 @@ public class WriterCredentialPolicy {
                 writerToken.getBytes(StandardCharsets.US_ASCII));
         if (!valid) {
             throw new ApiException(HttpStatus.FORBIDDEN,
-                    "writer_credential_invalid",
+                    ManagedSessionStoreModels.ERROR_WRITER_CREDENTIAL_INVALID,
                     "The writer credential is not valid for this Session.");
         }
     }

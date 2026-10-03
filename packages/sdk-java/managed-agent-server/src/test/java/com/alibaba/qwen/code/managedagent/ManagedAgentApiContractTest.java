@@ -258,6 +258,25 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
+        // ManagedActionStore.requireOwner admits any tenant caller on a
+        // Session with no recorded creator; the public contract must qualify
+        // every creator-only responder sentence with that fall-through.
+        int claims = 0;
+        for (Operation operation : CONTRACT.operations()) {
+            String text = operation.node().toString();
+            if (text.contains("Responding requires the Session creator")
+                    || text.contains("only the Session creator may respond")) {
+                claims++;
+                assertThat(text).as(operation.operationId())
+                        .contains("no recorded creator");
+            }
+        }
+        assertThat(claims).as("every creator-only responder sentence stays qualified")
+                .isEqualTo(6);
+    }
+
+    @Test
     void mappedRoutesMatchTheSpec() {
         Map<String, String> statuses = new TreeMap<>();
         for (Operation operation : CONTRACT.operations()) {

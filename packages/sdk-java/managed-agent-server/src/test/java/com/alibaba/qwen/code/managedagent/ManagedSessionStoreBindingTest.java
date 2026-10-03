@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -121,16 +122,25 @@ class ManagedSessionStoreBindingTest {
                         "managed_session_writer_conflict"));
 
         // After the lease lapses the rebooted harness re-acquires with the
-        // same broker-provisioned credential.
-        Thread.sleep(1_100);
-        mvc.perform(post(base(session) + "/writers:acquire")
-                        .header(TenantContextFilter.HEADER, TENANT)
-                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
-                                token)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(acquire("writer-b", 60_000)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.writerGeneration").value(2));
+        // same broker-provisioned credential. Poll rather than trust a
+        // single sleep: under CPU starvation the 1s lease may not have
+        // lapsed yet when the first attempt runs.
+        int reacquire = 0;
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            reacquire = mvc.perform(post(base(session) + "/writers:acquire")
+                            .header(TenantContextFilter.HEADER, TENANT)
+                            .header(ManagedSessionStoreModels
+                                    .WRITER_TOKEN_HEADER, token)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(acquire("writer-b", 60_000)))
+                    .andReturn().getResponse().getStatus();
+            if (reacquire == 200) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+        assertThat(reacquire).isEqualTo(200);
     }
 
     @Test

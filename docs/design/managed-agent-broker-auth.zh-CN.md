@@ -116,6 +116,17 @@ harness。
   `TenantContextFilter` 按现状交叉校验 principal，因此无需改动
   任何 controller。
 
+  两个 fail-closed 细节：覆盖判定使用路由后的路径
+  （`UrlPathHelper.getPathWithinApplication`，经 `PublicSurface`
+  与租户过滤器共享），因此裸集合路由 `POST /v1/agents` 与归一化
+  拼写（百分号编码、路径参数）都无法绕过，而规范串仍对原始请求
+  URI 签名；重复的 `Idempotency-Key` 头以 `400 invalid_request`
+  拒绝，因为 Servlet 契约会签第一个值而 controller 绑定的是逗号
+  拼接值。缓冲的请求体受
+  `qwen.managed-agent.auth.max-signed-body-bytes`（默认 10 MiB）
+  限制——超限请求在签名比对之前应答 `413 payload_too_large`，
+  未签名调用者无法以此消耗 broker 堆内存。
+
 - `auto`：当 `server.address` 为回环地址（交付默认值
   `127.0.0.1`）时解析为 `open`，否则启动失败并点名需要 `signed`
   模式。这使所有已交付的 dev/E2E 拓扑继续可用，同时生产监听地址
@@ -128,13 +139,23 @@ harness。
 - `mode=signed` + `signing-key` 缺失或过短。
 - 已解析模式为 `signed` 时配置了 `trusted-actor-header`（配置矛盾：
   头替身不得能在签名过滤器之后注入 principal）。
-- 配置了非空的 `server.servlet.context-path`（路径前缀过滤器假设
-  根挂载，否则会被静默绕过）。
+- 配置了非空的 `server.servlet.context-path` 或非根的
+  `spring.mvc.servlet.path`（路径前缀过滤器假设根挂载，否则会被
+  静默绕过）。
 - `allowed-drift` 低于 1 秒（会被截断为零窗口）。
 - 设置了 `internal-server.port` 时，回环的 `session-store.base-url`
   指向其他端口（harness 的 store 调用会全部 404）。
 - `harness.enabled` 且 `harness.base-url` 为非回环明文 http（attach
   载荷携带下发的 writer 凭证）。
+- `session-store.enabled` 且 `session-store.base-url` 的主机落在客户端
+  的纯字面量回环集（`localhost`、`*.localhost`、`127.0.0.0/8`、
+  `[::1]`）之外、又未设 `session-store.allow-insecure-http` 的明文
+  http——所有 harness 都会在 attach 时拒绝该 URL，因此 broker 在
+  启动时直接拒绝。
+
+`allow-insecure-bind` 会同时停用其中三项守卫（公网绑定、内部面
+binding key、harness 传输）；启动 posture 行以 `skipped=...` 列出
+被跳过的守卫，使其爆炸半径在日志中可见。
 
 OpenAPI 契约新增 `qwenSignature` apiKey 方案（`X-Qwen-Signature`），
 其描述固定规范串与 `401` 错误码；`trustedActor` 方案对外部网关
@@ -197,7 +218,10 @@ writer_credential_invalid`（常数时间比较）。密钥为空时保持
   Tomcat 连接器，`InternalSurfaceConfiguration.RoutingFilter`
   （最高优先级）按 `request.getLocalPort()` 路由：公网连接器上的
   `/internal/**` 应答 `404`，内部连接器上非 `/internal/**` 的
-  请求应答 `404`。
+  请求应答 `404`。面分类基于路由后的路径
+  （`PublicSurface.pathWithinApplication`），因此
+  `/%69nternal/...`、`/internal;/...` 等被 Spring 映射到内部
+  handler 的拼写无法跨越监听器边界。
 - 当 `port = 0` 时，保留现有单端口形态。
 - 启动守卫：任何非回环监听地址（公网或内部）都要求相应保护——
   公网面要求 `signed` 模式，内部面要求已配置 `binding-key`——

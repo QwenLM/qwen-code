@@ -77,7 +77,8 @@ class TrustedActorHeaderFilterTest {
         org.springframework.boot.autoconfigure.web.ServerProperties server =
                 new org.springframework.boot.autoconfigure.web.ServerProperties();
         server.setAddress(java.net.InetAddress.getByName("127.0.0.1"));
-        return new BrokerSecurity(properties, server);
+        return new BrokerSecurity(properties, server,
+                new org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties());
     }
 
     private static MockHttpServletRequest request() {

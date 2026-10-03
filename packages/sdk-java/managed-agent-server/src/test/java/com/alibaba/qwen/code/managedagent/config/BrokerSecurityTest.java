@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.net.InetAddress;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 
 class BrokerSecurityTest {
     private static final String KEY =
@@ -34,9 +35,82 @@ class BrokerSecurityTest {
         server.setAddress(InetAddress.getByName("127.0.0.1"));
         server.getServlet().setContextPath("/broker");
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        assertThatThrownBy(() -> new BrokerSecurity(properties, server))
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server, new WebMvcProperties()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("context-path");
+    }
+
+    @Test
+    void refusesANonRootServletPathThatWouldBypassThePathFilters()
+            throws Exception {
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        WebMvcProperties mvc = new WebMvcProperties();
+        mvc.getServlet().setPath("/broker");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server, mvc))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("servlet.path");
+    }
+
+    @Test
+    void refusesAPlaintextStoreUrlEveryHarnessWouldReject()
+            throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setEnabled(true);
+        properties.getSessionStore()
+                .setBaseUrl("http://broker.internal:4183");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("allow-insecure-http");
+        properties.getSessionStore()
+                .setBaseUrl("http://127.example.com:4183");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("allow-insecure-http");
+        properties.getSessionStore().setAllowInsecureHttp(true);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        properties.getSessionStore().setAllowInsecureHttp(false);
+        properties.getSessionStore()
+                .setBaseUrl("https://broker.internal:4183");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        for (String loopback : new String[] {"http://127.0.0.1:4183",
+                "http://localhost:4183", "http://broker.localhost:4183",
+                "http://[::1]:4183"}) {
+            properties.getSessionStore().setBaseUrl(loopback);
+            assertThatCode(() -> security(properties, "127.0.0.1"))
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    void theInsecureBindOverrideNamesEveryGuardItSkips() throws Exception {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(BrokerSecurity.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getAuth().setAllowInsecureBind(true);
+            properties.getSessionStore().setEnabled(true);
+            properties.getHarness().setEnabled(true);
+            properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
+            BrokerSecurity security = security(properties, "10.0.0.8");
+            assertThat(security.getMode()).isEqualTo(BrokerSecurity.Mode.OPEN);
+            assertThat(appender.list).anySatisfy(event -> assertThat(
+                    event.getFormattedMessage())
+                    .contains("skipped=")
+                    .contains("public-bind")
+                    .contains("internal-binding-key")
+                    .contains("harness-transport"));
+        } finally {
+            logger.detachAppender(appender);
+        }
     }
 
     @Test
@@ -140,16 +214,16 @@ class BrokerSecurityTest {
         server.setAddress(InetAddress.getByName("10.0.0.8"));
         server.setPort(8080);
         properties.getAuth().setAllowInsecureBind(true);
-        assertThatThrownBy(() -> new BrokerSecurity(properties, server))
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server, new WebMvcProperties()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("internal-server.port");
         // An unset server.port is the Spring Boot default 8080.
         server.setPort(null);
-        assertThatThrownBy(() -> new BrokerSecurity(properties, server))
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server, new WebMvcProperties()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("internal-server.port");
         properties.getInternalServer().setPort(8081);
-        assertThatCode(() -> new BrokerSecurity(properties, server))
+        assertThatCode(() -> new BrokerSecurity(properties, server, new WebMvcProperties()))
                 .doesNotThrowAnyException();
     }
 
@@ -232,6 +306,6 @@ class BrokerSecurityTest {
         ServerProperties server = new ServerProperties();
         server.setAddress(address == null ? null
                 : InetAddress.getByName(address));
-        return new BrokerSecurity(properties, server);
+        return new BrokerSecurity(properties, server, new WebMvcProperties());
     }
 }

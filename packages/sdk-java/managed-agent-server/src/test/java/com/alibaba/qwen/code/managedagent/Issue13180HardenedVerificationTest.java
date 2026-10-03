@@ -16,8 +16,6 @@ import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -379,41 +377,25 @@ class Issue13180HardenedVerificationTest {
     }
 
     private static String sign(String method, String uri, String tenant,
-            String actor, String timestamp) throws Exception {
-        return sign(SIGNING_KEY, method, uri, tenant, actor, timestamp,
-                new byte[0], null);
+            String actor, String timestamp) {
+        return BrokerSignatures.sign(SIGNING_KEY, method, uri, tenant, actor,
+                timestamp);
     }
 
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp, String body,
-            String idempotencyKey) throws Exception {
-        return sign(SIGNING_KEY, method, uri, tenant, actor, timestamp,
-                body == null ? new byte[0]
+            String idempotencyKey) {
+        return BrokerSignatures.sign(SIGNING_KEY, method, uri, null, tenant,
+                actor, timestamp, body == null ? new byte[0]
                         : body.getBytes(StandardCharsets.UTF_8),
                 idempotencyKey);
     }
 
     private static String sign(String key, String method, String uri,
             String tenant, String actor, String timestamp, byte[] body,
-            String idempotencyKey) throws Exception {
-        String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
-                + "\n" + sha256(body) + "\n"
-                + (idempotencyKey == null ? "" : idempotencyKey);
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8),
-                "HmacSHA256"));
-        return "v1=" + HexFormat.of().formatHex(
-                mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String sha256(byte[] value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance(
-                    "SHA-256").digest(value));
-        } catch (Exception error) {
-            throw new IllegalStateException(error);
-        }
+            String idempotencyKey) {
+        return BrokerSignatures.sign(key, method, uri, null, tenant, actor,
+                timestamp, body, idempotencyKey);
     }
 
     private static String sha256(String value) {

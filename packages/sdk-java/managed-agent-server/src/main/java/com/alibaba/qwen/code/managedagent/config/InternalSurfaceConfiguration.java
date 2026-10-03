@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
+import com.alibaba.qwen.code.managedagent.api.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -52,9 +53,11 @@ public class InternalSurfaceConfiguration
                 TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
         connector.setPort(port);
         String address = properties.getInternalServer().getAddress();
+        String hostAddress;
         try {
-            if (!connector.setProperty("address", java.net.InetAddress
-                    .getByName(address).getHostAddress())) {
+            hostAddress = java.net.InetAddress.getByName(address)
+                    .getHostAddress();
+            if (!connector.setProperty("address", hostAddress)) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.internal-server.address was"
                                 + " rejected by the connector: " + address);
@@ -65,15 +68,19 @@ public class InternalSurfaceConfiguration
                             + address, error);
         }
         factory.addAdditionalTomcatConnectors(connector);
+        LOG.info("The internal listener binds {}:{}", hostAddress, port);
     }
 
     @Component
     public static class RoutingFilter extends OncePerRequestFilter
             implements Ordered {
         private final int internalPort;
+        private final ObjectMapper objectMapper;
 
-        public RoutingFilter(ManagedAgentProperties properties) {
+        public RoutingFilter(ManagedAgentProperties properties,
+                ObjectMapper objectMapper) {
             this.internalPort = properties.getInternalServer().getPort();
+            this.objectMapper = objectMapper;
         }
 
         @Override
@@ -91,10 +98,13 @@ public class InternalSurfaceConfiguration
                 HttpServletResponse response, FilterChain chain)
                 throws ServletException, IOException {
             boolean internal = request.getLocalPort() == internalPort;
-            if (internal != request.getRequestURI().startsWith("/internal/")) {
+            // Classify on the routed path: raw-URI spellings such as
+            // /%69nternal/... or /internal;/... map to internal handlers.
+            if (internal != PublicSurface.pathWithinApplication(request)
+                    .startsWith("/internal/")) {
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                new ObjectMapper().writeValue(response.getOutputStream(),
+                objectMapper.writeValue(response.getOutputStream(),
                         ApiExceptionHandler.envelope(request, "not_found",
                                 "The requested endpoint does not exist on this listener."));
                 return;

@@ -4,8 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseBridgeManagedSessionStore } from './bridgeTypes.js';
+
+const fixture = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../core/src/managed-runtime/contracts/managed-session-store-v1.fixtures.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as {
+  limits: {
+    minimumWriterTokenLength: number;
+    maximumWriterTokenLength: number;
+  };
+};
 
 describe('parseBridgeManagedSessionStore', () => {
   const valid = {
@@ -50,5 +66,34 @@ describe('parseBridgeManagedSessionStore', () => {
     expect(() =>
       parseBridgeManagedSessionStore({ ...valid, extraField: 1 }),
     ).toThrow(/unsupported field/);
+  });
+
+  it('bounds writerToken length at the shared fixture limits', () => {
+    const { minimumWriterTokenLength, maximumWriterTokenLength } =
+      fixture.limits;
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(minimumWriterTokenLength - 1),
+      }),
+    ).toThrow(/writerToken is invalid/);
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(minimumWriterTokenLength),
+      }).writerToken,
+    ).toHaveLength(minimumWriterTokenLength);
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(maximumWriterTokenLength),
+      }).writerToken,
+    ).toHaveLength(maximumWriterTokenLength);
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(maximumWriterTokenLength + 1),
+      }),
+    ).toThrow(/writerToken is invalid/);
   });
 });

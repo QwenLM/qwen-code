@@ -1337,8 +1337,13 @@ export function registerHostedHarnessSessionRoutes(
     let store;
     try {
       store = parseBridgeManagedSessionStore(body?.['managedSessionStore']);
-    } catch {
-      error(res, 400, 'invalid_managed_session_store');
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor rejected:', cause);
+      res.status(400).json({
+        error: 'invalid_managed_session_store',
+        code: 'invalid_managed_session_store',
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
       return;
     }
     if (store.writerId !== contract.bootId) {

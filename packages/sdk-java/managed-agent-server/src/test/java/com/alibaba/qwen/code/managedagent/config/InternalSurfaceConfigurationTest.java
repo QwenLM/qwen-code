@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.config.InternalSurfaceConfiguration.RoutingFilter;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.Ordered;
 import org.springframework.mock.web.MockFilterChain;
@@ -15,7 +16,8 @@ class InternalSurfaceConfigurationTest {
 
     @Test
     void staysInactiveWithoutADedicatedPort() throws Exception {
-        RoutingFilter filter = new RoutingFilter(properties(0));
+        RoutingFilter filter = new RoutingFilter(properties(0),
+                new ObjectMapper());
         MockHttpServletRequest request = request(
                 "/internal/managed-session-store/v1/sessions/s/restore",
                 PUBLIC);
@@ -27,7 +29,8 @@ class InternalSurfaceConfigurationTest {
 
     @Test
     void keepsEachSurfaceOnItsOwnListener() throws Exception {
-        RoutingFilter filter = new RoutingFilter(properties(INTERNAL));
+        RoutingFilter filter = new RoutingFilter(properties(INTERNAL),
+                new ObjectMapper());
 
         MockHttpServletResponse internalOnPublic = new MockHttpServletResponse();
         MockFilterChain first = new MockFilterChain();
@@ -58,6 +61,29 @@ class InternalSurfaceConfigurationTest {
                 fourth);
         assertThat(publicOk.getStatus()).isEqualTo(200);
         assertThat(fourth.getRequest()).isNotNull();
+    }
+
+    @Test
+    void classifiesNormalizedSpellingsOnTheRoutedPath() throws Exception {
+        RoutingFilter filter = new RoutingFilter(properties(INTERNAL),
+                new ObjectMapper());
+        for (String spelling : new String[] {
+                "/%69nternal/managed-session-store/v1/sessions/s/restore",
+                "/internal;/managed-session-store/v1/sessions/s/restore",
+                "/internal;x=1/managed-session-store/v1/sessions/s/restore"}) {
+            MockHttpServletResponse onPublic = new MockHttpServletResponse();
+            MockFilterChain publicChain = new MockFilterChain();
+            filter.doFilter(request(spelling, PUBLIC), onPublic,
+                    publicChain);
+            assertThat(onPublic.getStatus()).as(spelling).isEqualTo(404);
+            assertThat(publicChain.getRequest()).as(spelling).isNull();
+
+            MockHttpServletResponse onInternal = new MockHttpServletResponse();
+            MockFilterChain internalChain = new MockFilterChain();
+            filter.doFilter(request(spelling, INTERNAL), onInternal,
+                    internalChain);
+            assertThat(internalChain.getRequest()).as(spelling).isNotNull();
+        }
     }
 
     private static ManagedAgentProperties properties(int port) {

@@ -164,6 +164,64 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void writerTokenLengthBoundsMatchTheSharedFixture() throws Exception {
+        String contract = java.nio.file.Files.readString(locateFixture());
+        int minimum = Integer.parseInt(group(contract,
+                "minimumWriterTokenLength"));
+        int maximum = Integer.parseInt(group(contract,
+                "maximumWriterTokenLength"));
+        assertTokenRejected("a".repeat(minimum - 1));
+        assertTokenAccepted("a".repeat(minimum));
+        assertTokenAccepted("a".repeat(maximum));
+        assertTokenRejected("a".repeat(maximum + 1));
+    }
+
+    private static void assertTokenAccepted(String token) {
+        ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .writerToken(token)
+                .build();
+    }
+
+    private static void assertTokenRejected(String token) {
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken(token)
+                        .build());
+    }
+
+    private static String group(String json, String name) {
+        var matcher = java.util.regex.Pattern
+                .compile("\"" + name + "\": (\\d+)").matcher(json);
+        assertTrue(matcher.find(), () -> name + " missing from the fixture");
+        return matcher.group(1);
+    }
+
+    private static java.nio.file.Path locateFixture() {
+        java.nio.file.Path current = java.nio.file.Path
+                .of(System.getProperty("user.dir")).toAbsolutePath();
+        for (int depth = 0; depth < 6 && current != null; depth++) {
+            java.nio.file.Path candidate = current.resolve(java.nio.file.Path
+                    .of("packages", "core", "src", "managed-runtime",
+                            "contracts",
+                            "managed-session-store-v1.fixtures.json"));
+            if (java.nio.file.Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+            current = current.getParent();
+        }
+        throw new AssertionError(
+                "cannot locate shared Managed Session store fixture");
+    }
+
+    @Test
     void rejectsCapabilityMismatchBeforeAnySessionMutation() {
         AtomicInteger sessions = new AtomicInteger();
         server.createContext("/session", exchange -> {
