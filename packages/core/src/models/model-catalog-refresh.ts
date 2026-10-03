@@ -220,11 +220,15 @@ export function trimModelsDevCatalog(
       }
     }
   }
-  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
-  for (const key of new Set([
+  // Every key the projection considered, whether or not it ended up writing
+  // one. Reserving all of them, rather than only the written ones, is what
+  // keeps the alias pass below from resurrecting a key this loop dropped.
+  const seen = new Set([
     ...limitCandidates.keys(),
     ...modalityCandidates.keys(),
-  ])) {
+  ]);
+  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
+  for (const key of seen) {
     const entry: ModelCatalogEntry = {};
     const limits = limitCandidates.get(key);
     if (
@@ -251,16 +255,19 @@ export function trimModelsDevCatalog(
   }
   // Commit every entry under the other spelling of its version too, so the
   // dotted and dashed ids a vendor accepts both reach it (#13209).
-  const committed = new Set(agreed.map(([key]) => key));
   const aliasCandidates = new Map<string, ModelCatalogEntry[]>();
   for (const [key, entry] of agreed) {
     const alias = versionSpellingAlias(key);
-    // A key the projection already wrote describes a model of its own and
-    // keeps its own numbers. An alias normalize() does not return unchanged
-    // is unreachable by its own spelling (Claude's dotted minor is folded to
-    // dashes), so it would be a dead key — the same class isModelCatalogKey
-    // keeps out of the projection above.
-    if (!alias || committed.has(alias) || !isModelCatalogKey(alias)) {
+    // A key the projection considered describes a model of its own: if it was
+    // written it keeps its own numbers, and if it was dropped because its
+    // allowlisted providers disagreed on limits then the veto stands — letting
+    // a spelling twin write it would assert the very limits the disagreement
+    // rule above refused to guess, on an entry the twin's endpoint never
+    // published. An alias normalize() does not return unchanged is unreachable
+    // by its own spelling (Claude's dotted minor is folded to dashes), so it
+    // would be a dead key — the same class isModelCatalogKey keeps out of the
+    // projection above.
+    if (!alias || seen.has(alias) || !isModelCatalogKey(alias)) {
       continue;
     }
     const existing = aliasCandidates.get(alias);

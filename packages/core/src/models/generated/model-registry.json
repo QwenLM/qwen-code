@@ -787,11 +787,6 @@
       "output": 131072,
       "modalities": {}
     },
-    "glm-5.2": {
-      "context": 1000000,
-      "output": 131072,
-      "modalities": {}
-    },
     "glm-5.3": {
       "context": 1000000,
       "output": 131072,
