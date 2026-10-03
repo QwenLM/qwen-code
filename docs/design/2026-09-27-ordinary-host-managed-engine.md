@@ -11,7 +11,7 @@ foundation, M1 protections (#12861, #12906), and M3 compatibility evaluation
 (#12883, #12903). M2 and M4–M6, including local engine registration and
 activation, are lower-priority backlog; revisit their schedule after the Hosted
 slice's tool execution, durable results, and required fault checks are accepted.
-M4, M2 and M5a have since landed without registering the engine; see below.
+M4, M2, M5a and M5b have since landed without registering the engine; see below.
 Deferral does not waive acceptance. This revision also adapts the M2/M5 exit
 checks to the child-host boundary: M2 verifies resource cleanup and isolation
 (the M2 update narrows this; see the slice plan);
