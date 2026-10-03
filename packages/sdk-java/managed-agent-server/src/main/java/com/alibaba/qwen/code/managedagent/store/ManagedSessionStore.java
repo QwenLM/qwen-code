@@ -50,6 +50,9 @@ public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final int MAX_ID_BYTES = 512;
     private static final int MAX_TEXT_BYTES = 4096;
+    // recovery_detail_code is VARCHAR(128); validating wider than the column
+    // made the one-way recovery block surface 500 instead of recording.
+    private static final int MAX_RECOVERY_DETAIL_CODE_BYTES = 128;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Pattern WRITER_TOKEN = Pattern.compile(
             "^[A-Za-z0-9_-]{"
@@ -302,7 +305,7 @@ public class ManagedSessionStore {
             throw invalid("recoveryStatus must be a blocked state.");
         }
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
-                MAX_TEXT_BYTES);
+                MAX_RECOVERY_DETAIL_CODE_BYTES);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();

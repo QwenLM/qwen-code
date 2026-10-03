@@ -40,6 +40,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -1570,6 +1571,254 @@ class ManagedAgentServerIntegrationTest {
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.cancelled')]").isNotEmpty()));
+    }
+
+    @Test
+    void keepsPagingSessionsAcrossRowsWhoseUpdatedAtMoved()
+            throws Exception {
+        String tenant = "tenant-paging-" + UUID.randomUUID();
+        List<String> ids = new ArrayList<>();
+        for (String name : List.of("page-a", "page-b", "page-c")) {
+            ids.add(objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "paging-" + name)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                    .andExpect(status().isAccepted()).andReturn()
+                    .getResponse().getContentAsString()).get("id").asText());
+        }
+
+        JsonNode page1 = objectMapper.readTree(mvc.perform(
+                        get("/v1/agents/sessions")
+                                .param("limit", "2")
+                                .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.has_more").value(true))
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andReturn().getResponse().getContentAsString());
+        List<String> page1Ids = new ArrayList<>();
+        page1.get("data").forEach(row -> page1Ids.add(row.get("id").asText()));
+        String leftover = ids.stream()
+                .filter(id -> !page1Ids.contains(id)).findFirst().orElseThrow();
+        String cursor = page1.get("next_cursor").asText();
+
+        // Touch the not-yet-returned session: the rename bumps its
+        // updated_at past every row the first page already served. Keyset
+        // paging must follow the immutable created_at, not updated_at, or
+        // the row slides behind the cursor and never appears.
+        lifecycle(patch("/v1/agents/sessions/{id}", leftover)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"paging-renamed\"}"), tenant,
+                "paging-rename")
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/v1/agents/sessions")
+                        .param("limit", "2")
+                        .param("cursor", cursor)
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.has_more").value(false))
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.data[0].id").value(leftover));
+    }
+
+    @Test
+    void replaysASubmittedTurnWhileTheHarnessIsUnavailable()
+            throws Exception {
+        String tenant = "tenant-unavailable-submit-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"unavailable-create",
+                                 "agentId":"qwen-code","input":[]}
+                                """))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        String submit = """
+                {"idempotencyKey":"unavailable-turn","sessionId":"%s",
+                 "input":[{"type":"text","text":"hold"}]}
+                """.formatted(sessionId);
+        String turnId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submit))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("turnId").asText();
+
+        harness.setAvailable(false);
+        try {
+            // A replay of an already-recorded command admits nothing new,
+            // so it must not be gated on the Harness being reachable.
+            mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(submit))
+                    .andExpect(status().isAccepted())
+                    .andExpect(jsonPath("$.replayed").value(true))
+                    .andExpect(jsonPath("$.turnId").value(turnId));
+            // A genuinely new submission still fails fast while down.
+            mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"idempotencyKey":"unavailable-fresh",
+                                     "sessionId":"%s",
+                                     "input":[{"type":"text","text":"new"}]}
+                                    """.formatted(sessionId)))
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("hosted_harness_disabled"));
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @Test
+    void replaysACreationWithInputWhileTheHarnessIsUnavailable()
+            throws Exception {
+        String tenant = "tenant-unavailable-create-" + UUID.randomUUID();
+        String create = """
+                {"idempotencyKey":"unavailable-create-in",
+                 "agentId":"qwen-code",
+                 "input":[{"type":"text","text":"seed"}]}
+                """;
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(create))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+
+        harness.setAvailable(false);
+        try {
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(create))
+                    .andExpect(status().isAccepted())
+                    .andExpect(jsonPath("$.replayed").value(true))
+                    .andExpect(jsonPath("$.sessionId").value(sessionId));
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @Test
+    void replaysACompletedRenameAfterTheSessionWasDeleted() throws Exception {
+        String tenant = "tenant-rename-replay-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "replay-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"before delete\"}"), tenant,
+                "replay-rename")
+                .andExpect(status().isOk());
+        String deleteId = objectMapper.readTree(lifecycle(
+                        delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                        "replay-delete")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        awaitOperation(tenant, sessionId, deleteId);
+
+        // The recorded success replays with its original body; it must not
+        // 404 just because the Session was deleted in between.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"before delete\"}"), tenant,
+                "replay-rename")
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"))
+                .andExpect(jsonPath("$.metadata.title")
+                        .value("before delete"));
+    }
+
+    @Test
+    void rewritesAStoredLongTitleUnderOneTitlePolicy() throws Exception {
+        String tenant = "tenant-title-policy-" + UUID.randomUUID();
+        String longTitle = "t".repeat(300);
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "title-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
+                                        + "\"metadata\":{\"title\":\"" + longTitle
+                                        + "\"}}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+
+        // A title the API once stored must stay writable through rename.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + longTitle + "\"}"), tenant,
+                "title-rewrite")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value(longTitle));
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + "t".repeat(513) + "\"}"), tenant,
+                "title-too-long")
+                .andExpect(status().isBadRequest());
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"bad\title\"}"), tenant,
+                "title-control")
+                .andExpect(status().isBadRequest());
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "title-create-control")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
+                                + "\"metadata\":{\"title\":\"bad\title\"}}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void foldsSessionStatusesWithTheRootLocaleUnderATurkishDefault()
+            throws Exception {
+        String tenant = "tenant-locale-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "locale-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+
+        java.util.Locale previous = java.util.Locale.getDefault();
+        java.util.Locale.setDefault(new java.util.Locale("tr", "TR"));
+        try {
+            // The Turkish fold turns "ACTIVE" into "actıve"; protocol
+            // tokens must stay ASCII-folded.
+            mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("active"));
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("active"));
+        } finally {
+            java.util.Locale.setDefault(previous);
+        }
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,

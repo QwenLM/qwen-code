@@ -50,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -141,9 +142,6 @@ public class ManagedAgentService {
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, false);
-        if (!input.isEmpty()) {
-            requireHarness();
-        }
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
@@ -153,11 +151,17 @@ public class ManagedAgentService {
         semantic.put("title", effectiveTitle);
         semantic.put("input", input);
         String requestDigest = digests.digest(semantic);
+        // Replay before the harness gate: re-serving an already-recorded
+        // command admits nothing new and must not 503 during a harness
+        // outage.
         Admission replay = replay(tenantId, CREATE, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
+        }
+        if (!input.isEmpty()) {
+            requireHarness();
         }
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -223,16 +227,17 @@ public class ManagedAgentService {
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         requireSubmitter(tenantId, actorId, sessionId);
-        requireHarness();
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
+        // Replay before the harness gate; see createSession.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
         }
+        requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
         try {
@@ -322,8 +327,10 @@ public class ManagedAgentService {
                         "The Hosted Harness could not persist the Session title.");
             }
         }
-        return new SessionMutationResult<>(getPublicSession(tenantId,
-                sessionId), true);
+        // A replay re-reads the row without the visibility filter: the
+        // recorded success must not 404 after a later delete.
+        return new SessionMutationResult<>(publicSession(
+                store.requireSession(tenantId, sessionId)), true);
     }
 
     // An archived Session stays closed, so unarchive needs neither the
@@ -362,7 +369,9 @@ public class ManagedAgentService {
                     SessionMutationKind.UNARCHIVE, null, null);
             return new StoreModels.SessionMutation(session, command.replayed());
         }
-        return new StoreModels.SessionMutation(requireVisibleSession(tenantId, sessionId), true);
+        // Replay without the visibility filter; see renameSession.
+        return new StoreModels.SessionMutation(
+                store.requireSession(tenantId, sessionId), true);
     }
 
     private PublicSession getPublicSession(String tenantId,
@@ -387,7 +396,7 @@ public class ManagedAgentService {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor);
         SessionPage page = store.listSessions(tenantId, actorId,
-                decoded == null ? null : decoded.updatedAt(),
+                decoded == null ? null : decoded.createdAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
         List<PublicSession> sessions = page.sessions().stream()
                 .map(this::publicSession).toList();
@@ -401,7 +410,7 @@ public class ManagedAgentService {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor);
         SessionPage page = store.listSessions(tenantId, actorId,
-                decoded == null ? null : decoded.updatedAt(),
+                decoded == null ? null : decoded.createdAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
         return new WebShellPage<>(page.sessions().stream()
                 .map(session -> webShellSession(session, actorId)).toList(),
@@ -551,7 +560,7 @@ public class ManagedAgentService {
                 "agent.session",
                 session.agentId(),
                 session.agentRevision(),
-                session.status().toLowerCase(),
+                session.status().toLowerCase(Locale.ROOT),
                 session.createdAt() / 1000,
                 session.updatedAt() / 1000,
                 metadata,
@@ -582,7 +591,7 @@ public class ManagedAgentService {
                 session.sessionId(),
                 session.title(),
                 session.agentId(),
-                session.status().toLowerCase(),
+                session.status().toLowerCase(Locale.ROOT),
                 session.createdAt(),
                 session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
@@ -650,7 +659,7 @@ public class ManagedAgentService {
     private static PublicTurn publicTurn(TurnSummary turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
                 turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
-                turn.status().toLowerCase(),
+                turn.status().toLowerCase(Locale.ROOT),
                 turn.createdAt() / 1000,
                 turn.completedAt() == null ? null
                         : turn.completedAt() / 1000,
@@ -659,7 +668,7 @@ public class ManagedAgentService {
 
     private static WebShellTurn webShellTurn(TurnRecord turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
-                turn.status().toLowerCase(), turn.createdAt(),
+                turn.status().toLowerCase(Locale.ROOT), turn.createdAt(),
                 turn.completedAt(), turn.errorCode(), null);
     }
 
@@ -908,25 +917,31 @@ public class ManagedAgentService {
                 : title instanceof String ? (String) title : null);
     }
 
+    // One title policy for create, metadata and rename: 512 (the column
+    // width) plus the control-character rule. A title the API once stored
+    // must stay writable through every path.
     private static String validTitle(String title) {
-        if (title != null && title.length() > 512) {
+        if (title == null) {
+            return null;
+        }
+        if (title.length() > 512) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must not exceed 512 characters.");
-        }
-        return title == null || title.isBlank() ? null : title;
-    }
-
-    private static String validRenameTitle(String title) {
-        if (title == null || title.isBlank() || title.length() > 256) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
-                    "Title must contain 1-256 characters.");
         }
         if (title.chars().anyMatch(character -> character <= 31
                 || character == 127)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must not contain control characters.");
         }
-        return title;
+        return title.isBlank() ? null : title;
+    }
+
+    private static String validRenameTitle(String title) {
+        if (title == null || title.isBlank()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
+                    "Title must contain 1-512 characters.");
+        }
+        return validTitle(title);
     }
 
     static void validateIdempotencyKey(String key) {
@@ -958,7 +973,7 @@ public class ManagedAgentService {
             return null;
         }
         SessionRecord last = page.sessions().get(page.sessions().size() - 1);
-        String raw = last.updatedAt() + ":" + last.sessionId();
+        String raw = last.createdAt() + ":" + last.sessionId();
         return Base64.getUrlEncoder().withoutPadding().encodeToString(
                 raw.getBytes(StandardCharsets.UTF_8));
     }
@@ -1038,7 +1053,7 @@ public class ManagedAgentService {
                 admission.turnId(), "accepted", admission.replayed());
     }
 
-    private record SessionCursor(long updatedAt, String sessionId) {
+    private record SessionCursor(long createdAt, String sessionId) {
     }
 
     private record TurnCursor(long createdAt, String turnId) {
