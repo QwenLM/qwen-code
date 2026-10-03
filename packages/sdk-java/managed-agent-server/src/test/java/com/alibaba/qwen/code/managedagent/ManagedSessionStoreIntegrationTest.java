@@ -539,6 +539,54 @@ class ManagedSessionStoreIntegrationTest {
                         .value("managed_session_journal_corrupt"));
     }
 
+    @Test
+    void rejectsAnOverlongRecoveryDetailCodeBeforeTheColumnDoes()
+            throws Exception {
+        String session = "recovery-width-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/"
+                + session;
+        mvc.perform(post(base + "/writers:acquire")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+
+        ObjectNode overlong = objectMapper.createObjectNode()
+                .put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_A)
+                .put("writerGeneration", 1)
+                .put("recoveryStatus", "BLOCKED_EXECUTION")
+                .put("recoveryDetailCode", "x".repeat(129));
+        // A code wider than the VARCHAR(128) column once fell through
+        // validation and the strict-mode truncation surfaced 500 with the
+        // one-way recovery block never recorded.
+        mvc.perform(post(base + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(overlong.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+
+        // A code that fits the column still records the block.
+        ObjectNode fits = overlong.deepCopy()
+                .put("recoveryDetailCode", "x".repeat(128));
+        mvc.perform(post(base + "/recovery:block")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                TOKEN_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(fits.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recoveryStatus")
+                        .value("BLOCKED_EXECUTION"))
+                .andExpect(jsonPath("$.recoveryDetailCode")
+                        .value("x".repeat(128)));
+    }
+
     private ObjectNode writerRequest(String writerId) {
         return objectMapper.createObjectNode()
                 .put("workspaceId", WORKSPACE)

@@ -137,7 +137,7 @@ public interface AgentStateStore {
     Optional<SessionRecord> findSessionById(String sessionId);
 
     SessionPage listSessions(String tenantId, String actorId,
-            Long beforeUpdatedAt,
+            Long beforeCreatedAt,
             String beforeSessionId, int limit);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,

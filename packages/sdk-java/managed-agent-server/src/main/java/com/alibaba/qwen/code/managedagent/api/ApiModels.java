@@ -36,7 +36,8 @@ public final class ApiModels {
     }
 
     public record UpdateSessionRequest(
-            @NotBlank @Size(max = 256) String title) {
+            // Same 512 cap as create; see ManagedAgentService.validTitle.
+            @NotBlank @Size(max = 512) String title) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

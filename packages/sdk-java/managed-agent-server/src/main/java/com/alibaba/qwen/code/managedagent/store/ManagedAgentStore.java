@@ -1024,18 +1024,21 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeUpdatedAt, String beforeSessionId, int limit) {
+            Long beforeCreatedAt, String beforeSessionId, int limit) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        // Keyset on the immutable created_at: updated_at moves on every
+        // event append, so a row can slide backwards into already-visited
+        // pages and silently vanish from a paged listing.
         String cursorClause = "";
-        if (beforeUpdatedAt != null && beforeSessionId != null) {
-            cursorClause = " AND (updated_at < ? OR (updated_at = ?"
+        if (beforeCreatedAt != null && beforeSessionId != null) {
+            cursorClause = " AND (created_at < ? OR (created_at = ?"
                     + " AND session_id < ?))";
-            arguments.add(beforeUpdatedAt);
-            arguments.add(beforeUpdatedAt);
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeCreatedAt);
             arguments.add(beforeSessionId);
         }
         arguments.add(limit + 1);
@@ -1059,7 +1062,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND wa.actor_id = ?"
                         + " AND wa.can_read = TRUE))"
                         + cursorClause
-                        + " ORDER BY updated_at DESC, session_id DESC LIMIT ?",
+                        + " ORDER BY created_at DESC, session_id DESC LIMIT ?",
                 sessionMapper, arguments.toArray());
         boolean hasMore = rows.size() > limit;
         if (hasMore) {
@@ -1488,6 +1491,10 @@ public class ManagedAgentStore implements AgentStateStore {
     public void recordAdmission(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
+        // Lock the session row before the turn row: every writer must take
+        // the two in this order or InnoDB deadlocks against the
+        // session-first paths (e.g. insertCancelCommand).
+        requireSessionForUpdate(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
@@ -1776,6 +1783,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void cancelBeforeAdmission(String tenantId, String sessionId,
             String turnId, String owner) {
+        // Session-row lock first; see recordAdmission.
+        requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || turn.harnessEventEpoch() != null
@@ -1803,6 +1812,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
+        // Session-row lock first; see recordAdmission.
+        requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || !ACTIVE_TURN_STATES.contains(turn.status())) {
@@ -1936,8 +1947,10 @@ public class ManagedAgentStore implements AgentStateStore {
         String itemId = EventIdentity.toolItemId(event.turnId(),
                 event.sequence(), event.data());
         String sourceStatus = string(event.data().get("status"));
+        // Protocol tokens must fold with Locale.ROOT: under a tr_TR default
+        // locale "FAILED" becomes "faıled" and misses these arms.
         String status = switch (sourceStatus == null ? ""
-                : sourceStatus.toLowerCase()) {
+                : sourceStatus.toLowerCase(Locale.ROOT)) {
             case "completed", "success" -> "completed";
             case "failed" -> "failed";
             case "cancelled" -> "cancelled";
@@ -2310,7 +2323,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private static ApiException sessionStateConflict(String status) {
         return new ApiException(HttpStatus.CONFLICT,
                 "session_state_conflict",
-                "The Session is " + status.toLowerCase()
+                "The Session is " + status.toLowerCase(Locale.ROOT)
                         + " and cannot perform this operation.");
     }
 
