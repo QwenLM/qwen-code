@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.daemon;
 
+import com.alibaba.fastjson2.JSON;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -9,6 +10,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Caller-owned prompt admission request for a Hosted Harness session. */
 public final class SubmitHarnessTurn {
@@ -58,7 +60,11 @@ public final class SubmitHarnessTurn {
         }
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = JsonSupport.encode(promptContent)
+            // The digest is the wire dedup key, so it must hash a canonical
+            // form: Map iteration order is process-random for small
+            // immutable maps, and fastjson2 does not sort maps nested in
+            // a collection, so the keys are sorted explicitly here.
+            byte[] bytes = JSON.toJSONString(canonicalForDigest(promptContent))
                     .getBytes(StandardCharsets.UTF_8);
             byte[] hashed = digest.digest(bytes);
             StringBuilder result = new StringBuilder("sha256:");
@@ -69,6 +75,26 @@ public final class SubmitHarnessTurn {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is unavailable", e);
         }
+    }
+
+    private static Object canonicalForDigest(Object value) {
+        if (value instanceof Map<?, ?>) {
+            Map<String, Object> sorted = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                sorted.put(String.valueOf(entry.getKey()),
+                        canonicalForDigest(entry.getValue()));
+            }
+            return sorted;
+        }
+        if (value instanceof List<?>) {
+            List<?> source = (List<?>) value;
+            List<Object> ordered = new ArrayList<>(source.size());
+            for (Object item : source) {
+                ordered.add(canonicalForDigest(item));
+            }
+            return ordered;
+        }
+        return value;
     }
 
     HarnessSessionRef getSession() {

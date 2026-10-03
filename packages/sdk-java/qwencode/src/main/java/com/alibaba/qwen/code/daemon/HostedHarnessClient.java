@@ -61,6 +61,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final String bearerToken;
     private final Duration requestTimeout;
     private final Duration heartbeatInterval;
+    private final Duration sseIdleTimeout;
     private final int maximumSseFrameBytes;
     private final ExecutorService httpExecutor;
     private final ExecutorService heartbeatExecutor;
@@ -83,6 +84,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                 builder.capabilityDigest, "capabilityDigest");
         this.requestTimeout = builder.requestTimeout;
         this.heartbeatInterval = builder.heartbeatInterval;
+        this.sseIdleTimeout = builder.sseIdleTimeout;
         this.maximumSseFrameBytes = builder.maximumSseFrameBytes;
         long number = CLIENT_SEQUENCE.incrementAndGet();
         this.httpExecutor = new ThreadPoolExecutor(4, 4, 0L,
@@ -134,7 +136,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             restoreInterrupt(e);
             throw new SessionCreationOutcomeUnknownException(e);
         }
-        validateGeneration(raw.headers(), raw.statusCode());
+        try {
+            validateGeneration(raw.headers(), raw.statusCode());
+        } catch (DaemonProtocolException e) {
+            // A response that never passed the fencing middleware cannot
+            // prove the POST did not execute, so it is outcome-unknown.
+            throw new SessionCreationOutcomeUnknownException(e);
+        }
         HttpSupport.Response response;
         try {
             response = HttpSupport.consume(raw, "POST /session");
@@ -230,11 +238,26 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
                     "POST", request.toJson(), session.getHarnessClientId());
+        } catch (DaemonTransportException e) {
+            // A locally rejected send proves this submission never reached
+            // the server, so a marker owned by it cannot be a running turn;
+            // a same-identity retry keeps the original entry instead.
+            if (ownsActivePrompt) {
+                activePrompts.remove(session.getHarnessSessionId(),
+                        candidate);
+            }
+            throw e;
         } catch (IOException | InterruptedException e) {
             restoreInterrupt(e);
             throw new PromptAdmissionUnknownException(e);
         }
-        validateGeneration(raw.headers(), raw.statusCode());
+        try {
+            validateGeneration(raw.headers(), raw.statusCode());
+        } catch (DaemonProtocolException e) {
+            // A response that never passed the fencing middleware cannot
+            // prove the prompt was not admitted, so it is outcome-unknown.
+            throw new PromptAdmissionUnknownException(e);
+        }
         HttpSupport.Response response;
         try {
             response = HttpSupport.consume(raw,
@@ -255,9 +278,24 @@ public final class HostedHarnessClient implements AutoCloseable {
                         "Expected 202 admission watermark but received HTTP "
                                 + response.getStatusCode());
             }
-            if (ownsActivePrompt && response.getStatusCode() != 409) {
-                activePrompts.remove(session.getHarnessSessionId(), candidate);
+            if (response.getStatusCode() == 409) {
+                // The server definitively rejected this promptId, so no
+                // terminal event will ever reference it; retaining the
+                // marker here wedges the session client-side. A 409 for a
+                // same-identity retry instead confirms the original
+                // admission is the running turn, so its entry stays.
+                if (ownsActivePrompt) {
+                    activePrompts.remove(session.getHarnessSessionId(),
+                            candidate);
+                }
+                throw new PromptAlreadyActiveException(
+                        "Hosted Harness session already has a running turn");
             }
+            // A definitive non-409 failure tells the caller the server is
+            // not running this prompt identity; had an earlier same-identity
+            // admission been running, the server would have answered 409.
+            ActivePrompt retained = ownsActivePrompt ? candidate : existing;
+            activePrompts.remove(session.getHarnessSessionId(), retained);
             throw new DaemonHttpException("POST /session/:id/prompt",
                     response.getStatusCode(), response.getBody());
         }
@@ -354,18 +392,28 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         HarnessSessionRef session = requireSessionRef(request.getSession());
+        // The ref carries the watermark parseSession already validated, so
+        // a caller that omits the resume pair still gets the epoch fence
+        // from it rather than silently disabling the check.
+        String fenceEpoch = request.getEventEpoch() != null
+                ? request.getEventEpoch()
+                : session.getHarnessEventEpoch();
+        long cursor = request.getLastEventId() != 0
+                ? request.getLastEventId()
+                : (session.getHarnessLastEventId() == null
+                        ? 0
+                        : session.getHarnessLastEventId());
         String path = sessionPath(session.getHarnessSessionId()) + "/events"
                 + (request.isSnapshot() ? "?snapshot=1" : "");
         HttpRequest.Builder builder = sessionRequestBuilder(path, session)
                 .header("Accept", "text/event-stream")
                 .header("Accept-Encoding", "identity")
                 .header("Cache-Control", "no-cache")
-                .header("Last-Event-ID",
-                        Long.toString(request.getLastEventId()))
+                .header("Last-Event-ID", Long.toString(cursor))
                 .timeout(requestTimeout)
                 .GET();
-        if (request.getEventEpoch() != null) {
-            builder.header(EVENT_EPOCH_HEADER, request.getEventEpoch());
+        if (fenceEpoch != null) {
+            builder.header(EVENT_EPOCH_HEADER, fenceEpoch);
         }
         HttpResponse<InputStream> response;
         try {
@@ -400,15 +448,15 @@ public final class HostedHarnessClient implements AutoCloseable {
             String eventEpoch = requireEventEpoch(
                     response.headers().firstValue(EVENT_EPOCH_HEADER)
                             .orElse(null), false);
-            if (request.getEventEpoch() != null
-                    && !request.getEventEpoch().equals(eventEpoch)) {
+            if (fenceEpoch != null && !fenceEpoch.equals(eventEpoch)) {
                 throw new DaemonProtocolException(
                         "Hosted Harness SSE event epoch changed");
             }
             HarnessEventStream stream = new HarnessEventStream(this, session,
-                    response.body(), maximumSseFrameBytes,
-                    request.getLastEventId(), eventEpoch);
+                    response.body(), maximumSseFrameBytes, cursor,
+                    eventEpoch);
             streams.add(stream);
+            stream.startIdleWatchdog();
             return stream;
         } catch (RuntimeException e) {
             closeQuietly(response.body());
@@ -445,6 +493,11 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public HarnessSessionStatus getStatus(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
+        // Snapshot before the remote read: the response describes the point
+        // in time when the server evaluated it, so it may only clear the
+        // registration that was present when the request was sent.
+        ActivePrompt observed = activePrompts.get(
+                ref.getHarnessSessionId());
         String operation = "GET /session/:id/status";
         HttpSupport.Response response = sendRead(
                 sessionPath(ref.getHarnessSessionId()) + "/status", ref,
@@ -461,8 +514,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean active = JsonSupport.requiredBoolean(json,
                 "hasActivePrompt", "status");
-        if (!active) {
-            activePrompts.remove(ref.getHarnessSessionId());
+        if (!active && observed != null) {
+            activePrompts.remove(ref.getHarnessSessionId(), observed);
         }
         return new HarnessSessionStatus(responseSessionId, active, json);
     }
@@ -517,8 +570,15 @@ public final class HostedHarnessClient implements AutoCloseable {
                 sessionPath(ref.getHarnessSessionId()) + "/detach",
                 Collections.emptyMap(), ref.getHarnessClientId(),
                 "POST /session/:id/detach");
-        requireMutationStatus(response, 204,
-                "POST /session/:id/detach");
+        // A definitive 404 means the server has already reclaimed the
+        // session, so the detach goal is reached; anything else ambiguous
+        // was already classified by sendMutation. Skipping the local cleanup
+        // here would leave the heartbeat timer beating against an absent
+        // session forever.
+        if (response.getStatusCode() != 404) {
+            requireMutationStatus(response, 204,
+                    "POST /session/:id/detach");
+        }
         removeAttachment(ref);
     }
 
@@ -576,14 +636,19 @@ public final class HostedHarnessClient implements AutoCloseable {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
         }
-        validateGeneration(raw.headers(), raw.statusCode());
+        try {
+            validateGeneration(raw.headers(), raw.statusCode());
+        } catch (DaemonProtocolException e) {
+            // Same classification as the shared mutation channel below.
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
         HttpSupport.Response response;
         try {
             response = HttpSupport.consume(raw, operation);
         } catch (DaemonProtocolException e) {
             throw new MutationOutcomeUnknownException(operation, e);
         }
-        if (response.getStatusCode() == 404 && clientId == null) {
+        if (response.getStatusCode() == 404) {
             return;
         }
         requireMutationStatus(response, 204, operation);
@@ -625,6 +690,14 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     void unregisterStream(HarnessEventStream stream) {
         streams.remove(stream);
+    }
+
+    Duration sseIdleTimeout() {
+        return sseIdleTimeout;
+    }
+
+    ScheduledThreadPoolExecutor scheduler() {
+        return scheduler;
     }
 
     static String requireUuid(String value, String name) {
@@ -911,7 +984,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
         }
-        validateGeneration(raw.headers(), raw.statusCode());
+        try {
+            validateGeneration(raw.headers(), raw.statusCode());
+        } catch (DaemonProtocolException e) {
+            // A response that never passed the fencing middleware cannot
+            // prove the mutation did not reach the Harness.
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
         HttpSupport.Response response;
         try {
             response = HttpSupport.consume(raw, operation);
@@ -946,9 +1025,28 @@ public final class HostedHarnessClient implements AutoCloseable {
             return httpClient.send(builder.build(),
                     HttpSupport.bodyHandler());
         } catch (RejectedExecutionException e) {
-            throw new IOException(
+            throw new DaemonTransportException(
                     "Hosted Harness HTTP executor is saturated", e);
+        } catch (IOException e) {
+            // java.net.http wraps a pool rejection into an IOException
+            // (java.net.http.HttpClientImpl); the request never left the
+            // JVM, so its outcome is known, not unknown.
+            if (isExecutorRejection(e)) {
+                throw new DaemonTransportException(
+                        "Hosted Harness HTTP executor is saturated", e);
+            }
+            throw e;
         }
+    }
+
+    private static boolean isExecutorRejection(Throwable failure) {
+        for (Throwable current = failure; current != null;
+                current = current.getCause()) {
+            if (current instanceof RejectedExecutionException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private HttpRequest.Builder sessionRequestBuilder(String path,
@@ -1168,7 +1266,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
-    private static long saturatedMillis(Duration duration) {
+    static long saturatedMillis(Duration duration) {
         try {
             return Math.max(1L, duration.toMillis());
         } catch (ArithmeticException e) {
@@ -1242,6 +1340,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofMinutes(1);
+        private Duration sseIdleTimeout = Duration.ofSeconds(45);
         private int maximumSseFrameBytes = 16 * 1024 * 1024;
 
         private Builder() {
@@ -1278,6 +1377,17 @@ public final class HostedHarnessClient implements AutoCloseable {
                         "heartbeatInterval must be non-negative");
             }
             this.heartbeatInterval = heartbeatInterval;
+            return this;
+        }
+
+        /**
+         * Bounds the silence an event stream tolerates before the client
+         * force-closes it and {@code next()} fails with a
+         * {@link DaemonTransportException}. Matches the bound the stdio
+         * transport applies to the same reader.
+         */
+        public Builder sseIdleTimeout(Duration sseIdleTimeout) {
+            this.sseIdleTimeout = positive(sseIdleTimeout, "sseIdleTimeout");
             return this;
         }
 
