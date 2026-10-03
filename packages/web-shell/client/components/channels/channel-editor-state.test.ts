@@ -401,6 +401,59 @@ describe('Channel editor state', () => {
     ).toBe('thread');
   });
 
+  const chatThreadDefaultDescriptor = (): DaemonChannelTypeDescriptor => ({
+    ...DINGTALK,
+    fields: DINGTALK.fields.map((field) =>
+      field.key === 'sessionScope'
+        ? { ...field, default: 'chat_thread' }
+        : field,
+    ),
+  });
+
+  it('pre-fills user for a multiSession instance whose plugin default is non-user', () => {
+    const descriptor = chatThreadDefaultDescriptor();
+    const instance = configuredInstance();
+    instance.config.multiSession = true;
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    // A multiSession channel only runs scope 'user'; submitting the plugin's
+    // 'chat_thread' default would make the store reject every save.
+    expect(draft.values.sessionScope).toBe('user');
+    expect(
+      buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-multi-session',
+        instance,
+      ).config.sessionScope,
+    ).toBe('user');
+  });
+
+  it('preserves a non-user default for an instance without multiSession', () => {
+    const descriptor = chatThreadDefaultDescriptor();
+    const instance = configuredInstance();
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.sessionScope).toBe('chat_thread');
+  });
+
+  it('keeps an explicit non-user scope so the store still rejects it', () => {
+    const descriptor = chatThreadDefaultDescriptor();
+    const instance = configuredInstance();
+    instance.config.multiSession = true;
+    instance.config.sessionScope = 'chat_thread';
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    // Not pre-fill: the stored value is explicit, so the editor must not
+    // silently rewrite it; the store's compatibility check rejects the save.
+    expect(draft.values.sessionScope).toBe('chat_thread');
+  });
+
   it('fills safe policy defaults when editing a legacy instance', () => {
     const instance = configuredInstance();
     delete instance.config.privatePolicy;
