@@ -4537,6 +4537,59 @@ describe('replyMsgId cleanup timer', () => {
         vi.useRealTimers();
       });
 
+      it('reports only the in-flight text beyond the residual a boundary already sealed', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-sealed-residual',
+          msgId: 'msg-SR',
+          turn: 1,
+        });
+        // captureBoundaryClear only seals the residual of the turn that owns
+        // the counter, so the entry and the counter must agree.
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        turnCounter.set('session-sealed-residual', 1);
+        // Keep the handoff on its stash write instead of a live delivery.
+        const activePromptSessions = chp['activePromptSessions'] as Set<string>;
+        activePromptSessions.add('session-sealed-residual');
+
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        state.buffer = 'stale-tail';
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: PermFailureState,
+            logLabel: string,
+          ) => void
+        )('session-sealed-residual', 'test buffer', state, 'test');
+        // A boundary clears the bridge's collection while the send is in
+        // flight: the live turn's residual is copied into sealedPre and the
+        // flight is flagged 'residual'. 'EXTRA' then arrives after the capture.
+        (chp['captureBoundaryClear'] as (sessionId: string) => void)(
+          'session-sealed-residual',
+        );
+        state.buffer += 'EXTRA';
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The captured 10-char head ('stale-tail') is folded into the handoff
+        // seal and delivered separately, so it is not dropped here: only the 5
+        // chars that arrived after the capture are (15 in the buffer - 10
+        // preserved). Counting the whole buffer would report those 10 twice.
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropping 11 chars');
+        expect(logged).toContain('plus 5 chars buffered in flight');
+        expect(logged).not.toContain('plus 15 chars buffered in flight');
+
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
       it('clears pending-cleanup flags on RETRY_EXHAUSTED (permanent-catch teardown)', async () => {
         // A dead-session tail chain (pendingStreamDelete + flushedSessions +
         // turnCounter parked) that hits a permanent failure must be torn

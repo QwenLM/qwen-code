@@ -2183,13 +2183,18 @@ export class QQChannel extends ChannelBase {
             e.code === 'ACTIVE_MSG_DISABLED' ||
             e.code === 'FALLBACK_FAILED')
         ) {
-          // The residual that accumulated into state.buffer while this send was
-          // in flight is dropped with the entry below, so the loss log must
-          // report it too: the payload count alone under-reports what the
-          // operator loses.
-          const inFlightResidual = state.buffer;
+          // The text that accumulated into state.buffer while this send was in
+          // flight is dropped with the entry below, so the loss log must report
+          // it too: the payload count alone under-reports what the operator
+          // loses. Except the residual a boundary captured: captureBoundaryClear
+          // copies exactly that text into sealedPre and flags the flight
+          // 'residual', and the handoff seal below preserves and delivers it
+          // separately, so counting it here would report the same characters
+          // twice. Only the buffer beyond the captured residual is lost here.
+          const droppedInFlight =
+            state.buffer.length - this.capturedResidual(state).length;
           process.stderr.write(
-            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars${inFlightResidual ? ` plus ${inFlightResidual.length} chars buffered in flight` : ''}\n`,
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars${droppedInFlight > 0 ? ` plus ${droppedInFlight} chars buffered in flight` : ''}\n`,
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Drop everything — including any residual buffer that arrived concurrently.
