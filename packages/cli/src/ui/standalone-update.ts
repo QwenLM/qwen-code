@@ -17,6 +17,10 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  hasStandaloneRuntimeLayout,
+  standaloneRuntimePaths,
+} from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -40,10 +44,17 @@ const VALID_TARGETS = new Set([
 
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
+// True for a concrete version this updater can route: no dist-tags, no build
+// metadata, no leading zeros. normalizeVersion throws on anything else, so
+// every comparison against an untrusted version must gate on this first.
+function isConcreteVersion(version: string): boolean {
+  return SEMVER_RE.test(version) && semver.valid(version) !== null;
+}
+
 type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
-function normalizeVersion(version: string): string {
-  if (!SEMVER_RE.test(version)) {
+export function normalizeVersion(version: string): string {
+  if (!isConcreteVersion(version)) {
     throw new Error(`Invalid version format: ${version}`);
   }
   return version.startsWith('v') ? version : `v${version}`;
@@ -55,9 +66,14 @@ function validateTarget(target: string): void {
   }
 }
 
-function archiveFilename(target: string): string {
+// Archive names mirror standaloneArchiveName in
+// scripts/create-standalone-package.js: the bun runtime ships as the
+// -opentui-preview flavor, and SHA256SUMS entries match by filename, so both
+// call sites must derive the name from the installed build's runtime.
+function archiveFilename(target: string, runtime: string): string {
   const ext = target.startsWith('win') ? 'zip' : 'tar.gz';
-  return `qwen-code-${target}.${ext}`;
+  const flavor = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${flavor}.${ext}`;
 }
 
 function escapePS(s: string): string {
@@ -469,11 +485,13 @@ function spawnAndCapture(
  * Verifies the new installation can actually run by invoking --version.
  * Prevents replacing a working install with a broken binary.
  */
-async function smokeTest(newInstallDir: string, target: string): Promise<void> {
+async function smokeTest(
+  newInstallDir: string,
+  target: string,
+  expectedVersion: string,
+): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
-  const nodeBin = target.startsWith('win')
-    ? path.join(resolvedInstallDir, 'node', 'node.exe')
-    : path.join(resolvedInstallDir, 'node', 'bin', 'node');
+  const nodeBin = standaloneRuntimePaths(resolvedInstallDir, target).node;
   const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
 
   if (!fs.existsSync(nodeBin)) {
@@ -495,9 +513,14 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
     );
   }
   const version = stdout.trim();
-  if (!SEMVER_RE.test(version)) {
+  if (!isConcreteVersion(version)) {
     throw new Error(
       `Smoke test failed: unexpected version output "${version}"`,
+    );
+  }
+  if (normalizeVersion(version) !== normalizeVersion(expectedVersion)) {
+    throw new Error(
+      `Smoke test failed: expected version ${expectedVersion}, got ${version}`,
     );
   }
   debugLogger.info(`Smoke test passed: ${version}`);
@@ -1098,10 +1121,13 @@ function detectTarget(): string {
 function standaloneUpdateTarget(standaloneDir: string): {
   target: string;
   version?: string;
+  runtime: string;
   isFirstTimeMigration: boolean;
 } {
   let target: string;
   let version: string | undefined;
+  // writeManifest defaults a missing runtime to 'node'; mirror that here.
+  let runtime = 'node';
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
@@ -1109,9 +1135,11 @@ function standaloneUpdateTarget(standaloneDir: string): {
     const manifest = JSON.parse(manifestRaw) as {
       target?: string;
       version?: string;
+      runtime?: string;
     };
     target = manifest.target ?? detectTarget();
     version = manifest.version;
+    runtime = manifest.runtime ?? 'node';
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -1124,7 +1152,7 @@ function standaloneUpdateTarget(standaloneDir: string): {
     isFirstTimeMigration = true;
   }
   validateTarget(target);
-  return { target, version, isFirstTimeMigration };
+  return { target, version, runtime, isFirstTimeMigration };
 }
 
 export async function prepareStandaloneUpdate(
@@ -1136,8 +1164,8 @@ export async function prepareStandaloneUpdate(
 }> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = resolveUpdateBaseUrl();
-  const { target } = standaloneUpdateTarget(standaloneDir);
-  const filename = archiveFilename(target);
+  const { target, runtime } = standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target, runtime);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   const cleanup = () => {
     process.off('exit', cleanup);
@@ -1189,9 +1217,12 @@ async function applyStandaloneUpdate(
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
-  const { target, isFirstTimeMigration } =
-    standaloneUpdateTarget(standaloneDir);
-  const filename = archiveFilename(target);
+  const {
+    target,
+    runtime: installedRuntime,
+    isFirstTimeMigration,
+  } = standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target, installedRuntime);
   const parentDir = path.dirname(standaloneDir);
 
   // Ensure the parent directory exists so the lock file can be created.
@@ -1269,14 +1300,48 @@ async function applyStandaloneUpdate(
     await extractArchive(archivePath, extractDir, target);
 
     const newInstallDir = path.join(extractDir, 'qwen-code');
-    if (!fs.existsSync(path.join(newInstallDir, 'manifest.json'))) {
+    const newManifestPath = path.join(newInstallDir, 'manifest.json');
+    if (!fs.existsSync(newManifestPath)) {
       throw new Error(
         'Extracted archive does not contain expected qwen-code directory',
       );
     }
+    // The smoke test pins the version the executable reports; the manifest
+    // is what isStandaloneInstallDir reads back to keep recognising the
+    // directory as a managed standalone install — installation does not
+    // rewrite it, so the archive must carry the requested release's name,
+    // target, version and runtime flavor, plus the executable layout
+    // (bin/qwen, node/bin/node) that classification requires. The launcher
+    // execs lib/cli-entry.js while the smoke test probes lib/cli.js, so the
+    // entry point is required here explicitly — the shared layout helper
+    // must not grow the requirement, or installs that predate cli-entry.js
+    // would stop classifying as standalone.
+    const manifest = JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
+      name?: unknown;
+      target?: unknown;
+      version?: unknown;
+      runtime?: unknown;
+    };
+    const manifestVersion = manifest.version;
+    const manifestRuntime =
+      typeof manifest.runtime === 'string' ? manifest.runtime : 'node';
+    if (
+      manifest.name !== '@qwen-code/qwen-code' ||
+      manifest.target !== target ||
+      typeof manifestVersion !== 'string' ||
+      !isConcreteVersion(manifestVersion) ||
+      normalizeVersion(manifestVersion) !== normalizeVersion(newVersion) ||
+      manifestRuntime !== installedRuntime ||
+      !hasStandaloneRuntimeLayout(newInstallDir, target) ||
+      !fs.existsSync(path.join(newInstallDir, 'lib', 'cli-entry.js'))
+    ) {
+      throw new Error(
+        `Archive manifest does not match the requested release: ${JSON.stringify(manifest)}`,
+      );
+    }
 
     debugLogger.info('Running smoke test...');
-    await smokeTest(newInstallDir, target);
+    await smokeTest(newInstallDir, target, newVersion);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
