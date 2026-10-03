@@ -1159,6 +1159,13 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
     expect(primaryArchive).not.toHaveBeenCalled();
+    await vi.waitFor(
+      () =>
+        expect(URL.revokeObjectURL).toHaveBeenCalledWith(
+          'blob:secondary-export',
+        ),
+      { timeout: 2000 },
+    );
   }, 15000);
 
   it('shows rename for current and non-current locked-secondary sessions', async () => {
@@ -2144,6 +2151,10 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(active.exportSession).toHaveBeenCalledWith('shared-active', 'html');
+    await vi.waitFor(
+      () => expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2),
+      { timeout: 2000 },
+    );
   });
 
   it('keeps primary active export on the primary action under session_export only', async () => {
@@ -2189,6 +2200,11 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(active.exportSession).toHaveBeenCalledWith('primary-export', 'html');
     expect(secondaryExport).not.toHaveBeenCalled();
+    await vi.waitFor(
+      () =>
+        expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:primary-export'),
+      { timeout: 2000 },
+    );
   });
 
   it('does not infer secondary active export from session_export', async () => {
@@ -6471,7 +6487,12 @@ describe('WebShellSidebar archived session export', () => {
       format: 'html',
     });
     expect(URL.createObjectURL).toHaveBeenCalledTimes(2);
-    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+    await vi.waitFor(
+      () => {
+        expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+      },
+      { timeout: 2000 },
+    );
   });
 });
 

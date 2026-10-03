@@ -1,3 +1,4 @@
+import { handleNativeDownload } from '../../utils/saveBlob.js';
 import type {
   DaemonSessionArtifact,
   SessionSource,
@@ -593,6 +594,10 @@ export function ArtifactPanel({
   const { t } = useI18n();
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string>();
+  const [imageDownloadError, setImageDownloadError] = useState<{
+    id: string;
+    message: string;
+  }>();
   const sideTaskMenuCloseTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
@@ -1384,11 +1389,23 @@ export function ArtifactPanel({
                 className={styles.imageDownloadButton}
                 href={activeTab.src}
                 download={imageDownloadName(activeTab.src)}
+                onClick={(event) => {
+                  setImageDownloadError(undefined);
+                  handleNativeDownload(event, (error) =>
+                    setImageDownloadError({
+                      id: activeTab.id,
+                      message: extractErrorDetail(error),
+                    }),
+                  );
+                }}
                 aria-label={t('common.download')}
                 title={t('common.download')}
               >
                 <DownloadIcon size={16} strokeWidth={1.8} />
               </a>
+              {imageDownloadError?.id === activeTab.id && (
+                <div role="alert">{imageDownloadError.message}</div>
+              )}
             </div>
           ) : (
             <div
@@ -3369,6 +3386,15 @@ function SourceDetail({
               <a
                 href={downloadUrl}
                 download={source.title}
+                onClick={(event) => {
+                  setError(undefined);
+                  handleNativeDownload(
+                    event,
+                    (error) => setError(extractErrorDetail(error)),
+                    () => !tab.owner.isCurrent(),
+                    data,
+                  );
+                }}
                 aria-label={`Download ${source.title}`}
                 title={t('common.download')}
               >
@@ -3463,6 +3489,7 @@ function SourceBlobPreview({
   showDownload?: boolean;
 }) {
   const [url, setUrl] = useState<string>();
+  const [downloadError, setDownloadError] = useState<string>();
   useEffect(() => {
     const objectUrl = URL.createObjectURL(data);
     setUrl(objectUrl);
@@ -3481,10 +3508,24 @@ function SourceBlobPreview({
         />
       )}
       {showDownload && (
-        <a href={url} download={title} aria-label={`Download ${title}`}>
+        <a
+          href={url}
+          download={title}
+          aria-label={`Download ${title}`}
+          onClick={(event) => {
+            setDownloadError(undefined);
+            handleNativeDownload(
+              event,
+              (error) => setDownloadError(extractErrorDetail(error)),
+              undefined,
+              data,
+            );
+          }}
+        >
           <DownloadIcon />
         </a>
       )}
+      {downloadError && <div role="alert">{downloadError}</div>}
     </div>
   ) : null;
 }
@@ -3746,12 +3787,14 @@ function ImageArtifactPreview({
   onLoadError?: (error: string) => void;
 }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [data, setData] = useState<Blob>();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | undefined;
     setSrc(null);
+    setData(undefined);
     setError(null);
     readWorkspaceFileAsBlob(
       (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
@@ -3765,6 +3808,7 @@ function ImageArtifactPreview({
       .then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
+        setData(blob);
         setSrc(objectUrl);
       })
       .catch((err: unknown) => {
@@ -3792,6 +3836,15 @@ function ImageArtifactPreview({
             className={styles.imageDownloadButton}
             href={src}
             download={fileName(workspacePath)}
+            onClick={(event) => {
+              setError(null);
+              handleNativeDownload(
+                event,
+                (error) => setError(extractErrorDetail(error)),
+                undefined,
+                data,
+              );
+            }}
             aria-label={`Download ${fileName(workspacePath)}`}
             title="Download"
           >

@@ -30,6 +30,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -66,9 +67,15 @@ class MainActivity : AppCompatActivity() {
         microphone.result(it)
     }
 
+    private val saveLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        downloads.result(it.resultCode, it.data)
+    }
+    private val downloads: NativeDownloads by lazy { NativeDownloads(this) { saveLauncher.launch(it) } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         filePicker.restoreAwaitingResult(savedInstanceState?.getBoolean("file-picker-in-flight") ?: false)
+        downloads.restoreAwaitingResult(savedInstanceState?.getBoolean("downloadPickerPending") == true)
         microphone.restoreAwaitingResult(savedInstanceState?.getBoolean("microphone-in-flight") ?: false)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -276,6 +283,10 @@ class MainActivity : AppCompatActivity() {
             .encodedFragment(profile.token?.let { "token=${Uri.encode(it)}" }).build().toString()
         webView = view
         activeProfile = profile
+        downloads.install(view, profile.origin) { view === webView && view.parent != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty()) }
+        view.setDownloadListener { _, _, _, _, _ ->
+            Toast.makeText(this, R.string.download_update_required, Toast.LENGTH_LONG).show()
+        }
         view.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -335,6 +346,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (view === webView) {
                     filePicker.cancel()
+                    downloads.cancel()
                     cancelMicrophone()
                 }
             }
@@ -381,6 +393,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
         filePicker.cancel()
+        downloads.cancel()
         cancelMicrophone()
         if (microphoneAuthorized) {
             destroyConnection()
@@ -439,6 +452,7 @@ class MainActivity : AppCompatActivity() {
     private fun destroyConnection() {
         connectionAttempt++
         filePicker.cancel()
+        downloads.cancel()
         cancelMicrophone()
         microphoneAuthorized = false
         cancelDialog()
@@ -505,6 +519,7 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("microphone-in-flight", microphone.awaitingResult)
         outState.putBoolean("file-picker-in-flight", filePicker.awaitingResult)
+        outState.putBoolean("downloadPickerPending", downloads.awaitingResult)
         super.onSaveInstanceState(outState)
     }
 }

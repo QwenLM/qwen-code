@@ -3,7 +3,17 @@
     <permission
         android:name="com.qwen.mobileshell.test.READ_PICKER"
         android:protectionLevel="signature" />
+    <permission
+        android:name="com.qwen.mobileshell.test.WRITE_DOWNLOAD"
+        android:protectionLevel="signature" />
     <application>
+        <provider
+            android:name="com.qwen.mobileshell.DownloadsFixtureProvider"
+            android:authorities="com.qwen.mobileshell.test.downloads"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:writePermission="com.qwen.mobileshell.test.WRITE_DOWNLOAD"
+            android:process=":downloads" />
         <provider
             android:name="com.qwen.mobileshell.FilePickerFixtureProvider"
             android:authorities="com.qwen.mobileshell.test.picker"
