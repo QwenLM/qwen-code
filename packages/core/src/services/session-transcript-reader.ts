@@ -346,7 +346,16 @@ export function buildManagedSessionRestoreProjection(
     }
     turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
     apiHistory.add(record);
-    fileHistory.add(record);
+    try {
+      fileHistory.add(record);
+    } catch (error) {
+      // The sink does not admit these records today; belt-and-braces parity
+      // with the Legacy dispatch path, which skips rather than failing the
+      // whole restore.
+      debugLogger.warn(
+        `restore projection: skipping malformed file_history_snapshot: ${error}`,
+      );
+    }
     if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
     if (isGoalRecoveryCandidate(record)) {
       const normalized = normalizeGoalRecoveryRecord(record);
@@ -2731,6 +2740,9 @@ function managedNavigationTurns(
         turnId: record.uuid,
         replayPosition: position,
         kind: navigationKind,
+        ...(typeof record.daemonPromptId === 'string' && record.daemonPromptId
+          ? { promptId: record.daemonPromptId }
+          : {}),
       };
       turns.push(turn);
       if (navigationKind === 'realtime') {
@@ -2753,7 +2765,7 @@ function managedNavigationTurns(
       isTurnResultRecordPayload(record.systemPayload) &&
       currentPromptTurn
     ) {
-      currentPromptTurn.promptId = record.systemPayload.promptId;
+      currentPromptTurn.promptId ??= record.systemPayload.promptId;
       currentPromptTurn = undefined;
     }
   }

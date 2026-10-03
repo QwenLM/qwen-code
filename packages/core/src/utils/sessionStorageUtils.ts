@@ -824,7 +824,8 @@ export function isSinglePathSegment(value: string): boolean {
   );
 }
 
-const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const MANAGED_HEADER_SUBTYPE = 'managed_session_header_v1';
+const MANAGED_HEADER_MARKER = `"subtype":"${MANAGED_HEADER_SUBTYPE}"`;
 const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
 const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
 const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
@@ -889,16 +890,41 @@ function lastCommittedDomainLine(
  * A positive identification, unlike the execution-engine reader, which reports
  * `unavailable` for any transcript with a completeness diagnostic and so cannot
  * gate legacy-only operations without regressing legacy sessions.
+ *
+ * The header must parse as a record of its own subtype: literal marker text
+ * left in a legacy line by an interrupted or glued append does not make the
+ * transcript Managed.
  */
 export function isManagedSessionTranscriptSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): boolean {
-  return (
-    readTranscriptHeadSync(filePath, scratchBuffer)?.includes(
-      MANAGED_HEADER_MARKER,
-    ) === true
-  );
+  const head = readTranscriptHeadSync(filePath, scratchBuffer);
+  return head !== undefined && headCarriesManagedHeader(head, filePath);
+}
+
+/** True for a parsed record that is itself the Managed Session header. */
+function isManagedHeaderRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const { type, subtype } = record as Record<string, unknown>;
+  return type === 'system' && subtype === MANAGED_HEADER_SUBTYPE;
+}
+
+/**
+ * Some line of the head holds a real Managed header record. Lines are parsed
+ * the way the owner reader parses them — a `\u`-spelled marker counts, raw
+ * marker text inside an unparseable or glued line does not.
+ */
+function headCarriesManagedHeader(head: string, filePath: string): boolean {
+  return head
+    .split('\n')
+    .some(
+      (line) =>
+        (line.includes(MANAGED_HEADER_MARKER) || line.includes('\\u')) &&
+        parseLineTolerantWithIntegrity(line, filePath).records.some(
+          isManagedHeaderRecord,
+        ),
+    );
 }
 
 /**
@@ -938,7 +964,7 @@ export function readManagedExecutionEvidenceSync(
       : undefined;
   }
   return (
-    head.includes(MANAGED_HEADER_MARKER) ||
+    headCarriesManagedHeader(head, filePath) ||
     head
       .split('\n')
       .some(

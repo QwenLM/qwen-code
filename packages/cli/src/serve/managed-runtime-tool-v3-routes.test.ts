@@ -156,7 +156,23 @@ describe('Tool v3 local worker routes', () => {
     await harness.ensureRunnable();
     const turnResult = await resources.publish(
       'managed-turn-result',
-      Buffer.from('{"state":"completed"}'),
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'rec-turn-a',
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date(1).toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'prompt-a',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+      ),
     );
     await session.authority.commitTurnComplete(
       command('settleTurn', 'settle-a'),

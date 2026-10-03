@@ -7,6 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
@@ -1175,6 +1177,38 @@ export class LocalManagedSessionAuthority {
           'turn-complete checkpoint requires no pending Harness work.',
         );
       }
+      // Read back the published turn result before the event commits it: the
+      // cold projection fails the whole session on a body that is not a
+      // reader-facing record, so an invalid one must not reach the log.
+      const resultBody = await store
+        .read(request.turn.resultRef)
+        .catch((cause: unknown) => {
+          throw new ManagedSessionRecordError(
+            `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        });
+      let resultValue: unknown;
+      try {
+        resultValue = JSON.parse(resultBody.toString('utf8'));
+      } catch {
+        throw new ManagedSessionRecordError(
+          'turn result resource contains an invalid reader-facing record.',
+        );
+      }
+      const validated = validateTranscriptRecord(resultValue);
+      const candidate = validated.record as Partial<ChatRecord> | undefined;
+      if (
+        validated.record === undefined ||
+        validated.record.sessionId !== this.sessionKey.sessionId ||
+        typeof candidate?.cwd !== 'string' ||
+        typeof candidate?.version !== 'string' ||
+        typeof candidate?.timestamp !== 'string' ||
+        validated.diagnostics.length > 0
+      ) {
+        throw new ManagedSessionRecordError(
+          'turn result resource contains an invalid reader-facing record.',
+        );
+      }
       const stateRef = await store.publish('managed-checkpoint', state);
       const subject = {
         type: 'activation' as const,
@@ -1323,11 +1357,13 @@ export class LocalManagedSessionAuthority {
       const recordRef = await store.publish(
         `managed-${request.domain}`,
         Buffer.from(
+          // The envelope comes last so a content key can never overwrite the
+          // operationId/revision/previousRecordRef this method composes.
           JSON.stringify({
+            ...request.content,
             operationId: command.commandId,
             revision,
             previousRecordRef: previous?.recordRef ?? null,
-            ...request.content,
           }),
           'utf8',
         ),
@@ -2241,6 +2277,12 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
+    if (receipt === undefined) {
+      // Unreachable: install passes no in-queue hold.
+      throw new ManagedSessionRecordError(
+        'the activation install was not committed.',
+      );
+    }
     if (receipt.replayed) {
       throw activationAlreadyInstalledError(input.activationId);
     }
@@ -2271,7 +2313,7 @@ export class LocalManagedSessionAuthority {
       return undefined;
     }
     const renewalSeq = current.renewalSeq + 1;
-    await this.commitActivation({
+    const receipt = await this.commitActivation({
       activationId: current.activationId,
       epoch: current.epoch,
       workerId: current.workerId,
@@ -2283,8 +2325,17 @@ export class LocalManagedSessionAuthority {
       operation: 'renewActivation',
       subject: this.currentActivationSubject,
       renewalSeq,
+      // The check above ran before this renewal waited its turn, so a release
+      // or another renewal can have landed meanwhile; a same-epoch 'active'
+      // event here would revive the activation the release just ended.
+      hold: (live) =>
+        live !== undefined &&
+        live.phase === 'active' &&
+        live.activationId === current.activationId &&
+        live.epoch === current.epoch &&
+        live.renewalSeq === current.renewalSeq,
     });
-    return this.activation;
+    return receipt === undefined ? undefined : this.activation;
   }
 
   /**
@@ -2359,48 +2410,62 @@ export class LocalManagedSessionAuthority {
     readonly operation: string;
     readonly renewalSeq?: number;
     readonly subject?: ManagedSessionSubject;
-  }): Promise<ManagedSessionCommitReceipt> {
+    /**
+     * Re-checked inside the serial queue against the live activation before
+     * any append; a false verdict writes nothing and resolves undefined.
+     */
+    readonly hold?: (
+      current: ManagedSessionActivationState | undefined,
+    ) => boolean;
+  }): Promise<ManagedSessionCommitReceipt | undefined> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
     // event-id uniqueness would reject it as a duplicate of the install.
     const renewalSuffix =
       input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
-    return this.appendExecutionEvent(
-      {
-        operation: input.operation,
-        commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
-        sessionKey: this.sessionKey,
-        contentDigest: this.header.definitionRef.digest,
-      },
-      (sequence) => ({
-        v: MANAGED_SESSION_FORMAT_VERSION,
-        sequence,
-        eventId: `activation:${input.activationId}:${input.phase}${renewalSuffix}`,
-        sessionKey: this.sessionKey,
-        kind: 'activation.changed',
-        occurredAt: this.now(),
-        payload: {
-          activationId: input.activationId,
-          epoch: input.epoch,
-          workerId: input.workerId,
-          subject: input.subject ?? {
-            type: 'activation',
-            scopeId: input.activationId,
-            activationId: input.activationId,
-            epoch: input.epoch,
-          },
-          phase: input.phase,
-          leaseDurationMs: input.leaseDurationMs,
-          expiresAt: input.expiresAt,
-          installRef: input.installRef,
-          boundaryRef: input.boundaryRef,
-          ...(input.renewalSeq === undefined
-            ? {}
-            : { renewalSeq: input.renewalSeq }),
+    return this.runSerial(async () => {
+      if (input.hold !== undefined && !input.hold(this.activation)) {
+        return undefined;
+      }
+      return this.commit(
+        {
+          operation: input.operation,
+          commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
+          sessionKey: this.sessionKey,
+          contentDigest: this.header.definitionRef.digest,
         },
-      }),
-      { class: 'coordinator' },
-    );
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: this.committed + 1,
+            eventId: `activation:${input.activationId}:${input.phase}${renewalSuffix}`,
+            sessionKey: this.sessionKey,
+            kind: 'activation.changed',
+            occurredAt: this.now(),
+            payload: {
+              activationId: input.activationId,
+              epoch: input.epoch,
+              workerId: input.workerId,
+              subject: input.subject ?? {
+                type: 'activation',
+                scopeId: input.activationId,
+                activationId: input.activationId,
+                epoch: input.epoch,
+              },
+              phase: input.phase,
+              leaseDurationMs: input.leaseDurationMs,
+              expiresAt: input.expiresAt,
+              installRef: input.installRef,
+              boundaryRef: input.boundaryRef,
+              ...(input.renewalSeq === undefined
+                ? {}
+                : { renewalSeq: input.renewalSeq }),
+            },
+          },
+        ],
+        [{ class: 'coordinator' }],
+      );
+    });
   }
 
   /**

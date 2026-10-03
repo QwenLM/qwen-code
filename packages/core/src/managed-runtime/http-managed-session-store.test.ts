@@ -1375,6 +1375,139 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('commits a cancel.requested whose free-form target names the five ref fields', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    try {
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'requestCancel',
+          commandId: 'cancel-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'd'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'cancel:req-1',
+          sessionKey: SESSION_KEY,
+          kind: 'cancel.requested',
+          occurredAt: 1,
+          payload: {
+            requestId: 'req-1',
+            target: {
+              resourceId: 'not-a-ref',
+              kind: 'not-a-ref-kind',
+              schemaVersion: 1,
+              byteLength: 2,
+              digest: 'not-a-digest',
+            },
+            reason: 'user asked',
+            requestedBy: 'test',
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      const commit = server.commits.at(-1);
+      expect(commit).toMatchObject({ operation: 'requestCancel' });
+      expect(commit?.['resources']).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("rejects a restore head regressed below the writer's committed position", async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    try {
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      // The honest head reads fine, then the server forgets a commit.
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides['journalRevision'] = 0;
+      server.headOverrides['committedSequence'] = 0;
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      // The grant is not re-baselined onto a regressed head.
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      expect(server.transactionReads).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
@@ -1396,6 +1529,7 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
+  readonly headOverrides: Record<string, unknown> = {};
   transactionReads = 0;
   sealCount = 0;
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
@@ -1448,6 +1582,7 @@ class FakeManagedSessionStore {
         ...(this.recoveryDetailCode === null
           ? {}
           : { recoveryDetailCode: this.recoveryDetailCode }),
+        ...this.headOverrides,
       });
     }
     if (suffix === '/recovery:block') {

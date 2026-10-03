@@ -225,6 +225,53 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(recovered.get(item)?.outcome).toBe('completed');
   });
 
+  it('keeps the recovery wake armed when the pump exits memory-blocked', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const original = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const item = activation('a1');
+    await original.enqueue(item, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    await original.claim(item, 'dead-worker', 10);
+
+    now = 5;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'replacement-worker',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (activation) => {
+        handled.push(activation.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.start();
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // The idle exit armed the wake for the dead worker's lease expiring at
+    // t=10; a memory-blocked pump must not drop it.
+    now = 9;
+    await scheduler.submit(activation('a2', { sessionId: 'session-a2' }));
+    const before = consulted();
+
+    now = 10;
+    await vi.advanceTimersByTimeAsync(1);
+    await waitUntil(() => consulted() > before);
+
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1') && handled.includes('a2'));
+  });
+
   it('renews the lease while a handler remains active', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;

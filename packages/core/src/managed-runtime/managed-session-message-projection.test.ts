@@ -24,6 +24,7 @@ import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import {
   managedSessionEventsDigest,
+  ManagedSessionRecordError,
   parseManagedSessionEvent,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -304,13 +305,19 @@ describe('managed session message projection', () => {
     const checkpointPublishing = new Promise<void>((resolve) => {
       checkpointPublishStarted = resolve;
     });
+    let boundaryPublished!: () => void;
+    const boundaryPublishing = new Promise<void>((resolve) => {
+      boundaryPublished = resolve;
+    });
     vi.spyOn(harness.store, 'publish').mockImplementation(
       async (kind, body) => {
         if (kind === 'managed-checkpoint') {
           checkpointPublishStarted();
           await checkpointReleased;
         }
-        return publish(kind, body);
+        const result = await publish(kind, body);
+        if (kind === 'managed-activation-boundary') boundaryPublished();
+        return result;
       },
     );
     const appendEvent = vi.spyOn(harness.authority, 'appendExecutionEvent');
@@ -329,7 +336,12 @@ describe('managed session message projection', () => {
       );
       await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledOnce());
       const release = harness.authority.releaseActivation();
-      await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledTimes(2));
+      // The release queues its commit synchronously once its boundary body is
+      // published; a macrotask turn drains that microtask chain.
+      await boundaryPublishing;
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
 
       releaseCheckpoint();
       await expect(
@@ -410,6 +422,48 @@ describe('managed session message projection', () => {
         sessionKey,
       }),
     ).rejects.toThrow(/invalid reader-facing record/);
+  });
+
+  it('rejects a turn.settled with a null resultRef as a typed record error', async () => {
+    const harness = await createHarness();
+    try {
+      await harness.authority.appendExecutionEvent(
+        command('settleTurn', 'null-result-ref'),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'turn:null-result',
+          sessionKey,
+          kind: 'turn.settled',
+          occurredAt: 1,
+          subject: {
+            type: 'activation',
+            scopeId: 'act-1',
+            activationId: 'act-1',
+            epoch: 1,
+          },
+          payload: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: null,
+            resultRef: null,
+            usageRef: null,
+            pendingOwnersRef: null,
+          },
+        }),
+        HOLDS,
+      );
+    } finally {
+      await harness.close();
+    }
+
+    const read = readManagedSessionRecords({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
+      sessionKey,
+    });
+    await expect(read).rejects.toBeInstanceOf(ManagedSessionRecordError);
+    await expect(read).rejects.toThrow(/turn\.settled event turn:null-result/);
   });
 
   it('projects the latest durable session title for cold restore', async () => {

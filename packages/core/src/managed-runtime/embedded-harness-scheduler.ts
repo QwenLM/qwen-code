@@ -196,6 +196,10 @@ export class EmbeddedHarnessScheduler {
       }
       if (!this.options.hasMemoryHeadroom()) {
         this.memoryBlocked = true;
+        // Entries of the pump cleared the armed recovery wake above, and no
+        // execute() completion is coming to re-arm it (zero or idle active
+        // runs) — reclaimable leases would otherwise wait forever.
+        this.scheduleRecoveryWake();
         return;
       }
       this.memoryBlocked = false;
@@ -342,10 +346,10 @@ export class EmbeddedHarnessScheduler {
           : Math.min(expiry, activation.lease!.expiresAt);
     }
     if (expiry === undefined) return;
-    const delay = Math.min(
-      Math.max(0, expiry - this.store.getCurrentTime()),
-      2_147_483_647,
-    );
+    const remaining = expiry - this.store.getCurrentTime();
+    // An already-expired lease is reclaimable now, but a zero delay would
+    // spin the pump while the worker stays memory-blocked — poll instead.
+    const delay = Math.min(remaining <= 0 ? 1_000 : remaining, 2_147_483_647);
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
       void this.requestPump().catch(() => undefined);

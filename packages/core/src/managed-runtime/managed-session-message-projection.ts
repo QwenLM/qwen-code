@@ -7,6 +7,7 @@
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import {
+  assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
@@ -134,7 +135,11 @@ export class ManagedSessionMessageProjection {
           records.push(branch);
         } else if (event.kind === 'message.committed') {
           records.push(
-            await readRecordBody(this.resources, event.payload['contentRef']),
+            await readRecordBody(
+              this.resources,
+              event.payload['contentRef'],
+              `message.committed event ${event.eventId} contentRef`,
+            ),
           );
         }
       }
@@ -146,10 +151,9 @@ export class ManagedSessionMessageProjection {
 async function readRecordBody(
   resources: ManagedSessionResourceStore,
   ref: ManagedSessionEvent['payload'][string],
+  at: string,
 ): Promise<ChatRecord> {
-  const body = await resources.read(
-    ref as unknown as Parameters<ManagedSessionResourceStore['read']>[0],
-  );
+  const body = await resources.read(assertManagedSessionDurableRef(ref, at));
   return JSON.parse(body.toString('utf8')) as ChatRecord;
 }
 
@@ -251,7 +255,11 @@ export async function projectManagedSessionRecords(options: {
     }
     const carried = readerFacingBody(event);
     if (carried === undefined) continue;
-    const body = await readRecordBody(resources, carried.ref);
+    const body = await readRecordBody(
+      resources,
+      carried.ref,
+      `${event.kind} event ${event.eventId} ref`,
+    );
     records.push(
       requireProjectedRecord(
         carried.inDomainEnvelope

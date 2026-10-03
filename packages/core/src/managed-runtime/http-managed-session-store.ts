@@ -14,6 +14,7 @@ import {
   ManagedSessionRecordError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  managedSessionEventRefs,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -929,6 +930,17 @@ class ManagedSessionStoreHttpClient {
     ) {
       throw corrupt('restore head is not readable by this v1 writer.');
     }
+    // A head below this writer's committed position is a server-side
+    // regression; re-baselining onto it would silently forget our own
+    // commits, so only an equal-or-ahead head may replace the grant.
+    if (
+      head.journalRevision < grant.journalRevision ||
+      head.committedSequence < grant.committedSequence
+    ) {
+      throw corrupt(
+        `restore head regressed below this writer's committed position (head ${head.journalRevision}/${head.committedSequence} < grant ${grant.journalRevision}/${grant.committedSequence}).`,
+      );
+    }
   }
 
   private requireGrant(): WriterGrant {
@@ -1053,7 +1065,13 @@ export function describeTransaction(
       commitDigest: null,
       activationEpoch: currentActivationEpoch,
       latestCheckpointResourceId: null,
-      refs: collectRefs(records),
+      refs: dedupeRefs([
+        header.definitionRef,
+        header.rootSnapshotRef,
+        ...(header.baseTranscriptProof === undefined
+          ? []
+          : [header.baseTranscriptProof]),
+      ]),
     };
   }
   if (records.length < 2) {
@@ -1125,8 +1143,22 @@ export function describeTransaction(
     ),
     activationEpoch,
     latestCheckpointResourceId,
-    refs: collectRefs(records),
+    refs: dedupeRefs(
+      eventRecords.flatMap((event) => managedSessionEventRefs(event)),
+    ),
   };
+}
+
+function dedupeRefs(
+  found: Iterable<ManagedSessionDurableRef>,
+): ManagedSessionDurableRef[] {
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  for (const ref of found) {
+    const existing = refs.get(ref.resourceId);
+    if (existing !== undefined) requireSameRef(existing, ref);
+    else refs.set(ref.resourceId, ref);
+  }
+  return [...refs.values()];
 }
 
 function collectRefs(records: readonly unknown[]): ManagedSessionDurableRef[] {

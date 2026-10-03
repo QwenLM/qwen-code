@@ -80,6 +80,23 @@ describe('FileManagedActivationStore', () => {
     }
   });
 
+  it('persists the call-time descriptor when the caller mutates its input before the write drains', async () => {
+    const store = await openStore();
+    const input = activation('a1');
+    const pending = store.enqueue(input, limits);
+    (input as { payloadRef: string }).payloadRef = 'event:a2';
+    await expect(pending).resolves.toMatchObject({
+      created: true,
+      activation: { descriptor: { payloadRef: 'event:a1' } },
+    });
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      descriptor: { payloadRef: 'event:a1' },
+    });
+    expect(await readFile(filePath, 'utf8')).not.toContain('event:a2');
+  });
+
   it('truncates a torn tail before appending the next valid record', async () => {
     const store = await openStore();
     await store.enqueue(activation('a1'), limits);

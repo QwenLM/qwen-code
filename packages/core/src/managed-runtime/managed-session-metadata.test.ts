@@ -176,6 +176,41 @@ describe('managed session metadata', () => {
     expect(body.previousRecordRef?.resourceId).toBe(refs[0].resourceId);
   });
 
+  it('keeps the authority-composed envelope over colliding content keys', async () => {
+    const harness = await createHarness();
+    let recordRef!: ManagedSessionDurableRef;
+    await withAuthority(harness, async (authority) => {
+      recordRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-collide'),
+          {
+            domain: 'session_metadata',
+            content: {
+              title: 'x',
+              revision: 999,
+              previousRecordRef: 'bogus',
+              operationId: 'caller-chosen',
+            },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    const body = JSON.parse(
+      (await harness.store.read(recordRef)).toString('utf8'),
+    ) as {
+      operationId: string;
+      revision: number;
+      previousRecordRef: unknown;
+      title: string;
+    };
+    expect(body.operationId).toBe('cmd-rename-collide');
+    expect(body.revision).toBe(1);
+    expect(body.previousRecordRef).toBeNull();
+    expect(body.title).toBe('x');
+  });
+
   it.each([
     ['session_metadata', 'missing'],
     ['session_metadata', 'incomplete'],
