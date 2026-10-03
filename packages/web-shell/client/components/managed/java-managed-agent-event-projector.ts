@@ -54,7 +54,11 @@ export function projectJavaAgentItem(
       );
   }
   if (item.type === 'tool_call') {
-    const type = toolEventType(item.status);
+    // The store canonicalizes unknown statuses to in_progress while keeping
+    // the raw value in attributes.status: derive pending vs started from
+    // the raw hint so an approval-gated tool replays as requested, not
+    // already running.
+    const type = toolEventType(item.attributes?.['status'] ?? item.status);
     return [
       projectedItemEvent(
         item,

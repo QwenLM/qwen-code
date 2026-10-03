@@ -114,6 +114,46 @@ describe('java managed agent event projector', () => {
       })[0]?.type,
     ).toBe('tool_requested');
   });
+
+  it('replays a store-canonicalized pending tool as requested, not started', () => {
+    // The store canonicalizes any unknown status to in_progress but keeps
+    // the raw value in attributes.status; an approval-gated tool must not
+    // come back as already running after a reload.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-1',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'in_progress',
+        content: [],
+        attributes: { status: 'pending' },
+        firstSequence: 1,
+        lastSequence: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      })[0]?.type,
+    ).toBe('tool_requested');
+    // A genuinely running tool (no raw hint) still comes back as started.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-2',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'in_progress',
+        content: [],
+        attributes: {},
+        firstSequence: 2,
+        lastSequence: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      })[0]?.type,
+    ).toBe('tool_started');
+  });
+
   it('maps canonical events without exposing Java event names', () => {
     expect(
       projectJavaAgentEvent({

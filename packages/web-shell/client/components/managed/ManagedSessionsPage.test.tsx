@@ -934,6 +934,56 @@ describe('ManagedSessionsPage', () => {
     expect(onSelect).toHaveBeenLastCalledWith('created');
   });
 
+  it('discards a permanently failing pending prompt and restores the draft', async () => {
+    mocks.client.createSession.mockRejectedValue(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+    const textarea = () => container.querySelector('textarea');
+    expect(textarea()?.disabled).toBe(true);
+
+    // Without an escape the composer stays wedged on the retry loop forever.
+    await click('Discard this request');
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(textarea()?.disabled).toBe(false);
+    expect(textarea()?.value).toBe('Do the work');
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+
+    // The persisted pending prompt is gone too: a remount does not return it.
+    await render();
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+  });
+
+  it('does not refetch the list when a dropped workspace path changes', async () => {
+    await render('s1');
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ManagedSessionsPage
+            sessionId="s1"
+            onSelectSession={onSelect}
+            workspaceCwd="/other"
+            managedAgentProvider={provider}
+          />
+        </I18nProvider>,
+      );
+      await flush();
+    });
+
+    // The provider drops workspaceCwd from the request, so the new folder
+    // changes nothing: the fetched page (and its pagination) must survive.
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
+  });
+
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {

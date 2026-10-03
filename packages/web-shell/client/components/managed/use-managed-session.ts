@@ -216,8 +216,11 @@ export function useManagedSession(
                 );
             }
           } else if (!abort.signal.aborted)
+            // Every success path must clear a previous transient failure,
+            // or an idle session keeps the stale alert forever.
             update({
               summary: await provider.getSession(sessionId, opts),
+              error: undefined,
             });
         } catch (error) {
           fail(error);
@@ -230,7 +233,10 @@ export function useManagedSession(
         await pause(abort.signal, 3000);
         if (abort.signal.aborted) return;
         try {
-          update({ summary: await provider.getSession(sessionId, opts) });
+          update({
+            summary: await provider.getSession(sessionId, opts),
+            error: undefined,
+          });
         } catch (error) {
           fail(error);
         }

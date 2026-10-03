@@ -124,6 +124,7 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.discard': 'Discard this request',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
@@ -4340,6 +4341,7 @@ const ZH: Messages = {
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.discard': '丢弃本次请求',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed':

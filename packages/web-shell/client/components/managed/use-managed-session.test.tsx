@@ -2250,4 +2250,47 @@ describe('useManagedSession', () => {
     expect(streamBodies).toHaveLength(1);
     expect(streamBodies[0]?.['afterSequence']).toBe(2);
   });
+
+  it(
+    'clears a transient error on the next successful poll',
+    {
+      timeout: 30000,
+    },
+    async () => {
+      let summaryCalls = 0;
+      const provider = {
+        getSession: vi.fn(async () => {
+          summaryCalls += 1;
+          if (summaryCalls === 2) throw new Error('boom-blip');
+          return { sessionId: 'session-1' };
+        }),
+        getTranscript: vi
+          .fn<ManagedAgentProvider['getTranscript']>()
+          .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
+        async *subscribeEvents() {
+          await new Promise(() => {});
+          yield* [];
+        },
+      } as unknown as ManagedAgentProvider;
+      let latest: ReturnType<typeof useManagedSession> | undefined;
+      function Probe() {
+        latest = useManagedSession(provider, 'client-1', 'session-1');
+        return null;
+      }
+      const container = document.createElement('div');
+      root = createRoot(container);
+      act(() => root!.render(<Probe />));
+
+      // Snapshot summary (call 1) is fine, the first poll (call 2) blips.
+      await vi.waitFor(() => expect(latest?.error).toBe('boom-blip'), {
+        timeout: 10000,
+      });
+      // The next poll (call 3) succeeds: the fresh summary must not carry a
+      // stale alert beside it.
+      await vi.waitFor(() => expect(latest?.error).toBeUndefined(), {
+        timeout: 10000,
+      });
+      expect(latest?.summary).toEqual({ sessionId: 'session-1' });
+    },
+  );
 });

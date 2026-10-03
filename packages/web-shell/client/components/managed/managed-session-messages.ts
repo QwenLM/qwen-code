@@ -19,6 +19,24 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+// Only these Turn-bearing types may settle a Turn boundary. Control-plane
+// re-broadcasts (runtime_*, stream_gap, cancelling) must never settle: a
+// stale-Turn runtime_failed landing mid-stream would otherwise split one
+// answer into two bubbles, the first frozen mid-stream.
+const BOUNDARY_SETTLE_TYPES = new Set([
+  'accepted',
+  'assistant_delta',
+  'assistant_thought',
+  'agent_started',
+  'tool_requested',
+  'tool_started',
+  'tool_completed',
+  'tool_result_updated',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
 export function managedEventsToMessages(
   events: readonly ManagedAgentSessionEvent[],
   truncatedLabel: string,
@@ -42,6 +60,7 @@ export function managedEventsToMessages(
     // they must not settle or split the Turn being streamed.
     if (event.type === 'action_updated') continue;
     if (
+      BOUNDARY_SETTLE_TYPES.has(event.type) &&
       event.type !== 'tool_result_updated' &&
       event.turnId !== currentTurnId
     ) {
@@ -215,7 +234,12 @@ export function managedEventsToMessages(
     } else if (
       event.type === 'completed' ||
       event.type === 'failed' ||
-      event.type === 'cancelled'
+      event.type === 'cancelled' ||
+      // A runtime failure belongs to exactly one Turn: only for the Turn
+      // being streamed does it settle — otherwise the tail and pending
+      // tools render forever, while a stale-Turn failure must not disturb
+      // the live one.
+      (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
       settle();
       for (const tool of tools.values()) {
