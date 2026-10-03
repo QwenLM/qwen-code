@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
   checkHostedGlobPattern,
@@ -1312,6 +1312,14 @@ async function realpathDeepestExisting(candidate: string): Promise<string> {
       return path.join(await realpath(resolved), ...tail);
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      // A dangling symlink is not an absent path: writing through it
+      // creates its target, so follow the link instead of keeping its
+      // lexical name. A cycle never gets here — realpath reports ELOOP.
+      const link = await readlink(resolved).catch(() => undefined);
+      if (link !== undefined) {
+        resolved = path.resolve(path.dirname(resolved), link);
+        continue;
+      }
       const parent = path.dirname(resolved);
       if (parent === resolved) return path.join(resolved, ...tail);
       tail.unshift(path.basename(resolved));
