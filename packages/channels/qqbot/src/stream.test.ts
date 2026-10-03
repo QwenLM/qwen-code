@@ -642,11 +642,11 @@ describe('idle-flush timer', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
     onPromptStart(ch, 'test-chat', 'sess-A', 'msg-A');
-    // Establish the chat-level entry pointing at msg-A FIRST, so the
-    // overwrite below actually enters the guard branch
-    // (oldEntry.msgId !== msgId) and exercises the
-    // isMsgIdAnchoredBySession check inside setReplyMsgId — without this,
-    // oldEntry is undefined and the guard never runs.
+    // Establish the chat-level entry pointing at msg-A FIRST, then overwrite
+    // it with msg-B while A's stream is live. setReplyMsgId itself never drops
+    // the previous msgId's counter (see its NOTE); this pins that the
+    // overwrite is not what reclaims it — the counter survives because the
+    // session anchor still names msg-A.
     setReplyMsgId(ch, 'test-chat', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'part1 ', 'sess-A');
 
