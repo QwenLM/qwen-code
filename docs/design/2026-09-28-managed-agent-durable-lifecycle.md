@@ -196,8 +196,9 @@ default backoff the claims span about five minutes when attempts fail fast (a
 generation error rejects immediately, and a blocked journal answers every
 attempt with `503` at once) and about twice that when each attempt consumes
 the full Harness request timeout. When the budget is spent, the operation
-still releases the Runtime binding best-effort — through the workspace close
-pair for a bound Session — and terminates `failed` with the settle's failure
+still releases the Runtime binding best-effort — along settle()'s routing,
+which for a delete of an already closed bound Session is no call at all —
+and terminates `failed` with the settle's failure
 code, so a Session whose settle can never succeed still reaches a terminal
 state instead of looping forever: the Session keeps its pending status, no
 `session.closed` is appended, and no completion is certified. The one
