@@ -1553,10 +1553,15 @@ export const ISSUE_TITLE_PREFIX = '/resolve is failing:';
 // and the tick would then file a fresh duplicate every six hours with no
 // rate ceiling. The marker-in-body rule cannot close that: the query's own
 // label filter already excluded the issue. Fall back to a title search, one
-// extra call only on ticks that found nothing, adopting with the same trust
-// basis as the primary path (a STATE_AUTHORS author) plus the exact title
-// shape this watch creates — matched client-side, because GitHub search
-// tokenizes punctuation away. State keeps coming only from the watch's own
+// extra call only on ticks that found nothing. The trust basis stays the
+// primary path's minus the label alone: a STATE_AUTHORS author, the marker
+// still in the body (discovery keeps matching an edited body, as there — what
+// is dropped on an edit is only the state it feeds), and the exact title
+// shape this watch creates, matched client-side because GitHub search
+// tokenizes punctuation away. Requiring the marker is what keeps the
+// fallback from widening the surface a plant can occupy: without it, one
+// bot-authored title would be enough to adopt a decoy and silence the
+// filing of a real tracker. State keeps coming only from the watch's own
 // unedited comments, so an adopted issue feeds this tick exactly like a
 // labelled one. The `closed` record borrow runs no fallback: losing it only
 // drops a conservative optimisation, never files anything twice.
@@ -1573,18 +1578,19 @@ function findOpenIssueByTitle(gh, repo) {
       'per_page=100',
       '--paginate',
       '--jq',
-      '.items[] | [.number, .user.login, .created_at, (.title // "" | @base64)] | @tsv',
+      '.items[] | [.number, .user.login, .created_at, (.title // "" | @base64), (.body // "" | @base64)] | @tsv',
     ]),
   );
   // Search ranks by best match, not by time: sort so the newest candidate is
   // adopted, mirroring the primary path's created-desc read.
   rows.sort((a, b) => b[2].localeCompare(a[2]) || Number(b[0]) - Number(a[0]));
-  for (const [number, author, created_at, title] of rows) {
-    // The title is free text, base64'd like every free-text field: a tab in
-    // it would otherwise split the column the prefix check reads.
+  for (const [number, author, created_at, title, body] of rows) {
+    // Title and body are free text, base64'd like every free-text field: a
+    // tab in either would otherwise split the column the checks read.
     if (
       !STATE_AUTHORS.has(author) ||
-      !b64(title).startsWith(ISSUE_TITLE_PREFIX)
+      !b64(title).startsWith(ISSUE_TITLE_PREFIX) ||
+      !b64(body).includes(HEALTH_MARKER)
     ) {
       continue;
     }

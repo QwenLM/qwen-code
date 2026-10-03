@@ -4063,7 +4063,8 @@ describe('resolve-health: the tracking issue feed', () => {
     // Removing `scope/ci-cd` from the tracker is one click of housekeeping,
     // and without a fallback every 6-hour tick then files a fresh duplicate
     // with no rate ceiling. The label lookup therefore falls back to a title
-    // search — same trust basis (a STATE_AUTHORS author), plus the exact
+    // search carrying the primary path's trust basis minus the label alone —
+    // a STATE_AUTHORS author, the marker still in the body, and the exact
     // title prefix the create uses — instead of minting a new tracker.
     const botState =
       '<!-- qwen-resolve-health-state {"streak":1,"unanswered":[],"latest":7} -->';
@@ -4081,25 +4082,36 @@ describe('resolve-health: the tracking issue feed', () => {
         assert.match(q, /is:issue/);
         assert.match(q, /state:open/);
         assert.match(q, /in:title/);
+        const title = (n) =>
+          b64(
+            ISSUE_TITLE_PREFIX +
+              ` ${n} consecutive failures, 0 unanswered requests`,
+          );
+        const body = b64(`${HEALTH_MARKER}\nbody`);
         return [
           // Newest first would pick the planted stranger's title-copy; the
           // author check drops it. Ordered before the genuine ones because
           // search ranks by best match, not by time.
+          ['48', 'stranger', '2026-08-22T00:00:00Z', title(9), body].join('\t'),
+          // Same author, right title, but no marker in the body: the decoy
+          // a bot-token workflow could file without the label. Adopting it
+          // would silence the filing of a real tracker — the marker keeps
+          // the fallback's trust surface at the primary path's, minus the
+          // label alone.
           [
-            '48',
-            'stranger',
-            '2026-08-22T00:00:00Z',
-            b64(ISSUE_TITLE_PREFIX + ' x'),
+            '45',
+            'github-actions[bot]',
+            '2026-08-21T12:00:00Z',
+            title(9),
+            b64('a decoy'),
           ].join('\t'),
           // An older, genuine tracker.
           [
             '44',
             'github-actions[bot]',
             '2026-08-20T00:00:00Z',
-            b64(
-              ISSUE_TITLE_PREFIX +
-                ' 3 consecutive failures, 0 unanswered requests',
-            ),
+            title(3),
+            body,
           ].join('\t'),
           // Same author, wrong title — not the tracker.
           [
@@ -4107,6 +4119,7 @@ describe('resolve-health: the tracking issue feed', () => {
             'github-actions[bot]',
             '2026-08-21T00:00:00Z',
             b64('CI is red again'),
+            body,
           ].join('\t'),
           '',
         ].join('\n');
@@ -4142,13 +4155,15 @@ describe('resolve-health: the tracking issue feed', () => {
     assert.equal(calls[0][3], 'repos/QwenLM/qwen-code/issues');
     assert.equal(calls[1][3], 'search/issues');
     // The sort is client-side and time-based on whatever search returns:
-    // the stranger's row is the newest candidate and still loses.
+    // the stranger's row is the newest candidate and still loses, and so
+    // does the bot-authored decoy newer than the genuine tracker.
     const jq = calls[1][calls[1].indexOf('--jq') + 1];
     assert.match(jq, /\.items\[\]/);
     assert.match(jq, /\.title/);
-    // A tab in a title would split the TSV the prefix check reads raw, so
-    // the title travels base64'd like every other free-text field.
+    // Title and body are free text, base64'd like every other free-text
+    // field: a tab in either would split the TSV the checks read raw.
     assert.match(jq, /title \/\/ "" \| @base64/);
+    assert.match(jq, /body \/\/ "" \| @base64/);
   });
 
   it('never lets an edited body seed a barrier the close gate trusts', () => {
@@ -4448,7 +4463,8 @@ describe('resolve-health: end to end against a recording gh', () => {
   // in the shape assess() reads, `issues` the rows the open-issue lookup
   // returns, `issueComments` the tracking issue's own comment feed (four
   // columns, as findOpenIssue's jq emits them), `titled` the rows the title
-  // search fallback finds ([number, title, author?, created?]). Used where
+  // search fallback finds ([number, title, author?, created?, body?] — the
+  // body defaults to the marker, as a real tracker's does). Used where
   // the shared fixture's streak (3, below the default threshold) cannot tell
   // a fallback from a bug.
   function feedGh(calls, prs, issues = [], issueComments = {}, titled = []) {
@@ -4469,7 +4485,9 @@ describe('resolve-health: end to end against a recording gh', () => {
                 title,
                 author = 'github-actions[bot]',
                 created = '2026-08-20T00:00:00Z',
-              ]) => `${n}\t${author}\t${created}\t${b64(title)}\n`,
+                body = HEALTH_MARKER,
+              ]) =>
+                `${n}\t${author}\t${created}\t${b64(title)}\t${b64(body)}\n`,
             )
             .join('');
         }
@@ -4553,7 +4571,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           return (store.titled ?? [])
             .map(
               (i) =>
-                `${i.number}\t${i.author ?? 'github-actions[bot]'}\t${i.created_at}\t${b64(i.title)}\n`,
+                `${i.number}\t${i.author ?? 'github-actions[bot]'}\t${i.created_at}\t${b64(i.title)}\t${b64(i.body ?? HEALTH_MARKER)}\n`,
             )
             .join('');
         }
