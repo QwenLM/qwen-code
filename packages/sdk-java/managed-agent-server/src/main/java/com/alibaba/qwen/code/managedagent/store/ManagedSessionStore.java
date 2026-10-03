@@ -144,7 +144,7 @@ public class ManagedSessionStore {
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
         requireWriter(head, writer, generation, token, now, true);
-        return new PublicationWriter(now.getTime(), head.writerLeaseUntil().getTime(),
+        return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
                 head.latestCheckpointResourceId(), head.recoveryStatus());
     }
@@ -187,7 +187,7 @@ public class ManagedSessionStore {
                     initialLeaseUntil.getNanos() / 1_000,
                     wholeSeconds(initialLeaseUntil),
                     tokenHash, createdAt, createdAt);
-            return new WriterGrant(1, initialLeaseUntil.getTime(), 0, 0,
+            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
@@ -236,7 +236,7 @@ public class ManagedSessionStore {
                 generation, request.writerId(), leaseUntil.getNanos() / 1_000,
                 wholeSeconds(leaseUntil),
                 tokenHash, now, tenantId, sessionId);
-        return new WriterGrant(generation, leaseUntil.getTime(),
+        return new WriterGrant(generation, databaseEpochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
@@ -1028,11 +1028,18 @@ public class ManagedSessionStore {
         return now;
     }
 
-    private static WriterGrant grant(HeadRow head, Timestamp leaseUntil,
+    private WriterGrant grant(HeadRow head, Timestamp leaseUntil,
             boolean replayed) {
-        return new WriterGrant(head.writerGeneration(), leaseUntil.getTime(),
+        return new WriterGrant(head.writerGeneration(), databaseEpochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
+    }
+
+    private long databaseEpochMillis(Timestamp timestamp) {
+        // DATETIME uses the database zone; keep fractions outside MariaDB's bind.
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(CAST(? AS DATETIME(6)))",
+                Long.class, wholeSeconds(timestamp)) * 1_000
+                + timestamp.getNanos() / 1_000_000;
     }
 
     private static Timestamp plusMillis(Timestamp timestamp, long millis) {
