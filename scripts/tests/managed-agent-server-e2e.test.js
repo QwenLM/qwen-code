@@ -184,6 +184,23 @@ describe('managed-agent-server e2e runner', () => {
       source.match(/'--managed-runtime-broker-url'/g),
       'both Harness launch sites must pass the Runtime Broker flags',
     ).toHaveLength(2);
+    // The mount argument is pushed once into the springArguments both Spring
+    // launch sites share; re-gating it would fail validateWorkspaceFiles at
+    // startup in every non-workspaceTurns mode while CI stayed green.
+    expect(
+      source.match(/workspace-mounts\[0\]\.root=/g),
+      'the shared Spring arguments must configure the Workspace mount',
+    ).toHaveLength(1);
+    expect(
+      source.match(
+        /INSERT INTO qwen_managed_agent\.managed_workspace_registry/g,
+      ),
+      'the Workspace registry row must be seeded for every mode',
+    ).toHaveLength(1);
+    expect(
+      source.match(/INSERT INTO qwen_managed_agent\.managed_workspace_access/g),
+      'the Workspace access grant must be seeded for every mode',
+    ).toHaveLength(1);
   });
 
   // The README currently names no script, so only a fixture can pin the

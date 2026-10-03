@@ -100,7 +100,9 @@ takeover is implemented for contract completeness but has no E2E mode.
   plus the trusted-actor header on both Spring owners. The physical side effect
   is a fixed `write_file`; the exactly-once assertions ride the durable
   execution row, dispatch generation and model-request counts, not file bytes.
-  `--session-failover` stays unbound and unchanged.
+  `--session-failover` still creates an unbound Session, but this admission
+  wiring is no longer mode-gated: every mode's owners carry it (#13258), so
+  its configuration matches the other modes.
 - **Both modes join the `hosted-harness-mysql` job**, which installs the MySQL
   server binaries the runner needs for its private `mysqld`.
 
