@@ -262,6 +262,12 @@ class ManagedRuntimeProviderWorker {
     identity: ManagedRuntimeProviderSession,
     operation: ManagedRuntimeProviderOperation,
   ): Promise<unknown> {
+    if (operation.kind === 'raw-file-history')
+      return this.executor.controlFileHistory(
+        identity.harnessSessionId,
+        identity.runtimeSessionId,
+        operation,
+      );
     let session = this.lookup(identity);
     if (operation.kind === 'release') {
       if (session?.closed) return true;

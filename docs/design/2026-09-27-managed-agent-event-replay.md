@@ -84,8 +84,9 @@ correct `cursor_expired` or resync.
 - The WebShell transcript states what it already returned: without a cursor, a
   Session with a Snapshot gets all of its Items, the events up to the Snapshot
   other than `turn.accepted`, `item.output_text.delta`,
-  `item.reasoning.delta` and `item.tool_call.updated`, which the Items already
-  hold, and every later event;
+  `item.reasoning.delta`, `item.tool_call.updated` and
+  `item.tool_result.updated`, which the Items already hold, and every later
+  event;
   `limit` bounds the event pages otherwise.
 - `PublicEvent` and `WebShellEvent` state that events replay with the versions
   and identity they were accepted with, except after a `stream.reconciled`
@@ -111,7 +112,7 @@ Part that an event changes:
 | `turn.accepted`                                               | `data.itemId`, else `item_<turn>_input`                                                      | none; the event fills several Parts                                                                                                    |
 | `item.output_text.delta` and `item.reasoning.delta` with text | `data.itemId`, else `item_<turn>_assistant`                                                  | the Part of the event right before it, when that event is a delta of the same type and Item; otherwise `part_<turn>_<type>_<sequence>` |
 | a text delta with empty text                                  | none                                                                                         | none; the projection skips it                                                                                                          |
-| `item.tool_call.updated`                                      | `data.itemId`, else derived from the tool call id, or from the turn and sequence without one | none                                                                                                                                   |
+| `item.tool_call.updated` and `item.tool_result.updated`       | `data.itemId`, else derived from the tool call id, or from the turn and sequence without one | none                                                                                                                                   |
 | any other event                                               | none                                                                                         | none                                                                                                                                   |
 
 This is the rule the materializer already applies when it builds Items, and

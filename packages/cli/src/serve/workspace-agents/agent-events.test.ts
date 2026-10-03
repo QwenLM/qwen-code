@@ -8,7 +8,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { getThreadsDir } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import {
+  enrollAgentHost,
+  getThreadsDir,
+  heartbeatAgentHost,
+  issueAgentHostEnrollment,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
   publishAgentEvent,
   subscribeAgentEvents,
@@ -42,7 +47,38 @@ it('announces writes to a thread file once, naming the thread', async () => {
         expect(events).toContainEqual({ type: 'changed', threadId: 'th_1' }),
       { timeout: 3_000 },
     );
-    expect(events).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) => event.type === 'changed' && event.threadId === 'th_1',
+      ),
+    ).toEqual([{ type: 'changed', threadId: 'th_1' }]);
+  } finally {
+    stop();
+  }
+});
+
+it('announces a runtime coming online, not each of its heartbeats', async () => {
+  const workspace = path.join(runtimeDir, 'project');
+  const events: AgentLiveEvent[] = [];
+  const stop = await subscribeAgentEvents(workspace, (event) =>
+    events.push(event),
+  );
+  try {
+    const { token } = await issueAgentHostEnrollment(workspace);
+    const input = { workspaceCwd: '/remote', providers: ['Qwen Code ACP'] };
+    const { host, secret } = await enrollAgentHost(workspace, {
+      token,
+      name: 'laptop',
+      ...input,
+    });
+    await heartbeatAgentHost(workspace, host.id, secret, input);
+    await vi.waitFor(() => expect(events).toContainEqual({ type: 'changed' }), {
+      timeout: 3_000,
+    });
+    events.length = 0;
+    await heartbeatAgentHost(workspace, host.id, secret, input);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(events).toEqual([]);
   } finally {
     stop();
   }

@@ -503,6 +503,41 @@
       },
       "valid": false,
       "start": false
+    },
+    {
+      "id": "configuration-drained",
+      "domain": "mcp_configuration",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "runtime-1",
+            "generation": "1"
+          }
+        },
+        "catalogRef": {
+          "resourceId": "mcp-catalog-1",
+          "kind": "mcp-catalog",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "catalogRevision": 1,
+        "connectionGeneration": 1,
+        "releaseState": "drained"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "drain-before-configured",
+      "domain": "mcp_configuration",
+      "patch": {
+        "releaseState": "drained"
+      },
+      "valid": false,
+      "start": false
     }
   ],
   "successors": [
@@ -1254,6 +1289,111 @@
           "reason": null
         },
         "releaseState": "released"
+      },
+      "valid": false
+    },
+    {
+      "id": "configuration-drain-active-to-drained",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "active"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "drained"
+      },
+      "valid": false
+    },
+    {
+      "id": "configuration-drain-releasing-to-drained",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "releasing"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "drained"
+      },
+      "valid": true
+    },
+    {
+      "id": "configuration-drain-drained-to-released",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "drained"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "released"
+      },
+      "valid": true
+    },
+    {
+      "id": "configuration-drain-drained-to-releasing",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "drained"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "releasing"
+      },
+      "valid": false
+    },
+    {
+      "id": "configuration-drain-released-to-drained",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "released"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "drained"
       },
       "valid": false
     }

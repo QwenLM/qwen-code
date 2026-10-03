@@ -392,6 +392,35 @@ export interface ChatRecord {
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
   backgroundTurn?: BackgroundNotificationTurn;
+  /**
+   * `true` on a `subtype: 'notification'` record that IS the user entry of a
+   * turn the `LlmClient.sendMessageStream` send path admitted and went on to
+   * send (`client.ts`), so the stamp exists even where the admission branch
+   * runs outside `backgroundTurnContext`. Records persisted BEFORE their turn
+   * ran (`recordNotificationStrict`, the pre-send `recordNotification` copies)
+   * carry no stamp. This is the only reliable separator between the two — both
+   * share `provenance: 'system'` + `subtype: 'notification'`, and
+   * `backgroundTurn` vanishes on the `channelTask` admission branch
+   * (`backgroundTurnContext.exit`). Session recovery trims only unstamped
+   * notification records: a stamped-but-unanswered entry is treated as an
+   * `interrupted_prompt`, not as a cold notification nobody owes a response.
+   *
+   * The stamp means "admitted and sent", NOT "the model accepted a request".
+   * Every pre-send refusal gate on that path — `MaxSessionTurns`,
+   * `!boundedTurns`, the session token limit, the arena control signal —
+   * returns after the record is appended, and an abort before the first token
+   * does too, so a refused or aborted turn is stamped as well and then
+   * recovers as `interrupted_prompt`. That false positive is accepted: the
+   * record cannot move below the gates without losing the resumed info item it
+   * exists to restore, and an appended JSONL record cannot be mutated
+   * afterwards. Only the abort arm needs no setup — the gates are off or
+   * unreachable by default (`maxSessionTurns` is `-1`, the arena client is
+   * unset, `boundedTurns` reaches 0 only once the turn recursion is
+   * exhausted) — and the only observable symptom today is one recovery banner
+   * line, because no consumer of a record-derived plan reads `continuation`.
+   * Pinned by the cap-refusal case in `client.test.ts`.
+   */
+  deliveredTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -2374,12 +2403,19 @@ export class ChatRecordingService {
    * Records a background agent notification.
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
+   *
+   * `deliveredTurn` must be `true` exactly when the record IS the user entry
+   * of a notification turn the `client.ts` send path admitted and went on to
+   * send; copies persisted before the turn runs leave it unset so session
+   * recovery can still trim them. See `ChatRecord.deliveredTurn` for what the
+   * stamp does and does not guarantee.
    */
   recordNotification(
     message: PartListUnion,
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -2387,6 +2423,7 @@ export class ChatRecordingService {
       displayText,
       backgroundTask,
       goalContext,
+      deliveredTurn,
     );
   }
 
@@ -2416,6 +2453,7 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -2424,6 +2462,7 @@ export class ChatRecordingService {
         displayText,
         backgroundTask,
         goalContext,
+        deliveredTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -2437,12 +2476,14 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
       subtype,
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+      ...(deliveredTurn ? { deliveredTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
         ? {

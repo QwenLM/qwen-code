@@ -15,6 +15,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
 // Helper function to create a mock config
 function createMockConfig(
@@ -963,6 +964,82 @@ describe('modelCommand', () => {
       messageType: 'info',
       content: 'Fast Model: openai:deepseek-v4-flash',
     });
+  });
+
+  it.each([
+    ['--project', SettingScope.Workspace],
+    ['--global', SettingScope.User],
+  ] as const)(
+    'pins an ACP fast-model row at %s and updates the live runtime',
+    async (flag, scope) => {
+      const privateUrl = 'https://user:secret@second.example/v1?token=value';
+      const models = [
+        {
+          id: 'shared',
+          label: 'First',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://first.example/v1',
+          registryBaseUrl: 'https://first.example/v1',
+        },
+        {
+          id: 'shared',
+          label: 'Second',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: privateUrl,
+          registryBaseUrl: privateUrl,
+        },
+      ];
+      const route = buildAcpModelOptions(models)[1]!.modelId;
+      const args = `--fast ${route} ${flag}`;
+      const setValue = vi.fn();
+      const setFastModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: { raw: `/model ${args}`, name: 'model', args },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi
+              .fn()
+              .mockReturnValue({ authType: AuthType.USE_OPENAI }),
+            getAllConfiguredModels: vi.fn().mockReturnValue(models),
+            getAvailableModelsForAuthType: vi.fn().mockReturnValue(models),
+            setFastModel,
+          },
+          settings: { ...createMockSettings(setValue), isTrusted: true },
+        },
+      });
+      const result = await modelCommand.action!(mockContext, args);
+      const pinned = `openai:shared\0${privateUrl}`;
+      expect(setValue).toHaveBeenCalledWith(scope, 'fastModel', pinned);
+      expect(setFastModel).toHaveBeenCalledWith(pinned);
+      expect(result).toMatchObject({ messageType: 'info' });
+      expect(JSON.stringify(result)).not.toContain('secret');
+      expect(JSON.stringify(result)).not.toContain('token=value');
+    },
+  );
+
+  it('rejects a stale fast ACP route without persisting it', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: { name: 'model', args: '--fast qwen-route:v1:stale' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi
+            .fn()
+            .mockReturnValue({ authType: AuthType.USE_OPENAI }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast qwen-route:v1:stale',
+    );
+    expect(result).toMatchObject({ messageType: 'error' });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
   });
 
   it('keeps the live endpoint pin when --fast re-enters the displayed selector (#12760)', async () => {

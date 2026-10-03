@@ -386,6 +386,7 @@ import {
   getPersistScopeForModelSelection,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
+import { resolveModelSelectionAuthType } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import {
   deleteNestedPropertySafe,
   settingExistsInScope,
@@ -10420,18 +10421,30 @@ export class Session implements SessionContext {
                     nextMessage.parts ?? [],
                     ac.signal,
                   );
-                if (!sendResult.responseStream) {
+                const responseStream = sendResult.responseStream;
+                const preserveFullMessage =
+                  !responseStream && sendResult.stopReason === 'cancelled';
+                if (!responseStream) {
                   this.todoStopGuard.suspend();
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
-                    sendResult.stopReason === 'cancelled',
+                    preserveFullMessage,
                   );
                   if (sendResult.stopReason === 'max_tokens') {
                     this.#stopCronAfterTokenLimit();
                   }
-                  return;
                 }
-                const responseStream = sendResult.responseStream;
+                // Keep transcript replay aligned with model history: persist
+                // only if the prompt reached the model or was preserved in full.
+                if (
+                  turnCount === 1 &&
+                  (responseStream || preserveFullMessage)
+                ) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordCronPrompt([{ text: modelText }], echoText);
+                }
+                if (!responseStream) return;
                 const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
@@ -12207,22 +12220,49 @@ export class Session implements SessionContext {
 
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
+      const scopeSettings = this.settings.forScope(persistScope).settings;
+      const authChoice =
+        scopeSettings.security?.auth?.selectedType ??
+        (persistScope === SettingScope.Workspace
+          ? this.settings.user.settings.security?.auth?.selectedType
+          : undefined);
+      const persistedBaseUrl =
+        resolvedRoute && !resolvedRoute.isRuntime
+          ? (resolvedRoute.baseUrl ?? '')
+          : '';
+      // Keep the OpenAI choice when id-only startup can recover Responses.
+      // Raw models and same-id routes across wires need the effective type.
+      let persistedAuthType = effectiveAuthType;
+      if (
+        !isRuntime &&
+        effectiveAuthType === AuthType.USE_OPENAI_RESPONSES &&
+        authChoice === AuthType.USE_OPENAI
+      ) {
+        try {
+          if (
+            resolveModelSelectionAuthType(
+              authChoice,
+              effectiveModelId,
+              this.settings.merged.modelProviders,
+              this.settings.merged.providerProtocol,
+            ) === effectiveAuthType
+          ) {
+            persistedAuthType = authChoice;
+          }
+        } catch {
+          // A rejected config reload keeps the previous live registry usable.
+        }
+      }
       this.settings.setValue(
         persistScope,
         'model.name',
         resolvedRoute?.isRuntime ? resolvedRoute.modelId : effectiveModelId,
       );
-      this.settings.setValue(
-        persistScope,
-        'model.baseUrl',
-        resolvedRoute && !resolvedRoute.isRuntime
-          ? (resolvedRoute.baseUrl ?? '')
-          : '',
-      );
+      this.settings.setValue(persistScope, 'model.baseUrl', persistedBaseUrl);
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',
-        effectiveAuthType,
+        persistedAuthType,
       );
     }
 
@@ -14198,7 +14238,7 @@ export class Session implements SessionContext {
               toolParams,
               this.config.getCwd(),
             );
-            const { denialState, fallback } = prepareAutoModeFallback(
+            const { fallback } = prepareAutoModeFallback(
               this.config,
               actionFingerprint,
             );
@@ -14233,6 +14273,8 @@ export class Session implements SessionContext {
             // the CLI / ACP paths share one source of truth for the
             // switch + denial-tracking state updates + exhaustiveness
             // guard.
+            // Concurrent calls may update denial state during classification.
+            const denialState = this.config.getAutoModeDenialState();
             const outcome = applyAutoModeDecision(
               decision,
               this.config,
@@ -14698,17 +14740,25 @@ export class Session implements SessionContext {
                 message?: string,
                 opts?: { skipPersistence?: boolean },
               ) => {
-                onStopAfterPermissionCancel?.();
+                // Host refusals are automatic policy decisions, not user cancels.
+                const isHostRefusal =
+                  this.config.getSessionSourceType?.() === 'agent-host';
+                if (!isHostRefusal) onStopAfterPermissionCancel?.();
                 return earlyErrorResponse(
                   new Error(
-                    message ?? `Tool "${toolName}" was canceled by the user.`,
+                    message ??
+                      (isHostRefusal
+                        ? `Tool "${toolName}" requires approval, which is unavailable on this read-only Agent Host.`
+                        : `Tool "${toolName}" was canceled by the user.`),
                   ),
                   toolName,
                   {
-                    status: 'cancelled',
-                    errorType: undefined,
+                    status: isHostRefusal ? 'error' : 'cancelled',
+                    errorType: isHostRefusal
+                      ? ToolErrorType.EXECUTION_DENIED
+                      : undefined,
                     executionStatus: 'not_started',
-                    stopAfterPermissionCancel: true,
+                    stopAfterPermissionCancel: !isHostRefusal,
                     ...(opts?.skipPersistence === true
                       ? { skipPersistence: true }
                       : {}),
@@ -15360,7 +15410,12 @@ export class Session implements SessionContext {
                       .getToolRegistry()
                       .getTool(nestedName)?.kind;
                     const safe =
-                      isToolCallConcurrencySafe(nestedName, kind, nestedArgs) &&
+                      isToolCallConcurrencySafe(
+                        nestedName,
+                        kind,
+                        nestedArgs,
+                        'code_mode',
+                      ) &&
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&

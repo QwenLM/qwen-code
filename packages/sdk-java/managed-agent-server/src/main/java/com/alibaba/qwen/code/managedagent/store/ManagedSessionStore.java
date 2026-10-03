@@ -62,8 +62,10 @@ public class ManagedSessionStore {
             "BLOCKED_EXECUTION");
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
+    private ManagedToolResultStore toolResults;
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
+    private final ToolPublicationRetentionStore outputRetention;
     private final RowMapper<HeadRow> headMapper = (result, row) ->
             new HeadRow(result.getString("tenant_id"),
                     result.getString("workspace_id"),
@@ -117,11 +119,18 @@ public class ManagedSessionStore {
         this.jdbc = jdbc;
         this.extensionRecords = extensionRecords;
         this.actions = actions;
+        this.outputRetention = new ToolPublicationRetentionStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;
+    }
+
+    @Autowired(required = false)
+    public void setToolResults(ManagedToolResultStore toolResults) {
+        this.toolResults = toolResults;
     }
 
     record PublicationWriter(long now, long leaseUntil, long journalRevision,
@@ -146,6 +155,14 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
+                (row, index) -> row.getString("status"), tenantId, sessionId);
+        if (!closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
+            throw conflict("managed_session_not_writable", "The Session is closing or closed.");
+        }
         String tokenHash = tokenHash(writerToken);
         Timestamp createdAt = databaseNow();
         Timestamp initialLeaseUntil = plusMillis(createdAt,
@@ -160,11 +177,11 @@ public class ManagedSessionStore {
                             + " lease_token_hash, journal_revision,"
                             + " committed_sequence, activation_epoch,"
                             + " compacted_through_revision, recovery_status,"
-                            + " created_at, updated_at) VALUES (?, ?, ?, ?,"
+                            + " o3_backfill_through, o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?, ?,"
                             + " 'ACTIVE', 1, ?, TIMESTAMPADD(MICROSECOND, ?,"
                             + " CAST(? AS DATETIME(6))),"
                             + " ?, 0, 0, 0, 0, 'READY',"
-                            + " ?, ?)",
+                            + " 0, FALSE, ?, ?)",
                     tenantId, request.workspaceId(), sessionId,
                     STORAGE_VERSION, request.writerId(),
                     initialLeaseUntil.getNanos() / 1_000,
@@ -339,7 +356,7 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
-        extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+        var receiptEvents = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
@@ -396,6 +413,9 @@ public class ManagedSessionStore {
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(), now, tenantId,
                 sessionId);
+        if (toolResults != null) {
+            toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
+        }
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
                 request.firstSequence(), request.lastSequence(),
@@ -507,25 +527,29 @@ public class ManagedSessionStore {
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
-        String scopeKey = sessionScopeKey(tenantId, sessionId);
-        ResourceRow resource = findResource(scopeKey, resourceId);
-        if (resource == null) {
-            throw new ApiException(HttpStatus.NOT_FOUND,
-                    ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
-                    "The Managed Session resource does not exist.");
+        try (var lease = outputRetention.read(tenantId, sessionId)) {
+            String scopeKey = sessionScopeKey(tenantId, sessionId);
+            ResourceRow resource = findResource(scopeKey, resourceId);
+            if (resource == null) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
+                        "The Managed Session resource does not exist.");
+            }
+            requireResourceScope(resource, tenantId, workspaceId, sessionId,
+                    resourceId);
+            verifyStoredResource(resource);
+            jdbc.update("UPDATE qwen_managed_session_resource SET"
+                            + " last_verified_at = ? WHERE session_scope_key = ?"
+                            + " AND resource_id = ?",
+                    databaseNow(), scopeKey, resourceId);
+            byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
+                    ? readPublicationObject(resource, lease) : resource.bytes();
+            var result = new StoredResource(resource.resourceId(), resource.kind(),
+                    resource.schemaVersion(), resource.byteLength(),
+                    resource.digest(), bytes);
+            lease.check();
+            return result;
         }
-        requireResourceScope(resource, tenantId, workspaceId, sessionId,
-                resourceId);
-        verifyStoredResource(resource);
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " last_verified_at = ? WHERE session_scope_key = ?"
-                        + " AND resource_id = ?",
-                databaseNow(), scopeKey, resourceId);
-        byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                ? readPublicationObject(resource) : resource.bytes();
-        return new StoredResource(resource.resourceId(), resource.kind(),
-                resource.schemaVersion(), resource.byteLength(),
-                resource.digest(), bytes);
     }
 
     @Transactional
@@ -875,6 +899,7 @@ public class ManagedSessionStore {
     }
 
     private void requireReadGrant(HeadRow head, String writerToken) {
+        ToolPublicationRetentionStore.requireLive(jdbc, head.tenantId(), head.sessionId());
         Timestamp now = databaseNow();
         if (!"ACTIVE".equals(head.state())
                 || !secureEquals(tokenHash(writerToken),
@@ -886,6 +911,8 @@ public class ManagedSessionStore {
     }
 
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
+        ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<HeadRow> rows = jdbc.query(
                 "SELECT * FROM qwen_managed_session_journal_head"
                         + " WHERE tenant_id = ? AND session_id = ?"
@@ -980,12 +1007,12 @@ public class ManagedSessionStore {
      * has not expired by database time. A Harness renews that lease while it
      * holds the Session and seals the writer when it closes the Session.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean hasLiveWriter(String tenantId, String sessionId) {
         List<Timestamp> leases = jdbc.query("SELECT writer_lease_until FROM"
                         + " qwen_managed_session_journal_head WHERE"
                         + " tenant_id = ? AND session_id = ? AND state ="
-                        + " 'ACTIVE'",
+                        + " 'ACTIVE' FOR UPDATE",
                 (result, row) -> result.getTimestamp("writer_lease_until"),
                 tenantId, sessionId);
         return !leases.isEmpty() && leases.getFirst() != null
@@ -1140,23 +1167,35 @@ public class ManagedSessionStore {
         }
     }
 
-    private byte[] readPublicationObject(ResourceRow resource) {
+    private InputStream guardedPublicationResource(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
+        lease.requireScope(resource.tenantId(), resource.sessionId());
+        var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM qwen_tool_publication_object"
+                + " WHERE scope_key = ? AND resource_id = ? AND object_key = ?",
+                ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                resource.resourceId(), resource.objectKey());
+        if (rows.size() != 1) {
+            throw resourceCorrupt();
+        }
+        return outputRetention.open(resource.objectKey(), publicationObjects, lease, () -> {});
+    }
+
+    private byte[] readPublicationObject(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
         if (publicationObjects == null) {
             throw resourceCorrupt();
         }
-        try (InputStream stream = publicationObjects.open(resource.objectKey())) {
+        try (InputStream stream = guardedPublicationResource(resource, lease)) {
             byte[] bytes = stream.readNBytes(Math.toIntExact(resource.byteLength()) + 1);
             if (bytes.length != resource.byteLength()
                     || !sha256(bytes).equals(resource.digest())) {
-                jdbc.update("UPDATE qwen_tool_publication p SET quarantined = TRUE"
-                        + " WHERE EXISTS (SELECT 1 FROM qwen_tool_publication_object o"
-                        + " WHERE o.scope_key = p.scope_key AND o.publication_id = p.publication_id"
-                        + " AND o.resource_id = ? AND o.object_key = ?)",
-                        resource.resourceId(), resource.objectKey());
-                jdbc.update("UPDATE qwen_tool_publication_object SET state = 'QUARANTINED'"
-                        + " WHERE resource_id = ? AND object_key = ? AND state = 'VERIFIED'",
-                        resource.resourceId(), resource.objectKey());
-                throw resourceCorrupt();
+                var error = resourceCorrupt();
+                try {
+                    outputRetention.quarantineResource(
+                            ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                            resource.resourceId(), resource.objectKey());
+                } catch (RuntimeException cleanup) {
+                    error.addSuppressed(cleanup);
+                }
+                throw error;
             }
             return bytes;
         } catch (IOException error) {

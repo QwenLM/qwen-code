@@ -55,6 +55,7 @@ interface MessageItemProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
@@ -102,6 +103,7 @@ export const MessageItem = memo(function MessageItem({
   onImagePreview,
   onAttachmentPreview,
   onTurnOutputOpen,
+  onToolResultOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -264,6 +266,7 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             onTurnOutputOpen={onTurnOutputOpen}
+            onToolResultOpen={onToolResultOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -470,6 +473,7 @@ function areMessageItemPropsEqual(
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
+  if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
@@ -637,6 +641,8 @@ function areToolCallsEqual(
     prev.subContent === next.subContent &&
     stableJson(prev.args) === stableJson(next.args) &&
     stableJson(prev.rawOutput) === stableJson(next.rawOutput) &&
+    stableJson(prev.toolResult) === stableJson(next.toolResult) &&
+    prev.wasCancelled === next.wasCancelled &&
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)

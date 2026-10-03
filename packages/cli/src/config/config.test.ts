@@ -522,6 +522,30 @@ describe('parseArguments', () => {
     expect(argv.insecure).toBe(true);
   });
 
+  it('parses the private ACP execution engine and refuses other engines', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'managed',
+    ];
+    expect((await parseArguments()).acpExecutionEngine).toBe('managed');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'legacy',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    mockExit.mockRestore();
+  });
+
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
     // the synthetic structured_output terminal contract. The yargs check
@@ -4216,19 +4240,42 @@ describe('mergeExcludeTools', () => {
     expect(codeMode.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
+    'should disable CodeModeOnly and Freeform in %s mode',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
+        { tools: { codeModeOnly: true, freeform: true } },
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 
@@ -5155,6 +5202,67 @@ describe('loadCliConfig with includeDirectories', () => {
         lsp: { enabled: false },
       }),
     );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  it('builds agent-host sessions with a read-only initialization profile', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: { ambient: { command: 'ambient-mcp' } },
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+      },
+      tools: { workflowsEnabled: true },
+      experimental: {
+        cron: true,
+        sessionWorkflow: true,
+        artifact: true,
+      },
+      omni: { enabled: true },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      ['ambient-extension'],
+      { userHooks: { PromptSubmit: [{ command: 'ambient-hook' }] } },
+      undefined,
+      { injected: new ServerConfig.MCPServerConfig('node', ['injected.js']) },
+      undefined,
+      false,
+      { agentHostReadOnly: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
+        includeDirectories: [],
+        lsp: { enabled: false },
+        disableAllHooks: true,
+        mcpServers: {},
+        topTierMcpServers: undefined,
+        pendingMcpServers: undefined,
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        sessionWorkflowEnabled: false,
+        fileCheckpointingEnabled: false,
+        cronEnabled: false,
+        artifactEnabled: false,
+        omniEnabled: false,
+      }),
+    );
+    expect(sshWorkspaceProbe).not.toHaveBeenCalled();
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
