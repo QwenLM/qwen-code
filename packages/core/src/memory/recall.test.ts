@@ -1166,6 +1166,79 @@ describe('auto-memory relevant recall', () => {
       expect(result.selectorSkipped).toBeUndefined();
     });
 
+    it('keeps the selector when a keyword only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` — the collision the gate's own rationale
+      // names. The keyword arm reached the boundary rule only for one or two
+      // characters, so a three-character keyword kept the loose arm.
+      const innerSubstringKeyword = {
+        ...exact,
+        title: 'Build Notes',
+        keywords: ['log'],
+        description: 'the builds we ship',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringKeyword]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our builds',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringKeyword,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a multi-word title matches inside a larger word', async () => {
+      // `log conventions` sits inside `catalog conventions`, and a title with
+      // a space never reached the strict arm's single-word allowlist.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log conventions',
+        keywords: [],
+        description: 'conventions we follow',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog conventions we use',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a non-Latin title matches inside a larger word', async () => {
+      // `ток` sits inside `поток`. The strict arm's allowlist was `[a-z0-9]`,
+      // so every single-word title outside Latin kept the loose arm.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ток',
+        keywords: [],
+        description: 'поток памяти',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'объясни поток памяти',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
     it('keeps the selector when a competing keyword match scores zero lexically', async () => {
       // B's only strong-match evidence is a keyword that is a proper substring
       // of a query token, so the whole-token scorer gives it 0 and it never

@@ -198,13 +198,15 @@ is not already in context, suppresses the selector — and only when that hit is
 also the unique title or keyword match in the pool the suppressed selector
 would have been handed, so a second match ranked below the published fast
 window keeps the selector. Metadata-only substring matches and already-present
-or stale bodies keep the selector. In this gate a single-word Latin title
-counts only on a token boundary, so a memory titled `ai` does not skip the
-selector for `explain`, and one titled `log` does not skip it for `catalog`.
-Candidates are counted before prompt trimming so a second match cannot
-disappear from the guard. No refined result arrives after a skip; the shared
-client delivers it as the fast phase. This is an ablation experiment; default
-behavior is unchanged.
+or stale bodies keep the selector. In this gate a non-CJK title or keyword of
+any length counts only on a token boundary, so a memory titled `ai` does not
+skip the selector for `explain`, one titled `log conventions` does not skip it
+for `catalog conventions`, and a keyword `log` does not skip it for `catalog`.
+CJK titles and keywords keep substring matching: they are written without word
+separators, so there is no boundary to require. Candidates are counted before
+prompt trimming so a second match cannot disappear from the guard. No refined
+result arrives after a skip; the shared client delivers it as the fast phase.
+This is an ablation experiment; default behavior is unchanged.
 
 Extraction cadence is unchanged. The #13004 cooldown implementation was removed
 from #13158: its shutdown tail and suspended oldest windows require durable

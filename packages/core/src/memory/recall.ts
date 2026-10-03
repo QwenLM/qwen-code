@@ -120,6 +120,12 @@ const RECALL_TOKEN_RUN = new RegExp(
 const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
 const CJK_BIGRAM = new RegExp(`^${CJK_CLASS}{2}$`, 'u');
 
+/**
+ * Whether a value holds any CJK code point, and so is written without the word
+ * separators a token-boundary rule needs.
+ */
+const CJK_ANY = new RegExp(CJK_CLASS, 'u');
+
 function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
 }
@@ -311,14 +317,15 @@ function matchesTitleOrKeyword(
   query: string,
   doc: ScannedAutoMemoryDocument,
   /**
-   * Apply the keyword arm's token-boundary rule to a single-word Latin title
-   * of any length. Only the #13003 skip gate sets this: there the match is the
-   * final authority on whether the selector runs at all, so a coincidental
-   * inner substring (`ai` inside `explain`, `log` inside `catalog`) would
-   * cancel the model call that is the only thing correcting it. Ranking
-   * callers keep the loose arm, so default recall behavior is unchanged.
+   * Require a token boundary for every non-CJK title and keyword instead of
+   * only the short Latin ones. Only the #13003 skip gate sets this: there the
+   * match is the final authority on whether the selector runs at all, so a
+   * coincidental inner substring (`ai` inside `explain`, `log` inside
+   * `catalog`) would cancel the model call that is the only thing correcting
+   * it. Ranking callers keep the loose arm, so default recall behavior is
+   * unchanged.
    */
-  requireTitleBoundary = false,
+  requireTokenBoundary = false,
 ): boolean {
   const normalizedQuery = normalizeRecallText(query);
   const title = normalizeRecallText(doc.title).trim();
@@ -332,17 +339,23 @@ function matchesTitleOrKeyword(
       'u',
     ).test(normalizedQuery);
   };
+  // One strictness rule for both arms, keyed on the same script split the
+  // tokenizer draws: a value written with word separators must land on a token
+  // boundary. CJK values stay loose, because `includesAtBoundary` demands a
+  // `[^\p{L}\p{N}]` neighbour while Han, Kana, and Hangul are `\p{L}`, so a
+  // boundary rule would cancel every CJK skip.
+  const includesValue = (value: string) =>
+    CJK_ANY.test(value)
+      ? normalizedQuery.includes(value)
+      : includesAtBoundary(value);
   const includesKeyword = (keyword: string) =>
-    /^[a-z0-9]{1,2}$/.test(keyword)
-      ? includesAtBoundary(keyword)
+    requireTokenBoundary || /^[a-z0-9]{1,2}$/.test(keyword)
+      ? includesValue(keyword)
       : normalizedQuery.includes(keyword);
   return (
-    // Multi-word and non-Latin titles keep the loose arm even under
-    // `requireTitleBoundary`: the tokenizer never emits a Latin run shorter
-    // than three characters, so the CJK arm has no boundary rule to apply.
     (title.length > 0 &&
-      (requireTitleBoundary && /^[a-z0-9]+$/.test(title)
-        ? includesAtBoundary(title)
+      (requireTokenBoundary
+        ? includesValue(title)
         : normalizedQuery.includes(title))) ||
     keywords.some(includesKeyword)
   );
@@ -806,8 +819,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         (candidates.candidateTitleKeywordMatchCount ?? 0) === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
-        // Strict title arm: this match decides whether the selector runs at
-        // all, so it may not rest on a coincidental inner substring.
+        // Strict arm: this match decides whether the selector runs at all, so
+        // it may not rest on a coincidental inner substring.
         matchesTitleOrKeyword(query, uniqueStrongHit, true) &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted
