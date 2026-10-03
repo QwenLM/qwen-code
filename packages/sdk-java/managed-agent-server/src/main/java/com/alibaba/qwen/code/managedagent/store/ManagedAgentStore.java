@@ -566,6 +566,17 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
         }
+        // A retired receipt still completes for a sibling that entered the
+        // Harness before the retirement, but never over a later mutation:
+        // while it was FAILED another key could begin and complete, and
+        // completing this one now would revert that newer outcome.
+        if ("FAILED".equals(command.status()) && supersededByLaterMutation(
+                tenantId, sessionId, operation, idempotencyKey, kind)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "session_mutation_superseded",
+                    "A later change to the Session completed after this"
+                            + " request was retired.");
+        }
         validateMutationStatus(session, kind);
         long now = clock.millis();
         Map<String, Object> data = Map.of("sessionId", sessionId);
@@ -2203,6 +2214,30 @@ public class ManagedAgentStore implements AgentStateStore {
         return "session."
                 + (kind == SessionMutationKind.RENAME ? "update" : "unarchive")
                 + "." + phase;
+    }
+
+    // Mutation commands on one Session begin one at a time, so a completion
+    // sequenced after this command's requested event belongs to a command
+    // that began after this one stopped being PENDING. Sequence ids order
+    // that strictly, where millisecond timestamps can tie.
+    private boolean supersededByLaterMutation(String tenantId,
+            String sessionId, String operation, String idempotencyKey,
+            SessionMutationKind kind) {
+        List<Long> requested = jdbc.queryForList("SELECT sequence_id FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND source_key = ?",
+                Long.class, tenantId, sessionId,
+                mutationSource(operation, idempotencyKey, "requested"));
+        if (requested.isEmpty()) {
+            return false;
+        }
+        Integer later = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id > ? AND"
+                        + " event_type = ? AND source_key LIKE 'control:%'",
+                Integer.class, tenantId, sessionId, requested.getFirst(),
+                mutationEvent(kind, "completed"));
+        return later != null && later > 0;
     }
 
     private static String mutationSource(String operation,

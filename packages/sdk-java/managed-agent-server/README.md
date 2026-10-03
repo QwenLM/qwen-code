@@ -195,7 +195,11 @@ unarchive restores it to closed. Rename waits for the Harness to durably commit
 while retaining its receipt and request digest. The same
 key retries the same content with the replay flag set; changed content or a
 different Session conflicts. A successful concurrent request can still complete
-the receipt, and a failing sibling cannot overwrite that completed outcome.
+the receipt, and a failing sibling cannot overwrite that completed outcome. It
+cannot complete a retired receipt once a later rename has completed either: that
+sibling answers `409 session_mutation_superseded` and the newer title stays. A
+same-key request sent after the later rename is the newest request and still
+applies.
 Retries do not re-append the original `requested` event. If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
