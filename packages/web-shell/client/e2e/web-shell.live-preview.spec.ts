@@ -284,7 +284,9 @@ test('rejects unsafe URLs and preserves the working preview after invalid input'
     page.url(),
   ]) {
     await openPreview(page, url);
-    await expect(page.getByRole('alert')).toContainText('development address');
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'development address' }),
+    ).toHaveCount(1);
     await expect(appFrame(page).locator('#storage')).toHaveText('working');
   }
 });

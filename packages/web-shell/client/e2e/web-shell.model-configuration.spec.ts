@@ -442,7 +442,9 @@ test('keeps invalid values editable and preserves defaults on a failed save', as
   });
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => requests.length).toBe(1);
-  await expect(page.getByRole('alert')).toContainText('Test save failed');
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Test save failed' }),
+  ).toHaveCount(1);
   await expect(
     page.getByRole('button', { name: 'Save', exact: true }),
   ).toBeEnabled();
@@ -769,9 +771,12 @@ test('reports a failed runtime sync after saving a context window', async ({
   await page
     .getByRole('button', { name: 'save Configured Test Model', exact: true })
     .click();
-  await expect(page.getByRole('status')).toContainText(
-    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-  );
+  await expect(
+    page.getByRole('status').filter({
+      hasText:
+        'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+    }),
+  ).toHaveCount(1);
   await edit.click();
   await expect(page.getByLabel('Context window', { exact: true })).toHaveValue(
     '65536',
@@ -853,9 +858,9 @@ test('edits a persisted context window, retries a failure, and resets to automat
   await page
     .getByRole('button', { name: 'save Configured Test Model', exact: true })
     .click();
-  await expect(page.getByRole('alert')).toContainText(
-    'Test context save failed',
-  );
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Test context save failed' }),
+  ).toHaveCount(1);
   await expect(context).toHaveValue('65536');
   await page
     .getByRole('button', { name: 'save Configured Test Model', exact: true })

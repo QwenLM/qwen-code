@@ -259,8 +259,15 @@ for (const theme of ['light', 'dark']) {
       panel.getByRole('button', { name: 'Refresh', exact: true }),
     ).toBeDisabled();
     await expect(editor).toHaveText('Keep this draft while compressing');
-    await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
-    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Compressing…' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
     await page.screenshot({
       path: testInfo.outputPath(`context-compressing-${theme}.png`),
     });
@@ -277,8 +284,17 @@ for (const theme of ['light', 'dark']) {
     await expect(panel).toContainText(
       'Compression completed. Context usage refreshed.',
     );
-    await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
-    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: 'Compression completed. Context usage refreshed.' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
     await expect.poll(() => reads).toBeGreaterThan(readsBeforeCompletion);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
     await expect(hover).toContainText('20,000 tokens');
@@ -316,14 +332,23 @@ for (const theme of ['light', 'dark']) {
         code: 'internal_error',
       },
     });
-    await expect(panel.getByRole('alert')).toHaveText(
-      'Compression failed. You can try again.',
-    );
-    await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
-    await expect(hover.getByRole('alert')).toHaveText(
-      'Compression failed. You can try again.',
-    );
-    await expect(hover.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(
+      page
+        .getByRole('alert')
+        .filter({ hasText: 'Compression failed. You can try again.' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveText('Compression failed. You can try again.');
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveText('Compression failed. You can try again.');
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
     await hover
       .getByRole('button', { name: 'View details', exact: true })
       .click();
@@ -340,10 +365,12 @@ for (const theme of ['light', 'dark']) {
         sessionId: scenario.sessionId,
       }),
     );
-    await expect(panel.getByRole('alert')).toContainText(
-      'Compression completed, but usage could not be refreshed.',
-    );
-    await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toContainText('Compression completed, but usage could not be refreshed.');
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
     readFails = false;
     await panel.getByRole('button', { name: 'Refresh', exact: true }).click();
