@@ -1716,6 +1716,44 @@ describe('CoreToolScheduler', () => {
     expect(message).not.toContain('Deferred tool');
   });
 
+  it('shares validation retries across bridged and direct calls', async () => {
+    const { deferred, scheduler, onAllToolCallsComplete } = bridgeWithDeferred({
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    for (const [index, name] of [
+      ToolNames.TOOL_CALL,
+      deferred.name,
+      ToolNames.TOOL_CALL,
+    ].entries()) {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        toolRequest(
+          `mixed-validation-${index}`,
+          name,
+          name === ToolNames.TOOL_CALL
+            ? { name: deferred.name, arguments: {} }
+            : {},
+          'prompt-mixed-validation',
+        ),
+        new AbortController().signal,
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(functionResponseOf(completed)?.name).toBe(name);
+      const message = completed.response.error?.message ?? '';
+      expect(message).toContain("must have required property 'url'");
+      expect(message.includes('Deferred tool')).toBe(
+        name === ToolNames.TOOL_CALL,
+      );
+      expect(message.includes('RETRY LOOP DETECTED')).toBe(index === 2);
+    }
+  });
+
   it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
     // R1-18: invalid envelopes record under the model-facing name
     // (`tool_call:<msg>`), but a resolved envelope is renamed to the TARGET
