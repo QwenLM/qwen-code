@@ -102,6 +102,7 @@ import {
   OpenTuiOutputStyleDialog,
 } from './dialogs-modes.js';
 import {
+  computeStatsBodyRows,
   OpenTuiStatsDialog,
   OpenTuiSkillsDialog,
 } from './dialogs-stats-skills.js';
@@ -604,7 +605,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
 
     case 'stats':
-      return <OpenTuiStatsDialog config={config} onClose={onClose} />;
+      return (
+        <OpenTuiStatsDialog
+          config={config}
+          onClose={onClose}
+          bodyRows={computeStatsBodyRows(dimensions.height)}
+        />
+      );
 
     case 'arena':
       return (
