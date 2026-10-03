@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import stripJsonComments from 'strip-json-comments';
+import { readConfigFile } from './read-config-file.js';
 
 /** Project-scoped MCP config filename, read from the workspace root. */
 export const PROJECT_MCP_FILENAME = '.mcp.json';
@@ -135,11 +136,12 @@ export interface LoadProjectMcpServersResult {
  * so the snapshot is required by the type whenever `expandEnv` is true. Pass
  * `expandEnv: false` when the approval gate is off (`--yolo`): then nothing
  * stands between a checked-in `.mcp.json` and a live connection, and the
- * placeholder travels as the literal text it is.
+ * placeholder travels as the literal text it is. Omit it when the caller only
+ * probes the file and never connects.
  */
 export type LoadProjectMcpServersOptions =
-  | { expandEnv: false }
-  | { expandEnv: true; env: Readonly<NodeJS.ProcessEnv> };
+  | { expandEnv?: false; strict?: boolean }
+  | { expandEnv: true; env: Readonly<NodeJS.ProcessEnv>; strict?: boolean };
 
 /**
  * Load project-scoped MCP servers from `<projectRoot>/.mcp.json`, each tagged
@@ -148,7 +150,8 @@ export type LoadProjectMcpServersOptions =
  * A pure read: never spawns a process, opens a transport or runs a health check
  * (#4615). Never throws — a missing file returns empty, and anything malformed,
  * over-deep or otherwise unusable is reported via `errors` and skipped, per
- * entry, so one bad server cannot cost the session.
+ * entry, so one bad server cannot cost the session. With `strict`, only a truly
+ * absent file counts as none: an unreadable file is reported via `errors` too.
  *
  * Note `getHomeEnvFallbackVars()` is deliberately NOT merged into the snapshot:
  * the only keys it would add are the ones `loadEnvironment` refused to apply
@@ -162,13 +165,22 @@ export function loadProjectMcpServers(
   const expandEnv = options.expandEnv;
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
 
-  let raw: string;
+  let raw: string | undefined;
   try {
-    raw = fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    // Missing/unreadable file is the common case — not an error.
-    return { servers: {}, path: undefined, errors: [] };
+    raw = options.strict
+      ? readConfigFile(filePath)
+      : fs.readFileSync(filePath, 'utf-8');
+  } catch (e) {
+    // Without strict, a missing or unreadable file is the common case — not
+    // an error.
+    if (!options.strict) return { servers: {}, path: undefined, errors: [] };
+    return {
+      servers: {},
+      path: filePath,
+      errors: [`Failed to read ${filePath}: ${(e as Error).message}`],
+    };
   }
+  if (raw === undefined) return { servers: {}, path: undefined, errors: [] };
 
   let parsed: unknown;
   try {

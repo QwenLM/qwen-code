@@ -5,6 +5,7 @@
  */
 
 import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
+import { SessionAttachmentUploadError } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -277,6 +278,21 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionAttachmentUploadError) {
+    if (err.status >= 500) {
+      reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(err, ctx, daemonLog);
+    }
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      ...(err.code === 'attachment_upload_store_busy'
+        ? { retryable: true }
+        : {}),
+    });
+    return;
+  }
   const sourceErrorKind =
     err instanceof SessionSourceError
       ? err.code
@@ -499,6 +515,10 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionExecutionEngineError) {
+    // The response names no cause, so the log keeps it: an operator must be
+    // able to tell a transcript that cannot prove its owner from an owner
+    // that cannot run here.
+    recordExpectedBridgeError(err, ctx, daemonLog);
     res.status(409).json({
       error:
         'This session cannot be resumed with the current execution engine.',
@@ -1057,6 +1077,11 @@ export function sendBridgeError(
         return;
       }
       if (kind === 'session_execution_engine_unavailable') {
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
         res.status(409).json({
           error:
             'This session cannot be resumed with the current execution engine.',
@@ -1090,6 +1115,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'branch_point_invalid',
           errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
         });
         return;
       }

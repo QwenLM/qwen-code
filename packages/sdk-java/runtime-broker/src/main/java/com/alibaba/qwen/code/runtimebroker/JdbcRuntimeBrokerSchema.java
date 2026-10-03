@@ -28,36 +28,41 @@ public final class JdbcRuntimeBrokerSchema {
                     statement.execute(command);
                 }
             }
-            addStorageColumn(statement, "qwen_runtime_binding_slot");
-            addStorageColumn(statement, "qwen_runtime_binding");
+            addColumn(statement, "qwen_runtime_binding_slot", "storage_id", "VARCHAR(256)");
+            addColumn(statement, "qwen_runtime_binding", "storage_id", "VARCHAR(256)");
+            addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
+            addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
+            addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }
     }
 
-    private static void addStorageColumn(Statement statement, String table)
+    private static void addColumn(Statement statement, String table, String column, String definition)
             throws SQLException {
-        if (hasStorageColumn(statement, table)) {
+        if (hasColumn(statement, table, column)) {
             return;
         }
         try {
             statement.execute("ALTER TABLE " + table
-                    + " ADD COLUMN storage_id VARCHAR(256)");
+                    + " ADD COLUMN " + column + " " + definition);
         } catch (SQLException failure) {
             // Another instance may have added it since the check.
-            if (!hasStorageColumn(statement, table)) {
+            if (!hasColumn(statement, table, column)) {
                 throw failure;
             }
         }
     }
 
-    private static boolean hasStorageColumn(Statement statement, String table)
+    private static boolean hasColumn(Statement statement, String table, String column)
             throws SQLException {
         try (java.sql.ResultSet result = statement.executeQuery(
                 "SELECT * FROM " + table + " WHERE 1 = 0")) {
             java.sql.ResultSetMetaData columns = result.getMetaData();
             for (int index = 1; index <= columns.getColumnCount(); index++) {
-                if ("storage_id".equalsIgnoreCase(columns.getColumnName(index))) {
+                if (column.equalsIgnoreCase(columns.getColumnName(index))) {
                     return true;
                 }
             }

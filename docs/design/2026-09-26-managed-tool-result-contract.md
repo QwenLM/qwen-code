@@ -19,7 +19,7 @@ The facts below are from `main` at `89b057befd`.
 - **Session resources.** `LocalManagedSessionResourceStore` in `packages/core/src/managed-runtime/managed-session-resources.ts` publishes a whole `Buffer` and reads a whole file, and checks length and SHA-256 on read. It has no stream publication and no range read. A resource is referenced by a `DurableRef`: `resourceId`, `kind`, `schemaVersion`, `byteLength` and a bare lowercase hexadecimal SHA-256 `digest`.
 - **Session receipts.** The Managed Session event `tool.receipt` carries `executionCallId`, `toolOutcomeRef`, `resultRef`, `resources` and `historyRevision`.
 - **Tool v2.** `managed-runtime-tool-v2.schema.json` closes a settled `result` to `executionStatus`, `responseParts` and an optional `error`, and caps each response at 1 MiB. The worker replaces a larger result with a small terminal error.
-- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which admits exactly the routes of its boot version, `OWNED_MANAGED_RUNTIME_ROUTES` under boot v1 and `MANAGED_CONTEXT_WORKER_ROUTES` under boot v2 (W0c-1, #12732), and answers any other path with an empty 404 before a handler runs.
+- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which admits exactly the routes of its boot version, `OWNED_MANAGED_RUNTIME_ROUTES` under boot v1 and `MANAGED_CONTEXT_WORKER_ROUTES` under boot v2 (W0c-1, #12732), and answers any other path with an empty 404 before a handler runs. (After this snapshot, the [Broker provider control contract](2026-09-27-broker-provider-control.md) added `MANAGED_RUNTIME_PROVIDER_ROUTE` to the routes both boot versions admit, and this contract's own routes join boot v2's set when a capture or remote publisher is configured.)
 
 ## Goals
 
@@ -75,7 +75,7 @@ A manifest is a Session resource of kind `managed-tool-result-manifest` and sche
 | `sessionId`         | id: the Managed Session, not the Runtime Session                                                         |
 | `turnId`            | id                                                                                                       |
 | `executionCallId`   | id: the `tool.intent` identity that the Session receipt will name                                        |
-| `callId`            | id: the model's call ID                                                                                  |
+| `callId`            | id: original Runtime `reference.callId`; model pairing is separate                                       |
 | `invocationDigest`  | id: the `argsDigest` of the original reference, exactly as the Runtime received it                       |
 | `bindingGeneration` | generation: the Runtime binding generation that ran the call                                             |
 | `captureId`         | token: one per execution capture; segments are keyed under it                                            |

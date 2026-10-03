@@ -10,52 +10,49 @@ import {
   resolveEnvVarsInObject,
 } from './envVarResolver.js';
 
+let originalEnv: NodeJS.ProcessEnv;
+
+beforeEach(() => {
+  originalEnv = { ...process.env };
+});
+
+afterEach(() => {
+  process.env = originalEnv;
+});
+
 describe('resolveEnvVarsInString', () => {
-  let originalEnv: NodeJS.ProcessEnv;
-
-  beforeEach(() => {
-    originalEnv = { ...process.env };
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
-  });
-
   it('should resolve $VAR_NAME format', () => {
     process.env['TEST_VAR'] = 'test-value';
-
-    const result = resolveEnvVarsInString('Value is $TEST_VAR');
-
-    expect(result).toBe('Value is test-value');
+    expect(resolveEnvVarsInString('Value is $TEST_VAR')).toBe(
+      'Value is test-value',
+    );
   });
 
   it('should resolve ${VAR_NAME} format', () => {
     process.env['TEST_VAR'] = 'test-value';
-
-    const result = resolveEnvVarsInString('Value is ${TEST_VAR}');
-
-    expect(result).toBe('Value is test-value');
+    expect(resolveEnvVarsInString('Value is ${TEST_VAR}')).toBe(
+      'Value is test-value',
+    );
   });
 
   it('should resolve multiple variables in the same string', () => {
     process.env['HOST'] = 'localhost';
     process.env['PORT'] = '3000';
-
-    const result = resolveEnvVarsInString('URL: http://$HOST:${PORT}/api');
-
-    expect(result).toBe('URL: http://localhost:3000/api');
+    expect(resolveEnvVarsInString('URL: http://$HOST:${PORT}/api')).toBe(
+      'URL: http://localhost:3000/api',
+    );
   });
 
-  it('should leave undefined variables unchanged', () => {
-    const result = resolveEnvVarsInString('Value is $UNDEFINED_VAR');
-
-    expect(result).toBe('Value is $UNDEFINED_VAR');
-  });
-
-  it('should leave undefined variables with braces unchanged', () => {
-    const result = resolveEnvVarsInString('Value is ${UNDEFINED_VAR}');
-
-    expect(result).toBe('Value is ${UNDEFINED_VAR}');
+  it.each([
+    ['should leave undefined variables unchanged', 'Value is $UNDEFINED_VAR'],
+    [
+      'should leave undefined variables with braces unchanged',
+      'Value is ${UNDEFINED_VAR}',
+    ],
+    ['should handle empty string', ''],
+    ['should handle string without variables', 'No variables here'],
+  ])('%s', (_title, input) => {
+    expect(resolveEnvVarsInString(input)).toBe(input);
   });
 
   it.each([
@@ -105,24 +102,24 @@ describe('resolveEnvVarsInString', () => {
     });
   });
 
-  it('should handle empty string', () => {
-    const result = resolveEnvVarsInString('');
-
-    expect(result).toBe('');
-  });
-
-  it('should handle string without variables', () => {
-    const result = resolveEnvVarsInString('No variables here');
-
-    expect(result).toBe('No variables here');
-  });
-
   it('should handle mixed defined and undefined variables', () => {
     process.env['DEFINED'] = 'value';
+    expect(resolveEnvVarsInString('$DEFINED and $UNDEFINED mixed')).toBe(
+      'value and $UNDEFINED mixed',
+    );
+  });
 
-    const result = resolveEnvVarsInString('$DEFINED and $UNDEFINED mixed');
+  it('resolves only from customEnv without the process.env fallback', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+    process.env['FROM_BOTH'] = 'process-value';
 
-    expect(result).toBe('value and $UNDEFINED mixed');
+    const result = resolveEnvVarsInString(
+      '$FROM_PROCESS ${FROM_PROCESS} $FROM_BOTH',
+      { FROM_BOTH: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toBe('$FROM_PROCESS ${FROM_PROCESS} custom-value');
   });
 
   describe('processEnvFallback', () => {
@@ -210,6 +207,21 @@ describe('resolveEnvVarsInObject', () => {
     process.env = originalEnv;
   });
 
+  it('passes the process.env fallback option to nested values', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+
+    const result = resolveEnvVarsInObject(
+      { list: ['$FROM_PROCESS'], nested: { value: '$FROM_CUSTOM' } },
+      { FROM_CUSTOM: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toEqual({
+      list: ['$FROM_PROCESS'],
+      nested: { value: 'custom-value' },
+    });
+  });
+
   it('should resolve variables in nested objects', () => {
     process.env['API_KEY'] = 'secret-123';
     process.env['DB_URL'] = 'postgresql://localhost/test';
@@ -224,9 +236,7 @@ describe('resolveEnvVarsInObject', () => {
       port: 3000,
     };
 
-    const result = resolveEnvVarsInObject(config);
-
-    expect(result).toEqual({
+    expect(resolveEnvVarsInObject(config)).toEqual({
       server: {
         auth: {
           key: 'secret-123',
@@ -248,9 +258,7 @@ describe('resolveEnvVarsInObject', () => {
       },
     };
 
-    const result = resolveEnvVarsInObject(config);
-
-    expect(result).toEqual({
+    expect(resolveEnvVarsInObject(config)).toEqual({
       tags: ['production', 'app', '1.0.0'],
       metadata: {
         env: 'production',
@@ -267,9 +275,7 @@ describe('resolveEnvVarsInObject', () => {
       tags: ['item1', 'item2'],
     };
 
-    const result = resolveEnvVarsInObject(config);
-
-    expect(result).toEqual(config);
+    expect(resolveEnvVarsInObject(config)).toEqual(config);
   });
 
   it('should handle MCP server config structure', () => {
@@ -292,9 +298,7 @@ describe('resolveEnvVarsInObject', () => {
       },
     };
 
-    const result = resolveEnvVarsInObject(extensionConfig);
-
-    expect(result).toEqual({
+    expect(resolveEnvVarsInObject(extensionConfig)).toEqual({
       name: 'test-extension',
       version: '1.0.0',
       mcpServers: {
@@ -320,9 +324,7 @@ describe('resolveEnvVarsInObject', () => {
       false: false,
     };
 
-    const result = resolveEnvVarsInObject(config);
-
-    expect(result).toEqual(config);
+    expect(resolveEnvVarsInObject(config)).toEqual(config);
   });
 
   it('should handle circular references in objects without infinite recursion', () => {
@@ -338,7 +340,6 @@ describe('resolveEnvVarsInObject', () => {
       name: '$TEST_VAR',
       value: 42,
     };
-    // Create circular reference
     config.self = config;
 
     const result = resolveEnvVarsInObject(config);
@@ -346,9 +347,9 @@ describe('resolveEnvVarsInObject', () => {
     expect(result.name).toBe('resolved-value');
     expect(result.value).toBe(42);
     expect(result.self).toBeDefined();
-    expect(result.self?.name).toBe('$TEST_VAR'); // Circular reference should be shallow copied
+    expect(result.self?.name).toBe('$TEST_VAR'); // the cycle is shallow copied
     expect(result.self?.value).toBe(42);
-    // Verify it doesn't create infinite recursion by checking it's not the same object
+    // No infinite recursion: the copy is not the same object.
     expect(result.self).not.toBe(result);
   });
 
@@ -357,7 +358,6 @@ describe('resolveEnvVarsInObject', () => {
 
     type ArrayWithCircularRef = Array<string | number | ArrayWithCircularRef>;
     const arr: ArrayWithCircularRef = ['$ARRAY_VAR', 123];
-    // Create circular reference
     arr.push(arr);
 
     const result = resolveEnvVarsInObject(arr) as ArrayWithCircularRef;
@@ -366,9 +366,9 @@ describe('resolveEnvVarsInObject', () => {
     expect(result[1]).toBe(123);
     expect(Array.isArray(result[2])).toBe(true);
     const subArray = result[2] as ArrayWithCircularRef;
-    expect(subArray[0]).toBe('$ARRAY_VAR'); // Circular reference should be shallow copied
+    expect(subArray[0]).toBe('$ARRAY_VAR'); // the cycle is shallow copied
     expect(subArray[1]).toBe(123);
-    // Verify it doesn't create infinite recursion
+    // No infinite recursion.
     expect(result[2]).not.toBe(result);
   });
 
@@ -383,8 +383,6 @@ describe('resolveEnvVarsInObject', () => {
 
     const obj1: ObjWithRef = { name: '$NESTED_VAR', id: 1 };
     const obj2: ObjWithRef = { name: 'static', id: 2 };
-
-    // Create cross-references
     obj1.ref = obj2;
     obj2.ref = obj1;
 

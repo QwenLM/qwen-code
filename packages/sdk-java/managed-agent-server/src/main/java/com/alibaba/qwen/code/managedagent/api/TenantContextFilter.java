@@ -8,12 +8,12 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.security.Principal;
-import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.UrlPathHelper;
 
 @Component
 public class TenantContextFilter extends OncePerRequestFilter {
@@ -21,6 +21,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
     public static final String ATTRIBUTE = TenantContext.class.getName();
     private static final String MANAGED_SESSION_STORE_PREFIX =
             "/internal/managed-session-store/v1/";
+    private static final String TOOL_PUBLICATION_PREFIX =
+            "/internal/managed-tool-publications/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -31,30 +33,37 @@ public class TenantContextFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        return !path.startsWith("/v1/agents/")
+        String path = UrlPathHelper.defaultInstance
+                .getPathWithinApplication(request);
+        // The bare collection route (POST /v1/agents) has no trailing slash,
+        // so the prefix alone would let it skip the tenant scope.
+        return !path.equals("/v1/agents")
+                && !path.startsWith("/v1/agents/")
                 && !path.startsWith("/api/agent/web-shell/v1/")
-                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX);
+                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
+                && !path.startsWith(TOOL_PUBLICATION_PREFIX);
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        if (request.getRequestURI()
-                .startsWith(MANAGED_SESSION_STORE_PREFIX)) {
+        String path = UrlPathHelper.defaultInstance
+                .getPathWithinApplication(request);
+        if (path.startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || path.startsWith(TOOL_PUBLICATION_PREFIX)
+                || path.startsWith("/v1/agents/workspaces")
+                || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);
         if (tenantId == null || !TENANT_PATTERN.matcher(tenantId).matches()) {
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-            objectMapper.writeValue(response.getOutputStream(), Map.of(
-                    "error", Map.of(
-                            "code", "invalid_tenant",
-                            "message", HEADER
-                                    + " is required and must contain 1-128"
-                                    + " safe characters.")));
+            objectMapper.writeValue(response.getOutputStream(),
+                    ApiExceptionHandler.envelope(request, "invalid_tenant",
+                            HEADER + " is required and must contain 1-128"
+                                    + " safe characters."));
             return;
         }
         Principal principal = request.getUserPrincipal();
@@ -65,9 +74,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
                     || !validActorId(tenantId, claimedActorId)) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                objectMapper.writeValue(response.getOutputStream(), Map.of(
-                        "error", Map.of("code", "actor_scope_mismatch",
-                                "message", "Authenticated actor scope is invalid.")));
+                objectMapper.writeValue(response.getOutputStream(),
+                        ApiExceptionHandler.envelope(request,
+                                "actor_scope_mismatch",
+                                "Authenticated actor scope is invalid."));
                 return;
             }
             actorId = claimedActorId;

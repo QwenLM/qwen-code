@@ -9,5 +9,16 @@ public interface RuntimeWarmer {
 
     CompletionStage<Void> drain(String sessionId);
 
-    void resume(String sessionId);
+    default boolean supportsWorkspaceClose() {
+        return false;
+    }
+
+    default void requestWorkspaceClose(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("Workspace close is unavailable");
+    }
+
+    default CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Workspace close is unavailable"));
+    }
 }

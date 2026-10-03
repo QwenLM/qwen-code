@@ -13,7 +13,7 @@ export interface ResolveEnvVarsOptions {
    * file resolved against one workspace's environment, where `process.env`
    * may carry another workspace's `.env` values.
    */
-  processEnvFallback?: boolean;
+  readonly processEnvFallback?: boolean;
 }
 
 /**
