@@ -107,9 +107,19 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureCsp(server: ViteDevServer | PreviewServer): void {
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
   server.middlewares.use((req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
+    if (
+      req.method === 'GET' &&
+      /^\/settings\/?(?:\?|$)/.test(req.url || '') &&
+      req.headers.accept?.includes('text/html')
+    ) {
+      req.url = '/index.html';
+    }
     next();
   });
 }
@@ -120,9 +130,9 @@ export default defineConfig(({ command }) => ({
     react(),
     tailwindcss(),
     {
-      name: 'web-shell-development-csp',
-      configureServer: configureCsp,
-      configurePreviewServer: configureCsp,
+      name: 'web-shell-development-middleware',
+      configureServer: configureDevelopmentMiddleware,
+      configurePreviewServer: configureDevelopmentMiddleware,
     },
   ],
   resolve: {
