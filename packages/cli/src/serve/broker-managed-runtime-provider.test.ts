@@ -882,4 +882,128 @@ describe('BrokerManagedRuntimeProvider', () => {
       requestId: expect.any(String),
     });
   });
+
+  it('does not re-send an execution the Broker declared non-retryable', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return new Response(
+          JSON.stringify({
+            code: 'runtime_broker_overloaded',
+            error: 'Overloaded.',
+            retryable: false,
+          }),
+          { status: 503, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(1);
+    provider.dispose();
+  });
+
+  it('re-prepares an execution after a transient reservation failure', async () => {
+    let prepares = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        if (++prepares <= 2) return new Response('{}', { status: 503 });
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(2);
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(prepares).toBe(3);
+    provider.dispose();
+  });
+
+  it('rejects a release after dispose instead of reporting nothing held', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json(envelope({ acquired: true })),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    await provider.getToolV2Client(request(), { harnessSessionId });
+    provider.dispose();
+    await expect(provider.release(runtimeSessionId, request())).rejects.toThrow(
+      'disposed',
+    );
+  });
+
+  it('rejects a release the Broker does not confirm and keeps it retryable', async () => {
+    let confirm = false;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith(':release'))
+        return json(envelope({ released: confirm }));
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    await provider.getToolV2Client(request(), { harnessSessionId });
+    await expect(provider.release(runtimeSessionId, request())).rejects.toThrow(
+      'did not confirm',
+    );
+    confirm = true;
+    await expect(
+      provider.release(runtimeSessionId, request(), { terminal: true }),
+    ).resolves.toBe(true);
+    provider.dispose();
+  });
 });
