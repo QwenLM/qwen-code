@@ -3386,7 +3386,29 @@ export const AppContainer = (props: AppContainerProps) => {
               setPromptSuggestion(result.nextSuggestion);
             }
           })
-          .catch(() => {
+          .catch((err: unknown) => {
+            // Falling back to a normal submit hides the reason the accept failed.
+            // The overlay carries the underlying cause (EACCES from ENOSPC from
+            // ENOTDIR), so record it rather than dropping it on the floor.
+            logSpeculation(
+              config,
+              new SpeculationEvent({
+                outcome: 'failed',
+                turns_used: spec.messages.filter((m) => m.role === 'model')
+                  .length,
+                files_written: 0,
+                tool_use_count: spec.toolUseCount,
+                duration_ms: Date.now() - spec.startTime,
+                boundary_type: spec.boundary?.type,
+                had_pipelined_suggestion: !!spec.pipelinedSuggestion,
+              }),
+            );
+            debugLogger.error(
+              'Failed to accept speculation, resubmitting normally',
+              err,
+              'Cause:',
+              err instanceof Error ? err.cause : undefined,
+            );
             // Fallback: submit normally
             addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });

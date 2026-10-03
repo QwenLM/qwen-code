@@ -93,19 +93,49 @@ export class OverlayFs {
   /**
    * Copy all overlay files back to the real filesystem.
    * Returns the list of real paths that were updated.
+   *
+   * Throws when a file could not be copied. The caller reports the speculation
+   * as accepted and injects the tool results that claim the edits landed, so
+   * dropping a file here would tell the user -- and the model reading the
+   * history -- that an edit is on disk when it is not.
    */
   async applyToReal(): Promise<string[]> {
     const applied: string[] = [];
+    const failed: string[] = [];
+    let firstError: unknown;
 
     for (const [rel, overlayPath] of this.writtenFiles) {
       const realPath = join(this.realCwd, rel);
+      // A registered entry is not proof that anything was written. `redirectWrite`
+      // registers the path up front and, for a file that does not exist yet, only
+      // creates the directory -- so a redirected write that then failed leaves an
+      // entry with no overlay file behind it. There is no edit to land and no false
+      // success to prevent, so counting it would reject edits that did land.
+      if (!existsSync(overlayPath)) {
+        continue;
+      }
       try {
         await mkdir(dirname(realPath), { recursive: true });
         await copyFile(overlayPath, realPath);
         applied.push(realPath);
-      } catch {
-        // Best-effort — ignore errors and continue
+      } catch (err) {
+        // Keep going so the other files still land, then report this one. The
+        // first failure rides along as the cause so the caller can tell EACCES
+        // from ENOSPC instead of only seeing that something went wrong.
+        failed.push(realPath);
+        firstError ??= err;
       }
+    }
+
+    if (failed.length > 0) {
+      // The denominator is the number of files actually attempted, not the number
+      // registered: an entry with no overlay file behind it was skipped above, so
+      // counting it here would report "1 of 2" next to a single path.
+      const attempted = applied.length + failed.length;
+      throw new Error(
+        `Could not apply ${failed.length} of ${attempted} file(s) to disk: ${failed.join(', ')}`,
+        { cause: firstError },
+      );
     }
 
     return applied;
