@@ -223,6 +223,20 @@ function error(
     );
 }
 
+/**
+ * Names the first predicate of a turn-busy gate that fired, so its refusals
+ * are attributable: a blocked Session never recovers alone, an inactive
+ * Activation needs re-acquiring, and pending MCP or Hook operations settle
+ * and retry clean. Call it only after one of the predicates is known true.
+ */
+function hostedTurnBusyReason(session: HostedSession): string {
+  if (session.blocked) return 'turn_blocked';
+  if (session.managed.authority.currentActivation?.phase !== 'active')
+    return 'activation_inactive';
+  if (session.mcp?.hasPendingOperations()) return 'mcp_operations_pending';
+  return 'hook_operations_pending';
+}
+
 function identity(
   req: Request,
   sessions: Map<string, HostedSession>,
@@ -1585,7 +1599,6 @@ export function registerHostedHarnessSessionRoutes(
             stores.toolResultResources,
             restore.throughSequence,
           );
-          await stores.assertWritable();
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
@@ -1596,6 +1609,21 @@ export function registerHostedHarnessSessionRoutes(
             409,
             'hosted_turn_recovery_required',
             'restore_verification_failed',
+          );
+          return;
+        }
+        try {
+          await stores.assertWritable();
+        } catch (cause) {
+          await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} workspace writable check refused: ${String(cause)}`,
+          );
+          error(
+            res,
+            409,
+            'hosted_turn_recovery_required',
+            'workspace_not_writable',
           );
           return;
         }
@@ -1765,7 +1793,12 @@ export function registerHostedHarnessSessionRoutes(
         // strand is silent until retirement.
         noteOwedAdoption(session, sessionId);
         await managed.close();
-        error(res, 409, 'hosted_turn_recovery_required', 'turn_unsettled');
+        error(
+          res,
+          409,
+          'hosted_turn_recovery_required',
+          incompletePublication ? 'publication_incomplete' : 'turn_unsettled',
+        );
         return;
       }
       if (!create && workspaceProfile) {
@@ -1990,7 +2023,12 @@ export function registerHostedHarnessSessionRoutes(
       session.mcp?.hasPendingOperations() ||
       session.hooks?.hasPendingOperations
     )
-      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        hostedTurnBusyReason(session),
+      );
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
@@ -2375,7 +2413,12 @@ export function registerHostedHarnessSessionRoutes(
       (session.blocked || session.mcp.hasPendingOperations()) &&
       !session.managed.authority.extensionRecord('mcp_operation', operationId)
     )
-      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        hostedTurnBusyReason(session),
+      );
     session.mcpBusy = true;
     void session.mcp
       .invoke(operationId, serverId, invocation)
@@ -2615,26 +2658,46 @@ export function registerHostedHarnessSessionRoutes(
     }
     // Prove the checkpoint is continuable before answering: a 200 admission
     // for a turn that cannot continue would settle it with a bare
-    // turn.settled and wedge the Session for good.
+    // turn.settled and wedge the Session for good. The authorization read
+    // itself failing is a third refusal ground, not a `not_runnable` state.
     const continueAuthorization = await session.managed.authority
       .harnessRunAuthorization()
-      .catch(() => undefined);
+      .then(
+        (authorization) => ({ ok: true as const, authorization }),
+        (cause) => ({ ok: false as const, cause }),
+      );
     if (identity(req, sessions) !== session)
       return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (!continueAuthorization.ok) {
+      releaseRecoveredRuntime(session);
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} run authorization could not be read: ${String(continueAuthorization.cause)}`,
+      );
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        'authorization_unreadable',
+      );
+    }
+    if (continueAuthorization.authorization.status !== 'runnable') {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
+    }
     if (
-      continueAuthorization?.status !== 'runnable' ||
-      continueAuthorization.checkpoint.continuation.phase !== 'results_ready'
+      continueAuthorization.authorization.checkpoint.continuation.phase !==
+      'results_ready'
     ) {
       releaseRecoveredRuntime(session);
       return error(
         res,
         409,
         'hosted_turn_recovery_required',
-        'not_continuable',
+        'continuation_not_ready',
       );
     }
     const abort = new AbortController();
@@ -2887,17 +2950,34 @@ export function registerHostedHarnessSessionRoutes(
     }
     // A checkpoint whose authorization is no longer readable cannot prove
     // its parked executions; refuse like the load path instead of settling
-    // a cancellation nothing verified.
+    // a cancellation nothing verified. That read failure is not a
+    // `not_runnable` state, so it is named separately and logged.
     const cancelAuthorization = await session.managed.authority
       .harnessRunAuthorization()
-      .catch(() => undefined);
+      .then(
+        (authorization) => ({ ok: true as const, authorization }),
+        (cause) => ({ ok: false as const, cause }),
+      );
     if (identity(req, sessions) !== session)
       return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (cancelAuthorization?.status !== 'runnable') {
+    if (!cancelAuthorization.ok) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${sessionId} run authorization could not be read: ${String(cancelAuthorization.cause)}`,
+      );
+      // Retry-inviting refusal: keep the adopted lease owed (see the
+      // blocked refusal above).
+      return error(
+        res,
+        409,
+        'hosted_turn_recovery_required',
+        'authorization_unreadable',
+      );
+    }
+    if (cancelAuthorization.authorization.status !== 'runnable') {
       // Retry-inviting refusal: keep the adopted lease owed (see the
       // blocked refusal above).
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
@@ -3162,7 +3242,7 @@ export function registerHostedHarnessSessionRoutes(
       (result) =>
         result.status === 200
           ? res.json(result.body)
-          : error(res, result.status, result.code),
+          : error(res, result.status, result.code, result.reason),
       (cause) => {
         // This answer recorded nothing, so a retry is safe.
         writeStderrLineSafe(
@@ -3202,9 +3282,8 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (session.hooksBusy || session.hooks?.hasUnsettledExecutions)
       return error(res, 409, 'hosted_hook_operation_active');
-    if (session.blocked)
-      return error(res, 409, 'hosted_turn_recovery_required', 'turn_blocked');
     if (
+      session.blocked ||
       session.hooks?.hasPendingOperations ||
       session.managed.authority.currentActivation?.phase !== 'active'
     )
@@ -3212,9 +3291,7 @@ export function registerHostedHarnessSessionRoutes(
         res,
         409,
         'hosted_turn_recovery_required',
-        session.hooks?.hasPendingOperations
-          ? 'hook_operation_active'
-          : 'activation_inactive',
+        hostedTurnBusyReason(session),
       );
     const body = object(req.body);
     const requestId = body?.['requestId'];
