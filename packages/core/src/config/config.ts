@@ -6203,6 +6203,12 @@ export class Config {
     // initialization in getFileReadCache() applies even for derived Configs;
     // each derived Config should clear its own cache, not the parent's.
     this.getFileReadCache().clear();
+    // Conditional-rule markers are the same argument: a new session starts
+    // with no history, so no reminder text survives, but refreshHierarchicalMemory()
+    // — the only thing that rebuilds the registry — does not run here.
+    // startNewSession() rejects derived Configs, so this clears the
+    // canonical registry, not a parent's by accident.
+    this.getConditionalRulesRegistry()?.resetInjected();
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
