@@ -203,6 +203,7 @@ import {
   GoalPersistenceUnavailableError,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   applyPendingGoalProposal,
@@ -268,6 +269,10 @@ import {
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
+import {
+  MANAGED_RUNTIME_OUTCOME_UNKNOWN,
+  ManagedRuntimeOutcomeUnknownError,
+} from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
@@ -991,6 +996,20 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+/**
+ * A Managed session whose Runtime tool call ended without a known outcome:
+ * the turn fails, and so does every later one.
+ */
+function managedOutcomeUnknownError(error: Error): RequestError {
+  // The cause, such as the socket failure, is what tells an operator why.
+  const cause = error.cause instanceof Error ? error.cause.message : undefined;
+  return new RequestError(
+    -32603,
+    cause ? `${error.message} (${cause})` : error.message,
+    { errorKind: MANAGED_RUNTIME_OUTCOME_UNKNOWN },
+  );
 }
 
 function createLoopDetectedTurnError(
@@ -2868,9 +2887,19 @@ export class Session implements SessionContext {
         return;
       }
       if (!turn.modelStarted) {
+        // A blocked Managed session refuses every turn before the model, so
+        // a continuation would be refused again at once, without end.
+        const managedSessionBlock = this.config.getManagedSessionBlock?.();
+        const pauseReason =
+          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+            ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
+              ? GOAL_PAUSE_REASON_USER_INTERRUPT
+              : managedSessionBlock
+                ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+                : undefined;
         if (
-          (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
-            turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON) &&
+          pauseReason !== undefined &&
           runtime.getSnapshot().goal?.status === 'active'
         ) {
           try {
@@ -2878,10 +2907,7 @@ export class Session implements SessionContext {
               action: 'pause',
               expectedGoalId: turn.permit.goalId,
               expectedRevision: turn.permit.revision,
-              reason:
-                turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
-                  ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-                  : GOAL_PAUSE_REASON_USER_INTERRUPT,
+              reason: pauseReason,
             });
           } catch (error) {
             debugLogger.warn(
@@ -2891,6 +2917,8 @@ export class Session implements SessionContext {
             );
             await runtime.releaseTurn(turn.turnKey, { requeue: false });
           }
+        } else if (managedSessionBlock) {
+          await runtime.releaseTurn(turn.turnKey, { requeue: false });
         } else {
           await runtime.releaseTurn(turn.turnKey);
         }
@@ -2940,7 +2968,9 @@ export class Session implements SessionContext {
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
               ? GOAL_PAUSE_REASON_SESSION_DISPOSED
               : failureMessage !== undefined
-                ? goalPauseReasonForFailure(failureMessage)
+                ? this.config.getManagedSessionBlock?.()
+                  ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+                  : goalPauseReasonForFailure(failureMessage)
                 : undefined;
       // Same latched-write-failure hazard as the flush above, one step later:
       // `pause` and `finishTurn` both persist through
@@ -4977,6 +5007,10 @@ export class Session implements SessionContext {
         'Invocation context session does not match the active session',
       );
     }
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) {
+      throw managedOutcomeUnknownError(managedSessionBlock);
+    }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
     const channelTask =
@@ -5034,10 +5068,18 @@ export class Session implements SessionContext {
       // controlled cancellation so infrastructure failures are not hidden
       // as cancellations, and a non-abort error landing after a successor
       // aborted this turn is a real failure that must surface the same way.
+      // A cancel that left a Managed Runtime call's outcome unknown blocked
+      // the session: that is a failure, not a cancellation.
+      const managedOutcomeUnknown =
+        error instanceof RequestError &&
+        (error.data as { errorKind?: unknown } | undefined)?.errorKind ===
+          MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
-        abortReason === USER_CANCEL_ABORT_REASON ||
-        abortReason === SESSION_DISPOSE_ABORT_REASON ||
-        (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
+        !managedOutcomeUnknown &&
+        (abortReason === USER_CANCEL_ABORT_REASON ||
+          abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          (abortReason === NEW_PROMPT_ABORT_REASON &&
+            this.#isAbortError(error)));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
         await this.#settleTurnRecording('cancelled', turnRecording, result);
@@ -13422,6 +13464,8 @@ export class Session implements SessionContext {
         : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
+    // Released when the call ends, however it ends, as the core scheduler does.
+    let builtInvocation: { release?: () => Promise<void> } | undefined;
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
@@ -13997,6 +14041,7 @@ export class Session implements SessionContext {
                 this.config,
               )
             : tool.build(args);
+          builtInvocation = invocation;
           const callIdAware = invocation as {
             setCallId?: (id: string) => void;
           };
@@ -15990,6 +16035,8 @@ export class Session implements SessionContext {
                 : undefined,
           };
         } catch (e) {
+          // No failure to report: see the outer catch.
+          if (e instanceof ManagedRuntimeOutcomeUnknownError) throw e;
           const caught = e instanceof Error ? e : new Error(String(e));
           // Same labelling as the scheduler: a target reached through
           // tool_call names itself when its own build() rejects the arguments.
@@ -16068,6 +16115,11 @@ export class Session implements SessionContext {
         }
       }); // end runInToolSpanContext
     } catch (e) {
+      // A Managed Runtime call without a known outcome has no result to
+      // report: the prompt fails, and the session refuses to continue.
+      if (e instanceof ManagedRuntimeOutcomeUnknownError) {
+        throw managedOutcomeUnknownError(e);
+      }
       const error = e instanceof Error ? e : new Error(String(e));
       const status = activeToolAbortSignal.aborted ? 'cancelled' : 'error';
       return await earlyErrorResponse(error, toolName, {
@@ -16077,6 +16129,13 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (builtInvocation?.release) {
+        void Promise.resolve()
+          .then(() => builtInvocation?.release?.())
+          .catch((error: unknown) => {
+            debugLogger.warn('Tool invocation resource cleanup failed:', error);
+          });
+      }
       if (terminalStatus && terminalStatus !== 'cancelled') {
         this.config.getLlmClient().recordCompletedToolCall(toolName, args);
       }
