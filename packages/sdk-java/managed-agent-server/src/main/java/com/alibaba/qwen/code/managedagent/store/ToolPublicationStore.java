@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.sql.Timestamp;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
@@ -42,7 +41,7 @@ public final class ToolPublicationStore {
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
     // While false, authorization keeps scanning the journal: a rolling fleet
-    // with a pre-V34 binary can commit without maintaining the head columns.
+    // with a pre-V35 binary can commit without maintaining the head columns.
     private final boolean journalHeadAuthorization;
 
     public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
@@ -111,8 +110,8 @@ public final class ToolPublicationStore {
         require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
-        require(now != null && row.expiresAt() != null && row.expiresAt() > now.getTime(),
+        long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
+        require(row.expiresAt() != null && row.expiresAt() > nowEpoch,
                 "Publication grant expired");
         JsonNode key = binding.get("sessionKey");
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
@@ -120,22 +119,20 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
-                        + " writer_lease_until, recovery_status, activation_epoch, journal_revision,"
+                        + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
+                        + " recovery_status, activation_epoch, journal_revision,"
                         + " activation_id, activation_phase, activation_event_epoch, activation_expires_at,"
                         + " activation_head_revision"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
-        Object leaseValue = head.get("writer_lease_until");
-        Timestamp lease = leaseValue instanceof java.time.LocalDateTime local
-                ? Timestamp.valueOf(local) : (Timestamp) leaseValue;
         require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
                 && text(binding, "writerId").equals(head.get("writer_id"))
                 && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
-                && lease != null && lease.after(now) && "READY".equals(head.get("recovery_status"))
+                && ((Number) head.get("writer_live")).intValue() == 1 && "READY".equals(head.get("recovery_status"))
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
         // The stamp says which journal revision the columns were written
-        // from; a pre-V34 binary's commit bumps journal_revision without
+        // from; a pre-V35 binary's commit bumps journal_revision without
         // touching it, so a stale head is detected and rescanned instead of
         // trusted.
         if (journalHeadAuthorization
@@ -148,11 +145,11 @@ public final class ToolPublicationStore {
                     && head.get("activation_event_epoch") instanceof Number epoch
                     && epoch.longValue() == binding.get("activationEpoch").longValue()
                     && head.get("activation_expires_at") instanceof Number expires
-                    && expires.longValue() > now.getTime(), "Original activation is fenced");
+                    && expires.longValue() > nowEpoch, "Original activation is fenced");
         } else {
             requireLegacyActivation(row.tenant(), row.session(), binding,
-                    ((Number) head.get("journal_revision")).longValue(), now,
-                    head);
+                    ((Number) head.get("journal_revision")).longValue(),
+                    nowEpoch, head);
         }
         requireExecution(binding, true);
         var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest"
@@ -161,18 +158,18 @@ public final class ToolPublicationStore {
         require(equalHash(suppliedHash, (String) current.get("token_hash"))
                 && "OPEN".equals(current.get("state"))
                 && row.digest().equals(current.get("binding_digest"))
-                && ((Number) current.get("expires_at")).longValue() > now.getTime(),
+                && ((Number) current.get("expires_at")).longValue() > nowEpoch,
                 "Publication grant changed");
         return binding;
     }
 
     /**
      * Authorizes against the journal scan for heads whose activation columns
-     * predate migration V34, then backfills the head so later checks are
+     * predate migration V35, then backfills the head so later checks are
      * answered from the head row.
      */
     private void requireLegacyActivation(String tenant, String session,
-            JsonNode binding, long journalRevision, Timestamp now,
+            JsonNode binding, long journalRevision, long nowEpoch,
             java.util.Map<String, Object> head) {
         JsonNode found = null;
         for (long revision = journalRevision; revision > 0 && found == null; revision--) {
@@ -197,7 +194,7 @@ public final class ToolPublicationStore {
         require("active".equals(text(found, "phase"))
                 && text(binding, "activationId").equals(text(found, "activationId"))
                 && binding.get("activationEpoch").longValue() == found.path("epoch").asLong()
-                && expiresAt != null && expiresAt > now.getTime(),
+                && expiresAt != null && expiresAt > nowEpoch,
                 "Original activation is fenced");
         backfillActivation(tenant, session, text(found, "activationId"),
                 text(found, "phase"), found.path("epoch").asLong(),

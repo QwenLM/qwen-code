@@ -32,8 +32,9 @@ class ManagedArtifactReadIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String ROOT = "/v1/agents/sessions/session-1";
 
-    @Test
-    void fullDownloadUsesOneLeaseAndBoundsQueriesAcrossObjectSegments() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {Integer.MAX_VALUE, 4096})
+    void fullDownloadUsesOneLeaseAndBoundsQueriesAcrossObjectSegments(int maxRead) throws Exception {
         var h2 = new org.h2.jdbcx.JdbcDataSource();
         h2.setURL("jdbc:h2:mem:download-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -59,7 +60,7 @@ class ManagedArtifactReadIntegrationTest {
         };
         int size = 8 * 1024 * 1024;
         var source = new ManagedArtifactApiIntegrationTest();
-        source.fixture = ToolPublicationStoreTest.largeApiFixture(size, counted);
+        source.fixture = ToolPublicationStoreTest.largeApiFixture(size, counted, maxRead);
         source.configureApi();
         var artifact = source.fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100)
                 .artifacts().stream().filter(row -> row.streamId().equals("stdout")).findFirst().orElseThrow();

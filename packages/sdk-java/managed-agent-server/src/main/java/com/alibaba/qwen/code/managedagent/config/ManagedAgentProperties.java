@@ -240,7 +240,7 @@ public class ManagedAgentProperties {
         private boolean gcEnabled;
         private Duration deletionGrace = Duration.ofHours(24);
         // Off by default: the head's activation columns are only trustworthy
-        // once no pre-V34 binary can still commit. Enable after the fleet
+        // once no pre-V35 binary can still commit. Enable after the fleet
         // fully runs the schema's version.
         private boolean journalHeadAuthorization;
 
@@ -444,8 +444,8 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
-        private boolean durableLocalProcess;
-        private boolean trustedLocalRebootRecovery;
+        private boolean durableLocalProcess = true;
+        private boolean trustedLocalRebootRecovery = true;
         private boolean operatorRecoveryEnabled;
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";

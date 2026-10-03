@@ -42,8 +42,8 @@ class EmbeddedRuntimeBrokerTest {
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isTrue();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isTrue();
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -57,7 +57,10 @@ class EmbeddedRuntimeBrokerTest {
             properties.getRuntimeBroker().setWorkspaceId("");
         }
         assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires durable local-process");
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requires durable local-process")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY")
+                .hasMessageContaining(local ? "enable durable local-process" : "configured: static");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -81,7 +84,9 @@ class EmbeddedRuntimeBrokerTest {
         }
         config.setStateDirectory(storage.resolve("recovery").toString());
         assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside Workspace roots");
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outside Workspace roots")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY");
     }
 
     @Test
@@ -206,6 +211,7 @@ class EmbeddedRuntimeBrokerTest {
         broker.setPort(0);
         broker.setToken("broker-token");
         broker.setProvisioner("static");
+        broker.setTrustedLocalRebootRecovery(false);
         broker.setWorkspaceId("workspace");
         broker.setWorkspaceGeneration("generation");
         broker.setWorkspaceCwd(Path.of(".").toRealPath().toString());

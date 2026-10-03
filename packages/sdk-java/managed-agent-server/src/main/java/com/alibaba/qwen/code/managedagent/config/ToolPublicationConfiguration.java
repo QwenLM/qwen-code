@@ -9,16 +9,20 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.CredentialsProviderFactory;
+import com.aliyun.oss.common.auth.CredentialsProvider;
 import com.aliyun.oss.common.comm.SignVersion;
 import java.net.URI;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -29,6 +33,10 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class ToolPublicationConfiguration {
     @Bean(destroyMethod = "shutdown")
     public OSS toolPublicationOss(ManagedAgentProperties properties) throws Exception {
+        return buildOss(properties, CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider());
+    }
+
+    public static OSS buildOss(ManagedAgentProperties properties, CredentialsProvider credentials) {
         var settings = properties.getToolPublication();
         URI endpoint = URI.create(required(settings.getOssEndpoint(), "OSS endpoint"));
         String region = required(settings.getOssRegion(), "OSS region");
@@ -42,10 +50,10 @@ public class ToolPublicationConfiguration {
         required(settings.getServiceBaseUrl(), "publication service URL");
         var client = new ClientBuilderConfiguration();
         client.setSignatureVersion(SignVersion.V4);
-        client.setMaxErrorRetry(0);
+        AliyunToolPublicationObjectStore.configureClientRetries(client);
         return OSSClientBuilder.create().endpoint(endpoint.toString())
                 .region(region)
-                .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())
+                .credentialsProvider(credentials)
                 .clientConfiguration(client).build();
     }
 
@@ -114,6 +122,17 @@ public class ToolPublicationConfiguration {
     public ToolPublicationRetentionObserver toolPublicationRetentionObserver(ToolPublicationRetentionStore retention,
             ManagedAgentProperties properties) {
         return new ToolPublicationRetentionObserver(retention, properties);
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler managedToolOutputScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-tool-output-").build();
+    }
+
+    @Bean
+    public ToolPublicationCollector toolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
+        return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
     }
 
     private static String required(String value, String label) {
