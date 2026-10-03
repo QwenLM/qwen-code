@@ -80,7 +80,7 @@ G2 now adds automatic, paginated evidence reconciliation when a Broker acquires 
 
 The service uses process-local futures only to coalesce duplicate provisioning, Session acquisition, and dispatch work within one Broker instance. Repository versions and leases remain the authority for state mutation. `brokerOwnerId` must identify one live Broker process; operation and dispatch claims are renewed at one third of their configured duration while external work is active.
 
-Closing the service rejects new work, cancels its internal waiters, and stops its owned schedulers — renewals run on a dedicated pool so a stalled storage call cannot queue coordination work, and coordination runs on a single thread. It does not assert that in-flight external work stopped; expired repository claims preserve the fail-closed takeover semantics.
+Closing the service rejects new work, cancels its internal waiters, and stops its owned schedulers — renewals run on a dedicated pool, so a stalled renewal no longer occupies the coordination thread, and coordination runs on a single thread. A stalled renewal still holds its claim's renewal monitor, and the fence and settlement paths take that monitor, so a long storage stall can still block coordination behind it. Closing does not assert that in-flight external work stopped; expired repository claims preserve the fail-closed takeover semantics.
 
 ## Errors and security
 

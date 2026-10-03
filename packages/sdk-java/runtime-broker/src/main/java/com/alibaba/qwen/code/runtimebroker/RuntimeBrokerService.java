@@ -2979,8 +2979,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     /**
-     * The v3 result-poll backoff: 100ms doubling, capped at 2s so a finished
-     * result is picked up at most one cap late.
+     * The v3 result-poll backoff: 100ms doubling, capped at 2s. The cap
+     * bounds the scheduled delay between rounds for one execution; rounds
+     * for all executions share the single coordination thread, so pick-up
+     * lateness under concurrency also carries that thread's queue wait.
      */
     static long v3PollDelayMillis(int attempt) {
         return Math.min(2_000, 100L << Math.min(attempt, 6));

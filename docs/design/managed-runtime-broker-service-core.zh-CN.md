@@ -79,7 +79,7 @@ G2 现已在 Broker 获取持久 READY Session 时加入自动分页证据对账
 
 服务只使用进程内 future 合并同一 Broker 实例中的重复供应、Session acquire 和 dispatch 工作。repository version 和 lease 仍是状态变更的权威依据。`brokerOwnerId` 必须标识一个存活 Broker 进程；外部工作活跃期间，operation claim 和 dispatch claim 按配置租期的三分之一间隔续租。
 
-关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的调度器——续约运行在独立线程池，单个存储调用的卡顿不会拖住协调工作，协调运行在单线程。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
+关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的调度器——续约运行在独立线程池，因此卡住的续约不再占用协调线程，协调运行在单线程。卡住的续约仍持有该 claim 的续约监视器，而围栏与结算路径会取这把监视器，所以一次足够长的存储停顿仍可能通过它阻塞协调。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
 
 ## 错误与安全
 

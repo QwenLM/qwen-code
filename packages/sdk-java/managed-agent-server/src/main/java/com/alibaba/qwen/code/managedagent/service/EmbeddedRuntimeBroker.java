@@ -180,8 +180,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         this.recovery = broker.isTrustedLocalRebootRecovery()
                 ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
-        LOG.info("Embedded Runtime Broker listening at {}",
-                server.getBaseUri());
+        // Log the resolved window: a suffix-less config value binds as
+        // milliseconds, so "30" meant as 30 minutes shows up here as PT0.03S.
+        LOG.info("Embedded Runtime Broker listening at {} (v3 result window {})",
+                server.getBaseUri(), v3ResultWindow);
     }
 
     @Override
