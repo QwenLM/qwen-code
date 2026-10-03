@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,10 +12,33 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ManagedChildRunRecordContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void pinsTheKeysAndStopReasonVocabulary() throws IOException {
+        JsonNode fixtures = fixtures();
+        assertEquals(List.of("commandRef", "exitCode", "exitSignal", "kind",
+                "outputRef", "ownerScopeId", "run", "shellId",
+                "startReceiptRef", "stopReason", "stopRequested"),
+                jsonList(fixtures.required("keys")));
+        assertEquals(List.of("commandRef", "kind", "ownerScopeId", "shellId"),
+                jsonList(fixtures.required("fixedKeys")));
+        JsonNode reasons = fixtures.required("stopReasons");
+        for (String state : List.of("settled", "failed", "cancelled")) {
+            assertEquals(ManagedExtensionRecords.CHILD_STOP_REASONS.get(state),
+                    jsonList(reasons.required(state)), state);
+        }
+    }
+
+    private static List<String> jsonList(JsonNode node) {
+        List<String> values = new java.util.ArrayList<>();
+        node.forEach(each -> values.add(each.textValue()));
+        return values;
+    }
 
     @Test
     void validatesTheSharedRecordsAndStarts() throws IOException {

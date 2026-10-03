@@ -159,7 +159,6 @@ public final class ManagedExtensionRecords {
                     List.of("start_failed", "process_failed",
                             "quota_exceeded"),
                     "cancelled", List.of("stop_requested"));
-    public static final String CHILD_RUN_KIND = "managed-child_run";
 
     private static final Pattern EXIT_SIGNAL = Pattern.compile(
             "[A-Z][A-Z0-9]{0,15}");
@@ -702,10 +701,10 @@ public final class ManagedExtensionRecords {
         require(stopReason == null
                 || CHILD_STOP_REASONS.get(state).contains(stopReason),
                 "childRun.stopReason does not fit the " + state + " state");
-        require(!"settled".equals(state) || "settled".equals(execution)
-                && !startReceipt.isNull(),
-                "childRun.run settles only with a process that started and "
-                        + "ended");
+        // A 'settled' run needs no clause of its own: the shared run block
+        // only proves a settled execution, and the receipt rules above pin
+        // both that the process was running and that nothing proves a stop
+        // without one.
         require(!"start_failed".equals(stopReason)
                 || startReceipt.isNull() && execution != null,
                 "childRun.stopReason start_failed needs a process that "
@@ -745,8 +744,9 @@ public final class ManagedExtensionRecords {
      * re-attach under a later generation keeps the receipt whose process
      * it proves, while a changed receipt is refused as the shape of a
      * rerun — its stop request is set but never cleared, its output may
-     * grow but is never removed, exit evidence is set once, and nothing
-     * changes once it ended.
+     * grow but is never removed, and once the run is terminal the total
+     * freeze enforces everything, including that exit evidence can never
+     * have been set beforehand.
      */
     public static boolean isChildRunSuccessor(JsonNode previous,
             JsonNode next) {
@@ -764,12 +764,6 @@ public final class ManagedExtensionRecords {
                         && next.get("outputRef").isNull()
                 || previous.get("stopRequested").booleanValue()
                         && !next.get("stopRequested").booleanValue()
-                || !previous.get("exitCode").isNull()
-                        && !same(previous.get("exitCode"),
-                                next.get("exitCode"))
-                || !previous.get("exitSignal").isNull()
-                        && !same(previous.get("exitSignal"),
-                                next.get("exitSignal"))
                 || !previous.get("startReceiptRef").isNull()
                         && !same(previous.get("startReceiptRef"),
                                 next.get("startReceiptRef"))) {

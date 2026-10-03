@@ -33,12 +33,19 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 
 export type ChildRunKind = 'shell';
 
+/** Why a background Shell ended, by the state its run ended in. */
+export const CHILD_RUN_STOP_REASONS = Object.freeze({
+  settled: Object.freeze(['exited'] as const),
+  failed: Object.freeze([
+    'start_failed',
+    'process_failed',
+    'quota_exceeded',
+  ] as const),
+  cancelled: Object.freeze(['stop_requested'] as const),
+});
+
 export type ChildRunStopReason =
-  | 'exited'
-  | 'start_failed'
-  | 'process_failed'
-  | 'quota_exceeded'
-  | 'stop_requested';
+  (typeof CHILD_RUN_STOP_REASONS)[keyof typeof CHILD_RUN_STOP_REASONS][number];
 
 /** The body of a `managed-child_run` schema version 1 (`kind: "shell"`). */
 export interface ChildRun {
@@ -59,17 +66,6 @@ export interface ChildRun {
   readonly exitSignal: string | null;
   readonly run: ExtensionRun;
 }
-
-/** Why a background Shell ended, by the state its run ended in. */
-export const CHILD_RUN_STOP_REASONS = Object.freeze({
-  settled: Object.freeze(['exited'] as const),
-  failed: Object.freeze([
-    'start_failed',
-    'process_failed',
-    'quota_exceeded',
-  ] as const),
-  cancelled: Object.freeze(['stop_requested'] as const),
-});
 
 const BODY_KEYS = [
   'commandRef',
@@ -253,12 +249,9 @@ export function parseChildRun(value: unknown): ChildRun {
       );
     }
   }
-  if (
-    run.state === 'settled' &&
-    (execution !== 'settled' || startReceiptRef === null)
-  ) {
-    fail('Child run settles only with a process that started and ended.');
-  }
+  // A 'settled' run needs no clause of its own: the shared run block only
+  // proves a settled execution, and the receipt rules above pin both that
+  // the process was running and that nothing proves a stop without one.
   if (
     stopReason === 'start_failed' &&
     (startReceiptRef !== null || execution === null)
@@ -320,8 +313,9 @@ export function isChildRunStart(value: unknown): boolean {
  * set once and never changes — a re-attach under a later generation keeps
  * the receipt whose process it proves, while a changed receipt is refused as
  * the shape of a rerun — its stop request is set but never cleared, its
- * output may grow but is never removed, exit evidence is set once, and
- * nothing changes once it ended.
+ * output may grow but is never removed, and once the run is terminal the
+ * total freeze enforces everything, including that exit evidence can never
+ * have been set beforehand.
  */
 export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
   return accepts(() => {
@@ -332,8 +326,6 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       !isExtensionRunSuccessor(before.run, after.run) ||
       (before.outputRef !== null && after.outputRef === null) ||
       (before.stopRequested && !after.stopRequested) ||
-      !setOnce(before.exitCode, after.exitCode) ||
-      !setOnce(before.exitSignal, after.exitSignal) ||
       !setOnce(before.startReceiptRef, after.startReceiptRef)
     ) {
       return false;

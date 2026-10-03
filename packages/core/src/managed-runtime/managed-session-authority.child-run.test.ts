@@ -486,7 +486,7 @@ describe('managed session authority child_run records', () => {
           },
           TRUSTED,
         ),
-      ).rejects.toThrow(ManagedSessionRecordError);
+      ).rejects.toThrow(/successor|must follow|revision/im);
       expect(authority.committedSequence).toBe(before);
       expect(await publishedBodies(harness)).toBe(1);
     });
@@ -514,7 +514,9 @@ describe('managed session authority child_run records', () => {
           { domain: 'child_run', record: shell(fake, {}) },
           TRUSTED,
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow(
+        /never-published|managed-tool-args|resource|reference/im,
+      );
       expect(await publishedBodies(harness)).toBe(0);
     });
   });

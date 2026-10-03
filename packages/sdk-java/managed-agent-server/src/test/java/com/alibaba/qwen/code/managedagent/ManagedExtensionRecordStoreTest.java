@@ -100,6 +100,121 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void commitsAndProjectsAChildRunChain() throws Exception {
+        byte[] args = "{\"command\":\"yes\"}"
+                .getBytes(StandardCharsets.UTF_8);
+        CommitResource argsResource = new CommitResource(
+                ExtensionRecordJournal.resourceId(args), "managed-tool-args",
+                1, args.length, ExtensionRecordJournal.sha256(args),
+                Base64.getEncoder().encodeToString(args));
+        byte[] receipt = "{}".getBytes(StandardCharsets.UTF_8);
+        CommitResource receiptResource = new CommitResource(
+                ExtensionRecordJournal.resourceId(receipt),
+                "managed-runtime-receipt", 1, receipt.length,
+                ExtensionRecordJournal.sha256(receipt),
+                Base64.getEncoder().encodeToString(receipt));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode rev1 = childRun("admitted", "intent", null, argsResource);
+        var tx1 = journal.requestDomain("child-1", "child_run", rev1,
+                List.of(argsResource), 1_000);
+        journal.commit(tx1);
+        journal.committed(tx1);
+        ObjectNode rev2 = childRun("running", "dispatch_started", "binding-1", argsResource);
+        var tx2 = journal.requestDomain("child-2", "child_run", rev2,
+                List.of(), 2_000);
+        journal.commit(tx2);
+        journal.committed(tx2);
+        ObjectNode rev3 = childRun("waiting", "running_attached", "binding-1", argsResource);
+        rev3.set("startReceiptRef", ref(receiptResource));
+        var tx3 = journal.requestDomain("child-3", "child_run", rev3,
+                List.of(receiptResource), 3_000);
+        journal.commit(tx3);
+        journal.committed(tx3);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "shell-x"));
+        ManagedExtensionRecordStore.TaskRow row = records
+                .findTask(TENANT, sessionId, taskId).orElseThrow();
+        assertThat(row.kind()).isEqualTo("background_shell");
+        assertThat(row.projection().state()).isEqualTo("waiting");
+        assertThat(row.projection().runtimeState()).isEqualTo("ready");
+        assertThat(row.projection().startedAt()).isEqualTo(2_000L);
+        assertThat(row.projection().settledAt()).isNull();
+        // A revision naming a resource outside the transaction's closure is
+        // refused, and nothing of it persists.
+        String other = UUID.randomUUID().toString();
+        ExtensionRecordJournal broken = journal(other);
+        var bx1 = broken.requestDomain("broken-1", "child_run",
+                childRun("admitted", "intent", null, argsResource),
+                List.of(argsResource), 1_000);
+        broken.commit(bx1);
+        broken.committed(bx1);
+        var bx2 = broken.requestDomain("broken-2", "child_run",
+                childRun("running", "dispatch_started", "binding-1", argsResource),
+                List.of(), 2_000);
+        broken.commit(bx2);
+        broken.committed(bx2);
+        ObjectNode badAttach = childRun("waiting", "running_attached",
+                "binding-1", argsResource);
+        badAttach.set("startReceiptRef", ref(receiptResource));
+        assertRefused("child_run names a resource the closure lacks", other,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> broken.commit(broken.requestDomain("broken-3",
+                        "child_run", badAttach, List.of(), 3_000)));
+        assertThat(records.listTasks(TENANT, other, null, null, 10).tasks())
+                .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
+                .containsExactly(ManagedExtensionProjection.taskId(
+                        ManagedExtensionProjection.recordKey(other,
+                                "child_run", "shell-x")));
+    }
+
+    private static ObjectNode ref(CommitResource resource) {
+        ObjectNode ref = JsonNodeFactory.instance.objectNode();
+        ref.put("resourceId", resource.resourceId());
+        ref.put("kind", resource.kind());
+        ref.put("schemaVersion", resource.schemaVersion());
+        ref.put("byteLength", resource.byteLength());
+        ref.put("digest", resource.digest());
+        return ref;
+    }
+
+    private static ObjectNode childRun(String state, String execution,
+            String runtimeBinding, CommitResource argsResource) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("kind", "shell");
+        body.put("shellId", "shell-x");
+        body.put("ownerScopeId", "scope-x");
+        body.set("commandRef", ref(argsResource));
+        body.putNull("startReceiptRef");
+        body.putNull("outputRef");
+        body.putNull("stopReason");
+        body.put("stopRequested", false);
+        body.putNull("exitCode");
+        body.putNull("exitSignal");
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", state);
+        run.putNull("reason");
+        run.putNull("definition");
+        run.put("executionCallId", "call-x");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.put("execution", execution);
+        if (runtimeBinding != null) {
+            ObjectNode runtime = JsonNodeFactory.instance.objectNode();
+            runtime.put("runtimeBindingId", runtimeBinding);
+            runtime.put("generation", "1");
+            run.set("runtime", runtime);
+        } else {
+            run.putNull("runtime");
+        }
+        run.putNull("delivery");
+        body.set("run", run);
+        return body;
+    }
+
+    @Test
     void refusesTheSharedRejectedChains() throws Exception {
         for (JsonNode reject : fixtures().required("monitorChainRejectCases")) {
             String sessionId = UUID.randomUUID().toString();
