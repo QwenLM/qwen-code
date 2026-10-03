@@ -1985,10 +1985,6 @@ describe('群管理事件', () => {
         { msgId: string; timestamp: number }
       >;
       const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
-      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
-        string,
-        { chatId: string; msgId: string; timestamp: number }
-      >;
       const streamState = chp['streamState'] as Map<
         string,
         {
@@ -2011,11 +2007,9 @@ describe('群管理事件', () => {
         timestamp: Date.now(),
       });
       msgSeqMap.set('msg-X', 3);
-      replyContextByMessageId.set('msg-X', {
-        chatId: groupId,
-        msgId: 'msg-X',
-        timestamp: Date.now(),
-      });
+      // No routing entry and no session anchor names msg-X: the buffered
+      // streamState entry is the only holder, so this pins isMsgSeqStillInUse's
+      // streamState clause rather than the routing-map fallback.
       streamState.set('sid-1', {
         chatId: otherGroupId,
         buffer: 'pending tail',
@@ -2032,8 +2026,11 @@ describe('群管理事件', () => {
       };
       pvt['handleGroupDelRobot'](evt);
 
-      // The context loop's guard saw the buffered entry and kept the counter.
+      // The context loop's guard saw the buffered entry and kept the counter
+      // (if the entry's buffer no longer counted as a holder, the counter would
+      // have been reclaimed here).
       expect(msgSeqMap.get('msg-X')).toBe(3);
+      expect(streamState.get('sid-1')!.buffer).toBe('pending tail');
     });
 
     it('cascades the msg_seq counter of a stream whose buffer it discards', () => {
