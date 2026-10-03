@@ -618,7 +618,8 @@ export async function collectContextData(
 
   // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
   // the MCP schemas together exceed the declared tool list, that excess would
-  // be charged to the overhead and taken straight back out of `messages`.
+  // push the estimate past the window, or come straight out of `messages`
+  // against a provider total.
   // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
   // to the Skill definition `skills` carries, so the three rows still account
   // for exactly `allToolsTokens` plus the listing and the loaded bodies.
