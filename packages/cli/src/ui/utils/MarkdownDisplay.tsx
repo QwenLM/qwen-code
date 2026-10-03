@@ -16,7 +16,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { parseCodeFenceInfo } from './markdownUtilities.js';
+import { parseCodeFenceInfo } from './markdown-utilities.js';
 import {
   fitPendingSlice,
   splitMarkdownTableRow,
