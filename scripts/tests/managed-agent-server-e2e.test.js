@@ -191,6 +191,14 @@ describe('managed-agent-server e2e runner', () => {
       source.match(/workspace-mounts\[0\]\.root=/g),
       'the shared Spring arguments must configure the Workspace mount',
     ).toHaveLength(1);
+    // The mount root itself must sit in the unconditional mkdir list: a
+    // re-gated entry still starts Spring (nothing checks the root exists)
+    // and only breaks the real-model side-effect assertion, which no lane
+    // runs.
+    expect(
+      source.match(/^\s+workspaceMount,$/m),
+      'the Workspace mount root must be created for every mode',
+    ).not.toBeNull();
     expect(
       source.match(
         /INSERT INTO qwen_managed_agent\.managed_workspace_registry/g,
