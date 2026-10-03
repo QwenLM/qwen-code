@@ -1282,6 +1282,83 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
   });
 
+  it('prefers the terminal stop reason over a later transient error and keeps it after the transient clears', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    mocks.client.subscribeEvents
+      .mockImplementationOnce(async function* () {
+        yield event(3, 'still streaming');
+        await new Promise((resolve) => setTimeout(resolve, 3_500));
+        throw new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway');
+      })
+      .mockImplementationOnce(async function* (
+        _id: string,
+        opts: { signal: AbortSignal },
+      ) {
+        yield event(4, 'resumed after the stop');
+        await new Promise<void>((resolve) => {
+          if (opts.signal.aborted) resolve();
+          else
+            opts.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+      });
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    expect(
+      container.querySelector('[data-testid="messages"]')?.textContent,
+    ).toContain('resumed after the stop');
+  });
+
+  it('shows a fresh action error alongside a sticky terminal stop', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(409, 'turn_active', 'Turn already active'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    await act(async () => {
+      await flush();
+    });
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found', 'Turn already active']);
+  });
+
   it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
     vi.useFakeTimers();
     let deliverGap!: () => void;
