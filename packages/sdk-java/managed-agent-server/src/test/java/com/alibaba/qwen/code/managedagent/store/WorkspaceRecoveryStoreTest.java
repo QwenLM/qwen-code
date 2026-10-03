@@ -13,7 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -425,18 +424,17 @@ class WorkspaceRecoveryStoreTest {
 
     private String retireSession(String session) {
         String operation = UUID.randomUUID().toString();
-        // Workspace-bound public admission is unavailable; exercise retained DELETE completion.
+        // Exercise retained DELETE completion from an admitted closed Session.
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = ?", session);
         jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, lease_owner, claim_generation, available_at, created_at, updated_at)"
-                + " VALUES ('tenant', ?, ?, 'DELETE', '', 'delete', 'digest', 'PENDING', 'JAVA_DURABLE',"
-                + " 'PENDING', 'ACTIVE', NULL, 0, 0, 0, 0)", session, operation);
+                + " session_status_before, lease_owner, lease_until, claim_generation, available_at, created_at,"
+                + " updated_at)"
+                + " VALUES ('tenant', ?, ?, 'DELETE', '', 'delete', 'digest', 'RUNNING', 'JAVA_DURABLE',"
+                + " 'LEASED', 'CLOSED', 'worker', 32503680000000, 1, 0, 0, 0)", session, operation);
         jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
-        var claimed = new TransactionTemplate(manager).execute(status ->
-                sessions.claimOperation("tenant", session, operation, "worker", Duration.ofSeconds(30)).orElseThrow());
         assertThat(new TransactionTemplate(manager).<Boolean>execute(status ->
-                sessions.completeOperation("tenant", session, operation, "worker", claimed.claimGeneration(), false))).isTrue();
+                sessions.completeOperation("tenant", session, operation, "worker", 1, false))).isTrue();
         return operation;
     }
 

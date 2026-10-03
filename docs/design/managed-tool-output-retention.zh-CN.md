@@ -24,7 +24,7 @@ Session 是保留根。close、archive、Runtime 排空、ACK 和事件过期后
 
 默认关闭自动删除，先观察候选。持锁重新检查候选：Session 永久退役、宽限期到期、完整 committed 且已接纳的 publication、无活跃读租约、无未结束或未知 PUT、无 candidate 对象、未完成 operation、隔离或恢复保护，并具备升级后的写入证据。持久 claim generation 和游标支持重启及多实例竞争；每实例仅一个调度清理器，和候选观察共用独立单线程输出调度器，避免存储 I/O 阻塞活跃 Session 调度。每个 tick 在独立事务中最多检查 32 个到期候选，并最多回收一页。宽限期阻塞的候选等待至原始退役时间加配置宽限期；其他阻塞一分钟后重试。每页确认通过主键存在性查询检查剩余 catalog 项，并在 Session 自身的主键前缀内仅清理属于该 publication catalog 的资源。
 
-SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精确 key，再在原 claim 下确认。每次 claim 最多检查 32 个到期候选，避免被阻塞的 publication 独占 worker；宽限期内的行等到原始退役时间加宽限期再检查。过期 claim 只通过原 owner/generation fence 延后。纯 inline 页不需要 OSS versioning 探针，物理 key 继续要求未启用版本控制。幂等 `deleteIfPresent` 处理不存在对象和应答丢失；异常保留待重试页，不按前缀扫删。旧清理器不能推进新 claim 或释放配额。退役和 `DELETING` 关闭接纳，阻止新读者和 PUT 重新创建已删对象。Collection 使用接在 recovery V31、close V32 后的 V33；合入前 V28 collection 历史需要显式核对，不自动执行 Flyway repair。
+SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精确 key，再在原 claim 下确认。每次 claim 最多检查 32 个到期候选，避免被阻塞的 publication 独占 worker；宽限期内的行等到原始退役时间加宽限期再检查。过期 claim 只通过原 owner/generation fence 延后。纯 inline 页不需要 OSS versioning 探针，物理 key 继续要求未启用版本控制。幂等 `deleteIfPresent` 处理不存在对象和应答丢失；异常保留待重试页，不按前缀扫删。旧清理器不能推进新 claim 或释放配额。退役和 `DELETING` 关闭接纳，阻止新读者和 PUT 重新创建已删对象。Collection 使用接在 recovery V31、close V32、AgentDefinition V33 后的 V34；合入前以 V28 或 V33 记录 collection 的历史需要显式核对，不自动执行 Flyway repair。
 
 最后一页确认后，SQL 清除 publication inline 副本及对应 Session resource 副本，保留身份、digest、长度、receipt 指针和审计时间，置为 `COLLECTED`，一次性清零 held/used 记账。部分成功仍保留全部占额。原 journal 及公共预览/历史遵循各自已有保留策略。
 
