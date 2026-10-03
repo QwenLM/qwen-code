@@ -86,10 +86,10 @@ function queryAndPrint(terminal: TestTerminal) {
   };
 }
 
-// The package runs three builds: the app (`vite.config.ts`) and the two lib
-// invocations (`vite.lib.config.ts`, default and transcript modes). Both
-// configs must carry the ES2021 floor or the shipped bundle throws on the
-// first DECRQM query.
+// The package runs one app build plus two library modes that expose three
+// public library entries. The app still bundles xterm and needs ES2021 to
+// avoid #11643; the library entries externalize xterm but intentionally share
+// the same public syntax floor, so both configs are pinned here.
 describe.each(['vite.config.ts', 'vite.lib.config.ts'])(
   'Web Shell production terminal (%s)',
   (configFile) => {
