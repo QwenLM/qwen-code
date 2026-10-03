@@ -18,6 +18,9 @@ import type { Config } from '../config/config.js';
 
 const probe = vi.hoisted(() => ({
   readFile: undefined as string | undefined,
+  // Injected errno for the readFile probe; EMFILE by default. Non-exhaustion
+  // codes (EACCES) model per-file damage instead of a refresh rejection.
+  readFileCode: undefined as string | undefined,
   pluginRealpath: false,
 }));
 vi.mock('node:fs', async (importOriginal) => {
@@ -46,8 +49,9 @@ vi.mock('fs/promises', async (importOriginal) => {
     ...actual,
     readFile: (...args: Parameters<typeof actual.readFile>) => {
       if (probe.readFile && String(args[0]).includes(probe.readFile)) {
+        const code = probe.readFileCode ?? 'EMFILE';
         return Promise.reject(
-          Object.assign(new Error('EMFILE injected'), { code: 'EMFILE' }),
+          Object.assign(new Error(`${code} injected`), { code }),
         );
       }
       return actual.readFile(...args);
@@ -78,6 +82,7 @@ describe('extension scan recovery', () => {
   });
   afterEach(() => {
     probe.readFile = undefined;
+    probe.readFileCode = undefined;
     probe.pluginRealpath = false;
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -447,6 +452,70 @@ describe('extension scan recovery', () => {
     expect(manager.getLoadedExtensions().map((entry) => entry.name)).toContain(
       'aaa-refusal',
     );
+    await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
+      SubagentError,
+    );
+  });
+
+  it('retains a pending refusal when an update commit could not read the refused file', async () => {
+    // R18-2: the commit-path withdrawal must be damage-aware. The ledger is
+    // seeded with a named refusal; the update's copy brings the same
+    // (still-invalid) agent file, and the reload's read of it faults with a
+    // plain EACCES — damage, not refusal, not exhaustion. A reload that
+    // cannot read a file has no evidence about its refusal: the pending
+    // record must survive, exactly like a damaged refresh. An unconditional
+    // delete here leaks dispatch to the same-named builtin (mutation: with
+    // the wholesale delete restored this test stays green no more).
+    const source = path.join(root, 'update-source');
+    fs.mkdirSync(source, { recursive: true });
+    fs.writeFileSync(
+      path.join(source, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify({ name: 'aaa-refusal', version: '1.0.0' }),
+    );
+    // A live cache first — installs never add entries to an uninitialized
+    // one, and the update path resolves the previous entry from it.
+    await manager.refreshCache();
+    const installed = await manager.installExtension({ type: 'local', source });
+
+    // The still-invalid executor file lands on disk; a rejected refresh
+    // records the pending refusal (with its agents-dir source file).
+    refusal('aaa-refusal');
+    const link = dangling();
+    await expect(manager.refreshCache()).rejects.toThrow('zzz-dangling');
+    fs.unlinkSync(link);
+    expect(
+      manager.getPendingScanRefusals().get('aaa-refusal')?.has('explore'),
+    ).toBe(true);
+
+    // v2 ships the same still-invalid file; fault only the reload's read.
+    fs.writeFileSync(
+      path.join(source, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify({ name: 'aaa-refusal', version: '2.0.0' }),
+    );
+    fs.mkdirSync(path.join(source, 'agents'), { recursive: true });
+    fs.writeFileSync(
+      path.join(source, 'agents', 'explore.md'),
+      '---\nname: explore\ndescription: Test agent\nexecutor: {kind: invalid, command: runner}\n---\nRefuse this agent.',
+    );
+    probe.readFile = 'explore.md';
+    probe.readFileCode = 'EACCES';
+    try {
+      const updated = await manager.installExtension(
+        { type: 'local', source },
+        undefined,
+        undefined,
+        undefined,
+        installed.config,
+      );
+      expect(updated.version).toBe('2.0.0');
+    } finally {
+      probe.readFile = undefined;
+      probe.readFileCode = undefined;
+    }
+
+    expect(
+      manager.getPendingScanRefusals().get('aaa-refusal')?.has('explore'),
+    ).toBe(true);
     await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
       SubagentError,
     );

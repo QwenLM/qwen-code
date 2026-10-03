@@ -69,8 +69,12 @@ uses a helper that retries resource exhaustion once and otherwise continues
 with the previous complete cache (empty on a cold start) rather than aborting
 initialization. If the initial refresh gives up and the final startup refresh
 succeeds, hooks and skills are synchronized before initialization continues.
-A synchronization failure rejects initialization. Post-startup refreshes keep
-the fail-closed semantics above.
+A synchronization failure rejects initialization. When every startup attempt
+gives up, a pending-recovery flag stays set: the daemon's source revalidation
+is the next successful refresh, arriving with every extension-derived
+consumer still built from the empty startup set, so it resyncs hooks, MCP
+servers and context once per give-up in addition to the skill cache.
+Post-startup refreshes keep the fail-closed semantics above.
 
 Executor refusals are kept separately from the committed runtime cache. A file
 that declares an invalid `executor`/`executionBackend` records a refusal in
@@ -98,8 +102,11 @@ still damaged, and is withdrawn once that file parses clean, parses into a
 different refusal, or no longer exists. A refusal therefore never outlives
 the file that caused it, and a malformed sibling file cannot pin it. An
 unreadable agents directory proves nothing per file and keeps every record
-for that extension; install/update reloads supersede the extension's records
-wholesale. Uninstall removes the name; a full refresh also drops records whose
+for that extension. Install/update reloads supersede the extension's records
+wholesale — unless the reload itself recorded per-file damage, in which case
+the same per-name rule applies: a file the commit could not read is no
+evidence to withdraw its refusal. Uninstall removes the name; a full refresh
+also drops records whose
 installation directory is confirmed missing. Unreadable directories and
 `ENOTDIR` are not proof of removal. Pending state does not persist across
 process restarts.

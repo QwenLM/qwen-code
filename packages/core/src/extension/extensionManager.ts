@@ -1682,9 +1682,17 @@ export class ExtensionManager {
   }
 
   private clearPendingScanRefusals(extension: Extension): void {
-    if (!this.incompleteAgentScans.has(extension)) {
+    if (this.incompleteAgentScans.has(extension)) return;
+    // Damage-aware supersede (R18-2): a commit reload that could not READ an
+    // agent file has no evidence about its refusal — the per-file damage it
+    // just recorded must retain the pending name, exactly like a damaged
+    // refresh. Only a reload with no per-file damage supersedes wholesale:
+    // an unreadable file is neither clean nor absent.
+    if (!this.agentScanDamagedFiles.get(extension)?.size) {
       this.pendingScanRefusals.delete(extension.name);
+      return;
     }
+    this.reconcilePendingScanRefusals(extension);
   }
 
   /**
