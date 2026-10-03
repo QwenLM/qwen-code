@@ -1204,6 +1204,8 @@ describe('BaseLlmClient', () => {
       mockConfig.getModelsConfig.mockReturnValue(
         undefined as unknown as ReturnType<Config['getModelsConfig']>,
       );
+      mockBuildAgentContentGeneratorConfig.mockReset();
+      mockCreateContentGenerator.mockReset();
     });
 
     it('shrinks the request so a large prompt still fits the window', async () => {
@@ -1384,6 +1386,18 @@ describe('BaseLlmClient', () => {
       expect(sentBudget()).toBe(8_092);
     });
 
+    it('ignores a non-positive configured window', async () => {
+      // `config.ts` reads `contextWindowSize <= 0` as "not configured", so a
+      // cleared settings value falls through to `tokenLimit(model, 'input')`
+      // (131_072, as the unconfigured-window case above) instead of becoming
+      // the window term and flooring the request to `max_tokens: 1`.
+      useWindow('deepseek-r1', 0);
+
+      await askText('deepseek-r1', 100_000);
+
+      expect(sentBudget()).toBe(31_072);
+    });
+
     describe('QWEN_CODE_MAX_OUTPUT_TOKENS still applies to side queries', () => {
       // Both providers read the override only when the request carries no
       // output limit of its own (`provider/default.ts` applyOutputTokenLimit,
@@ -1454,6 +1468,38 @@ describe('BaseLlmClient', () => {
         });
 
         expect(sentBudget()).toBe(4_096);
+      });
+
+      it('sends an override above the auto ceiling instead of clipping it', async () => {
+        // The override *replaces* the model-limit default, so an operator limit
+        // above `defaultOutputCeiling` still reaches the wire on a side query,
+        // as it does on the main turn. With 1_000_000 of window the room term
+        // does not bind, so the budget is exactly the override; an intersecting
+        // budget would clip it to the model's own 32_768 ceiling.
+        process.env[ENV_KEY] = '100000';
+        useWindow('qwen3-coder-plus', 1_000_000);
+
+        await askText('qwen3-coder-plus', 100);
+
+        expect(sentBudget()).toBe(100_000);
+      });
+
+      it('lets samplingParams.max_tokens outrank the override', async () => {
+        // Documented precedence: the override "is overridden by
+        // `samplingParams.max_tokens` in settings". The sampling value has to
+        // sit above the override to pin that direction.
+        process.env[ENV_KEY] = '2000';
+        mockConfig.getModel.mockReturnValue('qwen3-coder-plus');
+        mockConfig.getContentGeneratorConfig.mockReturnValue({
+          model: 'qwen3-coder-plus',
+          authType: AuthType.USE_GEMINI,
+          contextWindowSize: 1_000_000,
+          samplingParams: { max_tokens: 128_000 },
+        });
+
+        await askText('qwen3-coder-plus', 100);
+
+        expect(sentBudget()).toBe(128_000);
       });
     });
   });

@@ -120,15 +120,21 @@ function estimateSystemInstructionTokens(
  * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
  * shrink it against a window it is not going to.
  *
- * `QWEN_CODE_MAX_OUTPUT_TOKENS` is folded in as a cap for the same reason a
- * caller value is honored: both providers read that override only when the
- * request carries no output limit of its own
+ * An explicit user ceiling — `samplingParams.max_tokens`, else
+ * `QWEN_CODE_MAX_OUTPUT_TOKENS` — *replaces* `defaultOutputCeiling` instead of
+ * intersecting it. That is the precedence the main turn already applies
+ * (`llm-chat.ts` `explicitOutputCeiling`), the one both providers apply when
+ * the request carries no output limit of its own
  * (`openaiContentGenerator/provider/default.ts` `applyOutputTokenLimit`,
- * `anthropicContentGenerator.ts` `buildSamplingParameters`), and it is
- * documented to take precedence over the model-limit default
- * (`docs/users/configuration/settings.md`). Budgeting every side query would
- * otherwise displace it — and could *raise* the wire value, since a small
- * prompt on a large window leaves more room than the override asks for.
+ * `anthropicContentGenerator.ts` `buildSamplingParameters`), and the one
+ * `docs/users/configuration/settings.md` documents ("Takes precedence over the
+ * model-limit default but is overridden by `samplingParams.max_tokens`").
+ * Intersecting would silently cut an operator limit set above the auto ceiling
+ * — 100 000 down to 64 000, or to `DEFAULT_OUTPUT_TOKEN_LIMIT` for a
+ * self-hosted id — on side queries only, and `generateText` reports no
+ * `finishReason`, so the truncated page extract or recap would be stored as
+ * complete. Each provider still clips an explicit value to the model's real
+ * output limit, so that policy is not duplicated here.
  *
  * `resolvedContextWindowSize` is the window of the model the request is
  * actually sent to, resolved by `resolveForModel` against that target (its
@@ -161,25 +167,30 @@ function budgetOutputTokensForWindow(
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
   resolvedContextWindowSize: number | undefined,
 ): GenerateContentConfig {
-  const envMaxOutputTokens = parsePositiveIntegerEnvValue(
-    process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-  );
+  const explicitCeiling =
+    contentGeneratorConfig?.samplingParams?.max_tokens ??
+    parsePositiveIntegerEnvValue(process.env['QWEN_CODE_MAX_OUTPUT_TOKENS']);
+  // `<= 0` means "not configured", the reading `config.ts` gives this same
+  // field: a cleared or mis-merged settings value must not become the window
+  // term and floor every governed side query to `max_tokens: 1`.
+  const declaredWindow = [
+    resolvedContextWindowSize,
+    contentGeneratorConfig?.contextWindowSize,
+  ].find((v): v is number => typeof v === 'number' && v > 0);
+  const room =
+    (declaredWindow ?? tokenLimit(model, 'input')) -
+    estimateContentTokens(contents) -
+    estimateSystemInstructionTokens(requestConfig.systemInstruction);
 
   return {
     ...requestConfig,
     maxOutputTokens:
       requestConfig.maxOutputTokens ??
+      // The room term keeps binding on an explicit ceiling too, or the #13208
+      // 400 returns.
       Math.max(
         1,
-        Math.min(
-          defaultOutputCeiling(model),
-          envMaxOutputTokens ?? Infinity,
-          (resolvedContextWindowSize ??
-            contentGeneratorConfig?.contextWindowSize ??
-            tokenLimit(model, 'input')) -
-            estimateContentTokens(contents) -
-            estimateSystemInstructionTokens(requestConfig.systemInstruction),
-        ),
+        Math.min(explicitCeiling ?? defaultOutputCeiling(model), room),
       ),
   };
 }
