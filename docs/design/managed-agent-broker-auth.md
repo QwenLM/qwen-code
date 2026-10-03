@@ -140,7 +140,9 @@ Mode resolution at startup:
   10 MiB) — an over-limit request answers `413 payload_too_large` before
   the signature comparison. Aggregate pre-authentication buffering is
   bounded by that limit times the servlet worker-thread count
-  (`server.tomcat.threads.max`, 200 by default); lower either knob on
+  (`server.tomcat.threads.max`, 200 by default), times the per-request
+  buffer-growth factor (up to roughly 2× for a declared-length body and
+  3× for a chunked one while the buffer grows); lower either knob on
   memory-tight deployments.
 
 - `auto`: resolves to `open` when `server.address` is loopback (the
@@ -243,9 +245,12 @@ New configuration `qwen.managed-agent.internal-server`:
   precedence) routes by `request.getLocalPort()`: `/internal/**` on the
   public connector answers `404`, and anything outside `/internal/**` on
   the internal connector answers `404`. The surface check classifies on
-  the routed path (`PublicSurface.pathWithinApplication`), so spellings
-  like `/%69nternal/...` or `/internal;/...` that Spring maps to the
-  internal handlers cannot cross the listener boundary.
+  the routed path (`PublicSurface.pathWithinApplication`, the router's
+  own parsed segments), so spellings like `/%69nternal/...` or
+  `/internal;/...` that Spring maps to the internal handlers cannot cross
+  the listener boundary — and a `Content-Type` charset cannot skew the
+  classification, because the segments come from the router's fixed UTF-8
+  decoding.
 - When `port = 0`, today's single-port shape is preserved.
 - Startup guard: any non-loopback listen address (public or internal)
   requires the matching protection — `signed` mode for the public surface,

@@ -1320,7 +1320,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
@@ -1352,7 +1351,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
@@ -1384,7 +1382,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL. */
+            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V35 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];

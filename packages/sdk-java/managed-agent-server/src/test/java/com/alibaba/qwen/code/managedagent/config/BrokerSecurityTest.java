@@ -84,9 +84,10 @@ class BrokerSecurityTest {
                 .doesNotThrowAnyException();
         for (String loopback : new String[] {"http://127.0.0.1:4183",
                 "http://localhost:4183", "http://broker.localhost:4183",
-                "http://[::1]:4183"}) {
+                "http://[::1]:4183", "http://127.1:4183"}) {
             properties.getSessionStore().setBaseUrl(loopback);
             assertThatCode(() -> security(properties, "127.0.0.1"))
+                    .as(loopback)
                     .doesNotThrowAnyException();
         }
     }
@@ -108,6 +109,26 @@ class BrokerSecurityTest {
                 .setServiceBaseUrl("https://publication.internal:4184");
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
+
+        // The consumer resolves /internal/... against the base, so a path
+        // prefix or a loopback spelling outside its literal set is refused
+        // even with TLS.
+        for (String bad : new String[] {
+                "https://publication.internal:4184/broker/",
+                "http://127.0.0.2:4184"}) {
+            properties.getToolPublication().setServiceBaseUrl(bad);
+            assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                    .as(bad)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("service-base-url");
+        }
+        for (String good : new String[] {"http://127.0.0.1:4184",
+                "http://localhost:4184", "http://[::1]:4184"}) {
+            properties.getToolPublication().setServiceBaseUrl(good);
+            assertThatCode(() -> security(properties, "127.0.0.1"))
+                    .as(good)
+                    .doesNotThrowAnyException();
+        }
     }
 
     @Test
@@ -299,6 +320,12 @@ class BrokerSecurityTest {
                 .doesNotThrowAnyException();
         properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
         properties.getAuth().setAllowInsecureBind(true);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        // Abbreviated loopback spellings the client accepts (URI.getHost is
+        // null for them, so the authority fallback must classify them).
+        properties.getAuth().setAllowInsecureBind(false);
+        properties.getHarness().setBaseUrl("http://127.1:4170");
         assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
     }

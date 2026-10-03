@@ -85,6 +85,35 @@ class Issue13180InternalPortTest {
         HttpResponse<String> publicApi = call(publicPort,
                 "/v1/agents/sessions", null, null);
         assertThat(publicApi.statusCode()).as(publicApi.body()).isEqualTo(200);
+
+        // The charset in Content-Type must not give the surface classifier a
+        // different view than the router's fixed UTF-8 decoding.
+        String encodedAcquire = "/%69%6Eternal/managed-session-store/v1/sessions/"
+                + session + "/writers:acquire";
+        HttpResponse<String> charsetProbe = http.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + publicPort + encodedAcquire))
+                        .header("X-Qwen-Tenant-Id", TENANT)
+                        .header("X-Qwen-Managed-Writer-Token", token)
+                        .header("Content-Type",
+                                "application/json; charset=UTF-16")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(charsetProbe.statusCode()).as(charsetProbe.body())
+                .isEqualTo(404);
+        HttpResponse<String> charsetInternal = http.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + internalPort + encodedAcquire))
+                        .header("X-Qwen-Tenant-Id", TENANT)
+                        .header("X-Qwen-Managed-Writer-Token", token)
+                        .header("Content-Type",
+                                "application/json; charset=UTF-16")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(charsetInternal.statusCode()).as(charsetInternal.body())
+                .isEqualTo(200);
     }
 
     private HttpResponse<String> call(int port, String path, String token,

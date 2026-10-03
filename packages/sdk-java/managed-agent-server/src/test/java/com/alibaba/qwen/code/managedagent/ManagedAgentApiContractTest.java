@@ -282,30 +282,37 @@ class ManagedAgentApiContractTest {
     @Test
     void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
         // ManagedActionStore.requireOwner admits any tenant caller on a
-        // Session with neither a recorded creator nor a create command; the
-        // public contract must qualify every creator-only responder sentence
-        // with that fall-through — per sentence, not per operation.
-        int claims = 0;
+        // Session with neither a recorded creator nor a create command.
+        // Enumerate the responder operations structurally so a reworded or
+        // newly added responder cannot escape the qualification.
+        Set<String> responderPaths = Set.of(
+                "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
+                "/api/agent/web-shell/v1/actions/respond");
+        int responders = 0;
         for (Operation operation : CONTRACT.operations()) {
+            boolean responder = responderPaths.contains(operation.path());
             JsonNode node = operation.node();
-            List<String> texts = new ArrayList<>();
-            texts.add(node.path("description").asText());
-            node.path("responses").properties().forEach(response ->
-                    texts.add(response.getValue().path("description")
-                            .asText()));
-            for (String text : texts) {
-                if (text.contains("Responding requires the Session creator")
-                        || text.contains("only the Session creator may respond")) {
-                    claims++;
-                    assertThat(text).as(operation.operationId())
-                            .contains("no recorded creator and no recorded"
-                                    + " create command");
-                }
+            String description = node.path("description").asText();
+            String forbidden = node.path("responses").path("403")
+                    .path("description").asText();
+            if (responder) {
+                responders++;
+                assertThat(description + "\n" + forbidden)
+                        .as(operation.operationId())
+                        .contains("no recorded creator and no recorded"
+                                + " create command");
+            }
+            // action_forbidden is documented only where requireOwner can
+            // fire, and a 403 sibling description overrides the shared
+            // Forbidden component, so it must name its other code.
+            assertThat((description + forbidden).contains("action_forbidden"))
+                    .as(operation.operationId()).isEqualTo(responder);
+            if (!forbidden.isEmpty()) {
+                assertThat(forbidden).as(operation.operationId())
+                        .contains("actor_scope_mismatch");
             }
         }
-        assertThat(claims)
-                .as("every creator-only responder sentence stays qualified")
-                .isEqualTo(12);
+        assertThat(responders).isEqualTo(2);
     }
 
     @Test

@@ -1743,8 +1743,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "$ref": "#/components/responses/Forbidden"
           }
         },
         "parameters": [
@@ -1796,8 +1795,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "$ref": "#/components/responses/Forbidden"
           }
         },
         "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
@@ -1843,7 +1841,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V35 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2037,8 +2035,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "$ref": "#/components/responses/Forbidden"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2087,8 +2084,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "$ref": "#/components/responses/Forbidden"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2139,7 +2135,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or created before the V35 migration) answers to any caller in its tenant, matching its read ACL."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V35 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"

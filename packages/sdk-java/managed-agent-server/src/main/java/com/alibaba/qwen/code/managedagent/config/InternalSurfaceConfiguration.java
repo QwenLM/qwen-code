@@ -51,10 +51,10 @@ public class InternalSurfaceConfiguration
                     + " server.ssl applies to the public connector only.",
                     port);
         }
-        if (!loopback && !tls) {
+        if (!loopback) {
             LOG.warn("The internal listener on port {} binds a non-loopback"
-                    + " address with no TLS; the writer credential crosses"
-                    + " in cleartext.", port);
+                    + " address and never inherits TLS; the writer credential"
+                    + " crosses in cleartext.", port);
         }
         Connector connector = new Connector(
                 TomcatServletWebServerFactory.DEFAULT_PROTOCOL);

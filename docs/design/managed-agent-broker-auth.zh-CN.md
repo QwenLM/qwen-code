@@ -128,8 +128,9 @@ harness。
   `qwen.managed-agent.auth.max-signed-body-bytes`（默认 10 MiB）
   限制——超限请求在签名比对之前应答 `413 payload_too_large`。
   认证前的聚合缓冲上限为该值乘以 Servlet 工作线程数
-  （`server.tomcat.threads.max`，默认 200）；内存紧张的环境可调低
-  两者之一。
+  （`server.tomcat.threads.max`，默认 200），再乘每请求的缓冲增长
+  系数（声明长度的请求体约 2 倍，chunked 约 3 倍）；内存紧张的
+  环境可调低两者之一。
 
 - `auto`：当 `server.address` 为回环地址（交付默认值
   `127.0.0.1`）时解析为 `open`，否则启动失败并点名需要 `signed`
@@ -225,9 +226,10 @@ writer_credential_invalid`（常数时间比较）。密钥为空时保持
   （最高优先级）按 `request.getLocalPort()` 路由：公网连接器上的
   `/internal/**` 应答 `404`，内部连接器上非 `/internal/**` 的
   请求应答 `404`。面分类基于路由后的路径
-  （`PublicSurface.pathWithinApplication`），因此
-  `/%69nternal/...`、`/internal;/...` 等被 Spring 映射到内部
-  handler 的拼写无法跨越监听器边界。
+  （`PublicSurface.pathWithinApplication`，即路由器自身解析出的
+  段），因此 `/%69nternal/...`、`/internal;/...` 等被 Spring 映射到
+  内部 handler 的拼写无法跨越监听器边界——`Content-Type` 中的字符集
+  也无法扭曲分类，因为这些段来自路由器固定的 UTF-8 解码。
 - 当 `port = 0` 时，保留现有单端口形态。
 - 启动守卫：任何非回环监听地址（公网或内部）都要求相应保护——
   公网面要求 `signed` 模式，内部面要求已配置 `binding-key`——

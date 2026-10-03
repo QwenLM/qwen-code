@@ -87,6 +87,32 @@ class InternalSurfaceConfigurationTest {
     }
 
     @Test
+    void theClassifierIgnoresTheRequestContentCharset() throws Exception {
+        // The router decodes the URI as UTF-8; a Content-Type charset must
+        // not give the classifier a different view.
+        RoutingFilter filter = new RoutingFilter(properties(INTERNAL),
+                new ObjectMapper());
+        MockHttpServletRequest encoded = request(
+                "/%69%6Eternal/managed-session-store/v1/sessions/s/restore",
+                PUBLIC);
+        encoded.setCharacterEncoding("UTF-16");
+        MockHttpServletResponse onPublic = new MockHttpServletResponse();
+        MockFilterChain publicChain = new MockFilterChain();
+        filter.doFilter(encoded, onPublic, publicChain);
+        assertThat(onPublic.getStatus()).isEqualTo(404);
+        assertThat(publicChain.getRequest()).isNull();
+
+        MockHttpServletRequest internal = request(
+                "/%69%6Eternal/managed-session-store/v1/sessions/s/restore",
+                INTERNAL);
+        internal.setCharacterEncoding("UTF-16");
+        MockFilterChain internalChain = new MockFilterChain();
+        filter.doFilter(internal, new MockHttpServletResponse(),
+                internalChain);
+        assertThat(internalChain.getRequest()).isNotNull();
+    }
+
+    @Test
     void warnsWhenTheInternalListenerLeavesLoopbackWithoutTls() {
         ch.qos.logback.classic.Logger logger =
                 (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
@@ -100,6 +126,33 @@ class InternalSurfaceConfigurationTest {
             properties.getInternalServer().setAddress("10.0.0.8");
             new InternalSurfaceConfiguration(properties).customize(
                     new org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory());
+            assertThat(appender.list).anySatisfy(event -> assertThat(
+                    event.getFormattedMessage())
+                    .contains("non-loopback")
+                    .contains("cleartext"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    @Test
+    void warnsAboutCleartextCredentialsEvenWhenThePublicConnectorHasTls() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(InternalSurfaceConfiguration.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            ManagedAgentProperties properties = properties(INTERNAL);
+            properties.getInternalServer().setAddress("10.0.0.8");
+            var factory =
+                    new org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory();
+            var ssl = new org.springframework.boot.web.server.Ssl();
+            ssl.setEnabled(true);
+            factory.setSsl(ssl);
+            new InternalSurfaceConfiguration(properties).customize(factory);
             assertThat(appender.list).anySatisfy(event -> assertThat(
                     event.getFormattedMessage())
                     .contains("non-loopback")

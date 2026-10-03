@@ -232,12 +232,13 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     }
 
     // Returns null once the stream runs past the limit, so a chunked or
-    // under-declared body cannot outgrow the bound. Presized from the
-    // declared length when it is known, clamped to a safe array size.
+    // under-declared body cannot outgrow the bound. The presize hint from
+    // the declared length is capped at the chunk size: a client-controlled
+    // Content-Length must not pin the full bound before a byte arrives.
     private static byte[] readBounded(java.io.InputStream source, long max,
             long declared) throws IOException {
-        int hint = (int) Math.min(Math.max(declared, 0),
-                Math.min(max, Integer.MAX_VALUE - 8L));
+        int hint = (int) Math.min(8192L, Math.min(Math.max(declared, 0),
+                Math.min(max, Integer.MAX_VALUE - 8L)));
         java.io.ByteArrayOutputStream buffer =
                 new java.io.ByteArrayOutputStream(hint);
         byte[] chunk = new byte[8192];

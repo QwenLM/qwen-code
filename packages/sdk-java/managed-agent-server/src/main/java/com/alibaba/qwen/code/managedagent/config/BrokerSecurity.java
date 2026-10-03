@@ -214,7 +214,7 @@ public class BrokerSecurity {
         if (advertised == internalPort) {
             return;
         }
-        if (isLoopback(uri.getHost())) {
+        if (isLoopback(hostOf(uri))) {
             throw new IllegalStateException(
                     "qwen.managed-agent.session-store.base-url port "
                             + advertised + " does not reach the internal"
@@ -244,7 +244,7 @@ public class BrokerSecurity {
             return;
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
-                && !isLiteralLoopbackHost(uri.getHost())
+                && !isLiteralLoopbackHost(hostOf(uri))
                 && !store.isAllowInsecureHttp()) {
             throw new IllegalStateException(
                     "qwen.managed-agent.session-store.base-url uses plaintext"
@@ -271,7 +271,7 @@ public class BrokerSecurity {
             return;
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
-                && !isLoopback(uri.getHost())) {
+                && !isLoopback(hostOf(uri))) {
             if (!allowInsecureBind) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.harness.base-url uses plaintext"
@@ -284,8 +284,12 @@ public class BrokerSecurity {
         }
     }
 
-    // The publication surface is handed to remote runtimes; plaintext on a
-    // non-loopback host leaks writer credentials the same way.
+    // The publication surface is handed to remote runtimes; the consumer
+    // (the runtime-side endpoint()) requires an absolute URL with no path
+    // prefix and a literal loopback host for plaintext http.
+    private static final java.util.Set<String> PUBLICATION_LOOPBACK_HOSTS =
+            java.util.Set.of("127.0.0.1", "localhost", "[::1]");
+
     private void checkPublicationTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
         ManagedAgentProperties.ToolPublication publication =
@@ -301,10 +305,24 @@ public class BrokerSecurity {
         try {
             uri = java.net.URI.create(baseUrl);
         } catch (IllegalArgumentException error) {
-            return;
+            uri = null;
+        }
+        if (uri == null || !uri.isAbsolute()
+                || !("http".equalsIgnoreCase(uri.getScheme())
+                        || "https".equalsIgnoreCase(uri.getScheme()))
+                || uri.getUserInfo() != null || uri.getQuery() != null
+                || uri.getFragment() != null
+                || !(uri.getPath() == null || uri.getPath().isEmpty()
+                        || "/".equals(uri.getPath()))) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.tool-publication.service-base-url"
+                            + " must be an absolute http(s) URL without a"
+                            + " path prefix, query, or fragment; runtimes"
+                            + " resolve /internal/managed-tool-publications"
+                            + " against it.");
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
-                && !isLoopback(uri.getHost())) {
+                && !PUBLICATION_LOOPBACK_HOSTS.contains(hostOf(uri))) {
             if (!allowInsecureBind) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.tool-publication.service-base-url"
@@ -315,6 +333,30 @@ public class BrokerSecurity {
             }
             skippedGuards.add("publication-transport");
         }
+    }
+
+    // URI.getHost() is null for spellings the WHATWG parser accepts
+    // (127.1); fall back to the authority so both sides classify them the
+    // same.
+    private static String hostOf(java.net.URI uri) {
+        String host = uri.getHost();
+        if (host != null) {
+            return host;
+        }
+        String authority = uri.getAuthority();
+        if (authority == null) {
+            return null;
+        }
+        int at = authority.lastIndexOf('@');
+        if (at >= 0) {
+            authority = authority.substring(at + 1);
+        }
+        if (authority.startsWith("[")) {
+            int end = authority.indexOf(']');
+            return end >= 0 ? authority.substring(0, end + 1) : authority;
+        }
+        int colon = authority.lastIndexOf(':');
+        return colon > 0 ? authority.substring(0, colon) : authority;
     }
 
     // The practical literal-only loopback set the client enforces:
