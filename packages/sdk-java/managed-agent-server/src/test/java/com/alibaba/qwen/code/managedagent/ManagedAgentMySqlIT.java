@@ -37,7 +37,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -318,11 +317,12 @@ class ManagedAgentMySqlIT {
                         "cccccccccccccccccccccccccccccccc",
                         new AcquireWriterRequest("mysql-lease-workspace",
                                 "mysql-lease-writer", 1_000L)));
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
-                Timestamp.class);
+        Long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP() * 1000"
+                        + " + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) DIV 1000",
+                Long.class);
 
         assertThat(now).isNotNull();
-        assertThat(grant.leaseUntil() - now.getTime())
+        assertThat(grant.leaseUntil() - now)
                 .isBetween(700L, 1_000L);
         Long persistedLeaseMicros = jdbc.queryForObject(
                 "SELECT TIMESTAMPDIFF(MICROSECOND, CURRENT_TIMESTAMP(6),"
@@ -377,12 +377,13 @@ class ManagedAgentMySqlIT {
 
     private static void assertLeaseDeadline(JdbcTemplate jdbc, String tenant,
             String session, WriterGrant grant) {
-        Timestamp persisted = jdbc.queryForObject(
-                "SELECT writer_lease_until FROM qwen_managed_session_journal_head"
+        Long persisted = jdbc.queryForObject(
+                "SELECT UNIX_TIMESTAMP(writer_lease_until) * 1000"
+                        + " FROM qwen_managed_session_journal_head"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                Timestamp.class, tenant, session);
+                Long.class, tenant, session);
         assertThat(persisted).isNotNull();
-        assertThat(persisted.getTime()).isEqualTo(grant.leaseUntil());
+        assertThat(persisted).isEqualTo(grant.leaseUntil());
     }
 
     @Test

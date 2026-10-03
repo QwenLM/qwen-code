@@ -631,7 +631,9 @@ describe('assign-pr-owner: workflow invariants', () => {
   it('scopes the write permission to the job and the token to the step', () => {
     assert.equal(doc.permissions['pull-requests'], undefined);
     assert.equal(assignJob.permissions['pull-requests'], 'write');
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     assert.ok(runStep.env.GH_TOKEN);
     assert.equal(doc.env?.GH_TOKEN, undefined);
     assert.equal(
@@ -674,13 +676,30 @@ describe('assign-pr-owner: workflow invariants', () => {
   });
 
   it('bootstrap-skips on a base without the script, before running node', () => {
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     // Pin the guard's shape and ordering: an inverted guard turns every run
     // into a silent no-op, a non-zero exit re-breaks the bootstrap PR's own
     // check, and a node call ahead of the guard fails on the base checkout.
     assert.match(
       runStep.run,
       /if \[ ! -f \.github\/scripts\/assign-pr-owner\.mjs \]; then[\s\S]*?exit 0[\s\S]*?fi[\s\S]*?node \.github\/scripts\/assign-pr-owner\.mjs\s*$/,
+    );
+  });
+
+  it('restores pool workspace ownership before the checkout', () => {
+    // #13245 routes trusted runs onto the shared ECS pool, where a prior
+    // containerised job can leave root-owned files that fail the checkout.
+    const names = assignJob.steps.map((step) => step.name);
+    const heal = names.indexOf('Restore workspace ownership');
+    const checkout = assignJob.steps.findIndex((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    assert.ok(heal !== -1 && heal < checkout);
+    assert.equal(
+      assignJob.steps[heal].if,
+      "${{ runner.environment == 'self-hosted' }}",
     );
   });
 

@@ -11,6 +11,7 @@ import type {
   GenerateContentConfig,
   GenerateContentResponse,
   Part,
+  SendMessageParameters,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
@@ -40,6 +41,11 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import {
+  bindRetryWaitObserver,
+  runWithRetryWaitObserver,
+  type RetryWaitEvent,
+} from '../utils/retry-wait.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
@@ -959,6 +965,19 @@ describe('LlmChat', async () => {
         expectPersisted,
       };
     }
+
+    it('sends nothing for a Managed session that a lost tool outcome blocked', async () => {
+      const blocked = new Error('outcome unknown');
+      (
+        mockConfig as Config & { getManagedSessionBlock: () => Error }
+      ).getManagedSessionBlock = () => blocked;
+      const history = chat.getHistory();
+      await expect(sendAny('continue', 'prompt-id-blocked')).rejects.toBe(
+        blocked,
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(chat.getHistory()).toEqual(history);
+    });
 
     it('releases the sleep inhibitor after the stream is consumed', async () => {
       mockStream(textStream('done'));
@@ -8711,6 +8730,390 @@ describe('LlmChat', async () => {
 
       afterEach(() => {
         mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+      });
+    });
+
+    describe('retry wait notifications', () => {
+      type ObservedWait = RetryWaitEvent & { requestsSoFar: number };
+
+      async function sendObserved(
+        message: SendMessageParameters['message'],
+        advanceByMs: number,
+        onEvent?: (event: StreamEvent) => void,
+        waits: ObservedWait[] = [],
+      ) {
+        const observer = (event: RetryWaitEvent) =>
+          waits.push({
+            ...event,
+            requestsSoFar: vi.mocked(mockContentGenerator.generateContentStream)
+              .mock.calls.length,
+          });
+        const stream = await runWithRetryWaitObserver(observer, () =>
+          chat.sendMessageStream('test-model', { message }, 'prompt-wait'),
+        );
+        const bound = bindRetryWaitObserver(observer, stream);
+        const events: StreamEvent[] = [];
+        const collecting = (async () => {
+          for await (const event of bound) {
+            events.push(event);
+            onEvent?.(event);
+          }
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(advanceByMs);
+        await collecting;
+        return { waits, events };
+      }
+
+      function expectOnePairBetweenRequests(waits: ObservedWait[]) {
+        expect(waits).toEqual([
+          {
+            phase: 'start',
+            waitId: expect.any(String),
+            delayMs: expect.any(Number),
+            requestsSoFar: 1,
+          },
+          { phase: 'end', waitId: waits[0]!.waitId, requestsSoFar: 1 },
+        ]);
+      }
+
+      it('announces the stream rate-limit wait with its scheduled delay', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                throw new StreamContentError(
+                  '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+                );
+                yield {} as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          const { waits, events } = await sendObserved('test', 400_000);
+          expectOnePairBetweenRequests(waits);
+          const retry = events.find(
+            (e) => e.type === StreamEventType.RETRY && e.retryInfo,
+          );
+          expect(
+            retry && 'retryInfo' in retry
+              ? retry.retryInfo?.delayMs
+              : undefined,
+          ).toBe((waits[0] as { delayMs: number }).delayMs);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('ends the rate-limit wait synchronously when skipDelay is called', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              (async function* () {
+                throw new StreamContentError(
+                  '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+                );
+                yield {} as GenerateContentResponse;
+              })(),
+            )
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          let phasesAtSkip: string[] = [];
+          let phasesAfterSkip: string[] = [];
+          const waits: ObservedWait[] = [];
+          await sendObserved(
+            'test',
+            0,
+            (event) => {
+              if (event.type === StreamEventType.RETRY && event.retryInfo) {
+                phasesAtSkip = waits.map((w) => w.phase);
+                event.retryInfo.skipDelay?.();
+                phasesAfterSkip = waits.map((w) => w.phase);
+              }
+            },
+            waits,
+          );
+          expect(phasesAtSkip).toEqual(['start']);
+          expect(phasesAfterSkip).toEqual(['start', 'end']);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('ends the rate-limit wait on abort without another request', async () => {
+        vi.useFakeTimers();
+        try {
+          const controller = new AbortController();
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValue(
+            (async function* () {
+              throw new StreamContentError(
+                '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+              );
+              yield {} as GenerateContentResponse;
+            })(),
+          );
+          const waits: RetryWaitEvent[] = [];
+          const observer = (event: RetryWaitEvent) => waits.push(event);
+          const stream = await runWithRetryWaitObserver(observer, () =>
+            chat.sendMessageStream(
+              'test-model',
+              { message: 'test', config: { abortSignal: controller.signal } },
+              'prompt-wait-abort',
+            ),
+          );
+          const settled = (async () => {
+            for await (const _ of bindRetryWaitObserver(observer, stream)) {
+              /* consume */
+            }
+          })().catch((e: unknown) => e);
+          await vi.advanceTimersByTimeAsync(1_000);
+          expect(waits.map((w) => w.phase)).toEqual(['start']);
+          controller.abort();
+          expect(waits.map((w) => w.phase)).toEqual(['start', 'end']);
+          await settled;
+          await vi.advanceTimersByTimeAsync(600_000);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('announces the transport replay wait', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([]))
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          const { waits, events } = await sendObserved('test', 30_000);
+          expectOnePairBetweenRequests(waits);
+          expect(
+            events.filter((e) => e.type === StreamEventType.RETRY),
+          ).toHaveLength(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('announces the transport continuation wait', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('partial ')]))
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'rest' }])));
+          const { waits, events } = await sendObserved('test', 30_000);
+          expectOnePairBetweenRequests(waits);
+          expect(
+            events.some(
+              (e) =>
+                e.type === StreamEventType.RETRY &&
+                'isContinuation' in e &&
+                e.isContinuation,
+            ),
+          ).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('announces the invalid-stream retry wait', async () => {
+        vi.useFakeTimers();
+        try {
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              streamOf({
+                candidates: [{ content: { parts: [{ text: '' }] } }],
+              } as unknown as GenerateContentResponse),
+            )
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          const { waits } = await sendObserved('test', 30_000);
+          expectOnePairBetweenRequests(waits);
+          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('announces the tool-result continuation retry wait', async () => {
+        vi.useFakeTimers();
+        try {
+          chat.setHistory([
+            { role: 'user', parts: [{ text: 'inspect the project' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call_read_file',
+                    name: 'read_file',
+                    args: { path: '/tmp/example' },
+                  },
+                },
+              ],
+            },
+          ]);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(
+              streamOf(stopResponse([{ text: 'thinking', thought: true }])),
+            )
+            .mockResolvedValueOnce(
+              streamOf(stopResponse([{ text: 'Finished.' }])),
+            );
+          const { waits } = await sendObserved(
+            [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+            30_000,
+          );
+          expectOnePairBetweenRequests(waits);
+          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('announces the HTTP Retry-After wait through the real retry helper', async () => {
+        vi.useFakeTimers();
+        try {
+          const { retryWithBackoff } =
+            await vi.importActual<typeof import('../utils/retry.js')>(
+              '../utils/retry.js',
+            );
+          mockRetryWithBackoff.mockImplementation(retryWithBackoff);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              Object.assign(new Error('Rate limited'), {
+                status: 429,
+                response: { headers: { 'retry-after': '9' } },
+              }),
+            )
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          const { waits } = await sendObserved('test', 10_000);
+          expectOnePairBetweenRequests(waits);
+          expect((waits[0] as { delayMs: number }).delayMs).toBe(9_000);
+        } finally {
+          mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps a fallback model request on the same observer', async () => {
+        vi.useFakeTimers();
+        try {
+          const { retryWithBackoff } =
+            await vi.importActual<typeof import('../utils/retry.js')>(
+              '../utils/retry.js',
+            );
+          mockRetryWithBackoff.mockImplementation(retryWithBackoff);
+          vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+            authType: AuthType.USE_GEMINI,
+            model: 'test-model',
+            maxRetries: 0,
+          });
+          vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+            'fallback-a',
+          ]);
+          const fallbackGenerateContentStream = vi
+            .fn()
+            .mockRejectedValueOnce(
+              Object.assign(new Error('Rate limited'), {
+                status: 429,
+                response: { headers: { 'retry-after': '4' } },
+              }),
+            )
+            .mockResolvedValueOnce(
+              streamOf(stopResponse([{ text: 'fallback ok' }])),
+            );
+          vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+            resolveForModel: vi.fn().mockResolvedValue({
+              contentGenerator: {
+                generateContent: vi.fn(),
+                generateContentStream: fallbackGenerateContentStream,
+                embedContent: vi.fn(),
+                batchEmbedContents: vi.fn(),
+              } as unknown as ContentGenerator,
+              contentGeneratorConfig: { modalities: {} },
+              retryAuthType: AuthType.USE_GEMINI,
+              retryErrorCodes: undefined,
+              model: 'fallback-a',
+            }),
+          } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockResolvedValueOnce(
+            (async function* () {
+              throw Object.assign(
+                new StreamContentError(
+                  '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+                ),
+                { status: 429 },
+              );
+              yield {} as GenerateContentResponse;
+            })(),
+          );
+          const { waits, events } = await sendObserved('test', 5_000);
+          expect(
+            events.some((e) => e.type === StreamEventType.MODEL_FALLBACK),
+          ).toBe(true);
+          expect(fallbackGenerateContentStream).toHaveBeenCalledTimes(2);
+          expect(waits.map((w) => w.phase)).toEqual(['start', 'end']);
+          expect((waits[0] as { delayMs: number }).delayMs).toBe(4_000);
+          expect(mockConfig.setModel).not.toHaveBeenCalled();
+        } finally {
+          mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+          vi.useRealTimers();
+        }
+      });
+
+      it('loses the HTTP wait when the lazy stream is iterated outside the observer', async () => {
+        vi.useFakeTimers();
+        try {
+          const { retryWithBackoff } =
+            await vi.importActual<typeof import('../utils/retry.js')>(
+              '../utils/retry.js',
+            );
+          mockRetryWithBackoff.mockImplementation(retryWithBackoff);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              Object.assign(new Error('Rate limited'), {
+                status: 429,
+                response: { headers: { 'retry-after': '1' } },
+              }),
+            )
+            .mockResolvedValueOnce(streamOf(stopResponse([{ text: 'ok' }])));
+          const waits: RetryWaitEvent[] = [];
+          // Bound only at creation: the request runs on first iteration, so
+          // the wait escapes — which is why AgentCore binds the iterator too.
+          const stream = await runWithRetryWaitObserver(
+            (e) => waits.push(e),
+            () =>
+              chat.sendMessageStream(
+                'test-model',
+                { message: 'test' },
+                'prompt-wait-unbound',
+              ),
+          );
+          await collectStreamWithFakeTimers(stream, 2_000);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(waits).toEqual([]);
+        } finally {
+          mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+          vi.useRealTimers();
+        }
       });
     });
   });

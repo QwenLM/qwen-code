@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -39,6 +40,8 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
@@ -53,6 +56,8 @@ class HostedPublicWorkspaceIT {
     private final String tenant = "g0-" + UUID.randomUUID();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
+    // Holds the model reply to a G0_CANCEL prompt so the test can cancel a running Turn.
+    private volatile CountDownLatch heldReply = new CountDownLatch(1);
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private ServletWebServerApplicationContext spring;
@@ -77,13 +82,14 @@ class HostedPublicWorkspaceIT {
     void ownerAnswersHostedApprovalsThroughBothSurfaces() throws Exception {
         approvals = true;
         runFiles();
-        assertThat(answered).hasSize(4);
+        assertThat(answered).hasSize(8);
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @EnabledOnOs(OS.LINUX)
     @Timeout(150)
-    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles() throws Exception {
+    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles(boolean crash) throws Exception {
         durableClose = true;
         runFiles();
         List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
@@ -98,6 +104,23 @@ class HostedPublicWorkspaceIT {
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
             var worker = ProcessHandle.of(pid).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
+            if (crash) {
+                worker.destroyForcibly();
+                worker.onExit().get(5, TimeUnit.SECONDS);
+                if (index == 1) {
+                    jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                            + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                    String failedTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
+                            Map.of("type", "agent.session.input.message", "input",
+                                    List.of(Map.of("type", "input_text", "text", "G0_AGAIN"))),
+                            "after-crash", "actor", 202).path("turn_id").asText();
+                    await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                            "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                            String.class, session, failedTurn)).isEqualTo("FAILED"));
+                }
+                assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+                        String.class, binding)).isEqualTo(index == 0 ? "READY" : "LOST");
+            }
             var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY resource_id", tenant, session);
             assertThat(retained).isNotEmpty();
@@ -129,6 +152,19 @@ class HostedPublicWorkspaceIT {
                     .resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(request("POST", route, body, "close", "actor", 202)
                     .path(webShell ? "operationId" : "id").asText()).isEqualTo(operation);
+            if (crash) {
+                jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                        + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                String nextSession = request("POST", "/v1/agents/sessions",
+                        Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                                "workspace", Map.of("workspace_id", "workspace-" + index, "cwd_relative", "child")),
+                        "after-close-" + index, "actor", 202).path("id").asText();
+                await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                        "SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, nextSession))
+                        .isEqualTo("COMPLETED"));
+                assertThat(Files.readString(temporary.resolve(index == 0 ? "workspace-a" : "workspace-b")
+                        .resolve("child/proof.txt"))).isEqualTo("after");
+            }
         }
     }
 
@@ -224,10 +260,120 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
-            request("POST", "/v1/agents/sessions/" + session + "/events",
-                    Map.of("type", "agent.session.input.message", "input", List.of(input)), "later", "actor", 409);
+            // A later Turn runs under the creator's grants: another actor who can read the
+            // Session keeps the refusal, and the creator's second Turn runs the file tools again.
+            Map<String, Object> later = Map.of("type", "agent.session.input.message", "input",
+                    List.of(Map.of("type", "input_text", "text", "G0_AGAIN")));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "reader-later-" + workspace, "reader", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            // WebShell advertises the same rule, per caller.
+            for (String caller : List.of("actor", "reader")) {
+                assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                        null, caller, 200).path("capabilities").path("workspaceTurns").asBoolean())
+                        .as(caller).isEqualTo("actor".equals(caller));
+            }
+            // Only the later Turn can restore this; the initial Turn asserted "after" above.
+            Files.writeString(roots.get(index).resolve("child/proof.txt"), "x");
+            String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "later-" + workspace, "actor", 202).path("turn_id").asText();
+            assertThat(laterTurn).isNotBlank();
+            await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn);
+                if ("FAILED".equals(status)) {
+                    throw new AssertionError("Later Turn failed. Harness: "
+                            + Files.readString(temporary.resolve("harness.log")));
+                }
+            }).untilAsserted(() -> {
+                if (approvals) answerActions(session, webShell);
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
+            assertThat(modelRequests).hasSize(requests + 4);
+            assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
+            assertThat(decoy.resolve("proof.txt")).doesNotExist();
+            // The cancel and rename probes below keep a held model reply, so they stay in
+            // the files run to fit the method timeout; the approvals run has already pinned
+            // that a later Turn under approval-mode=default is admitted and completes.
+            if (approvals) continue;
+
+            // The creator can cancel a running later Turn; the Hosted Harness aborts it before
+            // any tool runs. Another reader keeps the refusal.
+            int beforeCancel = modelRequests.size();
+            Map<String, Object> hold = Map.of("type", "agent.session.input.message", "input",
+                    List.of(Map.of("type", "input_text", "text", "G0_CANCEL")));
+            String heldTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "hold-" + workspace, "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeCancel);
+            Map<String, Object> cancel = Map.of("type", "agent.session.cancel", "turn_id", heldTurn);
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "reader-cancel-" + workspace, "reader", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            request("POST", "/v1/agents/sessions/" + session + "/events", cancel, "cancel-" + workspace,
+                    "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, heldTurn)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
+
+            // Only the creator may rename the bound Session.
+            Map<String, Object> rename = Map.of("title", "Renamed " + workspace);
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "reader-rename-" + workspace,
+                    "reader", 409).path("error").path("code").asText()).isEqualTo("workspace_unavailable");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
+                    "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
+
+            // A creator whose can_create grant is revoked keeps read access but loses
+            // admission: submit, cancel and rename all answer workspace_unavailable,
+            // nothing new executes, and no PENDING command row is left behind.
+            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            // With the running Turn settled, revoking the creator's read grant hides the
+            // bound Session from every later-Turn path: submit, cancel and rename all fall
+            // through to the legacy gate and answer session_not_found.
+            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "revoked-later-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "revoked-cancel-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "revoked-rename-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
-        assertThat(modelRequests).hasSize(8);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -260,7 +406,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(8);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -282,6 +428,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
+                "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
@@ -290,7 +437,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
-        if (durableClose) arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=true");
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -328,8 +475,11 @@ class HostedPublicWorkspaceIT {
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                         + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
-        if (approvals) jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create) VALUES (?, ?, ?, TRUE, FALSE)",
-                tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
+        // The reader grant exists in both runs so the later-Turn block can also run under
+        // approval-mode=default without colliding with the access table's primary key.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                        + " VALUES (?, ?, ?, TRUE, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
+                !approvals);
     }
 
     private void answerActions(String session, boolean web) throws Exception {
@@ -411,10 +561,27 @@ class HostedPublicWorkspaceIT {
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
             assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            // Count only this Turn's tool results, after the latest fixture prompt, so a later
+            // Turn in the same Session runs the same write, edit and read sequence. Other user
+            // messages the Harness may add do not restart the count.
             List<JsonNode> results = new ArrayList<>();
+            AtomicReference<String> prompt = new AtomicReference<>("");
             body.path("messages").forEach(message -> {
-                if ("tool".equals(message.path("role").asText())) results.add(message);
+                String role = message.path("role").asText();
+                if ("user".equals(role) && message.path("content").toString().contains("G0_")) {
+                    results.clear();
+                    String content = message.path("content").toString();
+                    prompt.set(content.substring(content.lastIndexOf("G0_")));
+                } else if ("tool".equals(role)) {
+                    results.add(message);
+                }
             });
+            if (prompt.get().contains("G0_CANCEL")) {
+                // Reply with nothing until the test has cancelled the Turn; the Harness has
+                // aborted this request by then, so there is no response to write.
+                heldReply.await(60, TimeUnit.SECONDS);
+                return;
+            }
             int step = results.size();
             if (step == 3) assertThat(results.get(2).toString()).contains("after");
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")

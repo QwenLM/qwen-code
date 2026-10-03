@@ -195,6 +195,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
+    {
+      reason:
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-session-worker.ts',
+    {
+      reason:
+        "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
+      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -362,8 +378,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'Embedded server construction keeps a process-environment compatibility fallback. ' +
         'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
-        'by design: it governs work no session owns (a recovery sweep and the ' +
-        'dispatch timer), so it cannot be a per-session setting.',
+        'by design: it governs work no session owns (the dispatch timer and Host ' +
+        'transport routes), so it cannot be a per-session setting.',
       accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
