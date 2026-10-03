@@ -382,6 +382,8 @@ async function crashProcess(child: ChildProcess, name: string): Promise<void> {
   }
 }
 
+const allocatedPorts = new Set<number>();
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -396,6 +398,8 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve, reject) =>
     server.close((error) => (error ? reject(error) : resolve())),
   );
+  if (allocatedPorts.has(address.port)) return freePort();
+  allocatedPorts.add(address.port);
   return address.port;
 }
 
@@ -481,9 +485,10 @@ async function startHeldExecutionStartProxy(
       response.end(String(error));
     });
   });
+  const port = await freePort();
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve();
     });
@@ -654,11 +659,6 @@ let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
 let failure: unknown;
 let dumpPort: number | undefined;
 try {
-  const mysqlPort = await freePort();
-  dumpPort = mysqlPort;
-  const springPort = await freePort();
-  const harnessPort = await freePort();
-  const brokerPort = await freePort();
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
   const credentialKey = randomBytes(32).toString('base64');
@@ -743,6 +743,12 @@ try {
     throw new Error('Fake model server did not start');
   }
 
+  const mysqlPort = await freePort();
+  dumpPort = mysqlPort;
+  const springPort = await freePort();
+  const harnessPort = await freePort();
+  const brokerPort = await freePort();
+
   const initialized = spawnSync(
     mysqld,
     [
@@ -817,13 +823,20 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+        // Trusted reboot recovery stays pinned off in every runner mode;
+        // durable local process follows workspaceTurns. Both pins keep each
+        // mode's previously verified behavior and keep the runner starting
+        // off Linux.
+        QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
         ...(workspaceTurns
           ? {
               QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
               QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
             }
-          : {}),
+          : {
+              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
+            }),
         ...(durableFailover
           ? {
               QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
@@ -1187,13 +1200,16 @@ try {
           QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
           QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
           QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+          QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
           ...(workspaceTurns
             ? {
                 QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
                 QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
                 QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
               }
-            : {}),
+            : {
+                QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
+              }),
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
           QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',

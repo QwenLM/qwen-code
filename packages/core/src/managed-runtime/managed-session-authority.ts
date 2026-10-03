@@ -269,6 +269,15 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
   }
 }
 
+/** The refusal for an activation ID the log already holds. */
+export function activationAlreadyInstalledError(
+  activationId: string,
+): ManagedSessionConflictError {
+  return new ManagedSessionConflictError(
+    `activation ${activationId} was already installed.`,
+  );
+}
+
 /** The digest-chain head of a log that has no commit marker yet. */
 export const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
 
@@ -333,6 +342,12 @@ export interface OpenManagedSessionAuthorityOptions {
   readonly expectedCommitProof?: ManagedSessionCommitProof;
   /** Required only for domain records, whose bodies live in resources. */
   readonly resources?: ManagedSessionResourceStore;
+  /**
+   * Keeps the Stage H resources that opening verified until
+   * `takeVerifiedExtensionResources()` takes them. Otherwise they are
+   * released once the log is open.
+   */
+  readonly retainVerifiedResources?: boolean;
 }
 
 /**
@@ -378,6 +393,45 @@ export class LocalManagedSessionAuthority {
   private readonly extensionRecords = new Map<
     string,
     ManagedSessionExtensionRecord
+  >();
+  /** The same records by domain, in the order each record first committed. */
+  private readonly extensionDomains = new Map<
+    ManagedSessionDomain,
+    Map<string, ManagedSessionExtensionRecord>
+  >();
+  /**
+   * What admission keeps unique, indexed as the Session store indexes it, so
+   * checking a new record does not read every earlier one: the command that
+   * opened each record, consumed once keys, each Hook occurrence's binding
+   * and ordinals, and the digest each Hook catalog pin names.
+   */
+  private readonly openingOperations = new Map<
+    string,
+    { readonly domain: ManagedSessionDomain; readonly recordId: string }
+  >();
+  private readonly hookOnceKeys = new Set<string>();
+  private readonly hookOccurrences = new Map<
+    string,
+    {
+      readonly registrationId: string;
+      readonly eventName: string;
+      readonly planRef: string;
+      readonly ordinals: Set<number>;
+    }
+  >();
+  private readonly hookDefinitionPins = new Map<string, string>();
+  /**
+   * The Stage H record resources an opened log replayed, and the resources
+   * they reference, each read and verified once. Resources are immutable by
+   * ID, so a later revision that names the same reference needs no second
+   * read. Kept past the open only until a caller takes them.
+   */
+  private readonly verifiedResources = new Map<
+    string,
+    {
+      readonly ref: ManagedSessionDurableRef;
+      readonly verified: Promise<void>;
+    }
   >();
   /** Which revision each committed Stage H event carried, by sequence. */
   private readonly extensionEvents = new Map<
@@ -566,6 +620,8 @@ export class LocalManagedSessionAuthority {
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
     }
     await authority.rebuildExtensionRecords();
+    if (options.retainVerifiedResources !== true)
+      authority.verifiedResources.clear();
     return authority;
   }
 
@@ -1423,9 +1479,28 @@ export class LocalManagedSessionAuthority {
   extensionRecordsInDomain(
     domain: ManagedSessionDomain,
   ): readonly ManagedSessionExtensionRecord[] {
-    return [...this.extensionRecords.values()].filter(
-      (record) => record.domain === domain,
-    );
+    return [...(this.extensionDomains.get(domain)?.values() ?? [])];
+  }
+
+  /**
+   * The Stage H resources read and verified when this log was opened, by
+   * resource ID: each record, together with every resource its body
+   * references. A caller verifying a wider closure can skip them, still
+   * checking that no other reference names the same ID differently, and must
+   * itself descend into what those referenced resources reference in turn.
+   * Only a log opened with `retainVerifiedResources` keeps them, and only
+   * until the first call takes them; a later call returns none.
+   */
+  async takeVerifiedExtensionResources(): Promise<
+    ReadonlyMap<string, ManagedSessionDurableRef>
+  > {
+    const verified = new Map<string, ManagedSessionDurableRef>();
+    for (const [resourceId, entry] of this.verifiedResources) {
+      await entry.verified;
+      verified.set(resourceId, entry.ref);
+    }
+    this.verifiedResources.clear();
+    return verified;
   }
 
   /**
@@ -1553,15 +1628,12 @@ export class LocalManagedSessionAuthority {
       }
     }
     if (domain === 'hook_registration') {
-      for (const registration of this.extensionRecordsInDomain(domain)) {
-        if (
-          !isDefinitionPinConsistent(
-            registration.run.definition,
-            parsed.run.definition,
-          )
-        ) {
-          reject('A Hook catalog revision cannot name two definition digests.');
-        }
+      // Every committed registration of a pin names the same digest, so the
+      // indexed one decides as all of them would.
+      const pin = parsed.run.definition!;
+      const digest = this.hookDefinitionPins.get(hookDefinitionPinKey(pin));
+      if (digest !== undefined && digest !== pin.definitionDigest) {
+        reject('A Hook catalog revision cannot name two definition digests.');
       }
     }
     if (domain === 'hook_execution' && previous === undefined) {
@@ -1579,22 +1651,23 @@ export class LocalManagedSessionAuthority {
           'Hook execution must bind to its settled committed registration.',
         );
       }
-      for (const committed of this.extensionRecordsInDomain(domain)) {
-        const other = parseHookExecution(committed.record);
-        if (execution.onceKey !== null && execution.onceKey === other.onceKey) {
-          reject('Hook onceKey is already consumed in this Session.');
-        }
-        if (
-          other.occurrenceId === execution.occurrenceId &&
-          (other.ordinal === execution.ordinal ||
-            other.registrationId !== execution.registrationId ||
-            other.eventName !== execution.eventName ||
-            JSON.stringify(other.planRef) !== JSON.stringify(execution.planRef))
-        ) {
-          reject(
-            'Hook occurrence must keep its registration, event and plan, with unique ordinals.',
-          );
-        }
+      if (
+        execution.onceKey !== null &&
+        this.hookOnceKeys.has(execution.onceKey)
+      ) {
+        reject('Hook onceKey is already consumed in this Session.');
+      }
+      const occurrence = this.hookOccurrences.get(execution.occurrenceId);
+      if (
+        occurrence !== undefined &&
+        (occurrence.ordinals.has(execution.ordinal) ||
+          occurrence.registrationId !== execution.registrationId ||
+          occurrence.eventName !== execution.eventName ||
+          occurrence.planRef !== JSON.stringify(execution.planRef))
+      ) {
+        reject(
+          'Hook occurrence must keep its registration, event and plan, with unique ordinals.',
+        );
       }
     }
     if (domain === 'mcp_operation' && previous === undefined) {
@@ -1630,12 +1703,11 @@ export class LocalManagedSessionAuthority {
           `the first revision of ${domain} record ${parsed.recordId} must open its run.`,
         );
       }
-      for (const record of this.extensionRecords.values()) {
-        if (record.operationId === operationId) {
-          reject(
-            `command ${operationId} already opened ${record.domain} record ${record.recordId}.`,
-          );
-        }
+      const opened = this.openingOperations.get(operationId);
+      if (opened !== undefined) {
+        reject(
+          `command ${operationId} already opened ${opened.domain} record ${opened.recordId}.`,
+        );
       }
       return;
     }
@@ -1682,6 +1754,42 @@ export class LocalManagedSessionAuthority {
             }),
     });
     this.extensionRecords.set(key, record);
+    let inDomain = this.extensionDomains.get(domain);
+    if (inDomain === undefined) {
+      inDomain = new Map();
+      this.extensionDomains.set(domain, inDomain);
+    }
+    inDomain.set(key, record);
+    // What admission indexes never changes across a record's revisions.
+    if (previous === undefined) {
+      this.openingOperations.set(operationId, {
+        domain,
+        recordId: parsed.recordId,
+      });
+      if (domain === 'hook_execution') {
+        const execution = parseHookExecution(parsed.record);
+        if (execution.onceKey !== null)
+          this.hookOnceKeys.add(execution.onceKey);
+        let occurrence = this.hookOccurrences.get(execution.occurrenceId);
+        if (occurrence === undefined) {
+          occurrence = {
+            registrationId: execution.registrationId,
+            eventName: execution.eventName,
+            planRef: JSON.stringify(execution.planRef),
+            ordinals: new Set(),
+          };
+          this.hookOccurrences.set(execution.occurrenceId, occurrence);
+        }
+        occurrence.ordinals.add(execution.ordinal);
+      }
+      if (domain === 'hook_registration') {
+        const pin = parsed.run.definition!;
+        this.hookDefinitionPins.set(
+          hookDefinitionPinKey(pin),
+          pin.definitionDigest,
+        );
+      }
+    }
     const committed = Object.freeze({
       domain,
       recordId: record.recordId,
@@ -1699,73 +1807,159 @@ export class LocalManagedSessionAuthority {
    * the log or its resources are corrupt, and opening fails.
    */
   private async rebuildExtensionRecords(): Promise<void> {
-    for (const event of this.events) {
-      if (event.kind !== 'domain.committed') continue;
-      const domain = event.payload['domain'] as ManagedSessionDomain;
-      const body = MANAGED_EXTENSION_RECORD_BODIES[domain];
-      if (body === undefined) continue;
-      if (this.resources === undefined) {
-        throw new ManagedSessionRecordError(
-          'a resource store is required to read Stage H records.',
+    const events = this.events.filter(
+      (event) =>
+        event.kind === 'domain.committed' &&
+        MANAGED_EXTENSION_RECORD_BODIES[
+          event.payload['domain'] as ManagedSessionDomain
+        ] !== undefined,
+    );
+    if (events.length > 0 && this.resources === undefined) {
+      throw new ManagedSessionRecordError(
+        'a resource store is required to read Stage H records.',
+      );
+    }
+    // Reading and verifying run a bounded window ahead; the chain checks
+    // and the state they build still follow the journal order.
+    const loads: Array<Promise<LoadedExtensionRevision>> = [];
+    let started = 0;
+    try {
+      for (const event of events) {
+        while (started < events.length && loads.length < REBUILD_READ_AHEAD) {
+          const load = this.loadExtensionRevision(events[started++]!);
+          // Awaited in its turn; an earlier failure must not leave it
+          // unhandled.
+          load.catch(() => undefined);
+          loads.push(load);
+        }
+        const { domain, body, parsed, recordRef } = await loads.shift()!;
+        this.assertExtensionRevision(
+          domain,
+          body,
+          parsed,
+          event.payload['operationId'] as string,
+          (message) => {
+            throw new ManagedSessionRecordError(
+              `session log is corrupt: ${message}`,
+            );
+          },
+        );
+        this.applyExtensionRevision(
+          event.sequence,
+          event.occurredAt,
+          event.payload['operationId'] as string,
+          domain,
+          parsed,
+          recordRef,
         );
       }
-      const recordRef = event.payload[
-        'recordRef'
-      ] as unknown as ManagedSessionDurableRef;
-      const bytes = await this.resources.read(recordRef);
-      const parsed = body.parse(
-        parseManagedSessionRecordJson(
-          bytes.toString('utf8'),
-          MANAGED_SESSION_LIMITS.maxEventBytes,
-        ),
-      );
-      await this.verifyExtensionResources(domain, parsed.record);
-      this.assertExtensionRevision(
-        domain,
-        body,
-        parsed,
-        event.payload['operationId'] as string,
-        (message) => {
-          throw new ManagedSessionRecordError(
-            `session log is corrupt: ${message}`,
-          );
-        },
-      );
-      this.applyExtensionRevision(
-        event.sequence,
-        event.occurredAt,
-        event.payload['operationId'] as string,
-        domain,
-        parsed,
-        recordRef,
-      );
+    } catch (error) {
+      // No read started ahead outlives the failed open.
+      await Promise.allSettled(loads);
+      throw error;
     }
   }
 
+  /** Reads one committed revision and verifies what it references. */
+  private async loadExtensionRevision(
+    event: ManagedSessionEvent,
+  ): Promise<LoadedExtensionRevision> {
+    const domain = event.payload['domain'] as ManagedSessionDomain;
+    const body = MANAGED_EXTENSION_RECORD_BODIES[domain]!;
+    const recordRef = event.payload[
+      'recordRef'
+    ] as unknown as ManagedSessionDurableRef;
+    const bytes = await this.resources!.read(recordRef);
+    const parsed = body.parse(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+    );
+    await this.verifyExtensionResources(domain, parsed.record, true);
+    // The record and what it references are verified; nothing reads it again.
+    await this.verifyResource(recordRef, bytes);
+    return { domain, body, parsed, recordRef };
+  }
+
+  /**
+   * Reads the resources a record references. A commit reads each of them,
+   * as the Session store would refuse a missing one; replaying an opened
+   * log reads each distinct resource once.
+   */
   private async verifyExtensionResources(
     domain: ManagedSessionDomain,
     record: unknown,
+    replay = false,
   ): Promise<void> {
-    const refs =
-      domain === 'mcp_configuration'
-        ? [parseMcpConfiguration(record).catalogRef]
-        : domain === 'mcp_operation'
-          ? [
-              parseMcpOperation(record).argsRef,
-              parseMcpOperation(record).resultRef,
-            ]
-          : domain === 'hook_registration'
-            ? [parseHookRegistration(record).catalogRef]
-            : domain === 'hook_execution'
-              ? [
-                  parseHookExecution(record).planRef,
-                  parseHookExecution(record).inputRef,
-                  parseHookExecution(record).resultRef,
-                ]
-              : [];
-    for (const ref of refs) {
-      if (ref !== null) await this.resources!.read(ref);
+    let refs: ReadonlyArray<ManagedSessionDurableRef | null> = [];
+    if (domain === 'mcp_configuration') {
+      refs = [parseMcpConfiguration(record).catalogRef];
+    } else if (domain === 'mcp_operation') {
+      const operation = parseMcpOperation(record);
+      refs = [operation.argsRef, operation.resultRef];
+    } else if (domain === 'hook_registration') {
+      refs = [parseHookRegistration(record).catalogRef];
+    } else if (domain === 'hook_execution') {
+      const execution = parseHookExecution(record);
+      refs = [execution.planRef, execution.inputRef, execution.resultRef];
     }
+    // Every read settles before a failure is reported, so none outlives
+    // the commit or the open it belongs to.
+    const results = await Promise.allSettled(
+      refs.map((ref) =>
+        ref === null
+          ? undefined
+          : replay
+            ? this.verifyResource(ref)
+            : this.resources!.read(ref),
+      ),
+    );
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
+  }
+
+  /**
+   * Reads a resource once while a log is replayed: a later reference that
+   * names the same resource reuses the verification. A reference that
+   * describes the ID differently is read again, so the store judges it as
+   * it judged the first.
+   */
+  private async verifyResource(
+    ref: ManagedSessionDurableRef,
+    bytes?: Buffer,
+  ): Promise<void> {
+    const existing = this.verifiedResources.get(ref.resourceId);
+    if (existing !== undefined) {
+      if (
+        existing.ref.kind === ref.kind &&
+        existing.ref.schemaVersion === ref.schemaVersion &&
+        existing.ref.byteLength === ref.byteLength &&
+        existing.ref.digest === ref.digest
+      )
+        return existing.verified;
+      if (bytes === undefined) await this.resources!.read(ref);
+      return;
+    }
+    const entry = {
+      ref: Object.freeze({
+        resourceId: ref.resourceId,
+        kind: ref.kind,
+        schemaVersion: ref.schemaVersion,
+        byteLength: ref.byteLength,
+        digest: ref.digest,
+      }),
+      verified:
+        bytes === undefined
+          ? this.resources!.read(ref).then(() => undefined)
+          : Promise.resolve(),
+    };
+    this.verifiedResources.set(ref.resourceId, entry);
+    entry.verified.catch(() => {
+      if (this.verifiedResources.get(ref.resourceId) === entry)
+        this.verifiedResources.delete(ref.resourceId);
+    });
+    return entry.verified;
   }
 
   /**
@@ -2016,6 +2210,13 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // The install's command identity is its activation ID, so a repeated ID
+    // would replay the earlier receipt without appending, and the epoch below
+    // would name an activation the log never recorded. Refuse it before the
+    // body is published; the replay check covers a concurrent repeat.
+    if (this.hasInstalledActivation(input.activationId)) {
+      throw activationAlreadyInstalledError(input.activationId);
+    }
     const epoch = (this.activation?.epoch ?? 0) + 1;
     const installRef = await this.publishActivationBody(
       'managed-activation-install',
@@ -2028,7 +2229,7 @@ export class LocalManagedSessionAuthority {
         ...(input.subject ? { subject: input.subject } : {}),
       },
     );
-    await this.commitActivation({
+    const receipt = await this.commitActivation({
       activationId: input.activationId,
       epoch,
       workerId: input.workerId,
@@ -2040,7 +2241,17 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
+    if (receipt.replayed) {
+      throw activationAlreadyInstalledError(input.activationId);
+    }
     return { activationId: input.activationId, epoch };
+  }
+
+  /** Whether the log already holds an install of this activation ID. */
+  hasInstalledActivation(activationId: string): boolean {
+    return this.transactions.has(
+      managedSessionCommandKey('installActivation', `${activationId}:active`),
+    );
   }
 
   /**
@@ -2148,13 +2359,13 @@ export class LocalManagedSessionAuthority {
     readonly operation: string;
     readonly renewalSeq?: number;
     readonly subject?: ManagedSessionSubject;
-  }): Promise<void> {
+  }): Promise<ManagedSessionCommitReceipt> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
     // event-id uniqueness would reject it as a duplicate of the install.
     const renewalSuffix =
       input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
-    await this.appendExecutionEvent(
+    return this.appendExecutionEvent(
       {
         operation: input.operation,
         commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
@@ -2415,6 +2626,24 @@ const INPUT_ACTORS: readonly ManagedSessionActor[] = [
   { class: 'trusted_entry' },
   { class: 'authority' },
 ];
+
+/** Stage H revisions read ahead of the replay when a log is reopened. */
+const REBUILD_READ_AHEAD = 32;
+
+interface LoadedExtensionRevision {
+  readonly domain: ManagedSessionDomain;
+  readonly body: ManagedExtensionRecordBody;
+  readonly parsed: ReturnType<ManagedExtensionRecordBody['parse']>;
+  readonly recordRef: ManagedSessionDurableRef;
+}
+
+/** Hook catalog pins that must name one digest share this key. */
+function hookDefinitionPinKey(pin: {
+  readonly definitionId: string;
+  readonly definitionRevision: number;
+}): string {
+  return `${pin.definitionId}\u0000${pin.definitionRevision}`;
+}
 
 /**
  * An accepted input and the wake the authority generates for it. The wake
