@@ -1088,6 +1088,15 @@ export function toRpcError(err: unknown): {
         },
       };
     }
+    case 'WorkspaceTrustGrantIneffectiveError':
+      // The REST twin answers this refusal 409 `trust_grant_ineffective`
+      // (routes/workspace-trust.ts); without this arm ACP clients get the
+      // opaque default frame and cannot branch on the refusal.
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: { errorKind: 'trust_grant_ineffective', httpStatus: 409 },
+      };
     case 'BridgeChannelQuarantinedError': {
       const unavailableError = err as BridgeChannelQuarantinedError;
       return {
