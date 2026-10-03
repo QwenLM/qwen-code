@@ -558,8 +558,9 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // Reuse the admitted attachment: attaching would recheck grants
-            // needed for new work and could replace the running attachment.
+            // Reuse the admitted owner; a cold connector cache re-attaches
+            // only for the persisted cancellation, without requiring the
+            // authority that admits new work.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());

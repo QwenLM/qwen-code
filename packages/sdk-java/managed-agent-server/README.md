@@ -195,7 +195,13 @@ unarchive restores it to closed. Rename waits for the Harness to durably commit
 while retaining its receipt and request digest. The same
 key retries the same content with the replay flag set; changed content or a
 different Session conflicts. A successful concurrent request can still complete
-the receipt, and a failing sibling cannot overwrite that completed outcome.
+the receipt, and a failing sibling cannot overwrite that completed outcome. It
+cannot complete a retired receipt once a later rename has completed either: that
+sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
+The Harness title was already written before this check; ordering overlapping
+Harness writes remains a follow-up tracked in #13269. A
+same-key request sent after the later rename is the newest request and still
+applies.
 Retries do not re-append the original `requested` event. If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
@@ -359,8 +365,10 @@ not a filesystem sandbox.
 Later Turns may be submitted by the Session's creator under the
 same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
-grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Workspace close follows
+grants, the Workspace registry's `ACTIVE` state and the Workspace generation and storage the
+Session was bound to), and the creator may rename the Session. The creator may
+also cancel a running Turn while they can still read the Workspace, under the
+cancel rule below. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
 close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
@@ -501,9 +509,24 @@ does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above and to later Turns submitted by the Session's creator under the same
 opt-in while they can still read and create in the Workspace (the per-caller
-`workspaceTurns` capability flag reflects the caller's current grants and the
-registry's `ACTIVE` state); the creator may also cancel the Session's running
-Turns and rename the Session. Later Turns run
+`workspaceTurns` capability flag reflects the caller's current grants, the
+registry's `ACTIVE` state and the Workspace generation and storage the Session was bound
+to); the creator may also rename the Session. Cancelling aborts work that is
+already running, so the creator may cancel a running Turn while they can still
+read the Workspace, even after their create grant is revoked, the Workspace
+starts draining or it is re-registered. A live cancel reuses the owner's
+resident Harness attachment. A cold connector cache passively re-attaches for
+the persisted cancellation after checking the frozen Session binding and exact
+identity, without depending on current creation grants, registry state or mount
+readiness. A resident passive load returns the original connection after scope
+and profile checks; a lost passive recovery reply can be retried without driving
+work. Passive recovery may adopt the original Runtime and query status without
+preparing or executing work; on the cancellation path, its lease stays owed
+through lost replies and retryable refusals until terminal success or teardown.
+New API cancellation requests still require read access, while already
+accepted cancellations continue if it is subsequently revoked. New work always
+rechecks execution authority. Broker/worker process death and an original prompt
+admission with a lost reply retain their separate recovery limitations. Later Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. Public close follows its separate close

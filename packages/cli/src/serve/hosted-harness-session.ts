@@ -130,6 +130,8 @@ const RESTORE_CONTAINER_KINDS = new Set([
 
 interface HostedSession {
   managed: ManagedSession;
+  storeBaseUrl: string;
+  definition: Record<string, unknown> | null;
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
@@ -1260,6 +1262,29 @@ export function registerHostedHarnessSessionRoutes(
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
 
+  const sendAttachment = (
+    res: Response,
+    sessionId: string,
+    session: HostedSession,
+    recovery?: HostedRuntimeRecoveryReport,
+  ): void => {
+    res.status(200).json({
+      sessionId,
+      clientId: session.clientId,
+      workspaceCwd: session.cwd,
+      lastEventId: session.managed.authority.committedSequence,
+      eventEpoch: epoch,
+      // A Harness older than approvals omits this, so a caller can tell.
+      ...(session.approval ? { approvalMode: session.approval.mode } : {}),
+      ...(session.blocked || session.hooks?.hasPendingOperations
+        ? { recoveryRequired: true }
+        : {}),
+      ...(recovery
+        ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
+        : {}),
+    });
+  };
+
   const open = async (
     req: Request,
     res: Response,
@@ -1348,8 +1373,117 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
-    if (sessions.has(sessionId) || opening.has(sessionId)) {
+    const resident = sessions.get(sessionId);
+    if (
+      opening.has(sessionId) ||
+      (resident && (create || body?.['passiveManagedRuntimeRecovery'] !== true))
+    ) {
       error(res, 409, 'hosted_session_already_attached');
+      return;
+    }
+    if (resident) {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId ||
+        resident.storeBaseUrl !== store.baseUrl
+      ) {
+        error(res, 404, 'hosted_session_not_found');
+        return;
+      }
+      if (
+        toolProfile === undefined &&
+        (resident.toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+          resident.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE)
+      )
+        toolProfile = resident.toolProfile;
+      const definition = resident.definition;
+      if (
+        definition?.['toolProfile'] !== toolProfile ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers) ||
+        !isDeepStrictEqual(
+          definition?.['hookCatalog'],
+          hookCatalog ?? definition?.['hookCatalog'],
+        ) ||
+        (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+          captureBytes !== undefined &&
+          definition?.['captureBytes'] !== captureBytes)
+      ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      try {
+        // Reuse the live owner without reopening its writer or driving work.
+        // A lost passive-load reply must still report a parked Runtime Turn.
+        let recovery: HostedRuntimeRecoveryReport | undefined;
+        const parked = !resident.active && unsettledPromptId(resident);
+        if (resident.mcpClosing) {
+          error(res, 409, 'hosted_session_closing');
+          return;
+        }
+        if (
+          !resident.active &&
+          !parked &&
+          hasUnsettledInput(
+            resident,
+            resident.managed.authority.committedSequence,
+          )
+        ) {
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        if (parked) {
+          if (!resident.toolProfile || !brokerOptions || resident.hooks) {
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+          const recovered = await recoverHostedRuntimeTurn({
+            session: resident.managed,
+            sessionId,
+            cwd: resident.cwd,
+            promptId: parked,
+            brokerOptions,
+            passive: true,
+          });
+          recovery = recovered?.report;
+          if (recovered?.acquiredRuntime)
+            resident.runtimeLeaseHeld =
+              recovered.report.executions[0]?.runtimeSessionId ??
+              recovered.promptId;
+          if (
+            !resident.active &&
+            unsettledPromptId(resident) &&
+            (!recovery ||
+              parked !== unsettledPromptId(resident) ||
+              recovery.checkpointId !==
+                resident.managed.authority.latestCheckpoint?.checkpointId ||
+              recovery.activationId !==
+                resident.managed.activation.activationId)
+          ) {
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+        }
+        if (sessions.get(sessionId) !== resident) {
+          error(res, 404, 'hosted_session_not_found');
+          return;
+        }
+        if (resident.mcpClosing) {
+          error(res, 409, 'hosted_session_closing');
+          return;
+        }
+        sendAttachment(
+          res,
+          sessionId,
+          resident,
+          resident.active || !unsettledPromptId(resident)
+            ? undefined
+            : recovery,
+        );
+      } catch {
+        error(res, 409, 'hosted_turn_recovery_required');
+      }
       return;
     }
     const sessionKey = {
@@ -1470,6 +1604,8 @@ export function registerHostedHarnessSessionRoutes(
       }
       const session: HostedSession = {
         managed,
+        storeBaseUrl: store.baseUrl,
+        definition,
         clientId: randomUUID(),
         cwd,
         streams: new Set(),
@@ -1793,21 +1929,7 @@ export function registerHostedHarnessSessionRoutes(
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
       refusedAdoptions.delete(sessionId);
-      res.status(200).json({
-        sessionId,
-        clientId: session.clientId,
-        workspaceCwd: cwd,
-        lastEventId: managed.authority.committedSequence,
-        eventEpoch: epoch,
-        // A Harness older than approvals omits this, so a caller can tell.
-        ...(pinned ? { approvalMode: pinned.mode } : {}),
-        ...(session.blocked || session.hooks?.hasPendingOperations
-          ? { recoveryRequired: true }
-          : {}),
-        ...(recovery
-          ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
-          : {}),
-      });
+      sendAttachment(res, sessionId, session, recovery);
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
         const abort = new AbortController();

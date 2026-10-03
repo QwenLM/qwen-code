@@ -499,6 +499,55 @@ class ManagedSessionLifecycleTest {
     }
 
     @Test
+    void retiredRenameCannotCompleteOverALaterCompletedRename() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String bootId = store.requireSession(tenant, sessionId).harnessBootId();
+        RequestDigests digests = new RequestDigests();
+        String first = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "A"));
+        String second = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "B"));
+        // K1 and its same-key retry both enter the Harness; one fails and
+        // retires K1, which frees the Session for a fresh key.
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
+                sessionId, SessionMutationKind.RENAME);
+        store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
+                SessionMutationKind.RENAME, "B", bootId);
+
+        // The sibling still inside the Harness finishes K1 last: it must
+        // not revert the newer committed title.
+        assertThatThrownBy(() -> store.completeSessionMutation(tenant,
+                "RENAME_SESSION", "k1", sessionId, SessionMutationKind.RENAME,
+                "A", bootId))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("session_mutation_superseded"));
+        assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
+        assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                        + " managed_agent_command WHERE tenant_id = ? AND"
+                        + " operation = 'RENAME_SESSION' AND idempotency_key = 'k1'",
+                String.class, tenant)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND event_type = 'session.updated'",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+
+        // A same-key request sent after K2 is the newest request, so it
+        // still re-drives K1 and wins.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"A\"}"), tenant, "k1")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("A"));
+    }
+
+    @Test
     void retryingFailedRenameAgainBlocksOtherLifecycleWork() throws Exception {
         String tenant = tenant();
         String sessionId = attachedSession(tenant);
@@ -522,9 +571,12 @@ class ManagedSessionLifecycleTest {
         String sessionId = attachedSession(tenant);
         AgentStateStore faulted = mock(AgentStateStore.class, delegatesTo(store));
         if ("lookup".equals(phase)) {
-            AtomicInteger reads = new AtomicInteger();
             doAnswer(call -> {
-                if (reads.incrementAndGet() == 2) {
+                if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'"
+                        + " AND command_status = 'PENDING'", Integer.class,
+                        tenant, sessionId) > 0) {
                     throw new IllegalStateException("lookup unavailable");
                 }
                 return store.requireSession(tenant, sessionId);

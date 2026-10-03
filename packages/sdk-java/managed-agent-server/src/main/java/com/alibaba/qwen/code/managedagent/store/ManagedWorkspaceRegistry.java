@@ -49,10 +49,6 @@ public class ManagedWorkspaceRegistry {
                 Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
     }
 
-    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        return createdSession(tenantId, actorId, sessionId);
-    }
-
     public boolean canRead(String tenantId, String actorId,
             String workspaceId) {
         if (actorId == null || actorId.isEmpty()) {
@@ -147,6 +143,19 @@ public class ManagedWorkspaceRegistry {
                 result.getString("display_name"), state,
                 result.getBoolean("can_create")
                         && "ACTIVE".equals(state));
+    }
+
+    /**
+     * Whether the registry still holds the Workspace generation and storage a
+     * Session was bound to; a re-registration changes them.
+     */
+    public boolean bindingCurrent(String tenantId, String workspaceId,
+            long generation, String storageId) {
+        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_registry"
+                + " WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND workspace_generation = ? AND storage_id = ?",
+                Integer.class, tenantId, workspaceId, generation, storageId)
+                .isEmpty();
     }
 
     public record WorkspaceSummary(String workspaceId, String displayName,
