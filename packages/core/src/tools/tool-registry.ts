@@ -22,7 +22,11 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
-import { ToolNames } from './tool-names.js';
+import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -318,8 +322,8 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns true when `name` is in the Config's `disabledTools` set, in
-   * which case `registerTool` / `registerFactory` will skip it. This is
+   * Returns true when Config disables `name` or the Host profile withholds it,
+   * in which case tool registration will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
    * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
@@ -329,6 +333,12 @@ export class ToolRegistry {
     name: string,
     aliases: readonly string[] = [],
   ): boolean {
+    if (
+      this.config.getSessionSourceType?.() === 'agent-host' &&
+      !AGENT_HOST_TOOL_NAMES.includes(name)
+    ) {
+      return true;
+    }
     const disabledTools = this.config.getDisabledTools();
     const hasExactMatch =
       disabledTools.has(name) ||
@@ -375,7 +385,7 @@ export class ToolRegistry {
       )
     ) {
       debugLogger.info(
-        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+        `Tool "${tool.name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -441,11 +451,50 @@ export class ToolRegistry {
     if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  /**
+   * Registers one of the tools a Managed session runs in its Runtime worker.
+   * Only these pass the Managed refusal, and only as the tool built for the
+   * session's own environment: any other name, environment, or tool under the
+   * name, is refused.
+   */
+  registerRuntimeBackedFactory(
+    name: string,
+    factory: ToolFactory,
+    environment: ExecutionEnvironment,
+    deferred: boolean,
+  ): void {
+    if (
+      !this.refusesHostTools() ||
+      !MANAGED_RUNTIME_TOOL_NAMES.has(name) ||
+      environment !== this.config.getManagedRuntimeEnvironment?.()
+    ) {
+      debugLogger.info(`Tool "${name}" skipped: it is not Runtime-backed.`);
+      return;
+    }
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
+    this.factories.set(name, async () => {
+      const tool = await factory();
+      if (
+        tool.name !== name ||
+        (tool as { environment?: unknown }).environment !== environment
+      ) {
+        throw new Error(`Tool "${name}" is not Runtime-backed.`);
+      }
+      return tool;
+    });
+    if (deferred) this.permissionDeferred.add(name);
   }
 
   unregisterTool(name: string): void {
@@ -465,7 +514,7 @@ export class ToolRegistry {
     if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
