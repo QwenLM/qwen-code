@@ -41,6 +41,7 @@ import { RequestShutdownTool } from './request-shutdown.js';
 import { RipGrepTool } from './ripGrep.js';
 import { SearchMemoryTool } from './search-memory.js';
 import { SendMessageTool } from './send-message.js';
+import { SessionContextTool } from './session-context.js';
 import { SkillTool } from './skill.js';
 import { TaskCreateTool } from './task-create.js';
 import { TaskListTool } from './task-list.js';
@@ -162,7 +163,18 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_200],
   ['list_directory', (c) => new LSTool(c), 1_100],
   ['grep_search (fallback)', (c) => new GrepTool(c), 1_050],
+  [
+    'session_history',
+    (c) => new SessionContextTool(c, ToolNames.SESSION_HISTORY),
+    950,
+  ],
+  [
+    'session_notes',
+    (c) => new SessionContextTool(c, ToolNames.SESSION_NOTES),
+    900,
+  ],
   ['glob', (c) => new GlobTool(c), 800],
+  ['new_context', (c) => new SessionContextTool(c, ToolNames.NEW_CONTEXT), 750],
   ['task_create', (c) => new TaskCreateTool(c), 650],
   ['tool_call', () => new ToolCallTool(), 650],
   ['team_plan_approval', (c) => new TeamPlanApprovalTool(c), 600],
@@ -171,6 +183,11 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['display_image', (c) => new DisplayImageTool(c), 550],
   ['get_goal', (c) => new GetGoalTool(c), 550],
   ['task_list', (c) => new TaskListTool(c), 500],
+  [
+    'get_context_remaining',
+    (c) => new SessionContextTool(c, ToolNames.GET_CONTEXT_REMAINING),
+    400,
+  ],
   ['team_delete', (c) => new TeamDeleteTool(c), 300],
 ];
 

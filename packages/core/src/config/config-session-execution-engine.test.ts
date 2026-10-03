@@ -10,6 +10,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { LlmChat } from '../core/llm-chat.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngineState,
@@ -240,4 +242,38 @@ describe('Config session execution engine', () => {
       });
     },
   );
+});
+
+it('falls back to summary for managed notes without changing the saved choice', async () => {
+  const requested = { strategy: 'notes' as const, imageTokenEstimate: 1234 };
+  const config = createConfig({
+    sessionExecutionEngine: 'managed',
+    sessionWriterLeaseEnabled: true,
+    experimentalZedIntegration: true,
+    chatCompression: requested,
+    bareMode: true,
+  });
+  try {
+    await initializeUntilSideEffects(config);
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(config.getChatCompression()).toEqual({
+      strategy: 'summary',
+      imageTokenEstimate: 1234,
+    });
+    expect(requested.strategy).toBe('notes');
+    for (const name of [
+      ToolNames.SESSION_NOTES,
+      ToolNames.SESSION_HISTORY,
+      ToolNames.GET_CONTEXT_REMAINING,
+      ToolNames.NEW_CONTEXT,
+    ]) {
+      expect(registry.getAllToolNames()).not.toContain(name);
+    }
+    const chat = new LlmChat(config, {}, [], config.getChatRecordingService());
+    expect(chat.getSessionNotesService()).toBeUndefined();
+  } finally {
+    await config.closeSessionWriter();
+  }
 });
