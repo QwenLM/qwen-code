@@ -13,8 +13,20 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import path from 'node:path';
-import { braceExpand } from 'minimatch';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -83,41 +95,17 @@ import {
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
-export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
-export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
-export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
-export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
+export {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+};
 
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2;
-
-export function isHostedWorkspaceProfile(
-  profile: unknown,
-): profile is HostedWorkspaceToolProfile {
-  return (
-    profile === HOSTED_WORKSPACE_FILE_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
-
-export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
-  return (
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
-
-export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
-  return (
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -144,48 +132,6 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-/**
- * A glob pattern's brace-expansion cost, as a saturating product over the
- * groups' alternative counts — computed by a left-to-right scan, never by
- * expanding. The worker re-checks the same rule after dispatch; refusing
- * here keeps the walk (and its seconds of event-loop block) off the shared
- * worker entirely. Over-counting nested or escaped braces is the safe
- * direction.
- */
-const GLOB_PATTERN_MAX_EXPANSIONS = 4096;
-
-function globPatternWithinBudget(pattern: string): boolean {
-  let product = 1;
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === '\\') {
-      i++;
-      continue;
-    }
-    if (c !== '{') continue;
-    let depth = 1;
-    let alternatives = 1;
-    let j = i + 1;
-    for (; j < pattern.length; j++) {
-      const g = pattern[j];
-      if (g === '\\') {
-        j++;
-        continue;
-      }
-      if (g === '{') depth++;
-      else if (g === '}') {
-        depth--;
-        if (depth === 0) break;
-      } else if (g === ',' && depth === 1) alternatives++;
-    }
-    if (depth !== 0) break; // unbalanced: minimatch treats it as literal
-    product *= alternatives;
-    if (product > GLOB_PATTERN_MAX_EXPANSIONS) return false;
-    i = j;
-  }
-  return true;
 }
 
 export interface HostedApprovalTurnOptions {
@@ -878,35 +824,19 @@ export class HostedWorkspaceToolTurn {
             'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
           const requestedPattern = call.args['pattern'];
           const directory = call.args['path'];
-          // Validate the value that gets dispatched, never the raw one. Glob
-          // treats an untrimmed pattern as a literal, so it matches nothing and
-          // the false negative is persisted; trimming first also stops a
-          // whitespace-masked `..`/absolute shape from clearing this guard only
-          // to be refused by the worker after a full durable round trip.
+          // A pattern is a second search root: refuse the absolute/`..` and
+          // oversized shapes here, pre-acquisition, with the identical check
+          // the worker applies after dispatch — a refusal before acquisition
+          // stays model-correctable and costs no durable Runtime work
+          // (#13030). Validate the value that gets dispatched, never the raw
+          // one: glob treats an untrimmed pattern as a literal, so it matches
+          // nothing and the false negative is persisted.
           const pattern =
-            typeof requestedPattern === 'string'
-              ? requestedPattern.trim()
-              : requestedPattern;
-          if (
-            typeof pattern !== 'string' ||
-            !pattern ||
-            // A pattern is a second search root: refuse the absolute/`..`
-            // shapes here, pre-acquisition, with the identical segment
-            // equality rule the worker applies after dispatch — a refusal
-            // before acquisition stays model-correctable and costs no
-            // durable Runtime work (#13030). The rule runs on the
-            // brace-expanded alternatives: `{/etc,/zz}/host*` composes an
-            // absolute search root the literal check cannot see, while
-            // `*.{ts,tsx}` expands to ordinary input. The budget bounds the
-            // expansion COST first — a ~70-byte brace pattern otherwise
-            // blocks the shared worker's event loop for seconds.
-            !globPatternWithinBudget(pattern) ||
-            braceExpand(pattern).some(
-              (alternative) =>
-                path.isAbsolute(alternative) ||
-                alternative.split(/[\\/]/).includes('..'),
-            )
-          ) {
+            typeof requestedPattern === 'string' ? requestedPattern.trim() : '';
+          const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
+          if (check === 'too-complex') {
+            validationError = HOSTED_GLOB_TOO_COMPLEX;
+          } else if (check === 'escapes') {
             validationError = globError;
           } else {
             input['pattern'] = pattern;

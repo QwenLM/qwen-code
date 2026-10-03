@@ -90,6 +90,16 @@ export interface GlobToolParams {
   path?: string;
 }
 
+export interface GlobToolOptions {
+  /**
+   * A directory the search never leaves: the walk neither enters
+   * nor reports anything whose real location is outside it, whatever the
+   * pattern's grammar spells. Managed Sessions set it; the ordinary CLI
+   * keeps external globs, which ask for permission instead.
+   */
+  containmentRoot?: string;
+}
+
 class GlobToolInvocation extends BaseToolInvocation<
   GlobToolParams,
   ToolResult
@@ -99,6 +109,7 @@ class GlobToolInvocation extends BaseToolInvocation<
   constructor(
     private config: Config,
     params: GlobToolParams,
+    private readonly containmentRoot?: string,
   ) {
     super(params);
     this.fileService = config.getFileService();
@@ -194,6 +205,43 @@ class GlobToolInvocation extends BaseToolInvocation<
       }
     };
 
+    // Containment is judged per walked entry, not on the pattern: `..`,
+    // `[.][.]`, `\.\.` and brace alternatives all resolve to an entry whose
+    // lexical path leaves the root, and a file reached through a symlinked
+    // directory has a parent whose realpath does. Pruning both keeps an
+    // outside entry from being walked, reported or counted.
+    const root = this.containmentRoot;
+    const realpaths = new Map<string, string | null>();
+    const realpathOf = (target: string): string | null => {
+      let real = realpaths.get(target);
+      if (real === undefined) {
+        try {
+          real = fs.realpathSync(target);
+        } catch {
+          real = null;
+        }
+        realpaths.set(target, real);
+      }
+      return real;
+    };
+    const escapesRoot = (full: string, self: boolean): boolean => {
+      if (root === undefined) return false;
+      if (!isPathWithinRoot(full, root)) return true;
+      const realRoot = realpathOf(root) ?? root;
+      // Judge a listed entry by its parent's realpath, so a merely listed
+      // outward symlink (a venv's `bin/python`) stays visible; judge a
+      // directory about to be entered by its own.
+      const real = self
+        ? realpathOf(full)
+        : (() => {
+            const parent = realpathOf(path.dirname(full));
+            return parent === null
+              ? null
+              : path.join(parent, path.basename(full));
+          })();
+      return real === null || !isPathWithinRoot(real, realRoot);
+    };
+
     const isAllowedByFileFilters = (entry: GlobPath): boolean => {
       const relativePath = path.relative(projectRoot, entry.fullpath());
       return (
@@ -212,8 +260,10 @@ class GlobToolInvocation extends BaseToolInvocation<
       follow: false,
       signal,
       ignore: {
-        ignored: isTraversalIgnored,
-        childrenIgnored: isTraversalIgnored,
+        ignored: (entry) =>
+          escapesRoot(entry.fullpath(), false) || isTraversalIgnored(entry),
+        childrenIgnored: (entry) =>
+          escapesRoot(entry.fullpath(), true) || isTraversalIgnored(entry),
       },
     }) as AsyncIterable<GlobPath> & { destroy?: () => void };
 
@@ -390,7 +440,10 @@ class GlobToolInvocation extends BaseToolInvocation<
 export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   static readonly Name = ToolNames.GLOB;
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly options: GlobToolOptions = {},
+  ) {
     super(
       GlobTool.Name,
       ToolDisplayNames.GLOB,
@@ -446,6 +499,10 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   protected createInvocation(
     params: GlobToolParams,
   ): ToolInvocation<GlobToolParams, ToolResult> {
-    return new GlobToolInvocation(this.config, params);
+    return new GlobToolInvocation(
+      this.config,
+      params,
+      this.options.containmentRoot,
+    );
   }
 }

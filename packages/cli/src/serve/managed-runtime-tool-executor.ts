@@ -7,7 +7,10 @@
 import path from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
-import { braceExpand } from 'minimatch';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -867,29 +870,15 @@ export class ManagedToolExecutor {
           );
         const requested =
           typeof params['path'] === 'string' ? params['path'].trim() : '';
-        // `pattern` is a second search root: glob resolves `..` segments and
-        // treats an absolute pattern as absolute, so it is contained too, by
-        // segment so a literal `a/..b/*.ts` stays usable. The rule runs on
-        // the brace-expanded alternatives: `{/etc,/zz}/host*` composes an
-        // absolute search root the literal check cannot see, while
-        // `*.{ts,tsx}` expands to ordinary input. The budget bounds the
-        // expansion COST, not the length: the scan never materializes the
-        // alternatives, so a ~70-byte pattern cannot block this shared
-        // worker's event loop for seconds.
+        // `pattern` is a second search root, and glob searches every brace
+        // alternative: the same check as the harness refuses absolute/`..`
+        // shapes and patterns too large to search before anything expands
+        // them. The walk is contained regardless (`containmentRoot`).
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        if (!globPatternWithinBudget(pattern)) {
-          throw new Error(
-            `Glob pattern expands beyond the ${GLOB_PATTERN_MAX_EXPANSIONS}-alternative budget. Narrow the brace groups and retry.`,
-          );
-        }
-        if (
-          braceExpand(pattern).some(
-            (alternative) =>
-              path.isAbsolute(alternative) ||
-              alternative.split(/[\\/]/).includes('..'),
-          )
-        ) {
+        const check = checkHostedGlobPattern(pattern);
+        if (check === 'too-complex') throw new Error(HOSTED_GLOB_TOO_COMPLEX);
+        if (check === 'escapes') {
           throw new Error(
             'Glob pattern must stay within the Session working directory.',
           );
@@ -1178,7 +1167,8 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
-        new GlobTool(config),
+        // The walk never leaves the Session, whatever the pattern spells.
+        new GlobTool(config, { containmentRoot: directory }),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
@@ -1328,48 +1318,6 @@ async function realpathDeepestExisting(candidate: string): Promise<string> {
       resolved = parent;
     }
   }
-}
-
-/**
- * A glob pattern's brace-expansion cost, as a saturating product over the
- * groups' alternative counts — computed by a left-to-right scan, never by
- * expanding. `{a,b}` repeated twenty times is 96 bytes that block this
- * shared worker's event loop for seconds; the budget refuses it before
- * minimatch materializes anything. Over-counting nested or escaped braces
- * is the safe direction.
- */
-const GLOB_PATTERN_MAX_EXPANSIONS = 4096;
-
-function globPatternWithinBudget(pattern: string): boolean {
-  let product = 1;
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === '\\') {
-      i++;
-      continue;
-    }
-    if (c !== '{') continue;
-    let depth = 1;
-    let alternatives = 1;
-    let j = i + 1;
-    for (; j < pattern.length; j++) {
-      const g = pattern[j];
-      if (g === '\\') {
-        j++;
-        continue;
-      }
-      if (g === '{') depth++;
-      else if (g === '}') {
-        depth--;
-        if (depth === 0) break;
-      } else if (g === ',' && depth === 1) alternatives++;
-    }
-    if (depth !== 0) break; // unbalanced: minimatch treats it as literal
-    product *= alternatives;
-    if (product > GLOB_PATTERN_MAX_EXPANSIONS) return false;
-    i = j;
-  }
-  return true;
 }
 
 function toPayload(

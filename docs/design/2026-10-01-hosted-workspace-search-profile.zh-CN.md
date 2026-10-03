@@ -47,13 +47,22 @@ worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持
 - 搜索被钉在 Session 已安装上下文的目录内。省略 `path` 时解析到该目录
   （绝不使用跨 Session 共享挂载点的 workspace 级 include 列表），其他取值
   必须解析到其内部；否则以模型可纠正的工具错误结算。
+- 遍历本身受范围约束：managed `GlobTool` 以 Session 目录作为
+  `containmentRoot` 构建，glob 的遍历钩子会剪掉词法路径或父目录 realpath
+  离开该目录的每个条目。任何 pattern 写法（`..`、`[.][.]`、`\.\.`、花括号
+  备选、软链接目录）都无法遍历、报告或计数外部内容，因此外部路径存在与否
+  得到完全相同的回答。
+- pattern 在被展开之前先设上界。brace-expansion 没有输出上限，glob 还会
+  再次展开同一个 pattern，因此 Harness（获取前）与 worker 都会拒绝超过
+  1024 字符、花括号不配对或按结构估算超过 64 个花括号备选的 pattern；通过
+  后才展开，并作为快速路径检查各备选是否为绝对路径或含 `..` 段。
 - 结果在到达网络、模型或持久记录之前改写为 Workspace 相对路径。Runtime
   宿主的物理目录布局不得泄露给 Harness；对搜索工具而言路径本身就是结果。
 
 Core 的忽略规则以 Session 目录为根。位于仓库子目录的 Session 不继承祖先
 目录的 `.gitignore`，依赖文件可能占满扫描上限；Session 自己的忽略文件仍
-生效。本切片不承诺仓库根目录的忽略语义，也不修改 core。宽泛 glob 列出
-外指软链接时，目前会拒绝整个结果；本轮保留这一保守的范围约束行为。
+生效。本切片不承诺仓库根目录的忽略语义。宽泛 glob 仅列出的外指软链接（如 venv
+的 `bin/python`）仍然可见，因为条目按其父目录的 realpath 判定。
 
 ## 上限
 
@@ -67,7 +76,9 @@ pattern or path.`），而不是把整个结果落入「输出被省略」路径
 
 - CLI Harness：profile 接受与固定、声明、获取前的参数校验、有界截断。
 - CLI worker：准入、范围约束、Workspace 相对输出。
-- Core：原样复用 `GlobTool`，不改 core。
+- Core：`GlobTool` 新增可选的 `containmentRoot` 构造选项；普通 CLI 不设置
+  它，外部 glob 仍需权限确认。
+- Workspace 恢复：W1 恢复通过与创建、加载相同的共享 profile 判断接受 `/2`。
 - Java：不变。生产 connector 仍固定 `hosted-workspace-files/1`；是否为公开
   Session 启用 `/2` 是单独的部署决定。
 

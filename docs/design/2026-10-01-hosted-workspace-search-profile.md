@@ -55,6 +55,18 @@ invariants hold there, because Glob's own validation admits external paths:
   which spans sibling Sessions on the same mount), and any other value must
   resolve inside it; anything else settles as a tool error the model can
   correct.
+- The walk itself is contained: the managed `GlobTool` is built with a
+  `containmentRoot` of the Session directory, and glob's traversal hooks
+  prune every entry whose lexical path, or whose parent's realpath, leaves
+  it. No pattern spelling (`..`, `[.][.]`, `\.\.`, brace alternatives, a
+  symlinked directory) can walk, report or count anything outside, so an
+  existing and a missing outside path answer identically.
+- The pattern is bounded before anything expands it. brace-expansion runs
+  without an output cap and glob expands the same pattern again, so both the
+  Harness (pre-acquisition) and the worker refuse a pattern over 1024
+  characters, with unbalanced braces, or with more than 64 brace
+  alternatives, computed from its structure; only then is it expanded and
+  its alternatives checked for absolute or `..` segments as a fast path.
 - Results are rewritten to Workspace-relative paths before they reach the
   wire, the model, or the durable record. The Runtime host's physical layout
   must not leak to the Harness; for a search tool the paths are the payload.
@@ -62,9 +74,9 @@ invariants hold there, because Glob's own validation admits external paths:
 Core ignore filtering is rooted at the Session directory. A Session below
 the repository root does not inherit ancestor `.gitignore` rules; dependency
 files may consume the scan limit. Its own ignore files still apply. This
-slice does not promise repository-root ignore semantics or change core.
-An outward symlink listed by a broad glob currently refuses the whole result;
-this conservative containment behavior also remains unchanged.
+slice does not promise repository-root ignore semantics. An outward symlink
+that a broad glob merely lists (a venv's `bin/python`) stays visible, because
+entries are judged by their parent's realpath.
 
 ## Bounds
 
@@ -80,7 +92,10 @@ existing omitted path still applies.
 - CLI Harness: profile acceptance and pinning, declaration, pre-acquisition
   argument validation, bounded truncation.
 - CLI worker: admission, containment, Workspace-relative output.
-- Core: `GlobTool` is reused unchanged; no core edit.
+- Core: `GlobTool` gains an opt-in `containmentRoot` constructor option; the
+  ordinary CLI does not set it and keeps external globs behind permission.
+- Workspace recovery: W1 recovery accepts the `/2` profiles through the same
+  shared profile predicates as creation and load.
 - Java: unchanged. The production connector still pins
   `hosted-workspace-files/1`; enabling `/2` for public Sessions is a separate
   deployment decision.
