@@ -591,7 +591,7 @@ describe('parseChannelConfig', () => {
       token: 'ghp_test',
       purgeLegacySessions: true,
     });
-    expect(result.purgeLegacySessions).toBe(true);
+    expect(result['purgeLegacySessions']).toBe(true);
     // A stringified "true" must not silently leave the QQ purge off.
     await expect(
       parseChannelConfig('bot', {
