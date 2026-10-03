@@ -132,8 +132,10 @@ mapper now maps `approval_mode` onto `SessionRecord` and `hasActions` reads
 it from the row the page already fetched.
 
 A page of unbound sessions costs at most 3 queries on either surface, and a
-page of workspace-bound sessions costs one more for the close-state batch —
-independent of page size in all cases. The single-session views
+page of workspace-bound sessions costs one more for the close-state batch;
+a WebShell page carrying submit-shaped sessions adds one creator-marker
+batch, and one grant batch when it also holds creator-owned ones — all
+independent of page size. The single-session views
 (`publicSession`, `webShellSession`) delegate to the same assembly with
 singleton inputs, so there is one code path. The single-session store reads
 (`findActiveTurn` / `findLatestTurn` / `findLatestEnvironmentEvent`,
@@ -229,7 +231,9 @@ keep reading the rows of a session being deleted.
 - `Issue13181QueryBudgetTest`'s `QueryLedger` (a `DataSource` proxy counting
   prepared statements) pins per-endpoint query budgets: a 20-session page of
   `listPublicSessions` ≤ 3 queries (4 for workspace-bound rows, adding the
-  close-state batch) and `listWebShellSessions` ≤ 3, with the
+  close-state batch) and `listWebShellSessions` ≤ 3 (a bound page whose
+  submit-shaped sessions include creator-owned ones costs 5, adding the
+  creator-marker and grant batches), with the
   batch turn reads asserted to project the summary column list and the
   admission-order selection rules exercised through the page (a two-Turn
   session admitted out of `created_at` order with inverted environment-event
