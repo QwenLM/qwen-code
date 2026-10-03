@@ -160,7 +160,7 @@ Java 请求路径不递归复制存储，SQL 元数据/SSE 不携带文件字节
 
 先支持已结算、使用相对路径的 Hosted 文件工具 Session。其新文件调用本来就要求相对保存的 cwd，所以不需要重写已提交消息。清点共享 storage 的所有 Session 和资源，包括已归档的 Session。只要存在不支持安全迁移的 profile 或保留资产，就保持旧挂载或拒绝迁移，不能因为当前选中的 Session 可以迁移就破坏其他旧 Session。
 
-首版迁移能力不支持 Shell 命令、MCP/Hook 配置、Workspace 外的文件历史引用、Memory root 及其他不透明绝对路径依赖；这些需要 profile 专属支持。W1c 不能通过升级现有 Session 的不可变 definition 来绕过检查。
+首版迁移能力支持相对路径的 Hosted 文件历史，保留原绝对 QWEN_HOME 与独立备份卷；备份名称和原记录不改写。Shell 命令、MCP/Hook 配置、非 Hosted 或外部绝对历史键、Memory root 和不透明绝对路径仍不支持。详见 [W1c 详细设计](workspace-storage-migration.zh-CN.md)。W1c 不能通过升级不可变 definition 绕过检查。
 
 ### 8.2 持久操作
 
