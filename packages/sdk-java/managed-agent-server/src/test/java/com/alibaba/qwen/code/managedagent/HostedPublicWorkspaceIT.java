@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -345,6 +347,8 @@ class HostedPublicWorkspaceIT {
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
                     + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            // Harness still runs the Turn, but this Java owner has lost its ref.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
             Map<String, Object> revokedCancel = Map.of("type", "agent.session.cancel", "turn_id", revokedTurn);
             request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
                     "nocreate-cancel-" + workspace, "actor", 202);
@@ -387,6 +391,25 @@ class HostedPublicWorkspaceIT {
             jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            String registeredStorage = jdbc.queryForObject("SELECT storage_id FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", String.class, tenant, workspace);
+            jdbc.update("UPDATE managed_workspace_registry SET "
+                    + (index == 0 ? "workspace_generation = workspace_generation + 1"
+                            : "storage_id = 'replacement-storage'")
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                    null, "actor", 200).path("capabilities").path("workspaceTurns").asBoolean()).isFalse();
+            assertUnavailable(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "rebound-later-" + workspace, "actor", 409));
+            assertUnavailable(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "rebound-rename-" + workspace, "actor", 409));
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "rebound-cancel-" + workspace, "actor", 202);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = ?"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", registeredStorage, tenant, workspace);
         }
         assertThat(modelRequests).hasSize(approvals ? 16 : 20);
         assertThat(modelFailure.get()).isNull();

@@ -33,6 +33,8 @@ import java.time.Duration;
 import java.util.Map;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -237,15 +239,16 @@ class QwenHostedHarnessConnectorTest {
         verify(client).createSession(any(CreateHarnessSession.class));
     }
 
-    @Test
-    void rechecksWorkspaceAuthorityOnCachedAttachmentAndKeepsPassiveRecoveryAuthorized() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rechecksWorkspaceAuthorityOnCachedAttachmentAndKeepsPassiveRecoveryAuthorized(boolean verifiedRecovery) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         SessionRecord session = mock(SessionRecord.class);
         AgentStateStore sessions = mock(AgentStateStore.class);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
-        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(verifiedRecovery);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
