@@ -365,7 +365,7 @@ not a filesystem sandbox.
 Later Turns may be submitted by the Session's creator under the
 same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
-grants, the Workspace registry's `ACTIVE` state and the Workspace generation the
+grants, the Workspace registry's `ACTIVE` state and the Workspace generation and storage the
 Session was bound to), and the creator may rename the Session. The creator may
 also cancel a running Turn while they can still read the Workspace, under the
 cancel rule below. Workspace close follows
