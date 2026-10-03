@@ -14,6 +14,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core';
 import {
   createThread,
+  enrollAgentHost,
+  heartbeatAgentHost,
+  issueAgentHostEnrollment,
   getAgentsDir,
   readThread,
   updateWorkspaceAgents,
@@ -354,4 +357,70 @@ it('keeps another disabled agent running when retiring the last enabled agent', 
 
   expect(bridge.closeSession).not.toHaveBeenCalledWith('alice-session');
   expect(bridge.cancelSession).not.toHaveBeenCalledWith('alice-session');
+});
+
+it('shows an online host offering the bound program when the first host is offline', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'multi-host');
+  const hosts: Array<{ id: string }> = [];
+  for (const [name, providers] of [
+    ['offline', ['Qwen Code ACP']],
+    ['wrong-program', ['Codex']],
+    ['available', ['Qwen Code ACP']],
+  ] as const) {
+    const { token } = await issueAgentHostEnrollment(workspaceCwd);
+    const enrolled = await enrollAgentHost(workspaceCwd, {
+      token,
+      name,
+      workspaceCwd: `/remote/${name}`,
+      providers: [...providers],
+    });
+    hosts.push(enrolled.host);
+    if (name !== 'offline') {
+      await heartbeatAgentHost(
+        workspaceCwd,
+        enrolled.host.id,
+        enrolled.secret,
+        {
+          workspaceCwd: `/remote/${name}`,
+          providers: [...providers],
+        },
+      );
+    }
+  }
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    {
+      id: 'ag_remote',
+      name: 'remote',
+      createdAt: 1,
+      execution: {
+        mode: 'managed-host',
+        hostIds: hosts.map((host) => host.id),
+        provider: 'qwen',
+      },
+    },
+  ]);
+  const runtime = {
+    workspaceId: 'workspace',
+    workspaceCwd,
+    primary: true,
+    trusted: true,
+    bridge: bridgeStub(),
+  } as WorkspaceRuntime;
+  const app = express();
+  registerWorkspaceAgentRoutes(app, {
+    workspaceRegistry: createWorkspaceRegistry([runtime]),
+    mutate: () => (_req, _res, next) => next(),
+    isAgentCollaborationEnabledFor: () => true,
+  });
+  try {
+    const response = await request(app)
+      .get('/workspaces/workspace/agent/agents')
+      .expect(200);
+    expect(response.body.agents[0]).toMatchObject({
+      status: 'idle',
+      runtime: { id: hosts[2]!.id, label: 'available', status: 'online' },
+    });
+  } finally {
+    (app.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined)?.();
+  }
 });

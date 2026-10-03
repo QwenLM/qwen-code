@@ -17,7 +17,7 @@ public final class ToolPublicationRetentionObserver {
         this.properties = properties;
     }
 
-    @Scheduled(fixedDelay = 60_000)
+    @Scheduled(fixedDelay = 60_000, scheduler = "managedToolOutputScheduler")
     public void tick() {
         try {
             var sample = retention.observe(properties.getToolPublication().getDeletionGrace());

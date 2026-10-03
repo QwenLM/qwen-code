@@ -35,6 +35,8 @@ export interface ManagedAgentSessionSummary {
     canCancel: boolean;
     actions?: boolean;
     artifacts?: boolean;
+    /** The caller may submit later Turns to this Workspace-bound Session. */
+    workspaceTurns?: boolean;
   };
   failure?: { code: string; message: string };
 }

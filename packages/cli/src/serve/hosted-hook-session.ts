@@ -27,7 +27,11 @@ import type {
   PromptHookConfig,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionSubject,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -221,6 +225,7 @@ export class HostedHookSession {
   readonly broker: HostedWorkspaceBroker;
   private readonly ownsBroker: boolean;
   private acquired = false;
+  private acquiring?: Promise<void>;
   private readonly aggregator = new HookAggregator();
   private catalog?: ManagedHookCatalog;
   private registration?: HookRegistration;
@@ -250,6 +255,11 @@ export class HostedHookSession {
   };
   private messagesProvider?: () => Array<Record<string, unknown>>;
 
+  /**
+   * Construct only on a load activation. Release finds earlier owners by
+   * load activations alone, so an owner named after a Hook operation's
+   * activation or its restore would never be released by a successor.
+   */
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
@@ -299,24 +309,44 @@ export class HostedHookSession {
 
   async acquire(): Promise<void> {
     if (this.acquired) return;
-    await this.releaseEarlierOwners();
-    await this.broker.warm();
-    await this.broker.acquire();
-    if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
-    this.acquired = true;
+    // Parallel Hooks share one acquisition, so each earlier owner is
+    // released once.
+    this.acquiring ??= (async () => {
+      try {
+        await this.releaseEarlierOwners();
+        await this.broker.warm();
+        await this.broker.acquire();
+        if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
+        this.acquired = true;
+      } finally {
+        this.acquiring = undefined;
+      }
+    })();
+    await this.acquiring;
   }
 
   private async releaseEarlierOwners(): Promise<void> {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
+    const restores = new Set<string>();
     // Activation is durable before even the first catalog request acquires.
     for (const event of authority.eventsInSequenceRange(
       1,
       authority.committedSequence,
     )) {
       if (event.kind !== 'activation.changed') continue;
-      const id = `hooks-activation-${digest([event.payload['activationId'], event.payload['epoch']])}`;
+      // Only a load constructs a Hook owner. A Hook operation's activation,
+      // and the one it restores on finishing, never acquire.
+      const activationId = event.payload['activationId'] as string;
+      restores.add(managedHookRestoreActivationId(activationId));
+      if (
+        restores.has(activationId) ||
+        (event.payload['subject'] as ManagedSessionSubject).type ===
+          'hook_operation'
+      )
+        continue;
+      const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
       if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
         owners.set(id, true);
     }
