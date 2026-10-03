@@ -552,10 +552,11 @@ export function tmuxPlan(opts: {
       // -N asks tmux to keep the REAL trailing spaces — dropped wherever it
       // could INVENT them instead: on tmux 3.1-3.2.x (pads to the grid
       // allocation, no -T to undo it) and, by the caller's composition, on
-      // a version `tmux -V` cannot name — an unnameable host may be either
-      // of those families exactly. There, a trimmed line understates a
-      // clipped right edge, while a padded one FABRICATES evidence, and
-      // the manifest records the caveat as a degradation.
+      // a version `tmux -V` cannot name — which may be such a padding
+      // host, or a 3.4+ whose `-T` remedy is withheld for the same
+      // unnameability. There, a trimmed line understates a clipped right
+      // edge, while a padded one FABRICATES evidence, and the manifest
+      // records the caveat as a degradation.
       ...(opts.captureTrailing === false ? [] : ['-N']),
       // -N alone pads each line out to the grid line's ALLOCATED cell count,
       // not what it rendered: measured on tmux 3.4, a row that had held 24

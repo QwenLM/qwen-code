@@ -1012,6 +1012,106 @@ exit 0
         else process.env['PATH'] = realPath;
         if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
         else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        // The shim plants look like this run's socket; a failure before
+        // the reap leaves one behind in the shared socket dir. Scoped to
+        // THIS pid's prefix, so a concurrent capture's sockets are
+        // unreachable from here.
+        spawnSync('bash', [
+          '-c',
+          `rm -f "/tmp/tmux-$(id -u)"/qwen-review-capture-${process.pid}-*`,
+        ]);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a swapped socket at the fallback name keeps the orphan WARNING — stamp sample is the discriminator',
+    async () => {
+      // The fallback-credit arm's negative direction, pinned nowhere
+      // else: same unusable-env shape as the fixture above, but the name
+      // the kill answers is NOT this run's socket — the stamped one was
+      // removed mid-window and a fresh entry sworn in at the same path.
+      // The pre-kill sample reads isSameSocket as FALSE, so the exit-0
+      // (which may have killed only the replacement) must NOT be credited
+      // as this run's death, and the orphan WARNING must still fire. A
+      // "simplify the ternary" mutant (`? stampedSocketAlive() : false`
+      // → `? true : false`) credits that exit-0 and ships green without
+      // this fixture — silencing the WARNING over a server that may
+      // still be live behind its removed socket.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-fbswap-'));
+      const envBase = join(dir, 'no-such-base');
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // The swap rides the first control call after the start: the
+      // stamped socket is removed and a fresh entry created at the same
+      // path — a new inode, which is the only property `isSameSocket`
+      // reads. Repeated swaps are harmless: every later read stays
+      // "not the stamped one".
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p "/tmp/tmux-$(id -u)"
+    : > "/tmp/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "capture-pane" ]; then
+    p="/tmp/tmux-$(id -u)/$SRV"
+    [ -f "$p" ] && { rm -f "$p"; : > "$p"; }
+    printf 'MARK\n'
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    if [ "$TMUX_TMPDIR" = "/tmp" ]; then
+      echo "no server running on /tmp/tmux-$(id -u)/$SRV" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('may still be running');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        spawnSync('bash', [
+          '-c',
+          `rm -f "/tmp/tmux-$(id -u)"/qwen-review-capture-${process.pid}-*`,
+        ]);
         rmSync(dir, { recursive: true, force: true });
       }
     },
