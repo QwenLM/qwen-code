@@ -150,9 +150,9 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 /**
  * Extensions positively attributable to a language through the mapping above.
  * A file whose extension is outside this set cannot prove any server
- * irrelevant for it — the fallback that treats a language ID as an extension
- * is only a guess (`rust` vs `rs`, `yaml` vs `yml`) — so a veto decision
- * fails closed for unknown extensions.
+ * irrelevant for it — a declared language ID is not always an extension
+ * (`rust` serves `.rs`, `yaml` serves `.yml`) — so a veto decision fails
+ * closed for unknown extensions.
  */
 const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
   Object.values(LANGUAGE_ID_TO_EXTENSIONS).flat(),
