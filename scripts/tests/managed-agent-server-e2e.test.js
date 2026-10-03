@@ -142,6 +142,27 @@ describe('managed-agent-server e2e runner', () => {
     }
   });
 
+  // With the server defaults flipped on, dropping these pins would make the
+  // runner start the durable path off Linux and fail at server startup while
+  // `npm run test:scripts` stayed green: trusted recovery is pinned off at
+  // both Spring launch sites, and durable local process only ever follows the
+  // workspace-Turn modes.
+  it('pins the runtime recovery flags for every runner mode', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(
+      source.match(
+        /QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:\s*'false'/g,
+      ),
+      'both Spring launch sites must pin trusted reboot recovery off',
+    ).toHaveLength(2);
+    expect(
+      source.match(
+        /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'false'/g,
+      ),
+      'both non-workspaceTurns branches must pin durable local process off',
+    ).toHaveLength(2);
+  });
+
   // The README currently names no script, so only a fixture can pin the
   // extractor itself: an extractor that stops matching must fail, not pass.
   it('extracts the script spellings the README could use', () => {

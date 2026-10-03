@@ -194,8 +194,41 @@ one response.
 
 The client recognizes the resync frame by its event name and the missing id.
 The provider turns it into the existing `stream_gap` event, so the session hook
-reloads the transcript and resumes after its `lastSequence`, as it does after
+reloads the transcript and resumes from the transcript head, as it does after
 `stream.reconciled`.
+
+The hook's gap recovery merges the fresh transcript into the displayed events
+instead of replacing them. The snapshot is authoritative for the range it
+covers ([first event, lastSequence]): live events missing from it — for
+example, streamed deltas the server has since assembled into an Item — are
+dropped rather than duplicated, while live events newer than the snapshot head
+survive a lagging read. Below the window, events the user paged in survive
+only while the paged region stays contiguous with the window — a hole between
+them would otherwise render two unrelated delta runs as one assistant bubble,
+so on a hole the pages drop and the window's cursor is adopted to page them
+back — and item projections never survive — after a retraction the server
+stands behind the raw events. The paging cursor follows the retained content:
+cleared when a non-empty snapshot carries the full history, adopted from the
+snapshot when the client has none or a hole opens between the paged pages and
+the window, and left with the user otherwise. A gap resync that does not
+advance the cursor counts as a stall; the third consecutive stall surfaces a
+persistent error, and any delivered event or advancing snapshot resets the
+count.
+
+The stream client tolerates corrupt frames. A frame whose data payload does
+not parse, parses to something without a string `type`, or — mid-stream —
+carries no `data:` line at all counts as corrupt. The default is fail closed:
+only the delta types whose text the snapshot re-assembles
+(`item.output_text.delta`, `item.reasoning.delta`) are skipped, with a
+rate-limited warning, and later frames move the consumer's cursor past them.
+Every other corrupt frame yields a resync — including one whose `event:` name
+is unusable. A resync also fires when more than three corrupt frames arrive
+with no decoded event between them (heartbeats do not reset the count — only
+a delivered event does), or when a whole connection delivered nothing but
+skips. A torn final buffer is a mid-frame disconnect: logged as such and
+never charged to the corruption budget. Synthesized resync frames carry
+placeholder watermarks (`replayFloorSequence: 0`,
+`snapshotThroughSequence: 0`) that no client code reads.
 
 ## 5. Tests
 
@@ -236,7 +269,16 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   floor there.
 - The web-shell tests decode a resync frame and check that the provider yields
   one `stream_gap` and stops, and that the session hook then reloads the
-  transcript and resubscribes after its `lastSequence`.
+  transcript and resubscribes from its head. The hook's gap-merge tests pin
+  the window semantics: paged pages survive while contiguous with the window,
+  superseded deltas drop, the cursor tracks the retained content, and
+  repeated non-advancing resyncs surface an error. The stream client's tests
+  pin the corrupt-frame policy: only re-assemblable deltas skip (at a bounded
+  warning rate), every other corrupt frame resyncs — including one with no
+  usable event name — more than three corrupt frames with no decoded event
+  between them resync (heartbeats do not dilute the count), a mid-frame close
+  logs distinctly and spares the budget, and a connection of only skips ends
+  with a resync.
 
 ## 6. Compatibility
 
