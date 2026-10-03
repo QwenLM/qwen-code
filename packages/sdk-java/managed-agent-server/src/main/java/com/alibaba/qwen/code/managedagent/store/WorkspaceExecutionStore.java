@@ -51,6 +51,14 @@ public class WorkspaceExecutionStore {
     }
 
     public void authorizePassiveAttachment(SessionRecord session) {
+        authorizeAttachment(session, false);
+    }
+
+    public void authorizeCancellation(SessionRecord session) {
+        authorizeAttachment(session, true);
+    }
+
+    private void authorizeAttachment(SessionRecord session, boolean cancellation) {
         ContextBinding binding = session.workspace();
         if (binding == null || !"ACTIVE".equals(session.status())
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
@@ -68,18 +76,25 @@ public class WorkspaceExecutionStore {
                 + " s.cwd_relative AS session_cwd,"
                 + " s.context_config_ref AS session_context,"
                 + " s.context_revision AS session_revision,"
-                + " s.workspace_config_ref, s.workspace_policy_ref,"
-                + " r.tenant_id AS registry_tenant, r.workspace_id,"
+                + " s.workspace_config_ref, s.workspace_policy_ref"
+                + (cancellation
+                        ? ", t.tenant_id AS cancellation_tenant, t.session_id AS cancellation_session"
+                        : ", r.tenant_id AS registry_tenant, r.workspace_id,"
                 + " r.workspace_generation, r.storage_id, r.state,"
                 + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
                 + " a.tenant_id AS access_tenant, a.workspace_id AS access_workspace,"
-                + " a.can_read, a.can_create FROM managed_agent_session s"
-                + " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
+                + " a.can_read, a.can_create")
+                + " FROM managed_agent_session s"
+                + (cancellation
+                        ? " JOIN managed_agent_turn t ON t.tenant_id = s.tenant_id"
+                                + " AND t.session_id = s.session_id AND t.status = 'CANCELLING'"
+                                + " AND (t.submission_attempted = TRUE OR t.harness_event_epoch IS NOT NULL)"
+                        : " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
                 + " AND r.workspace_id = s.workspace_id"
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
                 + " AND c.session_id = s.session_id"
                 + " JOIN managed_workspace_access a ON a.tenant_id = r.tenant_id"
-                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id"
+                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id")
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
                 (row, index) -> session.tenantId().equals(row.getString("tenant_id"))
                         && session.sessionId().equals(row.getString("session_id"))
@@ -92,7 +107,16 @@ public class WorkspaceExecutionStore {
                         && binding.getCwdRelative().equals(row.getString("session_cwd"))
                         && binding.getContextConfigRef().equals(row.getString("session_context"))
                         && binding.getContextRevision() == row.getLong("session_revision")
-                        && session.tenantId().equals(row.getString("registry_tenant"))
+                        && WorkspaceExecutionProfile.CONFIG_REF.equals(
+                                row.getString("workspace_config_ref"))
+                        && WorkspaceExecutionProfile.POLICY_REF.equals(
+                                row.getString("workspace_policy_ref"))
+                        // Cancellation was authorized when it was persisted;
+                        // retries must not depend on mutable creation grants.
+                        && (cancellation
+                                ? session.tenantId().equals(row.getString("cancellation_tenant"))
+                                        && session.sessionId().equals(row.getString("cancellation_session"))
+                                : session.tenantId().equals(row.getString("registry_tenant"))
                         && session.tenantId().equals(row.getString("command_tenant"))
                         && session.sessionId().equals(row.getString("command_session"))
                         && session.tenantId().equals(row.getString("access_tenant"))
@@ -101,11 +125,7 @@ public class WorkspaceExecutionStore {
                         && binding.getWorkspaceGeneration() == row.getLong("workspace_generation")
                         && binding.getStorageId().equals(row.getString("storage_id"))
                         && "ACTIVE".equals(row.getString("state"))
-                        && row.getBoolean("can_read") && row.getBoolean("can_create")
-                        && WorkspaceExecutionProfile.CONFIG_REF.equals(
-                                row.getString("workspace_config_ref"))
-                        && WorkspaceExecutionProfile.POLICY_REF.equals(
-                                row.getString("workspace_policy_ref")),
+                        && row.getBoolean("can_read") && row.getBoolean("can_create")),
                 session.tenantId(), session.sessionId());
         if (grants.size() != 1 || !grants.getFirst()) {
             throw unavailable();

@@ -32,15 +32,28 @@ re-registration refuses submit and rename before any command is written.
 Cancelling only aborts work already running: while the deployment still enables
 Workspace files, the creator who can still read the Workspace may cancel even
 after the create grant is revoked, the Workspace starts draining or it is
-re-registered. A live cancel reuses the running
-Turn's attachment without re-running the execution authority, and a cancel the
-Harness did not take is re-sent while the Turn is still cancelling. After each
+re-registered. A live cancel reuses the running Turn's resident attachment.
+A cold connector cache re-attaches for the persisted cancellation, validating
+its frozen Session binding and exact tenant/Session identity without requiring
+mutable creation grants, registry state or mount readiness. New API requests
+still require the creator's read grant; a cancellation already accepted keeps
+retrying if that grant is later revoked. New work always rechecks execution
+authority, including when physical recovery is disabled. Passive load of a
+resident Harness Session returns the original client identity after validating
+its tenant, Workspace, Session Store URL and frozen profile. It does not reopen
+the writer or drive work; an inactive parked Runtime Turn is reported again if
+a prior load reply was lost. Passive recovery may adopt the original Runtime
+and query status, but does not prepare or execute work. On the cancellation
+path, the adopted lease stays owed through lost replies and retryable refusals
+until terminal success or teardown. This does not prove recovery after Broker/worker
+process death or resolve an original prompt admission whose reply was lost.
+A cancel the Harness did not take is re-sent while the Turn is still cancelling. After each
 successful lease renewal, the running owner observes cancellation requested
 through any API replica and sends it on the executor, keeping network waits
 off the lease scheduler. Failed deliveries retry at the lease renewal interval.
-Close, archive, delete, unarchive and cwd operations remain gated: the Runtime
-Broker's drain only stops warming a closed Session and has no Harness-level
-teardown yet.
+Workspace close follows its separate close capability and lifecycle admission.
+Archive, delete and unarchive follow the separate retention capabilities after
+reliable Workspace close. Cwd operations remain gated for bound Sessions.
 
 ## Decisions
 
@@ -58,7 +71,7 @@ teardown yet.
   checks, Session creation, initial Turn and actor-scoped idempotency remain in
   the existing creation transaction. Replays preserve the original identities
   and binding; changed payloads conflict.
-- Before attaching a bound Session, the connector rechecks the persisted binding
+- Before attaching a bound Session for new work, the connector rechecks the persisted binding
   through `WorkspaceExecutionStore.authorize`. Broker acquisition and execution
   retain their own grant, generation, storage and ownership checks. No failed
   binding falls back to the global Workspace or an unbound no-tool Session.
@@ -68,19 +81,22 @@ teardown yet.
 - Cold load of unsettled input remains blocked. G0 does not enable in-flight
   continuation, adopt workers, remove affinity or change the G1 failover gates.
 
+- A cancellation reuses its admitted Harness attachment or passively re-attaches from a cold connector cache and is retried by the current lease owner. It never certifies a terminal failure from a fresh attach refusal. Recorded rename failures retain a `FAILED` command receipt and digest; same-content retries are replays, conflicting content remains rejected, and a concurrent success can complete the retained receipt.
+
 ## Changes and ownership
 
-| Layer                               | Change                                                                   | Scope                                    |
-| ----------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------- |
-| Java configuration                  | Explicit file admission opt-in and dependency validation                 | Deployment                               |
-| Creation service and SQL store      | Admit initial input only under fixed, authorized Workspace configuration | Tenant, creator and persisted Workspace  |
-| Coordinator                         | Dispatch admitted bound Turns only when the opt-in is enabled            | Persisted Session and leased Turn        |
-| Java connector and private SDK DTOs | Resolve the Session binding and pass the profile on create/load          | Persisted Session and live Harness owner |
-| Existing Broker/worker              | Reuse production routing and fencing                                     | Selected Runtime and persisted Workspace |
-| Contract and README                 | Document the narrow creation capability and remaining gates              | Public REST and WebShell adapter         |
+| Layer                               | Change                                                                               | Scope                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------- |
+| Java configuration                  | Explicit file admission opt-in and dependency validation                             | Deployment                               |
+| Creation service and SQL store      | Admit initial input only under fixed, authorized Workspace configuration             | Tenant, creator and persisted Workspace  |
+| Coordinator                         | Dispatch admitted bound Turns only when the opt-in is enabled                        | Persisted Session and leased Turn        |
+| Java connector and private SDK DTOs | Resolve the Session binding and pass the profile on create/load                      | Persisted Session and live Harness owner |
+| Hosted private load route           | Reuse resident connection after frozen identity checks; report parked Turn passively | Live Session owner                       |
+| Existing Broker/worker              | Reuse production routing and fencing                                                 | Selected Runtime and persisted Workspace |
+| Contract and README                 | Document the narrow creation capability and remaining gates                          | Public REST and WebShell adapter         |
 
 Production behavior changes under `packages/sdk-java/managed-agent-server`, in
-the private Hosted DTOs in `packages/sdk-java/qwencode`, and in the WebShell
+the private Hosted DTOs in `packages/sdk-java/qwencode`, in the CLI Hosted Session routes (`packages/cli`), and in the WebShell
 managed Sessions page and its providers (`packages/web-shell`); it covers the
 initial Workspace Read/Write/Edit Turn and the creator's later-Turn submit,
 cancel and rename admission. No core authority, tool
@@ -116,11 +132,16 @@ different payload conflicts, unauthorized tenants/actors cannot create or read,
 unsupported profiles and unavailable Workspaces refuse, and disabling the
 opt-in preserves the current gate. Exercise the shared WebShell create adapter,
 the later-operation gates that changed (the creator's later-Turn submit, cancel
-and rename are admitted; lifecycle and cwd operations stay gated), and unbound
+and rename are admitted; close and retention follow their separate capabilities,
+while cwd remains gated), and unbound
 no-tool regression paths.
 
 Focused SDK serialization, connector, store/admission and coordinator tests
-cover create/load identity, authorization rechecks and disabled gates. Run the
+cover create/load identity, authorization rechecks and disabled gates. The real
+Hosted stack must cancel after creation authority is revoked and the connector
+cache is cleared; generation-only and storage-only drift must refuse new work
+before any command is written. New cancellation requests after read revocation
+must remain hidden, while previously accepted cancellations still retry. Run the
 Hosted integration on H2 locally and include it in the existing Hosted MySQL CI
 suite. Record separately whether local MySQL is available. Build, typecheck,
 bundle, focused tests and two clean diff audits precede completion.
@@ -134,3 +155,7 @@ creator, above), lifecycle enablement,
 distributed provisioning and W0e/G1–G3 recovery remain separate. The existing
 `EmbeddedRuntimeBroker` is a production component and remains allowed; the E2E
 must not replace it or bypass admission with direct store calls.
+
+The late-rename supersession check protects the public SQL title and receipt.
+It runs after the Harness title write, so it does not order overlapping Harness
+writes. That inherited lifecycle issue remains tracked in #13269.

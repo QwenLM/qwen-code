@@ -250,7 +250,12 @@ describe('Tool v3 local worker routes', () => {
     );
     registerManagedRuntimeToolRoutes(
       app,
-      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      {
+        token: 'test-token',
+        leaseId: 'lease-a',
+        epoch: 1,
+        runtimeIncarnation: 'incarnation-a',
+      },
       executor,
     );
     server = createServer(app);

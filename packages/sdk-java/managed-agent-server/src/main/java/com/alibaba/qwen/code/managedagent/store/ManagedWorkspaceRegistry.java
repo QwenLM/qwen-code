@@ -50,12 +50,7 @@ public class ManagedWorkspaceRegistry {
     }
 
     public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        if (actorId == null) {
-            return false;
-        }
-        return Integer.valueOf(1).equals(jdbc.queryForObject("SELECT COUNT(*)"
-                + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ? AND actor_id = ?",
-                Integer.class, tenantId, sessionId, actorKey(tenantId, actorId)));
+        return createdSession(tenantId, actorId, sessionId);
     }
 
     public boolean canRead(String tenantId, String actorId,

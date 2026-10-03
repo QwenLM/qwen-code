@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -57,6 +56,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -65,6 +66,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
+    private static final Logger LOG = LoggerFactory.getLogger(ManagedAgentService.class);
     private static final String CREATE = "CREATE_SESSION";
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
@@ -222,6 +224,8 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
+        requireReadableSession(tenantId, actorId, sessionId);
+        requireBoundCreator(tenantId, actorId, sessionId);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
@@ -233,13 +237,10 @@ public class ManagedAgentService {
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
+            requireHarness();
             dispatch(tenantId, replay);
             return response(replay);
         }
-        // The admission gate stays ahead of the Harness gate, as it already
-        // does in cancelTurn and renameSession: a submitter the Workspace
-        // refuses is a 409 about that Workspace, not a 503 about how this
-        // deployment configures the Harness.
         requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
@@ -289,6 +290,8 @@ public class ManagedAgentService {
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
+        requireReadableSession(tenantId, actorId, sessionId);
+        requireBoundCreator(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
@@ -317,55 +320,39 @@ public class ManagedAgentService {
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
         if (!"COMPLETED".equals(command.status())) {
-            requireHarness();
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            HarnessConnector.Attachment attachment;
-            boolean attached = false;
             try {
-                attachment = harness.createOrLoad(tenantId, sessionId,
+                requireHarness();
+                SessionRecord session = store.requireSession(tenantId, sessionId);
+                HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null);
-                attached = true;
                 harness.rename(tenantId, sessionId, effectiveTitle);
+                session = store.completeSessionMutation(tenantId, RENAME,
+                        idempotencyKey, sessionId, SessionMutationKind.RENAME,
+                        effectiveTitle, attachment.bootId());
+                return new SessionMutationResult<>(publicSession(session),
+                        command.replayed());
             } catch (RuntimeException error) {
-                // A permanent failure must retire the command row it left
-                // PENDING: nothing else clears it, so every later rename
-                // with a fresh key would die in requireNoOpenOperation for
-                // the Session's life. Permanence cannot be read off the
-                // broker type alone, nor off IllegalStateException as such:
-                // attaching is where the connector confirms the Session
-                // approval mode and an IllegalStateException from it never
-                // clears on its own, whereas one thrown by rename is an
-                // unreachable Harness and must stay a 503 that keeps the row
-                // for a same-key retry to re-drive. A permanent (<500)
-                // DaemonHttpException wedges the row from either call.
-                // Transient failures (retryable broker refusals, 5xx) keep
-                // the row so a same-key retry recovers through it.
-                if (error instanceof RuntimeBrokerException refusal
-                        && !refusal.isRetryable()) {
+                try {
                     store.abandonSessionMutation(tenantId, RENAME,
                             idempotencyKey, sessionId);
+                } catch (RuntimeException cleanupError) {
+                    LOG.warn("Failed to retire rename tenant={} session={}",
+                            tenantId, sessionId, cleanupError);
+                }
+                if (error instanceof ApiException failure) {
+                    throw failure;
+                }
+                if (error instanceof RuntimeBrokerException refusal
+                        && !refusal.isRetryable()) {
                     HttpStatus status = HttpStatus.resolve(
                             refusal.getStatusCode());
                     throw new ApiException(
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                if ((!attached && error instanceof IllegalStateException)
-                        || (error instanceof DaemonHttpException http
-                                && http.getStatusCode() < 500)) {
-                    store.abandonSessionMutation(tenantId, RENAME,
-                            idempotencyKey, sessionId);
-                    throw new ApiException(HttpStatus.CONFLICT,
-                            "session_mutation_refused", error.getMessage());
-                }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.");
             }
-            session = store.completeSessionMutation(tenantId, RENAME,
-                    idempotencyKey, sessionId, SessionMutationKind.RENAME,
-                    effectiveTitle, attachment.bootId());
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
                 sessionId), true);
@@ -375,7 +362,27 @@ public class ManagedAgentService {
     // Harness nor the Runtime.
     public SessionMutationResult<PublicSession> unarchiveSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
+        var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
+        return new SessionMutationResult<>(publicSession(result.session()), result.replayed());
+    }
+
+    public SessionMutationResult<WebShellSession> unarchiveWebShellSession(
+            String tenantId, String actorId, String idempotencyKey, String sessionId) {
+        var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
+        return new SessionMutationResult<>(webShellSession(result.session(), actorId), result.replayed());
+    }
+
+    private StoreModels.SessionMutation unarchive(String tenantId, String actorId,
+            String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
+        SessionRecord target = store.requireSession(tenantId, sessionId);
+        if (target.workspace() != null) {
+            requireReadGrant(target, actorId);
+            String scopedKey = digests.digest(Map.of("sessionId", sessionId,
+                    "actorDigest", digests.digest(Map.of("actorId", actorId)), "idempotencyKey", idempotencyKey));
+            return store.unarchiveWorkspaceSession(tenantId, sessionId, actorId,
+                    scopedKey, lifecycleDigest(sessionId, UNARCHIVE));
+        }
         requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
@@ -385,11 +392,9 @@ public class ManagedAgentService {
             SessionRecord session = store.completeSessionMutation(tenantId,
                     UNARCHIVE, idempotencyKey, sessionId,
                     SessionMutationKind.UNARCHIVE, null, null);
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
+            return new StoreModels.SessionMutation(session, command.replayed());
         }
-        return new SessionMutationResult<>(getPublicSession(tenantId,
-                sessionId), true);
+        return new StoreModels.SessionMutation(requireVisibleSession(tenantId, sessionId), true);
     }
 
     private PublicSession getPublicSession(String tenantId,
@@ -572,6 +577,7 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
+        boolean retention = supportsRetention(session);
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -593,7 +599,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session)),
+                        hasActions(session), supportsClose(session), retention, retention, retention),
                 publicWorkspace(session));
     }
 
@@ -603,6 +609,7 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
                 session.tenantId(), session.sessionId()).orElse(null);
+        boolean retention = supportsRetention(session);
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -617,7 +624,12 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session)));
+                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session),
+                        retention, retention, retention));
+    }
+
+    private boolean supportsRetention(SessionRecord session) {
+        return session.workspace() == null || store.hasCompletedWorkspaceClose(session.tenantId(), session.sessionId());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -769,6 +781,19 @@ public class ManagedAgentService {
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (!maySubmitWorkspaceTurn(session, actorId)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // Replay skips the admission gate, so a bound Session's recorded
+    // admission answers only its creator. The creation receipt survives a
+    // revoked grant, a draining Workspace and a re-registration, so the
+    // creator's own same-key retry still replays.
+    private void requireBoundCreator(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (session.workspace() != null
+                && !workspaces.createdSession(tenantId, actorId, sessionId)) {
             requireLegacyWorkspace(session, actorId);
         }
     }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,11 +41,14 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -83,10 +87,11 @@ class HostedPublicWorkspaceIT {
         assertThat(answered).hasSize(8);
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @EnabledOnOs(OS.LINUX)
     @Timeout(150)
-    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles() throws Exception {
+    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles(boolean crash) throws Exception {
         durableClose = true;
         runFiles();
         List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
@@ -101,6 +106,23 @@ class HostedPublicWorkspaceIT {
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
             var worker = ProcessHandle.of(pid).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
+            if (crash) {
+                worker.destroyForcibly();
+                worker.onExit().get(5, TimeUnit.SECONDS);
+                if (index == 1) {
+                    jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                            + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                    String failedTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
+                            Map.of("type", "agent.session.input.message", "input",
+                                    List.of(Map.of("type", "input_text", "text", "G0_AGAIN"))),
+                            "after-crash", "actor", 202).path("turn_id").asText();
+                    await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                            "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                            String.class, session, failedTurn)).isEqualTo("FAILED"));
+                }
+                assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+                        String.class, binding)).isEqualTo(index == 0 ? "READY" : "LOST");
+            }
             var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY resource_id", tenant, session);
             assertThat(retained).isNotEmpty();
@@ -132,6 +154,19 @@ class HostedPublicWorkspaceIT {
                     .resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(request("POST", route, body, "close", "actor", 202)
                     .path(webShell ? "operationId" : "id").asText()).isEqualTo(operation);
+            if (crash) {
+                jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                        + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                String nextSession = request("POST", "/v1/agents/sessions",
+                        Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                                "workspace", Map.of("workspace_id", "workspace-" + index, "cwd_relative", "child")),
+                        "after-close-" + index, "actor", 202).path("id").asText();
+                await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                        "SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, nextSession))
+                        .isEqualTo("COMPLETED"));
+                assertThat(Files.readString(temporary.resolve(index == 0 ? "workspace-a" : "workspace-b")
+                        .resolve("child/proof.txt"))).isEqualTo("after");
+            }
         }
     }
 
@@ -312,6 +347,8 @@ class HostedPublicWorkspaceIT {
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
                     + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            // Harness still runs the Turn, but this Java owner has lost its ref.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
             Map<String, Object> revokedCancel = Map.of("type", "agent.session.cancel", "turn_id", revokedTurn);
             request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
                     "nocreate-cancel-" + workspace, "actor", 202);
@@ -354,6 +391,25 @@ class HostedPublicWorkspaceIT {
             jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            String registeredStorage = jdbc.queryForObject("SELECT storage_id FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", String.class, tenant, workspace);
+            jdbc.update("UPDATE managed_workspace_registry SET "
+                    + (index == 0 ? "workspace_generation = workspace_generation + 1"
+                            : "storage_id = 'replacement-storage'")
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                    null, "actor", 200).path("capabilities").path("workspaceTurns").asBoolean()).isFalse();
+            assertUnavailable(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "rebound-later-" + workspace, "actor", 409));
+            assertUnavailable(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "rebound-rename-" + workspace, "actor", 409));
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "rebound-cancel-" + workspace, "actor", 202);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = ?"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", registeredStorage, tenant, workspace);
         }
         assertThat(modelRequests).hasSize(approvals ? 16 : 20);
         assertThat(modelFailure.get()).isNull();
@@ -410,6 +466,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
+                "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
@@ -418,7 +475,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
-        if (durableClose) arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=true");
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -551,7 +608,8 @@ class HostedPublicWorkspaceIT {
                 String role = message.path("role").asText();
                 if ("user".equals(role) && message.path("content").toString().contains("G0_")) {
                     results.clear();
-                    prompt.set(message.path("content").toString());
+                    String content = message.path("content").toString();
+                    prompt.set(content.substring(content.lastIndexOf("G0_")));
                 } else if ("tool".equals(role)) {
                     results.add(message);
                 }

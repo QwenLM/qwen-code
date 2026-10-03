@@ -14,8 +14,10 @@ import {
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
-import { loadSettings, type SettingScope } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -30,6 +32,100 @@ beforeEach(() => {
     workspace: { settings: {} },
     forScope: vi.fn().mockReturnValue({ settings: {} }),
   } as never);
+});
+
+describe('fast-model ACP settings writes', () => {
+  const privateUrl = 'https://user:secret@second.example/v1?token=value';
+  const modelProviders = {
+    openai: [
+      { id: 'shared', name: 'First', baseUrl: 'https://first.example/v1' },
+      { id: 'shared', name: 'Second', baseUrl: privateUrl },
+    ],
+  };
+  const route = buildAcpModelOptions(
+    new ModelsConfig({
+      modelProvidersConfig: modelProviders,
+    }).getAllConfiguredModels(),
+  ).find((option) => option.model.registryBaseUrl === privateUrl)!.modelId;
+  const pinned = `openai:shared\0${privateUrl}`;
+  const publicPin = 'openai:shared\0https://second.example/v1';
+
+  it.each(['user', 'workspace'])(
+    'resolves an exact registered row for %s scope',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp({
+        userSettings: { modelProviders },
+      });
+      const response = await request(app).post('/workspace/settings').send({
+        key: 'fastModel',
+        scope,
+        value: route,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'fastModel',
+        pinned,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'fastModel',
+        publicPin,
+        scope,
+        undefined,
+      );
+      expect(JSON.stringify(response.body)).toContain('second.example');
+      expect(JSON.stringify(response.body)).not.toContain('secret');
+      expect(JSON.stringify(response.body)).not.toContain('token=value');
+    },
+  );
+
+  it('uses the selected workspace registry without loading primary environment', async () => {
+    const { app, persistSetting } = makeQualifiedApp({
+      workspaceCwd: '/selected-workspace',
+    });
+    vi.mocked(loadSettings).mockImplementation(
+      (workspace) =>
+        ({
+          merged: workspace === '/selected-workspace' ? { modelProviders } : {},
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        key: 'fastModel',
+        scope: 'workspace',
+        value: route,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/selected-workspace',
+      SettingScope.Workspace,
+      'fastModel',
+      pinned,
+      expect.any(Function),
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
+  });
+
+  it('does not persist an unavailable ACP route', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      key: 'fastModel',
+      scope: 'workspace',
+      value: 'qwen-route:v1:stale',
+    });
+    expect(response.status).toBe(500);
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
 });
 
 function makeApp(
@@ -113,6 +209,7 @@ function makeApp(
 function makeQualifiedApp(
   overrides: {
     ssh?: boolean;
+    workspaceCwd?: string;
     invokeWorkspaceCommand?: (
       method: string,
       params: Record<string, unknown>,
@@ -135,7 +232,7 @@ function makeQualifiedApp(
             current: {
               runtime: {
                 trusted: true,
-                workspaceCwd: '/workspace',
+                workspaceCwd: overrides.workspaceCwd ?? '/workspace',
                 routeFileSystemFactory: overrides.ssh
                   ? {
                       sshWorkspace: { host: 'host', directory: '/srv/project' },
