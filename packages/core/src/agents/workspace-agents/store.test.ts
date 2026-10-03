@@ -433,7 +433,7 @@ describe('agent versioned store', () => {
   // by the digest term instead. The non-record case is `null` rather than a
   // string: `null['attempt']` throws instead of validating, which is what tells
   // that term apart from the ones after it.
-  const malformedReceipts: [string, unknown][] = [
+  const malformedReceipts: Array<[string, unknown]> = [
     [
       'digest is not sha256 hex',
       { attempt: 1, leaseId: 'lease', digest: 'invalid' },
