@@ -547,12 +547,16 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             }
         };
         retire();
+        long before = ToolPublicationRetentionStore.now(jdbc);
         assertThat(collector(objects).runOnce()).isFalse();
+        long after = ToolPublicationRetentionStore.now(jdbc);
         assertThat(objects.deleted).containsExactly("exact/a");
         assertThat(state()).isEqualTo("DELETING");
         assertThat(held()).isEqualTo(3000);
         assertThat(jdbc.queryForObject("SELECT gc_blocker FROM qwen_tool_publication WHERE scope_key = ?",
                 String.class, scope)).isEqualTo("collection_retry");
+        assertThat(jdbc.queryForObject("SELECT gc_next_at FROM qwen_tool_publication WHERE scope_key = ?",
+                Long.class, scope)).isBetween(before + 60000, after + 60000);
         assertThat(collector(objects).runOnce()).isFalse();
         assertThat(objects.deleted).containsExactly("exact/a");
         retryNow();
