@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -79,14 +80,26 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springJar = path.join(
+const springTarget = path.join(
   root,
   'packages',
   'sdk-java',
   'managed-agent-server',
   'target',
-  'qwen-managed-agent-server-0.1.0-alpha.jar',
 );
+// Version-independent: fail (not a stale path) unless exactly one packaged
+// jar exists — a pom version bump must not strand this check.
+const packagedJars = readdirSync(springTarget).filter(
+  (entry) =>
+    /^qwen-managed-agent-server-.+\.jar$/.test(entry) &&
+    !/sources|javadoc|tests/.test(entry),
+);
+if (packagedJars.length !== 1) {
+  throw new Error(
+    `Expected exactly one packaged server jar in ${springTarget}, found ${packagedJars.length}: ${packagedJars.join(', ')}`,
+  );
+}
+const springJar = path.join(springTarget, packagedJars[0]!);
 for (const required of [
   cliBundle,
   springJar,
@@ -366,7 +379,13 @@ async function crashChild(child: ChildProcess, name: string): Promise<void> {
 }
 
 async function crashProcess(child: ChildProcess, name: string): Promise<void> {
-  if (child.pid === undefined || child.exitCode !== null) {
+  // A child killed BY signal has exitCode null but signalCode set; missing
+  // that branch kills a pid that no longer exists and throws raw ESRCH.
+  if (
+    child.pid === undefined ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  ) {
     throw new Error(`${name} exited before the crash was injected`);
   }
   process.kill(child.pid, 'SIGKILL');
@@ -521,6 +540,7 @@ async function waitUntil(
   child?: Child,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     if (
@@ -530,19 +550,37 @@ async function waitUntil(
       throw new Error(`${name} exited early\n${child.log()}`);
     }
     try {
-      if (await predicate()) return;
-    } catch {
-      // The dependency is still starting.
+      // Bound one iteration against the remaining deadline: a hung
+      // predicate must not outlive timeoutMs, and its last error must
+      // surface instead of vanishing into "did not become ready".
+      const ready = await Promise.race([
+        Promise.resolve().then(predicate),
+        new Promise<boolean>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`${name} predicate stalled`)),
+            Math.max(1, deadline - Date.now()),
+          ),
+        ),
+      ]);
+      if (ready) return;
+    } catch (error) {
+      lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`${name} did not become ready\n${child?.log() ?? ''}`);
+  const cause = lastError instanceof Error ? `: ${lastError.message}` : '';
+  throw new Error(
+    `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
+  );
 }
 
 function runMysql(port: number, sql: string): string {
   const result = spawnSync(
     mysql,
     [
+      // First argument, honored only there: a developer's ~/.my.cnf client
+      // options must not auth-fail a scratch empty-password server.
+      '--no-defaults',
       '--protocol=tcp',
       '--host=127.0.0.1',
       `--port=${port}`,
@@ -783,6 +821,7 @@ try {
       spawnSync(
         mysqladmin,
         [
+          '--no-defaults',
           '--protocol=tcp',
           '--host=127.0.0.1',
           `--port=${mysqlPort}`,
@@ -1813,3 +1852,7 @@ try {
 }
 
 if (failure) throw failure;
+// An interrupt after the last poll must not print the success JSON and
+// exit 0 — a supervising script would record a clean pass for a run the
+// operator explicitly stopped.
+if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);

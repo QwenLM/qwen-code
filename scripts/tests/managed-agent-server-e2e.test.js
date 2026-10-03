@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import {
   createSourceFile,
@@ -238,5 +239,92 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     expect(namedScripts('see `scripts/nope.ts`')).toEqual(['scripts/nope.ts']);
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
+  });
+
+  const extracted = (names) => {
+    const source = createSourceFile(
+      'runner.ts',
+      read('scripts/run-managed-agent-server-e2e.ts'),
+      ScriptTarget.Latest,
+      true,
+    );
+    const text = source.statements
+      .filter(
+        (node) =>
+          (isFunctionDeclaration(node) && names.includes(node.name?.text)) ||
+          (isVariableStatement(node) &&
+            node.declarationList.declarations.some((declaration) =>
+              names.includes(declaration.name.getText(source)),
+            )),
+      )
+      .map((node) => node.getText(source))
+      .join('\n');
+    return transpileModule(text, {
+      compilerOptions: { target: ScriptTarget.ES2022 },
+    }).outputText;
+  };
+
+  it('waitUntil surfaces the last predicate error', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal'])}\nreturn { waitUntil };`,
+    )();
+    await expect(
+      waitUntil(
+        'probe',
+        () => Promise.reject(new Error('HTTP 503 wedged')),
+        300,
+      ),
+    ).rejects.toThrow(/wedged/);
+  });
+
+  it('waitUntil bounds a stalled iteration by the deadline', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal'])}\nreturn { waitUntil };`,
+    )();
+    const started = Date.now();
+    await expect(
+      waitUntil('stalled', () => new Promise(() => {}), 300),
+    ).rejects.toThrow(/stalled|did not become ready/);
+    // A hung predicate used to outlive timeoutMs several-fold.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('crashProcess reports a by-signal exit instead of throwing ESRCH', async () => {
+    const { crashProcess } = new Function(
+      'process',
+      `${extracted(['crashProcess'])}\nreturn { crashProcess };`,
+    )(process);
+    const child = spawn('node', [
+      '-e',
+      'setTimeout(() => process.kill(process.pid, "SIGKILL"), 20)',
+    ]);
+    // Let the by-signal death land first: guard reads signalCode, not
+    // exitCode, and must refuse with the descriptive pre-exit diagnostic.
+    await new Promise((resolve) => child.once('exit', resolve));
+    await expect(crashProcess(child, 'probe')).rejects.toThrow(
+      /exited before the crash was injected/,
+    );
+  });
+
+  it('checks the received signal at the success exit too', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(
+      /if \(failure\) throw failure;[\s\S]{0,300}receivedSignal\) throw new Error/,
+    );
+  });
+
+  it('passes --no-defaults to every MySQL client invocation', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // mysqld twice, the mysql client once, mysqladmin once.
+    expect(source.match(/--no-defaults/g)).toHaveLength(4);
+  });
+
+  it('guards nothing against a hardcoded packaged-jar version', () => {
+    const script = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    expect(script).toContain('packagedJars.length !== 1');
+    expect(
+      read('packages/sdk-java/managed-agent-server/Dockerfile'),
+    ).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
   });
 });
