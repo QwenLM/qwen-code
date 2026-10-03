@@ -237,6 +237,13 @@ public class ManagedAgentProperties {
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
         private Duration maxVerificationTimeout;
+        private boolean gcEnabled;
+        private Duration deletionGrace = Duration.ofHours(24);
+
+        public boolean isGcEnabled() { return gcEnabled; }
+        public void setGcEnabled(boolean value) { gcEnabled = value; }
+        public Duration getDeletionGrace() { return deletionGrace; }
+        public void setDeletionGrace(Duration value) { deletionGrace = value; }
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -413,8 +420,8 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
-        private boolean durableLocalProcess;
-        private boolean trustedLocalRebootRecovery;
+        private boolean durableLocalProcess = true;
+        private boolean trustedLocalRebootRecovery = true;
         private boolean operatorRecoveryEnabled;
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";

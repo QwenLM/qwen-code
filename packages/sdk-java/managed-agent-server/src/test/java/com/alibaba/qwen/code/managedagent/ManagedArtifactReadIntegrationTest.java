@@ -32,6 +32,51 @@ class ManagedArtifactReadIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String ROOT = "/v1/agents/sessions/session-1";
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {Integer.MAX_VALUE, 4096})
+    void fullDownloadUsesOneLeaseAndBoundsQueriesAcrossObjectSegments(int maxRead) throws Exception {
+        var h2 = new org.h2.jdbcx.JdbcDataSource();
+        h2.setURL("jdbc:h2:mem:download-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        var statements = new AtomicInteger();
+        var admissions = new AtomicInteger();
+        var counted = new org.springframework.jdbc.datasource.DelegatingDataSource(h2) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                var connection = super.getConnection();
+                return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
+                        getClass().getClassLoader(), new Class<?>[] {java.sql.Connection.class},
+                        (proxy, method, arguments) -> {
+                            if (method.getName().equals("createStatement")) { statements.incrementAndGet(); }
+                            if (method.getName().equals("prepareStatement")) {
+                                statements.incrementAndGet();
+                                if (((String) arguments[0]).startsWith("INSERT INTO qwen_output_read_lease")) {
+                                    admissions.incrementAndGet();
+                                }
+                            }
+                            try { return method.invoke(connection, arguments); }
+                            catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                        });
+            }
+        };
+        int size = 8 * 1024 * 1024;
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.fixture = ToolPublicationStoreTest.largeApiFixture(size, counted, maxRead);
+        source.configureApi();
+        var artifact = source.fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100)
+                .artifacts().stream().filter(row -> row.streamId().equals("stdout")).findFirst().orElseThrow();
+        statements.set(0);
+        admissions.set(0);
+        var response = source.mvc.perform(asReader(get(ROOT + "/artifacts/"
+                + artifact.descriptor().path("id").asText() + "/content?revision="
+                + artifact.descriptor().path("revision").asText())))
+                .andExpect(status().isOk()).andExpect(header().string("Content-Length", Integer.toString(size)))
+                .andReturn().getResponse();
+        assertThat(statements.get()).isLessThanOrEqualTo(350 * 8);
+        assertThat(admissions.get()).isEqualTo(1);
+        assertThat(response.getContentAsByteArray()).isEqualTo("A".repeat(size).getBytes(StandardCharsets.UTF_8));
+        assertThat(source.fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Long.class)).isZero();
+    }
+
     @Test
     void OverlappingReadsRefuseImmediatelyAndTimeoutReleasesPermit() throws Exception {
         var source = new ManagedArtifactApiIntegrationTest();
@@ -52,7 +97,7 @@ class ManagedArtifactReadIntegrationTest {
                             return invocation.callRealMethod();
                         })
                 .when(reader)
-                .readRange(any(), anyLong(), anyInt(), any(Runnable.class));
+                .readRange(any(), anyLong(), anyInt(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
         var mvc =
                 mvc(
                         new ManagedArtifactService(
@@ -180,7 +225,7 @@ class ManagedArtifactReadIntegrationTest {
                             };
                         })
                 .when(reader)
-                .open(any(), any(Runnable.class));
+                .open(any(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
         var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
         var output = spy(response.getOutputStream());
         org.mockito.Mockito.doReturn(output).when(response).getOutputStream();

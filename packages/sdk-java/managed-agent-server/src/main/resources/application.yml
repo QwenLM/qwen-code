@@ -38,6 +38,8 @@ qwen:
       writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
     tool-publication:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
+      gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
+      deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
@@ -75,8 +77,8 @@ qwen:
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
       isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'
       state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}'
-      durable-local-process: '${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:false}'
-      trusted-local-reboot-recovery: '${QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:false}'
+      durable-local-process: '${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:true}'
+      trusted-local-reboot-recovery: '${QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:true}'
       operator-recovery-enabled: '${QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED:false}'
       verified-workspace-recovery-enabled: '${QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED:false}'
       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}'

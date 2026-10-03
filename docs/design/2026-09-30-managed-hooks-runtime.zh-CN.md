@@ -27,6 +27,14 @@ ordinal、registration、plan、有效输入、原 Runtime Session、取消意�
 条目。TypeScript 与 Java 消费共用正反例，并校验资源闭包、固定版本、唯一 ordinal，
 以及在 intent 时原子消费 once key。
 
+这些校验的开销不能随 Session 的 Hook 历史增长。once key、occurrence 与 ordinal、
+目录 pin 在记录的各个修订之间不变，因此 Session Store 在记录首次提交时把它们投影到
+带索引的列。(Session, once key) 和 (Session, occurrence, ordinal) 上的唯一索引拒绝
+重复，包括并发重复。occurrence 绑定与目录摘要只需与同一 key 下的一条已提交记录比较，
+因为准入保证同一 key 下的记录彼此一致。Session authority 在内存中维护相同的 key，
+重新打开日志时按线性时间回放记录。因此准入不再重读较早的记录，也不再在每次准入时
+发现其中某条记录已损坏；所有记录及其资源闭包在 Session 恢复时完整校验。
+
 每个 occurrence 固定目录与计划。Session 内串行准入 occurrence，防止并发事件
 同时预订同一个 once Hook；每个计划内部仍保留原生并行/顺序执行行为。同一 ID 携带不同语义输入会被拒绝。顺序执行持久化
 每一步有效输入，并复用原生 prompt context 和工具输入累积逻辑；并行结果按计划顺序
@@ -71,6 +79,18 @@ Hook owner ID 在构造时根据已经持久化的 activation ID 与 epoch 固�
 安装新的 activation，因此不会复用已释放的 Runtime Session ID。即使 acquire 仅用于
 目录请求、尚无首条 Hook execution 记录，恢复也能找到 owner。旧随机 owner ID
 继续从 execution 记录恢复；旧版本若没有留下任何 execution 记录，则需要运维恢复。
+只有 load 的 activation 对应 owner。每次生命周期 Hook 操作会安装一个
+`hook_operation` activation，结束时再安装一个恢复 activation，其 ID 由该操作所
+替换的 activation 的 ID 派生。日志中总有那个 activation，因此即使
+`hook_operation` activation 安装失败，也能识别出恢复。恢复 activation 沿用默认
+subject，因此记录格式不变；日志拒绝安装已存在的 activation ID，因此派生 ID 不会
+重放之前的安装。两者都不会构造 Hook session，因此释放时跳过两者，其开销不随 Hook
+操作次数增长。load 总是安装随机的 activation ID，因此即使它位于失败或未恢复的
+Hook 操作之后，也仍视为 owner。同一 Hook session 中并行的 Hook 执行共享同一次
+acquire，因此它们只执行一遍释放流程。之后的 load 会再次释放更早的 load owner；
+释放是幂等的，重复释放只多一次 Broker 往返。在恢复 ID 改为派生之前记录的恢复
+activation 会像 load 一样被释放，Broker 对这次释放返回 404。因此对本次改动之前
+写入的日志，之后每次 load 仍要为每次更早的 Hook 操作发送一次 release。
 替换后的 Hook owner acquire Workspace 前，会释放所有 Hook 记录已终态的旧 owner，
 包括经 status 完成对账的 owner。工具结果 continuation 复用同一 acquire 入口。
 共享的物理工作仍在运行时，Broker 继续拒绝释放。仅明确的
@@ -81,7 +101,9 @@ owner。已 attach 的空闲 owner 仍像 MCP 一样保留 Workspace 租约；�
 命令复用原生输出、超时和 TERM/KILL 处理。Managed 执行要求 Linux cgroup v2 委派：
 将 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 指向可写且提供 `cgroup.kill` 的 domain。干净的
 launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进程不会脱离该 unit；
-只有 `cgroup.events` 确认无剩余进程后才完成。取消先发送 TERM，必要时调用
+只有 `cgroup.events` 确认无剩余进程后才完成。比命令存活更久的后台子进程会让 unit
+保持非空：即使命令已输出结果并退出，也会在 Hook 超时到期时以 `timeout` 结算，
+随后 unit 被终止，输出不会生效。Hook 命令不得遗留后台进程。取消先发送 TERM，必要时调用
 `cgroup.kill`；无法证明排空时保留 owner。这是面向部署方可信 Hook 的生命周期隔离，
 不是防止脚本故意篡改 cgroup 控制面的安全沙箱。
 
@@ -204,6 +226,10 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+打开 authority 时，每条记录及其引用的每个资源只读取一次，无论有多少修订引用它。
+Workspace 校验复用该结果，只读取它必须自行检查的内容，例如 plan 及其消息快照；
+Session 打开后 authority 不再保留该结果。
+相互独立的读取按有界批次并发执行。
 Hook scope 标识符兼容现有 Broker 字符语法，包括开头的标点。Hook 操作阻塞 prompt
 准入期间，Session status 返回 `recoveryBlocked`，load 返回 `recoveryRequired`。
 已保存的操作实际结算后，对账会清除此诊断。
@@ -214,7 +240,10 @@ Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
 模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
-扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
+扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。Hook
+操作运行期间被拒的 prompt 返回 409 `hosted_hook_operation_active`。同一 Notification/
+扩展 operation ID 携带不同输入时返回 409 `hosted_hook_operation_conflict`，重试无法
+解决。公开
 tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投影展示
 元数据，不暴露 recipe、凭据、模块路径或 handler 引用。未配置 Hook pin 的 Session
 保持原有行为。
@@ -223,6 +252,12 @@ tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投
 Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V27 将首次
 准入的日志序号保存为 `first_sequence`，后续修订保持不变。最新已结算目录按该序号选择，
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
+Migration V28 增加准入列与索引；V29 从经过校验的记录体为 V27 写入的记录回填。
+记录体缺失或损坏的记录不写入 key，V29 按资源缺失的方式阻塞其所属 Session
+（`BLOCKED_RESOURCE`），使后续准入无法复用该记录已消费的 once key。若记录重复了
+所属 Session 中已有的 once key 或 occurrence ordinal（只有绕过准入的写入才会留下），
+V29 同样阻塞该 Session；其他 Session 不受影响。迁移后不支持再运行早于 V28 的二进制：它写入的 Hook 记录不带这些 key，
+Session Store 的检查看不到这些记录，但 Session authority 仍在内存中执行这些约束。
 
 ## 验证与验收
 

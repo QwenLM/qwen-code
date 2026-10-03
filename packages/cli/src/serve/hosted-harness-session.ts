@@ -9,6 +9,7 @@ import {
   commitHostedFileHistory,
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
+  HOSTED_UUID,
   canSettleHostedFileHistory,
   dropPendingHostedFileHistoryTurn,
 } from './hosted-file-history.js';
@@ -58,15 +59,13 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedHookSession,
+  HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import {
-  parseHookRegistration,
-  parseHookExecution,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -111,10 +110,24 @@ import {
   type HostedApprovalSettings,
 } from './hosted-tool-approval.js';
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const CLIENT = /^[A-Za-z0-9._:-]{1,128}$/u;
+/** References whose resources a cold Workspace load verifies at once. */
+const RESTORE_READ_BATCH = 32;
+/**
+ * Resource kinds a cold Workspace load descends into. Of the resources that
+ * opening the Session verified, those of these kinds are queued again, so
+ * what they reference is verified too; the rest are not read again.
+ */
+const RESTORE_CONTAINER_KINDS = new Set([
+  'managed-session_metadata',
+  'managed-file_history',
+  'managed-tool-outcome',
+  'managed-tool-result-manifest',
+  'managed-checkpoint',
+  'managed-hook-plan',
+  'managed-hook-message-chunks',
+]);
 
 interface HostedSession {
   managed: ManagedSession;
@@ -144,8 +157,13 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
-  /** A recovery load acquired the Runtime Session for this promptId;
-   * whichever terminal route runs must release it. */
+  /** A recovery load acquired the Runtime Session for this promptId. On
+   * the cancellation path, only the terminal success route and session
+   * teardown hand it back; retry-inviting refusals deliberately leave it
+   * owed, because a release persists RELEASED forever while a stranded
+   * READY lease is re-admitted against the current checkpoint or
+   * re-acquired idempotently. The continuation route keeps its #13083
+   * handback discipline (a recorded follow-up). */
   runtimeLeaseHeld?: string;
   /** A takeover load registered this Session with its recovered Turn still
    * owned by the client: /status reports it in flight and /prompt refuses a
@@ -568,7 +586,7 @@ async function readShellReceipt(
     ) ||
     receipt.payload['historyRevision'] !== receipt.sequence ||
     typeof history?.['messageId'] !== 'string' ||
-    !UUID.test(history['messageId']) ||
+    !HOSTED_UUID.test(history['messageId']) ||
     typeof history['timestamp'] !== 'string' ||
     typeof history['model'] !== 'string' ||
     !Array.isArray(history['parts'])
@@ -591,29 +609,47 @@ async function readShellReceipt(
 
 async function verifyWorkspaceRestore(
   session: HostedSession,
+  preverified: ReadonlyMap<string, ManagedSessionDurableRef>,
   toolResults: DurableToolResultResourceStore,
   throughSequence: number,
 ): Promise<boolean> {
   const { authority, resources, sink } = session.managed;
   const segmentStore = new ResourceToolResultSegmentStore(toolResults);
   const manifests = new Map<string, ManagedSessionDurableRef>();
-  const verified = new Map<string, ManagedSessionDurableRef>();
+  // What opening the Session verified is checked for conflicting references
+  // but not read again, except the kinds this verification descends into,
+  // which are queued with the other references below.
+  const verified = new Map<
+    string,
+    { ref: ManagedSessionDurableRef; done: Promise<void> }
+  >();
+  const descend: ManagedSessionDurableRef[] = [];
+  for (const [id, ref] of preverified) {
+    if (RESTORE_CONTAINER_KINDS.has(ref.kind)) descend.push(ref);
+    else verified.set(id, { ref, done: Promise.resolve() });
+  }
   const publicationManifests = new Set<string>();
   let incomplete = false;
-  async function readRef(ref: ManagedSessionDurableRef): Promise<void> {
+  function readRef(ref: ManagedSessionDurableRef): Promise<void> {
     const previous = verified.get(ref.resourceId);
     if (previous) {
       if (
-        previous.kind !== ref.kind ||
-        previous.schemaVersion !== ref.schemaVersion ||
-        previous.byteLength !== ref.byteLength ||
-        previous.digest !== ref.digest
+        previous.ref.kind !== ref.kind ||
+        previous.ref.schemaVersion !== ref.schemaVersion ||
+        previous.ref.byteLength !== ref.byteLength ||
+        previous.ref.digest !== ref.digest
       )
-        throw new Error('Hosted resource references conflict.');
-      return;
+        return Promise.reject(
+          new Error('Hosted resource references conflict.'),
+        );
+      return previous.done;
     }
+    const done = verifyRef(ref);
+    verified.set(ref.resourceId, { ref, done });
+    return done;
+  }
+  async function verifyRef(ref: ManagedSessionDurableRef): Promise<void> {
     const bytes = await resources.read(ref);
-    verified.set(ref.resourceId, ref);
     if (ref.kind === 'managed-tool-result-manifest')
       manifests.set(ref.resourceId, ref);
     if (
@@ -678,16 +714,6 @@ async function verifyWorkspaceRestore(
         if (nested) await readRef(nested);
       }
     }
-    if (ref.kind === 'managed-hook_registration') {
-      const registration = parseHookRegistration(JSON.parse(bytes.toString()));
-      await readRef(registration.catalogRef);
-    }
-    if (ref.kind === 'managed-hook_execution') {
-      const execution = parseHookExecution(JSON.parse(bytes.toString()));
-      await readRef(execution.planRef);
-      await readRef(execution.inputRef);
-      if (execution.resultRef) await readRef(execution.resultRef);
-    }
     if (ref.kind === 'managed-hook-plan') {
       const plan = object(JSON.parse(bytes.toString()));
       if (!plan) throw new Error('Hosted Hook plan is invalid.');
@@ -710,10 +736,8 @@ async function verifyWorkspaceRestore(
     }
   }
   const header = authority.sessionHeader;
-  await readRef(header.definitionRef);
-  await readRef(header.rootSnapshotRef);
-  if (header.baseTranscriptProof) await readRef(header.baseTranscriptProof);
-  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
+  const events = authority.eventsInSequenceRange(1, throughSequence);
+  for (const event of events) {
     if (
       event.kind === 'domain.committed' &&
       ![
@@ -724,17 +748,32 @@ async function verifyWorkspaceRestore(
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
+  }
+  const refs = [
+    header.definitionRef,
+    header.rootSnapshotRef,
+    ...(header.baseTranscriptProof ? [header.baseTranscriptProof] : []),
+  ];
+  for (const event of events) {
     for (const [field, value] of Object.entries(event.payload)) {
       if (field.endsWith('Ref') && value !== null && value !== undefined) {
-        const ref = value as unknown as ManagedSessionDurableRef;
-        await readRef(ref);
+        refs.push(value as unknown as ManagedSessionDurableRef);
       } else if (field === 'resources' && Array.isArray(value)) {
-        for (const ref of value) {
-          const resource = ref as unknown as ManagedSessionDurableRef;
-          await readRef(resource);
-        }
+        for (const ref of value)
+          refs.push(ref as unknown as ManagedSessionDurableRef);
       }
     }
+  }
+  refs.push(...descend);
+  // Independent reads, a bounded batch at a time; a resource several
+  // references name is still read once. A batch settles fully before a
+  // failure is reported, so no read outlives the verification.
+  for (let index = 0; index < refs.length; index += RESTORE_READ_BATCH) {
+    const results = await Promise.allSettled(
+      refs.slice(index, index + RESTORE_READ_BATCH).map((ref) => readRef(ref)),
+    );
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
   }
   if (session.publication) {
     for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
@@ -1311,7 +1350,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       typeof sessionId !== 'string' ||
-      !UUID.test(sessionId) ||
+      !HOSTED_UUID.test(sessionId) ||
       (create && body?.['sessionScope'] !== 'thread')
     ) {
       error(res, 400, 'invalid_hosted_session');
@@ -1382,8 +1421,14 @@ export function registerHostedHarnessSessionRoutes(
         activationLeaseDurationMs: store.leaseDurationMs,
         journalStore: stores.journalStore,
         resourceStore: stores.resourceStore,
-        ...(refs ? { create: refs, requireNew: true } : {}),
+        ...(refs
+          ? { create: refs, requireNew: true }
+          : { retainVerifiedResources: true }),
       });
+      // Taken now, so the authority keeps none of it for the Session's
+      // lifetime; a cold Workspace load reuses it below.
+      const preverified =
+        await managed.authority.takeVerifiedExtensionResources();
       const definition = object(
         JSON.parse(
           (
@@ -1534,6 +1579,7 @@ export function registerHostedHarnessSessionRoutes(
         try {
           incompletePublication = await verifyWorkspaceRestore(
             session,
+            preverified,
             stores.toolResultResources,
             restore.throughSequence,
           );
@@ -1575,21 +1621,11 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
           recovery = recovered.report;
-          // Arm the undriven marker only for a recovery the coordinator can
-          // actually drive: every outcome reported as known, and phase
-          // results_ready unless the load only reports passively (a passive
-          // report with all-known outcomes is cancellation-ready). An
-          // undrivable report is answered without the marker — the
-          // coordinator fails the Turn without ever driving, and the
-          // Session must not refuse every later route forever.
-          const passiveTakeover =
-            body?.['passiveManagedRuntimeRecovery'] === true;
-          const drivable =
-            recovery.executions.every(
-              (execution) => execution.outcome === 'known',
-            ) &&
-            (passiveTakeover || recovery.phase === 'results_ready');
-          if (drivable) session.recoveredTurn = recovered.promptId;
+          // Arm the undriven marker only for a recovery the producer itself
+          // judges drivable — the coordinator fails an undrivable one
+          // without ever arriving, and the Session must not refuse every
+          // later route forever.
+          if (recovered.drivable) session.recoveredTurn = recovered.promptId;
           if (recovered.acquiredRuntime)
             session.runtimeLeaseHeld =
               recovered.report.executions[0]?.runtimeSessionId ??
@@ -1705,9 +1741,14 @@ export function registerHostedHarnessSessionRoutes(
           !session.hooks &&
           !recovery)
       ) {
-        // The Session is closed without being registered, so no later route
-        // can hand back a lease the takeover acquired; release it here.
-        await releaseLeaseNow(session);
+        // A retry-inviting refusal keeps a takeover-adopted lease owed on
+        // the Broker side: the coordinator's retried load re-acquires the
+        // READY identity idempotently, while a release would persist
+        // RELEASED and wedge every retry with runtime_session_not_acquirable.
+        // This Session, though, is closed before registration, so no route
+        // can ever see the owed lease again — record it and say so, or the
+        // strand is silent until retirement.
+        noteOwedAdoption(session, sessionId);
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -1716,7 +1757,8 @@ export function registerHostedHarnessSessionRoutes(
         try {
           await stores.assertWritable();
         } catch {
-          await releaseLeaseNow(session);
+          // Same owed-lease discipline as the refusal above.
+          noteOwedAdoption(session, sessionId);
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1772,6 +1814,9 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      // The registered Session now carries the owed lease itself; the
+      // refusal-time record is discharged.
+      refusedAdoptions.delete(sessionId);
       res.status(200).json({
         sessionId,
         clientId: session.clientId,
@@ -1839,7 +1884,7 @@ export function registerHostedHarnessSessionRoutes(
         // history drift, runnable-checkpoint classification) is otherwise
         // invisible to anyone diagnosing why the restore was refused.
         writeStderrLineSafe(
-          `qwen serve: Hosted Harness load of session ${sessionId} is recovery blocked: ` +
+          'qwen serve: Hosted Session open failed: ' +
             String(
               cause instanceof Error && cause.cause !== undefined
                 ? cause.cause
@@ -1863,7 +1908,10 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.mcpBusy || session.mcpRecovering || session.hooksBusy)
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
+    if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
@@ -1872,7 +1920,7 @@ export function registerHostedHarnessSessionRoutes(
     const deadlineMs = body?.['deadlineMs'];
     if (
       typeof promptId !== 'string' ||
-      !UUID.test(promptId) ||
+      !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
       !prompt.every((block) => {
@@ -2111,7 +2159,7 @@ export function registerHostedHarnessSessionRoutes(
     const fields = object(body?.['input']);
     if (
       typeof operationId !== 'string' ||
-      !UUID.test(operationId) ||
+      !HOSTED_UUID.test(operationId) ||
       (event !== HookEventName.Notification &&
         event !== HookEventName.UserPromptExpansion) ||
       !fields
@@ -2150,7 +2198,16 @@ export function registerHostedHarnessSessionRoutes(
     void runHostedLifecycleHook(session, event, operationId, input)
       .then(
         (output) => res.json({ operationId, output: output ?? null }),
-        () => error(res, 503, 'hosted_hook_operation_failed'),
+        (cause) => {
+          if (cause instanceof HostedHookInputConflictError)
+            return error(res, 409, 'hosted_hook_operation_conflict');
+          writeStderrLineSafe(
+            cause instanceof HostedHookRecoveryRequiredError
+              ? `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: ${String(cause)}`
+              : `qwen serve: Hosted Hook operation ${operationId} failed: ${String(cause)}`,
+          );
+          error(res, 503, 'hosted_hook_operation_failed');
+        },
       )
       .finally(() => {
         session.hooksBusy = false;
@@ -2200,7 +2257,7 @@ export function registerHostedHarnessSessionRoutes(
     try {
       if (
         typeof operationId !== 'string' ||
-        !UUID.test(operationId) ||
+        !HOSTED_UUID.test(operationId) ||
         !Number.isSafeInteger(expectedRevision) ||
         (expectedRevision as number) < 0
       )
@@ -2241,7 +2298,7 @@ export function registerHostedHarnessSessionRoutes(
     try {
       if (
         typeof operationId !== 'string' ||
-        !UUID.test(operationId) ||
+        !HOSTED_UUID.test(operationId) ||
         !Number.isSafeInteger(expectedRevision) ||
         Number(expectedRevision) < 1
       )
@@ -2291,7 +2348,7 @@ export function registerHostedHarnessSessionRoutes(
     const request = object(body?.['request']);
     if (
       typeof operationId !== 'string' ||
-      !UUID.test(operationId) ||
+      !HOSTED_UUID.test(operationId) ||
       typeof serverId !== 'string' ||
       !request
     )
@@ -2403,7 +2460,7 @@ export function registerHostedHarnessSessionRoutes(
     const activationId = body?.['activationId'];
     if (
       typeof promptId !== 'string' ||
-      !UUID.test(promptId) ||
+      !HOSTED_UUID.test(promptId) ||
       typeof checkpointId !== 'string' ||
       checkpointId.length === 0 ||
       checkpointId.length > 512 ||
@@ -2448,16 +2505,38 @@ export function registerHostedHarnessSessionRoutes(
     session.managed.activation.activationId === activationId &&
     unsettledPromptId(session) === promptId;
 
+  // A takeover adoption owed on a Session closed before ever registering
+  // can never be handed back by a route — every discharger resolves the
+  // Session through this map. Record the stranded identity so it is neither
+  // silent nor wedged by a release; the next successful load of the id
+  // drains the record.
+  const refusedAdoptions = new Map<string, string>();
+  const noteOwedAdoption = (
+    session: HostedSession,
+    sessionId: string,
+  ): void => {
+    const runtimeSessionId = session.runtimeLeaseHeld;
+    if (runtimeSessionId === undefined || refusedAdoptions.has(sessionId))
+      return;
+    refusedAdoptions.set(sessionId, runtimeSessionId);
+    writeStderrLineSafe(
+      `qwen serve: Hosted Harness takeover of session ${sessionId} adopted Runtime Session ${runtimeSessionId} but refuses the load: the lease stays owed until this session loads successfully or retires.`,
+    );
+  };
+
   // A recovered Runtime Session the Broker already forgot is handed back
   // by definition — treat its 404 as a completed release instead of
   // retrying a doomed handback forever.
   const releaseIsSatisfied = (cause: unknown): boolean =>
     cause instanceof HostedWorkspaceBrokerRejection && cause.status === 404;
 
-  // A recovery load may hold the Runtime Session; whichever terminal route
-  // runs must release it, or the workspace lease stays pinned forever. The
-  // flag clears only once the release is confirmed, so a failed handback
-  // stays owed and the next terminal route retries it.
+  // A recovery load may hold the Runtime Session. On the cancellation
+  // path, terminal routes hand it back — or the workspace lease stays
+  // pinned forever — but retry-inviting refusals must not (see the field
+  // doc): a release persists RELEASED. The continuation route keeps its
+  // #13083 handback discipline (recorded follow-up). The flag clears only
+  // once the release is confirmed, so a failed handback stays owed and the
+  // next terminal route retries it.
   const releaseRecoveredRuntime = (session: HostedSession): void => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -2486,7 +2565,8 @@ export function registerHostedHarnessSessionRoutes(
   };
 
   // Awaited variant for exits after which no route can retry the handback
-  // (session close, load refusals of an unregistered Session).
+  // (session close/detach). Retry-inviting refusals must not call it: see
+  // the owed-lease comment at the blocked cancel refusal.
   const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -2515,6 +2595,9 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
@@ -2559,6 +2642,12 @@ export function registerHostedHarnessSessionRoutes(
     const continueAuthorization = await session.managed.authority
       .harnessRunAuthorization()
       .catch(() => undefined);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.active) return error(res, 409, 'hosted_turn_active');
     if (
       continueAuthorization?.status !== 'runnable' ||
       continueAuthorization.checkpoint.continuation.phase !== 'results_ready'
@@ -2756,6 +2845,17 @@ export function registerHostedHarnessSessionRoutes(
         }
         try {
           await session.managed.sink.write(turnResultRecord('error'));
+          // The direct settle above retired the pending file-history marker
+          // after its terminal record; the compensating path settles the
+          // same deadline, so it retires the marker the same way.
+          try {
+            await dropPendingHostedFileHistoryTurn(session.managed, promptId);
+          } catch (dropCause) {
+            session.fileHistoryOwed = promptId;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness file-history retirement of settled Turn ${promptId} failed; it stays owed: ${String(dropCause)}`,
+            );
+          }
         } catch (settleCause) {
           session.blocked = true;
           writeStderrLineSafe(
@@ -2780,12 +2880,18 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/cancel', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
     if (session.blocked) {
-      releaseRecoveredRuntime(session);
+      // A retry-inviting refusal: keep an adopted lease owed with the
+      // still-READY identity — the next takeover re-acquires it
+      // idempotently, while a release would persist RELEASED and wedge
+      // every retry with runtime_session_not_acquirable.
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     // A cancellation whose reply was lost is replayed by the coordinator: it
@@ -2809,19 +2915,30 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
+    // A redriven cancellation carries its load-time identity, but the
+    // checkpoint may legitimately have advanced underneath: an earlier
+    // attempt settled the executions and then failed before the terminal
+    // record. The coordinator never re-loads an attached Session, so the
+    // fence is the activation plus the unsettled Turn — admit those against
+    // the current checkpoint instead of refusing the only retry there is.
+    const attachedToUnsettled =
+      session.managed.activation.activationId === activationId &&
+      unsettledPromptId(session) === promptId;
+    if (!attachedToUnsettled) {
       if (settledReplay(session, promptId, res)) {
         releaseRecoveredRuntime(session);
         return;
       }
-      releaseRecoveredRuntime(session);
+      // A foreign-epoch cancel against a stranger's or settled Turn is not a
+      // teardown: keep the lease owed and re-acquirable — the same owed
+      // discipline as the refusals above. Only a genuinely settled replay
+      // hands it back.
       return error(res, 409, 'hosted_recovery_identity_mismatch');
     }
     const sessionId = req.params['id'];
     // Symmetric with the continue route: without the tool profile or the
     // Broker there is no way to prove the parked executions stopped.
     if (!session.toolProfile || !brokerOptions) {
-      releaseRecoveredRuntime(session);
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     // A checkpoint whose authorization is no longer readable cannot prove
@@ -2830,8 +2947,15 @@ export function registerHostedHarnessSessionRoutes(
     const cancelAuthorization = await session.managed.authority
       .harnessRunAuthorization()
       .catch(() => undefined);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.active) return error(res, 409, 'hosted_turn_active');
     if (cancelAuthorization?.status !== 'runnable') {
-      releaseRecoveredRuntime(session);
+      // Retry-inviting refusal: keep the adopted lease owed (see the
+      // blocked refusal above).
       return error(res, 409, 'hosted_turn_recovery_required');
     }
     session.admissions.set(promptId, {
@@ -2854,36 +2978,31 @@ export function registerHostedHarnessSessionRoutes(
         // Settle the parked executions as cancelled so the terminal record
         // can move the checkpoint past the durable wait instead of wedging
         // the session on its next prompt.
-        await settleParkedTurnCancelled({
-          session: session.managed,
-          sessionId,
-          cwd: session.cwd,
-          promptId,
-        });
-        settledDurable = true;
+        try {
+          await settleParkedTurnCancelled({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+          });
+          settledDurable = true;
+        } catch (cause) {
+          // The checkpoint moves inside the settle, one resolveAwaitRuntime
+          // at a time: a partially applied settle reads no longer like the
+          // recovery identity, and only that identity read can tell a
+          // re-drivable miss from an irrevocable movement.
+          settledDurable = !matchesRecovery(
+            session,
+            promptId,
+            checkpointId,
+            activationId,
+          );
+          throw cause;
+        }
         // The cancelled Turn never continues, so its pending file-history
         // obligation dies with it — keep the snapshots, drop the marker, or
         // every later load stays refused.
         await dropPendingHostedFileHistoryTurn(session.managed, promptId);
-        // The original owner's Runtime Session keeps the Workspace lease
-        // pinned; a passive takeover never re-acquired it, so release it
-        // here once the executions are confirmed stopped — including the
-        // abandoned kind, whose binding is fenced too. A refused or lost
-        // release must not redo a cancellation that is already settled:
-        // record the lease as owed under the identity whose release just
-        // failed, so the later retry sites (the next settled /prompt, a
-        // cancel replay, or close) hand it back on the same key.
-        const released = await broker.release().then(
-          () => true,
-          (cause: unknown) => {
-            if (releaseIsSatisfied(cause)) return true;
-            writeStderrLineSafe(
-              `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
-            );
-            return false;
-          },
-        );
-        if (!released) session.runtimeLeaseHeld = broker.runtimeSessionId;
         await session.managed.sink.write(
           record(session, sessionId, 'system', null, {
             subtype: 'turn_result',
@@ -2899,6 +3018,34 @@ export function registerHostedHarnessSessionRoutes(
         // The refusal stays armed on the retryable failure path, where the
         // coordinator's retry re-drives the same Turn.
         session.recoveredTurn = undefined;
+        // The original owner's Runtime Session keeps the Workspace lease
+        // pinned; the passive takeover adopted it on load. Release only
+        // after the terminal record is durable: the release persists
+        // RELEASED (a same-identity re-acquire then conflicts forever), so a
+        // failure between release and settle would wedge the Turn without a
+        // retry, while a stranded READY lease is re-acquired idempotently.
+        // It must also stay after the stop loop: the Broker refuses with
+        // runtime_session_busy while an execution is active.
+        const handedBack = await broker.release().then(
+          () => true,
+          (cause: unknown) => {
+            if (releaseIsSatisfied(cause)) return true;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
+            );
+            return false;
+          },
+        );
+        if (handedBack) {
+          // The release discharged the lease the load adopted, or it never
+          // existed; the teardown skips what is now a redundant handback.
+          session.runtimeLeaseHeld = undefined;
+        } else {
+          // Owed under the identity whose release just failed: the next
+          // settled /prompt, a cancel replay, or close hands it back on the
+          // same key.
+          session.runtimeLeaseHeld = broker.runtimeSessionId;
+        }
         // Answer at the admission watermark: the cancelled turn_result
         // streams in from there, and a replayed cancel replays it exactly.
         res.status(200).json({
@@ -2911,31 +3058,47 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted Harness turn ${promptId} could not settle the cancellation: ${String(cause)}`,
         );
-        if (session.admissions.get(promptId)?.replayedInFlight) {
+        if (settledDurable) {
+          // The checkpoint already moved — on a clean settle or already
+          // inside it, one resolveAwaitRuntime at a time — so no re-drive
+          // can ever match the recovery identity again. Finish the settle
+          // idempotently first (the journaled set journals nothing twice),
+          // because the terminal record must not land while a parked
+          // execution still lacks its functionResponse; then admit loudly
+          // instead of leaving the Session armed forever, keeping the
+          // admission and the owed file-history record for the retry sites.
+          const completed = await settleParkedTurnCancelled({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+          }).then(
+            () => true,
+            () => false,
+          );
+          if (completed) {
+            await session.managed.sink
+              .write(
+                record(session, sessionId, 'system', null, {
+                  subtype: 'turn_result',
+                  systemPayload: {
+                    promptId,
+                    state: 'cancelled',
+                    stopReason: 'cancelled',
+                    endedAt: Date.now(),
+                  },
+                }),
+              )
+              .catch(() => undefined);
+          }
+          session.fileHistoryOwed = promptId;
+          session.blocked = true;
+          session.recoveredTurn = undefined;
+        } else if (session.admissions.get(promptId)?.replayedInFlight) {
           // A replay already certified this cancellation as accepted to the
           // coordinator, so no retry or re-drive will ever come — admit the
           // failure loudly instead of leaving the Session armed-and-idle,
           // and keep the admission it certified on record.
-          session.blocked = true;
-          session.recoveredTurn = undefined;
-        } else if (settledDurable) {
-          // The checkpoint already moved, so no re-drive can ever match the
-          // recovery identity again: the Turn is cancelled wherever it is
-          // read, so admit it loudly instead of leaving the Session armed
-          // forever, and keep the admission it may have certified.
-          await session.managed.sink
-            .write(
-              record(session, sessionId, 'system', null, {
-                subtype: 'turn_result',
-                systemPayload: {
-                  promptId,
-                  state: 'cancelled',
-                  stopReason: 'cancelled',
-                  endedAt: Date.now(),
-                },
-              }),
-            )
-            .catch(() => undefined);
           session.blocked = true;
           session.recoveredTurn = undefined;
         } else {
@@ -2946,7 +3109,9 @@ export function registerHostedHarnessSessionRoutes(
         }
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {
-        releaseRecoveredRuntime(session);
+        // No handback here: the coordinator retries a failed cancel, and a
+        // release would wedge that retry; the success path above already
+        // released and discharged the flag itself.
         session.active = undefined;
       }
     })();
@@ -3142,7 +3307,12 @@ export function registerHostedHarnessSessionRoutes(
     void readHostedFileHistory(session.managed).then(
       (history) =>
         res.json({ sessionId: req.params['id'], history: history ?? null }),
-      () => error(res, 503, 'hosted_file_history_failed'),
+      (cause: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted file history read failed: ${String(cause)}`,
+        );
+        error(res, 503, 'hosted_file_history_failed');
+      },
     );
   });
   app.post('/session/:id/files/rewind', (req, res) => {
@@ -3174,9 +3344,9 @@ export function registerHostedHarnessSessionRoutes(
     const promptId = body?.['promptId'];
     if (
       typeof requestId !== 'string' ||
-      !UUID.test(requestId) ||
+      !HOSTED_UUID.test(requestId) ||
       typeof promptId !== 'string' ||
-      !UUID.test(promptId)
+      !HOSTED_UUID.test(promptId)
     )
       return error(res, 400, 'invalid_file_rewind');
     session.active = {
@@ -3320,20 +3490,25 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
-      if (req.method === 'DELETE') {
-        await session.hooks?.drain();
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionEnd,
-          `session-end:${req.params['id']}`,
-          { reason: 'other' },
-        );
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionDelete,
-          `session-delete:${req.params['id']}`,
-          { deleted_session_id: req.params['id'] },
-        );
+      if (req.method === 'DELETE' && session.hooks) {
+        session.hooksBusy = true;
+        try {
+          await session.hooks.drain();
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionEnd,
+            `session-end:${req.params['id']}`,
+            { reason: 'other' },
+          );
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionDelete,
+            `session-delete:${req.params['id']}`,
+            { deleted_session_id: req.params['id'] },
+          );
+        } finally {
+          session.hooksBusy = false;
+        }
       }
       await session.hooks?.close();
       // A lease a recovery load acquired must go back with the Session, or
@@ -3358,7 +3533,10 @@ export function registerHostedHarnessSessionRoutes(
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
-    } catch {
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} close failed: ${String(cause)}`,
+      );
       error(res, 503, 'managed_session_close_failed');
     } finally {
       session.mcpClosing = false;

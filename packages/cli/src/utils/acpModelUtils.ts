@@ -162,6 +162,23 @@ export function resolveAcpModelOption(
   };
 }
 
+export function resolveAcpFastModelSelector(
+  input: string,
+  models: readonly AvailableModel[],
+): string | null {
+  const option = buildAcpModelOptions(models).find(
+    (candidate) => candidate.modelId === input.trim(),
+  );
+  if (!option || option.model.isRuntimeModel || option.model.visionOnly) {
+    return null;
+  }
+  const { model } = option;
+  const selector = `${model.authType}:${model.id}`;
+  return model.authType === AuthType.QWEN_OAUTH
+    ? selector
+    : `${selector}\0${model.registryBaseUrl ?? ''}`;
+}
+
 export function getCurrentAcpModelId(
   options: readonly AcpModelOption[],
   modelId: string,
