@@ -2008,8 +2008,12 @@ const EN: Messages = {
   'sidebar.switchFailed': 'Failed to switch session',
   'sidebar.currentDeleteDisabled':
     'The current session is running and cannot be deleted',
-  'sidebar.currentStandaloneDeleteDisabled':
-    'Open another chat first to delete the current no-workspace session',
+  'sidebar.currentStandaloneNotReady':
+    'This conversation is not ready yet. Try again in a moment.',
+  'sidebar.standaloneLeaveFailed':
+    'Could not confirm this conversation was disconnected. Nothing was deleted.',
+  'sidebar.standaloneDeleteCancelled':
+    'The current conversation changed. Deletion was cancelled.',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
@@ -6172,8 +6176,9 @@ const ZH: Messages = {
   'sidebar.newSessionFailed': '创建新对话失败',
   'sidebar.switchFailed': '切换会话失败',
   'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
-  'sidebar.currentStandaloneDeleteDisabled':
-    '请先打开另一个对话，再删除当前无工作区会话',
+  'sidebar.currentStandaloneNotReady': '此会话尚未就绪，请稍后重试。',
+  'sidebar.standaloneLeaveFailed': '无法确认此会话已断开连接，因此未删除。',
+  'sidebar.standaloneDeleteCancelled': '当前会话已变化，删除已取消。',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
