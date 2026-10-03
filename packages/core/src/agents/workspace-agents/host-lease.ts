@@ -24,6 +24,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { assembleAgentPrompt } from './prompt.js';
 import { rebookUndeliveredTriggersInTransaction } from './dispatcher.js';
 import {
@@ -49,6 +50,8 @@ import {
   type ThreadRun,
   type WorkspaceAgent,
 } from './types.js';
+
+const debug = createDebugLogger('WORKSPACE_AGENTS_HOST_LEASE');
 
 type RunStep = NonNullable<NonNullable<ThreadRun['progress']>['steps']>[number];
 
@@ -745,19 +748,20 @@ export async function applyHostRunResult(
             }
           : { ok: false, reason: 'stale_lease' as const };
       }
-      // Terminal settlement fences the answer, not spend already incurred.
-      const usageByRound = withHostUsage(
-        run.usageByRound,
-        input.attempt,
-        input.tokens,
-      );
-      if (usageByRound !== run.usageByRound) {
-        await transaction.writeThread(
-          withRun(current, run.id, (target) => ({
-            ...target,
-            usageByRound,
-          })),
-        );
+      // Terminal settlement ends this attempt's write authority, spend
+      // included: `tokensUsed` is what `enforceTreeBudgets` reads to cancel
+      // live runs elsewhere in the tree, so a Host returning after its lease
+      // died must not move it. The mismatch stays observable in the debug log.
+      if (
+        withHostUsage(run.usageByRound, input.attempt, input.tokens) !==
+        run.usageByRound
+      ) {
+        debug.warn('Ignored post-terminal host usage report:', {
+          threadId: current.id,
+          runId: run.id,
+          attempt: input.attempt,
+          tokens: input.tokens,
+        });
       }
       return { ok: false, reason: 'stale_lease' as const };
     }

@@ -504,7 +504,7 @@ describe('Host result receipts', () => {
   });
 
   it.each(['recovery', 'cancellation'] as const)(
-    'accounts late usage after %s without applying the result',
+    'refuses late usage after %s without moving the ledger',
     async (reason) => {
       const mine = await host('mine', ['qwen']);
       await placeAgent([mine]);
@@ -567,7 +567,10 @@ describe('Host result receipts', () => {
         close: { kind: 'review' as const, summary: 'Must not appear.' },
         tokens: 1_050,
       };
-      for (const tokens of [1_050, 1_050, 900]) {
+      // Settlement ends the attempt's write authority over spend too: not even
+      // the transport's maximum admissible count may move `tokensUsed`, which
+      // is what tree budget enforcement reads to cancel unrelated live runs.
+      for (const tokens of [1_050, 900, 1_000_000_000]) {
         await expect(
           applyHostRunResult(
             PROJECT_ROOT,
@@ -575,31 +578,8 @@ describe('Host result receipts', () => {
             assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS + 1,
           ),
         ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
-        expect(await readThread(PROJECT_ROOT, child.id)).toEqual({
-          ...terminal,
-          tokensUsed: 1_050,
-          runs: terminal.runs.map((run) => ({
-            ...run,
-            usageByRound: [
-              { attempt: assignment.attempt, round: 1, tokens: 1_050 },
-            ],
-          })),
-        });
+        expect(await readThread(PROJECT_ROOT, child.id)).toEqual(terminal);
       }
-      await expect(
-        applyHostRunResult(
-          PROJECT_ROOT,
-          {
-            ...identity,
-            status: reason === 'recovery' ? 'failed' : 'cancelled',
-            tokens: 1_200,
-          },
-          assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS + 2,
-        ),
-      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
-      expect((await readThread(PROJECT_ROOT, child.id))?.tokensUsed).toBe(
-        1_200,
-      );
     },
   );
 
