@@ -90,6 +90,24 @@ function ChipProbe() {
   return <span data-testid="chip-content">chip</span>;
 }
 
+// Same trick for the tooltip root, which is the one the tooltip-catch
+// deferral releases. Opt-in per test: the renderer has to keep returning a
+// string for the others, because tooltipText is derived only from a
+// string/number tooltip and the sibling suite pins the chip.title fallback
+// that depends on it.
+let tooltipRendersProbe = false;
+let tooltipUnmounts = 0;
+
+function TooltipProbe() {
+  useEffect(
+    () => () => {
+      tooltipUnmounts += 1;
+    },
+    [],
+  );
+  return null;
+}
+
 function CompanionLikeHarness() {
   const [messages, setMessages] = useState<string[]>([]);
   const composer = useComposerCore({
@@ -104,7 +122,8 @@ function CompanionLikeHarness() {
     ...(hostPassesTagRenderProps
       ? {
           renderComposerTag: () => <ChipProbe />,
-          renderComposerTagTooltip: () => 'a file reference',
+          renderComposerTagTooltip: () =>
+            tooltipRendersProbe ? <TooltipProbe /> : 'a file reference',
         }
       : {}),
   });
@@ -208,6 +227,8 @@ afterEach(async () => {
   hostSyncsIntoEditor = false;
   hostPassesTagRenderProps = true;
   chipUnmounts = 0;
+  tooltipRendersProbe = false;
+  tooltipUnmounts = 0;
   document.body.innerHTML = '';
 });
 
@@ -395,6 +416,7 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
   });
 
   it('defers a failed inline tag tooltip root out of the update cycle', async () => {
+    tooltipRendersProbe = true;
     await mount();
     const view = latest!.viewRef.current!;
     const { states, restore } = spyRootUnmountStates();
@@ -412,6 +434,9 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
         return appendChild.call(this, child);
       });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Captured before the chip is added: tooltipUnmounts is a module-level
+    // counter reset per test, so the release reads as a before/after delta.
+    const unmountsBefore = tooltipUnmounts;
 
     try {
       addFileChip('notes.txt');
@@ -429,7 +454,12 @@ describe('useComposerCore issue #12826 re-entrant update', () => {
       expect(
         view.contentDOM.querySelector('[data-testid="chip-content"]'),
       ).not.toBeNull();
-      expect(states.length).toBeGreaterThan(0);
+      // Only the failed tooltip root renders <TooltipProbe/>, so this delta
+      // cannot be satisfied by an unrelated root unmounting inside the window
+      // -- which is what makes dropping the deferral observable right here.
+      expect(tooltipUnmounts).toBeGreaterThan(unmountsBefore);
+      // That unmount went through the spied prototype, so states is non-empty
+      // and this comparison cannot pass vacuously.
       expect(states).toEqual(states.map(() => CM_IDLE));
     } finally {
       warn.mockRestore();
