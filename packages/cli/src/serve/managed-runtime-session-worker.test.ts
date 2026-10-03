@@ -676,15 +676,19 @@ describe.skipIf(process.platform === 'win32')(
     /** Gates the fake recorder's commit awaits, per test. */
     const outcomeWaiters: { admit?: Promise<void>; settle?: Promise<void> } =
       {};
+    /** Makes the fake recorder's commits fail, per test. */
+    const outcomeFailures: { admit?: Error; settle?: Error } = {};
     const signal = new AbortController().signal;
 
     function recordOutcomes(target: Config) {
       const recorder = {
         admit: async (input: Record<string, unknown>) => {
+          if (outcomeFailures.admit) throw outcomeFailures.admit;
           if (outcomeWaiters.admit) await outcomeWaiters.admit;
           admissions.push(input);
         },
         settle: async (input: Record<string, unknown>) => {
+          if (outcomeFailures.settle) throw outcomeFailures.settle;
           if (outcomeWaiters.settle) await outcomeWaiters.settle;
           settlements.push(input);
         },
@@ -705,6 +709,8 @@ describe.skipIf(process.platform === 'win32')(
       settlements = [];
       outcomeWaiters.admit = undefined;
       outcomeWaiters.settle = undefined;
+      outcomeFailures.admit = undefined;
+      outcomeFailures.settle = undefined;
       config = new Config({
         sessionId: SESSION_ID,
         targetDir: root,
@@ -833,6 +839,25 @@ describe.skipIf(process.platform === 'win32')(
       expect(await readFile(logFile, 'utf8')).toContain('"execute"');
     });
 
+    it('does not dispatch a call whose admission fails', async () => {
+      const env = create('ok');
+      outcomeFailures.admit = new Error('the journal is unavailable');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await expect(env.execute('write', signal)).rejects.toThrow(
+        'journal is unavailable',
+      );
+      expect(admissions).toHaveLength(0);
+      expect(settlements).toHaveLength(0);
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+    });
+
     it('commits the outcome before the model sees the result', async () => {
       const env = create('ok');
       let release!: () => void;
@@ -865,12 +890,18 @@ describe.skipIf(process.platform === 'win32')(
       const entries = (await readFile(logFile, 'utf8'))
         .split('\n')
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as { route?: string });
-      expect(
-        entries
-          .filter((entry) => entry.route === 'acknowledge')
-          .every((entry) => entry !== undefined),
-      ).toBe(true);
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              route?: string;
+              request?: { reference?: { callId?: string } };
+            },
+        );
+      const acknowledges = entries.filter(
+        (entry) => entry.route === 'acknowledge',
+      );
+      expect(acknowledges).toHaveLength(1);
+      expect(acknowledges[0]!.request?.reference?.callId).toBe('write');
     });
 
     it('commits a refused call as not started and still settles it', async () => {
