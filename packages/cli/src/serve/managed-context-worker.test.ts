@@ -1174,13 +1174,11 @@ describe('Managed context tool gate', () => {
     const missing = await glob('call-3', { pattern: '**/*', path: 'nope' });
     // A link inside the Session context that points at a sibling Session.
     const linked = await glob('call-4', { pattern: '*', path: 'peek' });
-    // Brace expansion happens after the input-side segment check, so the
-    // `..` alternative never appears as a literal segment; containment is
-    // enforced on glob's output instead.
+    // The `..` alternative of a brace pair is refused at the input gate.
     const braced = await glob('call-5', { pattern: '{.,..}/**/*' });
     // A symlink named as a literal pattern segment is resolved by the
-    // filesystem: `follow: false` governs links met during a globstar walk,
-    // not this one.
+    // filesystem (`follow: false` governs links met during a globstar walk,
+    // not this one), so the walk prunes it: nothing beyond it is searched.
     const literalLink = await glob('call-6', { pattern: 'peek/**/*' });
     // An outward link is reported under its own in-Session name, disclosing
     // nothing: merely listing it must not fail the whole glob.
@@ -1192,13 +1190,36 @@ describe('Managed context tool gate', () => {
     const bracedAbsolute = await glob('call-8', {
       pattern: '{/etc,/zz-nonexistent}/host*',
     });
+    // Character-class and escape spellings of `..` pass any string gate;
+    // the contained walk answers an existing and a missing outside file
+    // identically, so neither is an existence oracle.
+    const classExisting = await glob('call-9', {
+      pattern: '[.][.]/web/secret.txt',
+    });
+    const classMissing = await glob('call-10', {
+      pattern: '[.][.]/web/nope.txt',
+    });
+    const escapedWalk = await glob('call-11', { pattern: '\\.\\./**/*' });
+    // Range expansion is bounded before anything searches it.
+    const rangeBomb = await glob('call-12', { pattern: '{1..100000}/passwd' });
 
     expect(dotdot.result.executionStatus).toBe('error');
     expect(absolute.result.executionStatus).toBe('error');
     expect(missing.result.executionStatus).toBe('error');
     expect(linked.result.executionStatus).toBe('error');
     expect(braced.result.executionStatus).toBe('error');
-    expect(literalLink.result.executionStatus).toBe('error');
+    expect(literalLink.result.executionStatus).toBe('success');
+    expect(JSON.stringify(literalLink)).toContain('No files found');
+    // The two answers differ only by the pattern each one echoes back.
+    expect(classExisting.result.executionStatus).toBe('success');
+    expect(JSON.stringify(classExisting)).toContain('No files found');
+    expect(
+      JSON.stringify(classExisting.result).replaceAll('secret.txt', 'nope.txt'),
+    ).toBe(JSON.stringify(classMissing.result));
+    expect(escapedWalk.result.executionStatus).toBe('success');
+    expect(JSON.stringify(escapedWalk)).toContain('src/index.ts');
+    expect(rangeBomb.result.executionStatus).toBe('error');
+    expect(JSON.stringify(rangeBomb)).toContain('64 brace alternatives');
     for (const response of [
       dotdot,
       absolute,
@@ -1206,6 +1227,9 @@ describe('Managed context tool gate', () => {
       linked,
       braced,
       literalLink,
+      classMissing,
+      escapedWalk,
+      rangeBomb,
     ]) {
       const text = JSON.stringify(response);
       expect(text).not.toContain('secret.txt');
@@ -1219,6 +1243,38 @@ describe('Managed context tool gate', () => {
       'Glob pattern must stay within the Session working directory.',
     );
     expect(JSON.stringify(bracedAbsolute)).not.toContain('host');
+  });
+
+  it('never counts an outside match the display sample would not show', async () => {
+    // glob judges up to 1000 collected entries but displays only the newest
+    // 100; an outside match must not reach the count either.
+    const root = workspace(['services/api/src', 'services/web']);
+    for (let index = 0; index < 137; index++)
+      fs.writeFileSync(path.join(root, `services/api/src/f${index}.ts`), '');
+    const sibling = path.join(root, 'services/web/old.ts');
+    fs.writeFileSync(sibling, 'sibling');
+    const past = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(sibling, past, past);
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+    await post(origin, CONTEXT, installation('session-2', 'services/web'));
+
+    const response = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'glob',
+        input: { pattern: '{**/*.ts,peek/**/*}' },
+      })
+    ).json();
+
+    expect(response.result.executionStatus).toBe('success');
+    const text = JSON.stringify(response);
+    expect(text).toContain('Found 137 file(s)');
+    expect(text).not.toContain('old.ts');
   });
 
   it('refuses read_file through an in-context symlink that leaves the Session', async () => {

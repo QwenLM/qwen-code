@@ -14,7 +14,20 @@ import {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import path from 'node:path';
-import { braceExpand } from 'minimatch';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -83,41 +96,17 @@ import {
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
-export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
-export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
-export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
-export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
+export {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+};
 
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2;
-
-export function isHostedWorkspaceProfile(
-  profile: unknown,
-): profile is HostedWorkspaceToolProfile {
-  return (
-    profile === HOSTED_WORKSPACE_FILE_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
-
-export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
-  return (
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
-
-export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
-  return (
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
-  );
-}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -917,25 +906,20 @@ export class HostedWorkspaceToolTurn {
             'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
           const pattern = call.args['pattern'];
           const directory = call.args['path'];
-          if (
-            typeof pattern !== 'string' ||
-            !pattern.trim() ||
-            // A pattern is a second search root: refuse the absolute/`..`
-            // shapes here, pre-acquisition, with the identical segment
-            // equality rule the worker applies after dispatch — a refusal
-            // before acquisition stays model-correctable and costs no
-            // durable Runtime work (#13030). The rule runs on the
-            // brace-expanded alternatives: `{/etc,/zz}/host*` composes an
-            // absolute search root the literal check cannot see, while
-            // `*.{ts,tsx}` expands to ordinary input.
-            braceExpand(pattern).some(
-              (alternative) =>
-                path.isAbsolute(alternative) ||
-                alternative.split(/[\\/]/).includes('..'),
-            )
-          ) {
+          // A pattern is a second search root: refuse the absolute/`..` and
+          // oversized shapes here, pre-acquisition, with the identical check
+          // the worker applies after dispatch — a refusal before acquisition
+          // stays model-correctable and costs no durable Runtime work
+          // (#13030).
+          const check =
+            typeof pattern === 'string' && pattern.trim()
+              ? checkHostedGlobPattern(pattern.trim())
+              : 'escapes';
+          if (check === 'too-complex') {
+            validationError = HOSTED_GLOB_TOO_COMPLEX;
+          } else if (check === 'escapes') {
             validationError = globError;
-          } else {
+          } else if (typeof pattern === 'string') {
             // Dispatch what was validated: glob treats an untrimmed pattern as a
             // literal, so it matches nothing and the false negative is persisted.
             input['pattern'] = pattern.trim();

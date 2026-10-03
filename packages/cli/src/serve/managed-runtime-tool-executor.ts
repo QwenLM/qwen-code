@@ -8,7 +8,10 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
-import { braceExpand } from 'minimatch';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import {
@@ -889,22 +892,15 @@ export class ManagedToolExecutor {
           );
         const requested =
           typeof params['path'] === 'string' ? params['path'].trim() : '';
-        // `pattern` is a second search root: glob resolves `..` segments and
-        // treats an absolute pattern as absolute, so it is contained too, by
-        // segment so a literal `a/..b/*.ts` stays usable. The rule runs on
-        // the brace-expanded alternatives: `{/etc,/zz}/host*` composes an
-        // absolute search root the literal check cannot see, while
-        // `*.{ts,tsx}` expands to ordinary input. A braceless pattern
-        // expands to itself, so this is also the fast path.
+        // `pattern` is a second search root, and glob searches every brace
+        // alternative: the same check as the harness refuses absolute/`..`
+        // shapes and patterns too large to search before anything expands
+        // them. The walk is contained regardless (`containmentRoot`).
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        if (
-          braceExpand(pattern).some(
-            (alternative) =>
-              path.isAbsolute(alternative) ||
-              alternative.split(/[\\/]/).includes('..'),
-          )
-        ) {
+        const check = checkHostedGlobPattern(pattern);
+        if (check === 'too-complex') throw new Error(HOSTED_GLOB_TOO_COMPLEX);
+        if (check === 'escapes') {
           throw new Error(
             'Glob pattern must stay within the Session working directory.',
           );
@@ -1201,7 +1197,8 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
-        new GlobTool(config),
+        // The walk never leaves the Session, whatever the pattern spells.
+        new GlobTool(config, { containmentRoot: directory }),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),

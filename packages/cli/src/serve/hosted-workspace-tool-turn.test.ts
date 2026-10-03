@@ -989,6 +989,13 @@ it.each([
   { pattern: '{/etc,/zz-nonexistent}/host*' },
   { pattern: '{.,..}/**/*' },
   { pattern: 'src/{..,x}/**' },
+  // Bounded before anything expands it: nesting deep enough to overflow
+  // brace-expansion's recursion, a range glob would search 100000 times,
+  // and an alternative product that exhausts memory.
+  { pattern: '{a,'.repeat(3400) + 'x' + '}'.repeat(3400) },
+  { pattern: '{1..100000}/passwd' },
+  { pattern: '{a,b}'.repeat(30) },
+  { pattern: 'x'.repeat(1025) },
   { pattern: '**/*.ts', path: '/private/secret-host-path' },
   { pattern: '**/*.ts', path: '../escape' },
   { pattern: '**/*.ts', path: 'a\\b' },
