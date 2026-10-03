@@ -743,6 +743,32 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps an operation the session does not offer to 400', () => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const error = Object.assign(
+      new Error(
+        'Invalid params: A Managed session cannot change its directory.',
+      ),
+      { data: { errorKind: 'unsupported_operation' } },
+    );
+
+    sendBridgeError(
+      response,
+      error,
+      { route: 'POST /session/:id/cd' },
+      daemonLog,
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: A Managed session cannot change its directory.',
+      code: 'unsupported_operation',
+    });
+    // Not reported as an unexpected bridge failure.
+    expect(daemonLog.error).not.toHaveBeenCalled();
+  });
+
   it('maps runtime still starting to 503 with Retry-After', () => {
     const { response, set, status, json } = responseMock();
     const daemonLog = {

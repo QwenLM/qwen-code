@@ -823,9 +823,43 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
     ).toContain('services/api');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('You cannot send messages in this Session');
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('lets the creator send a later Turn to a bound Session', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    await render('bound');
+
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).not.toContain('You cannot send messages in this Session');
+    expect(container.querySelector('textarea')).not.toBeNull();
+    await input('Run it again');
+    await click('Send');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      'bound',
+      { text: 'Run it again' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
   });
 
   async function click(label: string) {
@@ -1248,7 +1282,62 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
   });
 
-  it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
+  it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
+    vi.useFakeTimers();
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(3, 'Recent')],
+        olderCursor: '3',
+        lastEventId: 3,
+      })
+      .mockResolvedValueOnce({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'accepted',
+            data: { prompt: [{ type: 'text', text: 'Original question' }] },
+          },
+          event(2, 'Earlier '),
+        ],
+        olderCursor: '1',
+        lastEventId: 3,
+      })
+      // The gap resync's snapshot window sits right above the paged page,
+      // and older events still exist below it.
+      .mockResolvedValue({
+        events: [event(3, 'Recent'), event(4, ' New')],
+        olderCursor: '3',
+        lastEventId: 4,
+      });
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await gapGate;
+      yield { ...event(3, ''), type: 'stream_gap' };
+    });
+    await render('s1');
+    await click('Older history');
+    expect(container.textContent).toContain('Original question');
+    await act(async () => {
+      deliverGap();
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+    });
+    // The paged page survives the gap resync; wholesale replacement would
+    // drop it.
+    expect(container.textContent).toContain('Original question');
+    expect(container.textContent).toContain('Earlier');
+    expect(container.textContent).toContain('Recent New');
+    expect(
+      [...document.body.querySelectorAll('button')].some(
+        (n) => n.textContent === 'Older history',
+      ),
+    ).toBe(true);
+  });
+
+  it('deduplicates replay and merges a gapped stream with a durable snapshot', async () => {
     vi.useFakeTimers();
     mocks.client.getTranscript
       .mockResolvedValueOnce({ events: [event(1, 'First')], lastEventId: 1 })

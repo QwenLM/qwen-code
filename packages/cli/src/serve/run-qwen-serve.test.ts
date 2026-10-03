@@ -16967,6 +16967,50 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('does not load a workspace .env into the daemon environment on a missing-config channel delete', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-delete-env-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // The deleted name is configured nowhere, so the delete takes the
+    // config-loss branch whose merged-view read must skip environment
+    // loading; the sibling settings reads on this path already do.
+    writeWorkspaceSettings(daemon.secondary, {});
+    fs.writeFileSync(
+      path.join(daemon.secondary, '.env'),
+      'QWEN_SERVE_DELETE_ENV_SENTINEL=from-secondary\n',
+    );
+    delete process.env['QWEN_SERVE_DELETE_ENV_SENTINEL'];
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const channelsUrl = `${handle.url}/workspaces/${encodeURIComponent(id)}/channels`;
+      const listed = await fetch(channelsUrl, { headers: daemon.headers });
+      expect(listed.status).toBe(200);
+      const { revision } = (await listed.json()) as { revision: string };
+
+      const deleted = await fetch(`${channelsUrl}/ghost`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+        body: JSON.stringify({ expectedRevision: revision }),
+      });
+
+      expect(deleted.status).toBe(200);
+      expect(process.env['QWEN_SERVE_DELETE_ENV_SENTINEL']).toBeUndefined();
+    } finally {
+      delete process.env['QWEN_SERVE_DELETE_ENV_SENTINEL'];
+      await handle.close();
+    }
+  });
+
   it('reports a configured channel the daemon could not start at boot', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-failure-')),

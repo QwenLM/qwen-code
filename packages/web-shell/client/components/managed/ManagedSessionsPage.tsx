@@ -485,9 +485,11 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
-              <p className="text-muted-foreground">
-                {t('managed.workspaceExecutionUnavailable')}
-              </p>
+              {!summary.capabilities.workspaceTurns && (
+                <p className="text-muted-foreground">
+                  {t('managed.workspaceExecutionUnavailable')}
+                </p>
+              )}
             </div>
           )}
           {summary?.failure && (
@@ -615,7 +617,7 @@ function ManagedSessionsContent({
             }
             loading={detail.loading}
           />
-          {!summary?.workspace &&
+          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <form
               className="flex shrink-0 flex-col gap-2"

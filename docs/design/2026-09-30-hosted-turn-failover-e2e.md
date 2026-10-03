@@ -68,8 +68,19 @@ takeover is implemented for contract completeness but has no E2E mode.
   `executionCallId`. A continuation load re-dispatches each parked execution
   through `execute` — the Broker's durable record makes that exactly-once —
   commits the tool result, and advances the checkpoint to `results_ready`
-  before answering. A passive load (the coordinator's cancellation path) only
-  reads execution status and reports `known`/`unknown` without dispatching.
+  before answering. A passive load (the coordinator's cancellation path)
+  first adopts the dead owner's Runtime Session — acquiring dispatches
+  nothing — then reads execution status and reports `known`/`unknown`. The
+  load holds the adoption and never releases it itself: on success the
+  terminal cancel route hands the lease back; on failure it stays owed,
+  because a release persists RELEASED while a stranded READY identity is
+  still usable — a redriven cancel is re-admitted against the current
+  checkpoint (the daemon never re-loads an attached Session), and a
+  takeover after an owner change re-acquires idempotently. A load refused
+  after adopting but before the Session registers records the owed adoption
+  and reports it by name, since no registered session exists to retire it;
+  the record drains on the next successful load of that Session, and only
+  session retirement discharges an abandonment otherwise.
   Executions the Broker cannot account for report `unknown`, the coordinator
   blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
 - **Continue runs the model from `results_ready`; cancel settles without new
@@ -100,7 +111,9 @@ takeover is implemented for contract completeness but has no E2E mode.
   plus the trusted-actor header on both Spring owners. The physical side effect
   is a fixed `write_file`; the exactly-once assertions ride the durable
   execution row, dispatch generation and model-request counts, not file bytes.
-  `--session-failover` stays unbound and unchanged.
+  `--session-failover` still creates an unbound Session, but this admission
+  wiring is no longer mode-gated: every mode's owners carry it (#13258), so
+  its configuration matches the other modes.
 - **Both modes join the `hosted-harness-mysql` job**, which installs the MySQL
   server binaries the runner needs for its private `mysqld`.
 
@@ -110,7 +123,7 @@ takeover is implemented for contract completeness but has no E2E mode.
 | ------------ | ------------------------------------------------------------------------------- | ------------------------- |
 | Core journal | `message.delta` event kind (schema, harness actor, activation subject)          | Managed Session log       |
 | CLI Harness  | Recovery snapshot + settlement on load; continue/cancel routes; delta streaming | Hosted Harness sessions   |
-| CLI Broker   | `status` read for passive reports                                               | Workspace Broker          |
+| CLI Broker   | acquire + `status` read + release for passive reports                           | Workspace Broker          |
 | Java API     | `TrustedActorHeaderFilter` + property, default off                              | Deployment opt-in         |
 | E2E runner   | Ungate; Workspace seeding, mounts and actor wiring; `write_file` side effect    | Local and CI verification |
 | CI workflow  | MySQL binaries + both failover modes in `hosted-harness-mysql`                  | Hosted MySQL job          |
