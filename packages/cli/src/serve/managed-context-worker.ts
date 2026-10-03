@@ -276,12 +276,20 @@ export function registerManagedContextRoutes(
     mcp,
     hooks,
     async (sessionId, realPath) => {
-      // `mount.resolve` returns canonical directories only, so a lexical
-      // relative check against each installed sibling is enough.
+      // Judge each sibling by its place below the mount, not by
+      // `mount.resolve`: that answers undefined for a directory that is gone,
+      // unreadable or reached through a link, and skipping such a sibling
+      // would drop its Session boundary. A sibling `resolve` does answer for
+      // is exactly this joined path, so nothing it protected is lost.
+      let root: string;
+      try {
+        root = await fs.realpath(boot.mountRoot);
+      } catch {
+        return true;
+      }
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
-        const directory = await mount.resolve(binding.cwdRelative);
-        if (directory === undefined) continue;
+        const directory = path.join(root, ...binding.cwdRelative.split('/'));
         const relative = path.relative(directory, realPath);
         if (
           relative !== '..' &&

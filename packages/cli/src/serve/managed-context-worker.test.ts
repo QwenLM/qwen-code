@@ -1352,6 +1352,27 @@ describe('Managed context tool gate', () => {
       false,
     );
 
+    // A dangling link as the leaf: its target does not exist yet, but
+    // writing through it would create the target in the sibling.
+    fs.symlinkSync(
+      path.join('..', 'web', 'planted.txt'),
+      path.join(root, 'services/api/leaf'),
+    );
+    const dangling = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-3', ''),
+        toolName: 'write_file',
+        input: { file_path: 'leaf', content: 'written by session-1' },
+      })
+    ).json();
+    expect(dangling.result.executionStatus).toBe('error');
+    expect(JSON.stringify(dangling)).toContain(
+      "Path 'leaf' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web/planted.txt'))).toBe(
+      false,
+    );
+
     // Control: an ordinary in-Session create still works.
     const own = await (
       await post(origin, EXECUTE, {
@@ -1364,6 +1385,42 @@ describe('Managed context tool gate', () => {
     expect(
       fs.readFileSync(path.join(root, 'services/api/src/new.txt'), 'utf8'),
     ).toBe('mine too');
+  });
+
+  it('keeps a sibling Session protected while its directory is gone', async () => {
+    // An installed sibling whose directory no longer resolves is still a
+    // Session: writing into its place would plant a file it reads on restore.
+    const root = workspace(['services/api/src', 'services/web']);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    fs.rmSync(path.join(root, 'services/web'), {
+      recursive: true,
+      force: true,
+    });
+
+    const planted = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'write_file',
+        input: { file_path: '../web/pwned.txt', content: 'from session-1' },
+      })
+    ).json();
+    expect(planted.result.executionStatus).toBe('error');
+    expect(JSON.stringify(planted)).toContain(
+      "Path '../web/pwned.txt' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web'))).toBe(false);
   });
 
   it('reads through a symlink to a shared directory that is no Session', async () => {
