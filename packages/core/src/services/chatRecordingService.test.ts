@@ -1217,6 +1217,59 @@ describe('ChatRecordingService', () => {
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
 
+    it('maps prompt ids projected from turns recorded before resume', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'u1'],
+        rewindTurnPromptIds: ['p0', 'p1'],
+      });
+
+      expect(service.recordedTurnIndexForPrompt('p0')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(1);
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(2);
+    });
+
+    it('counts projected pre-resume turns in the prompt index', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'u1'],
+      });
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+
+      expect(service.getRecordedUserTurnCount()).toBe(4);
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(2);
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(3);
+    });
+
+    it('refuses a prompt index when the mirror is not the projected suffix', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      expect(service.getRecordedUserTurnCount()).toBe(1);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+
+      const parents = (
+        service as unknown as { turnParentUuids: Array<string | null> }
+      ).turnParentUuids;
+      parents[0] = 'wrong-parent';
+
+      expect(service.recordedRewindTurnIndexes()).toBeUndefined();
+      expect(service.recordedTurnIndexForPrompt('p1')).toBeUndefined();
+    });
+
+    it('refuses a rewind index past the recorded turns', async () => {
+      user('a');
+      user('b');
+      user('c');
+      svc.rewindRecording(3, { truncatedCount: 0 });
+      await svc.flush();
+
+      expect(writes().filter((record) => record.subtype === 'rewind')).toEqual(
+        [],
+      );
+    });
+
     it('drops display projections from rewound user turns', async () => {
       displayed('A');
       displayed('B');
@@ -2759,6 +2812,83 @@ describe('ChatRecordingService', () => {
       expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
       expect(written().parentUuid).toBeNull();
+    });
+
+    it('keeps a prompt id when the user record is dropped by a sync write failure', async () => {
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      writeSpy.mockImplementationOnce(throwFsError('ENOENT'));
+      writeSpy.mockImplementation(() => undefined);
+      const service = legacyRecorder();
+
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      await service.flush();
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      await service.flush();
+
+      expect(service.getRecordedUserTurnCount()).toBe(2);
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(1);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a rebuilt prompt id after rewind into a transcript gap', async () => {
+      const service = legacyRecorder();
+      const rec = (
+        uuid: string,
+        parentUuid: string | null,
+        type: 'user' | 'assistant',
+        promptId?: string,
+      ) =>
+        ({
+          uuid,
+          parentUuid,
+          type,
+          sessionId: 'test-session-id',
+          timestamp: 't',
+          cwd: '/',
+          version: '1',
+          message: {
+            role: type === 'user' ? 'user' : 'model',
+            parts: [{ text: uuid }],
+          },
+          ...(promptId ? { promptId } : {}),
+        }) as unknown as ChatRecord;
+      service.rebuildTurnBoundaries([
+        rec('a', null, 'user', 'p1'),
+        rec('b', 'a', 'assistant'),
+        rec('c', 'gap-x', 'user', 'p2'),
+        rec('d', 'c', 'assistant'),
+      ]);
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      service.rewindRecording(1, { truncatedCount: 0 });
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+      await service.flush();
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(1);
+      expect(service.getRecordedUserTurnCount()).toBe(2);
+    });
+
+    it('does not map an abandoned prompt id after rewind write failures', async () => {
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      for (let i = 0; i < 4; i++) {
+        writeSpy.mockImplementationOnce(throwFsError('ENOENT'));
+      }
+      writeSpy.mockImplementation(() => undefined);
+      const service = legacyRecorder();
+
+      service.recordUserMessage([{ text: 'p1' }], undefined, undefined, 'p1');
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      service.rewindRecording(0, { truncatedCount: 0 });
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+      service.recordUserMessage([{ text: 'p4' }], undefined, undefined, 'p4');
+      await service.flush();
+
+      expect(service.recordedTurnIndexForPrompt('p1')).toBeUndefined();
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(0);
+      expect(service.recordedTurnIndexForPrompt('p4')).toBe(1);
+      expect(service.getRecordedUserTurnCount()).toBe(2);
     });
 
     it('does not notify for a synchronous conversation-file failure', () => {

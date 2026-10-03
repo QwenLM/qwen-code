@@ -9,6 +9,7 @@ import type { ChatRecord } from './chatRecordingService.js';
 export interface SessionTurnState {
   initialTurn: number;
   turnParentUuids: Array<string | null>;
+  rewindTurnPromptIds: Array<string | null>;
   backgroundNotificationTaskIds: string[];
 }
 
@@ -16,6 +17,7 @@ export interface SessionTurnRecordHint {
   promptTurn?: number;
   countsAsUserPrompt: boolean;
   turnParentUuid?: string | null;
+  rewindPromptId?: string | null;
   backgroundNotificationTaskId?: string;
 }
 
@@ -23,6 +25,7 @@ export class SessionTurnStateAccumulator {
   private maxPromptTurn = 0;
   private userMessageCount = 0;
   private readonly turnParentUuids: Array<string | null> = [];
+  private readonly rewindTurnPromptIds: Array<string | null> = [];
   private readonly backgroundNotificationTaskIds = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
@@ -40,6 +43,7 @@ export class SessionTurnStateAccumulator {
     }
     if (hint.turnParentUuid !== undefined) {
       this.turnParentUuids.push(hint.turnParentUuid);
+      this.rewindTurnPromptIds.push(hint.rewindPromptId ?? null);
     }
     if (hint.backgroundNotificationTaskId !== undefined) {
       this.backgroundNotificationTaskIds.add(hint.backgroundNotificationTaskId);
@@ -51,6 +55,7 @@ export class SessionTurnStateAccumulator {
       initialTurn:
         this.maxPromptTurn > 0 ? this.maxPromptTurn : this.userMessageCount,
       turnParentUuids: [...this.turnParentUuids],
+      rewindTurnPromptIds: [...this.rewindTurnPromptIds],
       backgroundNotificationTaskIds: [...this.backgroundNotificationTaskIds],
     };
   }
@@ -67,15 +72,19 @@ export function getSessionTurnRecordHint(
       promptTurn = Math.max(promptTurn ?? 0, candidate);
     }
   }
-  const turnParentUuid =
+  const isRewindTurn =
     record.type === 'user' &&
     record.subtype !== 'goal_runtime' &&
     record.subtype !== 'notification' &&
     record.subtype !== 'cron' &&
     record.subtype !== 'mid_turn_user_message' &&
-    record.subtype !== 'realtime_message'
-      ? (record.parentUuid ?? null)
-      : undefined;
+    record.subtype !== 'realtime_message';
+  const turnParentUuid = isRewindTurn ? (record.parentUuid ?? null) : undefined;
+  const rewindPromptId = isRewindTurn
+    ? typeof record.promptId === 'string' && record.promptId.length > 0
+      ? record.promptId
+      : null
+    : undefined;
   const backgroundTask =
     record.subtype === 'notification'
       ? (
@@ -89,6 +98,7 @@ export function getSessionTurnRecordHint(
     countsAsUserPrompt:
       record.sessionId === sessionId && isUserPromptRecord(record),
     ...(turnParentUuid !== undefined ? { turnParentUuid } : {}),
+    ...(rewindPromptId !== undefined ? { rewindPromptId } : {}),
     ...(typeof backgroundTask?.taskId === 'string'
       ? { backgroundNotificationTaskId: backgroundTask.taskId }
       : {}),

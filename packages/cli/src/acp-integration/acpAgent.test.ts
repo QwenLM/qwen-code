@@ -2460,7 +2460,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
-        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        getRewindableTurnRange: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
@@ -5513,7 +5513,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .fn()
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
           beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
-          getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+          getRewindableTurnRange: vi.fn().mockReturnValue({ start: 0, end: 8 }),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
           getDefaultReasoningConfig: vi.fn(() =>
@@ -5537,6 +5537,77 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     return innerConfig;
   }
+
+  it('lists reachable absolute snapshot indexes after compression', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const snapshots = [0, 1, 2, 3].map((index) => ({
+      promptId: `${sessionId}########${index + 1}`,
+      timestamp: new Date('2026-06-13T00:00:00.000Z'),
+      trackedFileBackups: {},
+    }));
+    Object.assign(innerConfig, {
+      getFileHistoryService: vi.fn().mockReturnValue({
+        getSnapshots: () => snapshots,
+        getDiffStats: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.getRewindableTurnRange.mockReturnValue({
+      start: 2,
+      end: 4,
+    });
+
+    const listed = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      { sessionId },
+    );
+    expect(listed['snapshots']).toEqual([
+      expect.objectContaining({
+        turnIndex: 2,
+        promptId: `${sessionId}########3`,
+      }),
+      expect.objectContaining({
+        turnIndex: 3,
+        promptId: `${sessionId}########4`,
+      }),
+    ]);
+
+    await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 2,
+      rewindFiles: false,
+      cwd: '/tmp',
+    });
+    await agent.extMethod('rewindSession', {
+      sessionId,
+      promptId: `${sessionId}########4`,
+      rewindFiles: false,
+      cwd: '/tmp',
+    });
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenNthCalledWith(1, 2, {
+      rewindFiles: false,
+    });
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenNthCalledWith(2, 3, {
+      rewindFiles: false,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   async function bootAcpAgent() {
     const agentPromise = runAcpAgent(
@@ -28137,6 +28208,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
         primeRecoveredGoalPublication: vi.fn(),
         primeTurnState: vi.fn(opts.primeTurnStateImpl),
+        getRewindableTurnRange: vi.fn().mockReturnValue({ start: 0, end: 8 }),
         cumulativeUsage: {
           promptTokens: 7,
           cachedTokens: 3,

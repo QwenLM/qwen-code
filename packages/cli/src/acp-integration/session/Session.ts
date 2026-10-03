@@ -140,6 +140,11 @@ import {
   isSystemReminderContent,
   findApiRewindCutPoint,
   countApiUserPrompts,
+  isApiUserPrompt,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+  getStartupContextLength,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -4744,10 +4749,52 @@ export class Session implements SessionContext {
     const llmClient = this.config.getLlmClient()!;
     const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
-    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
-      apiHistory,
-      targetTurnIndex,
-    );
+    const rewindWindow = this.#rewindOffsetState(apiHistory);
+    const compressed = this.#historyHasCompressedPrefix(apiHistory);
+    const targetPromptId = this.#snapshotList()[targetTurnIndex]?.promptId;
+    const recorder = this.config.getChatRecordingService();
+    const lookup = recorder?.recordedTurnIndexForPrompt;
+    let mappedTurn: number | undefined;
+    if (lookup) {
+      mappedTurn = targetPromptId
+        ? lookup.call(recorder, targetPromptId)
+        : undefined;
+    }
+    const identityIndex = targetPromptId
+      ? findApiHistoryPromptIndex(apiHistory, targetPromptId)
+      : -1;
+    // Both sides cut at the prompt when the recorder and the API history
+    // name it. An uncompressed session with no marker falls back to the
+    // positional cut, on both sides. Compressed history stays closed.
+    const cutByIdentity = mappedTurn !== undefined && identityIndex >= 0;
+    let recorderIndex = targetTurnIndex;
+    let recorderRefused = false;
+    if (cutByIdentity && mappedTurn !== undefined) {
+      recorderIndex = mappedTurn;
+    } else if (compressed && (lookup || identityIndex < 0)) {
+      recorderRefused = true;
+    }
+    if (
+      !recorderRefused &&
+      recorder?.isRewindRecordingIndex &&
+      !recorder.isRewindRecordingIndex(recorderIndex)
+    ) {
+      recorderRefused = true;
+    }
+    const inWindow =
+      !rewindWindow.failClosed &&
+      targetTurnIndex >= rewindWindow.start &&
+      targetTurnIndex < rewindWindow.end;
+    let apiTruncateIndex = -1;
+    if (inWindow && !recorderRefused) {
+      apiTruncateIndex =
+        cutByIdentity || compressed
+          ? identityIndex
+          : this.#computeApiTruncationIndexForUserTurn(
+              apiHistory,
+              targetTurnIndex,
+            );
+    }
 
     if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
@@ -4793,7 +4840,7 @@ export class Session implements SessionContext {
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
-        targetTurnIndex,
+        recorderIndex,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
         {
@@ -4822,11 +4869,13 @@ export class Session implements SessionContext {
     return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
-  getRewindableUserTurnCount(): number {
-    return countApiUserPrompts(
-      this.captureHistorySnapshot(),
-      ACP_API_USER_PROMPT_OPTIONS,
-    );
+  /**
+   * Absolute file-history snapshot indexes a client may rewind to.
+   * `start` is the current index of the recorded boundary snapshot.
+   */
+  getRewindableTurnRange(): { start: number; end: number } {
+    const window = this.#rewindOffsetState(this.captureHistorySnapshot());
+    return { start: window.start, end: window.end };
   }
 
   restoreHistory(history: Content[]): void {
@@ -4837,7 +4886,13 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const cloned = structuredClone(history);
+    for (let index = 0; index < history.length; index++) {
+      const promptId = getApiHistoryPromptId(history[index]!);
+      const copy = cloned[index];
+      if (promptId && copy) markApiHistoryPrompt(copy, promptId);
+    }
+    this.config.getLlmClient()!.setHistory(cloned);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4855,6 +4910,83 @@ export class Session implements SessionContext {
       targetTurnIndex,
       ACP_API_USER_PROMPT_OPTIONS,
     );
+  }
+
+  #historyHasCompressedPrefix(apiHistory: Content[]): boolean {
+    return (
+      getStartupContextLength(apiHistory, { includeCompressed: true }) >
+      getStartupContextLength(apiHistory)
+    );
+  }
+
+  #snapshotList(): ReadonlyArray<{ promptId: string }> {
+    try {
+      return this.config.getFileHistoryService().getSnapshots();
+    } catch {
+      return [];
+    }
+  }
+
+  #countedPromptIds(apiHistory: Content[]): Set<string> {
+    const ids = new Set<string>();
+    const start = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
+    for (let index = start; index < apiHistory.length; index++) {
+      const content = apiHistory[index];
+      if (!content || !isApiUserPrompt(content, ACP_API_USER_PROMPT_OPTIONS)) {
+        continue;
+      }
+      const promptId = getApiHistoryPromptId(content);
+      if (promptId) ids.add(promptId);
+    }
+    return ids;
+  }
+
+  #corroboratedSuffix(apiHistory: Content[]): { start: number; end: number } {
+    const snapshots = this.#snapshotList();
+    const liveIds = this.#countedPromptIds(apiHistory);
+    const recorder = this.config.getChatRecordingService();
+    const tracksRecorder =
+      typeof recorder?.recordedRewindTurnIndexes === 'function';
+    const indexes = tracksRecorder
+      ? recorder.recordedRewindTurnIndexes()
+      : undefined;
+    if (tracksRecorder && !indexes) {
+      return { start: snapshots.length, end: snapshots.length };
+    }
+    let start = snapshots.length;
+    for (let index = snapshots.length - 1; index >= 0; index--) {
+      const id = snapshots[index]?.promptId;
+      if (!id || !liveIds.has(id)) break;
+      if (tracksRecorder && !indexes?.has(id)) break;
+      start = index;
+    }
+    return { start, end: snapshots.length };
+  }
+
+  #rewindOffsetState(apiHistory: Content[]): {
+    start: number;
+    end: number;
+    failClosed: boolean;
+  } {
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+    const snapshots = this.#snapshotList();
+    const snapshotCount = snapshots.length;
+    if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      return { start: 0, end: visible, failClosed: false };
+    }
+    if (snapshotCount === 0) {
+      return { start: 0, end: 0, failClosed: true };
+    }
+    const suffix = this.#corroboratedSuffix(apiHistory);
+    if (suffix.start >= suffix.end) {
+      return { start: 0, end: 0, failClosed: true };
+    }
+    return { start: suffix.start, end: suffix.end, failClosed: false };
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -6016,8 +6148,18 @@ export class Session implements SessionContext {
           return { stopReason: 'cancelled' };
         }
         if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
-        // Increment turn counter for each user prompt
-        this.turn += 1;
+        const retryMetadata = (params as { _meta?: Record<string, unknown> })
+          ._meta;
+        const isRetry =
+          (params as { retry?: boolean }).retry === true ||
+          retryMetadata?.[DAEMON_RETRY_META_KEY] === true;
+        const isContinue = retryMetadata?.[DAEMON_CONTINUE_META_KEY] === true;
+        // A retry or continue resubmits the prompt already recorded under
+        // this turn. A new id would stamp API history with a marker the
+        // snapshot and the recorder do not have.
+        if (!(isRetry || isContinue) || this.turn === 0) {
+          this.turn += 1;
+        }
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
         if (
@@ -6107,12 +6249,6 @@ export class Session implements SessionContext {
             // history (no dangling user message from the failed attempt).
             // Also skip recordUserMessage to avoid duplicating the user
             // turn in the JSONL transcript.
-            const isRetry =
-              (params as { retry?: boolean }).retry === true ||
-              (params as { _meta?: Record<string, unknown> })._meta?.[
-                DAEMON_RETRY_META_KEY
-              ] === true;
-
             // Continue an interrupted previous turn without a synthetic user
             // message. Classified from full history (the strip pass removes the
             // entire trailing user run, so detection must see all of it):
@@ -6121,10 +6257,6 @@ export class Session implements SessionContext {
             // `interrupted_turn` closes dangling tool calls with synthesized
             // error responses. Mirrors the stream-json path in
             // nonInteractiveCli.ts so both surfaces behave identically.
-            const isContinue =
-              (params as { _meta?: Record<string, unknown> })._meta?.[
-                DAEMON_CONTINUE_META_KEY
-              ] === true;
             const isRestoreAskUserQuestion =
               this.config.getRestoreAskUserQuestion?.() === true &&
               (params as { _meta?: Record<string, unknown> })._meta?.[
@@ -6562,18 +6694,28 @@ export class Session implements SessionContext {
             if (!isRestoreAskUserQuestion) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
-                await fileHistoryService.makeSnapshot(promptId);
-                try {
-                  const latestSnapshot = fileHistoryService
-                    .getSnapshots()
-                    .at(-1);
-                  if (latestSnapshot) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordFileHistorySnapshot(latestSnapshot);
+                // Retry and continue keep the prompt id of the attempt that
+                // already snapshotted this turn. A second snapshot would
+                // duplicate that id and make rewind refuse the turn.
+                const alreadySnapshotted = fileHistoryService
+                  .getSnapshots()
+                  .some((snapshot) => snapshot.promptId === promptId);
+                if (!alreadySnapshotted) {
+                  await fileHistoryService.makeSnapshot(promptId);
+                  try {
+                    const latestSnapshot = fileHistoryService
+                      .getSnapshots()
+                      .at(-1);
+                    if (latestSnapshot) {
+                      this.config
+                        .getChatRecordingService()
+                        ?.recordFileHistorySnapshot(latestSnapshot);
+                    }
+                  } catch (e) {
+                    debugLogger.error(
+                      `FileHistory: recordSnapshot failed: ${e}`,
+                    );
                   }
-                } catch (e) {
-                  debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
                 }
               } catch (e) {
                 debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
@@ -8912,11 +9054,18 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    const markHistoryPrompt = !message.some(
+      (part) => 'functionResponse' in part && part.functionResponse,
+    );
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream = markHistoryPrompt
+        ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+            promptId,
+          })
+        : goalPermit
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+          : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
