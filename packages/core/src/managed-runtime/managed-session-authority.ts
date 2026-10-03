@@ -626,12 +626,6 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * Discards a tail that was appended without a commit marker, after proving
-   * the retained prefix reads cleanly. Repair is explicit: opening a session
-   * reports the tail and refuses to write, because a read-only owner or a
-   * compatibility probe must never rewrite a transcript.
-   */
-  /**
    * Acquires the writer for a Managed session.
    *
    * Managed sessions leave a sealed lock behind on close rather than removing
@@ -678,6 +672,12 @@ export class LocalManagedSessionAuthority {
     await this.journal.seal(this.commitProof);
   }
 
+  /**
+   * Discards a tail that was appended without a commit marker, after proving
+   * the retained prefix reads cleanly. Repair is explicit: opening a session
+   * reports the tail and refuses to write, because a read-only owner or a
+   * compatibility probe must never rewrite a transcript.
+   */
   static async recoverUncommittedTail(options: {
     lease: SessionWriterLease;
     sessionKey: ManagedSessionKey;
