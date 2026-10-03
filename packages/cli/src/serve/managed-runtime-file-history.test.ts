@@ -646,7 +646,12 @@ it('wires history to the real raw executor and preserves its original invocation
   const app = express();
   registerManagedRuntimeToolRoutes(
     app,
-    { token: 'token', leaseId: 'lease', epoch: 1 },
+    {
+      token: 'token',
+      leaseId: 'lease',
+      epoch: 1,
+      runtimeIncarnation: 'incarnation',
+    },
     executor,
   );
   const replay = await supertest(app)

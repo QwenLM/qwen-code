@@ -195,6 +195,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
+    {
+      reason:
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-session-worker.ts',
+    {
+      reason:
+        "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
+      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
