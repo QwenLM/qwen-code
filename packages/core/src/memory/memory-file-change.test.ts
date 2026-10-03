@@ -36,6 +36,8 @@ import {
 } from './paths.js';
 
 import { ensureAutoMemoryScaffold } from './store.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import { HookEventName, HookType } from '../hooks/types.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
@@ -1616,6 +1618,90 @@ describe('memory file change hook', () => {
       expect(windowSeen).toEqual([]);
     },
   );
+
+  it('keeps the previous team index when cancelled before writing', async () => {
+    const projectRoot = await setup();
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const indexPath = path.join(teamRoot, 'MEMORY.md');
+    await fs.writeFile(indexPath, 'previous index\n');
+    const listener = vi.fn();
+    const registration = registerMemoryChangedListener(projectRoot, listener);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot, {
+          deliveryId: registration.id,
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(fs.readFile(indexPath, 'utf8')).resolves.toBe(
+        'previous index\n',
+      );
+      expect(await fs.readdir(teamRoot)).toEqual(['MEMORY.md']);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      registration();
+    }
+  });
+
+  it('delivers the team index hook when cancelled after commit', async () => {
+    const projectRoot = await fs.realpath(await setup());
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const indexPath = path.join(teamRoot, 'MEMORY.md');
+    const controller = new AbortController();
+    const runner = new HookRunner();
+    const outcomes: boolean[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      async (_, signal) => {
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `"${process.execPath}" -e "process.exit(0)"`,
+          },
+          HookEventName.MemoryChanged,
+          {
+            session_id: 'committed-team-index',
+            timestamp: new Date().toISOString(),
+            transcript_path: '',
+            cwd: projectRoot,
+            hook_event_name: HookEventName.MemoryChanged,
+          },
+          signal,
+        );
+        outcomes.push(result.success);
+      },
+    );
+    const rename = fs.rename;
+    let committedContent: string | undefined;
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      await rename(from, to);
+      if (String(to) === indexPath) {
+        committedContent = await fs.readFile(indexPath, 'utf8');
+        controller.abort();
+      }
+    });
+    try {
+      const content = await rebuildTeamAutoMemoryIndex(projectRoot, {
+        deliveryId: registration.id,
+        signal: controller.signal,
+      });
+      expect(controller.signal.aborted).toBe(true);
+      expect(content).toEqual(expect.any(String));
+      expect(committedContent).toBe(content);
+      await expect(fs.readFile(indexPath, 'utf8')).resolves.toBe(content);
+      expect(outcomes).toEqual([true]);
+      await rebuildTeamAutoMemoryIndex(projectRoot, {
+        deliveryId: registration.id,
+      });
+      expect(outcomes).toEqual([true]);
+    } finally {
+      registration();
+    }
+  });
 
   it('delivers a team index rebuild to the writing registration', async () => {
     const projectRoot = await setup();

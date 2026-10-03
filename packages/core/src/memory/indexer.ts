@@ -422,6 +422,7 @@ async function writeMemoryIndex(
   ) {
     return;
   }
+  options.signal?.throwIfAborted();
   await atomicWriteFile(indexPath, content, {
     encoding: 'utf-8',
     ...(options.noFollow ? { noFollow: true } : {}),
@@ -431,6 +432,5 @@ async function writeMemoryIndex(
     projectRoot,
     existing === undefined ? 'create' : 'update',
     options.deliveryId,
-    options.signal,
   );
 }
