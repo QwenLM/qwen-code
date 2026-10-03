@@ -209,6 +209,25 @@ describe('managed-agent-server e2e runner', () => {
       source.match(/INSERT INTO qwen_managed_agent\.managed_workspace_access/g),
       'the Workspace access grant must be seeded for every mode',
     ).toHaveLength(1);
+    // The counts above cannot see WHERE an item sits: the runner before the
+    // admission alignment gated these same items inside workspaceTurns
+    // conditionals and satisfied every count. These negative pins are the
+    // symmetry witness. The windows stay short so the gates that must stay
+    // (durable local process, the Linux check, the 0700 state dir, the
+    // unbound create body) and the comment mentioning workspaceTurns do not
+    // trip them.
+    for (const reGated of [
+      /workspaceTurns[\s\S]{0,120}?QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER/,
+      /workspaceTurns[\s\S]{0,120}?QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED/,
+      /workspaceTurns[\s\S]{0,120}?--managed-runtime-broker-url/,
+      /workspaceTurns[\s\S]{0,120}?workspaceMount/,
+      /if \(workspaceTurns\) \{\s*runMysql\(/,
+    ]) {
+      expect(
+        source.match(reGated),
+        `G0 admission re-gated behind workspaceTurns: ${reGated}`,
+      ).toBeNull();
+    }
   });
 
   // The README currently names no script, so only a fixture can pin the
