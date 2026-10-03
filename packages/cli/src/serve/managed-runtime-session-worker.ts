@@ -941,7 +941,10 @@ export function createManagedRuntimeEnvironment(
           executionStatus: payload.executionStatus,
           payload,
         });
-        await worker.acknowledge(call.id, params);
+        // Fire-and-forget: the outcome is committed, and nothing in the turn
+        // may wait on the worker hearing the receipt — a wedged boot or
+        // worker must never hold a settled result back.
+        void worker.acknowledge(call.id, params);
         const result = toToolResult(payload);
         // As Legacy, a read shows no copy of the file it returns.
         return call.toolName === ToolNames.READ_FILE && !result.error

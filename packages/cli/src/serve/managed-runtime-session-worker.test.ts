@@ -815,7 +815,21 @@ describe.skipIf(process.platform === 'win32')(
           executionStatus: 'success',
         }),
       ]);
-      expect(entries.some((entry) => entry.route === 'acknowledge')).toBe(true);
+      await vi.waitFor(async () => {
+        const acknowledgesNow = (await readFile(logFile, 'utf8'))
+          .split('\n')
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                route?: string;
+                request?: { reference?: { callId?: string } };
+              },
+          )
+          .filter((entry) => entry.route === 'acknowledge');
+        expect(acknowledgesNow).toHaveLength(1);
+        expect(acknowledgesNow[0]!.request?.reference?.callId).toBe('write');
+      });
       // The host prepared it but never wrote the file.
       await expect(readFile(file, 'utf8')).rejects.toThrow();
     });
@@ -907,21 +921,21 @@ describe.skipIf(process.platform === 'win32')(
       expect(settlements).toHaveLength(1);
       expect(resolved).toBe(true);
       // The worker forgot the call only after its commit landed.
-      const entries = (await readFile(logFile, 'utf8'))
-        .split('\n')
-        .filter(Boolean)
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              route?: string;
-              request?: { reference?: { callId?: string } };
-            },
-        );
-      const acknowledges = entries.filter(
-        (entry) => entry.route === 'acknowledge',
-      );
-      expect(acknowledges).toHaveLength(1);
-      expect(acknowledges[0]!.request?.reference?.callId).toBe('write');
+      await vi.waitFor(async () => {
+        const acknowledgesNow = (await readFile(logFile, 'utf8'))
+          .split('\n')
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                route?: string;
+                request?: { reference?: { callId?: string } };
+              },
+          )
+          .filter((entry) => entry.route === 'acknowledge');
+        expect(acknowledgesNow).toHaveLength(1);
+        expect(acknowledgesNow[0]!.request?.reference?.callId).toBe('write');
+      });
     });
 
     it('commits a refused call as not started and still settles it', async () => {

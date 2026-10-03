@@ -949,7 +949,9 @@ alone says which call took effect.
   and the Hosted dispatch gate: no local variant, so the tooling that reads
   Hosted logs reads these, and both paths answer the same questions. Intents
   and checkpoints name the `harness` actor with the activation subject;
-  receipts name `trusted_entry`, as in Hosted.
+  receipts name `trusted_entry`, as in Hosted. The restore gate reads only
+  the log the local authority just opened; the Hosted stores present through
+  their own open paths and never hand this gate a checkpointless log.
 - **Admitted before dispatch.** Before the host sends a call, it publishes
   the call's final parameters and, once per session and tool, the tool's
   definition, appends a `tool.intent` naming both with the call's

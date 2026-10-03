@@ -702,7 +702,9 @@ M2 一样，它不在 daemon 各构造点注册任何东西，因此 M6 之前�
   写入，采用 Hosted 的 Harness checkpoint 结构、Hosted 的 `tool.intent` 与
   `tool.receipt` 事件和 Hosted 的派发门禁：不做本地变体，因此读取 Hosted log 的工具
   也能读这些 log，两条路径回答同一组问题。intent 与 checkpoint 以带激活条目的
-  `harness` actor 写入；receipt 与 Hosted 一样以 `trusted_entry` 写入。
+  `harness` actor 写入；receipt 与 Hosted 一样以 `trusted_entry` 写入。恢复门只读取本地
+  authority 刚刚打开的 log；Hosted 的存储经由自己的打开路径出现，从不会把一份无
+  checkpoint 的 log 交给这个门。
 - **先准入、后派发。** 宿主发出调用之前，先发布该调用的最终参数，并按会话与工具各
   发布一次工具定义，追加一条以调用 `executionCallId`（call id）引用二者的
   `tool.intent`，再提交覆盖整个 prompt 批次（随调用累积）的 `await_runtime`
