@@ -202,9 +202,10 @@ or stale bodies keep the selector. In this gate a non-CJK title or keyword of
 any length counts only on a token boundary, so a memory titled `ai` does not
 skip the selector for `explain`, one titled `log conventions` does not skip it
 for `catalog conventions`, and a keyword `log` does not skip it for `catalog`.
-CJK titles and keywords keep substring matching: they are written without word
-separators, so there is no boundary to require. Candidates are counted before
-prompt trimming so a second match cannot disappear from the guard. No refined
+CJK edges keep substring matching because they are written without word
+separators. Mixed-script values still require boundaries at non-CJK edges;
+an adjacent CJK character also separates a non-CJK token. `Git文档` must not skip the selector for `Legit文档`. The pool count includes ranking and strict matches so CJK-adjacent short
+keywords cannot be missed. Candidates are counted before prompt trimming so a second match cannot disappear from the guard. No refined
 result arrives after a skip; the shared client delivers it as the fast phase.
 This is an ablation experiment; default behavior is unchanged.
 

@@ -963,24 +963,35 @@ describe('auto-memory relevant recall', () => {
       delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
     });
 
-    it.each(['1', ' TRUE '])(
-      'skips the selector with flag %s',
-      async (flag) => {
+    it.each([
+      ['1', 'keyword', 'provider fallback', query],
+      [' TRUE ', 'keyword', 'provider fallback', query],
+      ['1', 'title', 'provider fallback', query],
+      ['1', 'title', 'Git文档', '请解释Git文档的格式'],
+      ['1', 'keyword', '文档git', '请查看文档git的格式'],
+      ['1', 'title', '生产部署', '检查生产部署流程'],
+    ])(
+      'skips the selector with flag %s and a %s hit %s',
+      async (flag, field, value, searchQuery) => {
         process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        const hit =
+          field === 'title'
+            ? { ...exact, title: value, keywords: [] }
+            : { ...exact, keywords: [value] };
         // docs[1] is a weaker candidate the selector could have added; the skip
         // narrows proactive injection to the unique strong hit on purpose.
-        mockSnapshot([exact, docs[1]!]);
+        mockSnapshot([hit, docs[1]!]);
         const onFastResult = vi.fn();
 
         const result = await resolveRelevantAutoMemoryPromptForQuery(
           '/tmp/project',
-          query,
+          searchQuery,
           { config, onFastResult },
         );
 
         expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
-        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
-        expect(result.selectedDocs).toEqual([exact]);
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+        expect(result.selectedDocs).toEqual([hit]);
         expect(result.strategy).toBe('heuristic');
         expect(result.selectorSkipped).toBe(true);
         expect(result.treeSnapshot).toBe(
@@ -1278,6 +1289,111 @@ describe('auto-memory relevant recall', () => {
         innerSubstringTitle,
       ]);
       expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it.each([
+      ['title', 'Git文档', '请解释 Legit文档 的格式'],
+      ['keyword', 'git文档', '请解释 Legit文档 的格式'],
+      ['title', '文档Git', '请解释 文档GitHub 的格式'],
+      ['keyword', '文档git', '请解释 文档gitHub 的格式'],
+    ])(
+      'keeps the selector when a mixed-script %s %s matches inside a larger word',
+      async (field, value, searchQuery) => {
+        const innerSubstring = {
+          ...exact,
+          title: field === 'title' ? value : 'Build Notes',
+          keywords: field === 'keyword' ? [value] : [],
+          description: '',
+          usageScenarios: [],
+        };
+        mockSnapshot([innerSubstring]);
+        const onFastResult = vi.fn();
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          searchQuery,
+          { config, onFastResult },
+        );
+
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+          innerSubstring,
+        ]);
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+      },
+    );
+
+    it('keeps the selector when the prompt budget trims a second fast candidate', async () => {
+      const usageScenarios = [0, 1, 2].map((n) => String(n) + 'x'.repeat(63));
+      const first = {
+        ...exact,
+        description: 'x'.repeat(512),
+        usageScenarios,
+      };
+      const longPath = Array(18).fill('中'.repeat(30)).join('/') + '/b.md';
+      const second = {
+        ...docs[1]!,
+        filePath: '/tmp/m/' + longPath,
+        relativePath: longPath,
+        filename: 'b.md',
+        title: 'Ops notes',
+        description: ('provider again ' + 'x'.repeat(512)).slice(0, 512),
+        keywords: ['alpha', 'beta'],
+        usageScenarios,
+        body: 'unrelated',
+      };
+      mockSnapshot([first, second]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([first]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when CJK-adjacent short keywords have a competing title', async () => {
+      const hit = {
+        ...memoryDoc(
+          'a-usage.md',
+          'reference',
+          'Usage notes',
+          '代码说明',
+          'unrelated text',
+        ),
+        keywords: ['ai', 'coding'],
+        mtimeMs: 1,
+      };
+      const competitor = {
+        ...memoryDoc(
+          'b-ai.md',
+          'reference',
+          'AI',
+          'general guidance',
+          'unrelated text',
+        ),
+        keywords: ['models', 'usage'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([hit, competitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '请用ai给出代码说明',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock.calls[0]?.[2],
+      ).toContainEqual(competitor);
       expect(result.selectorSkipped).toBeUndefined();
     });
 

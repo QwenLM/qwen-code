@@ -361,8 +361,7 @@ describe('loggers', () => {
           docs_selected: 1,
         },
       );
-      // The log attribute stays unconditional on purpose; only the metric
-      // dimensions are gated on the experiment.
+      // Only the metric dimensions are gated on the experiment.
       expect(mockLogger.emit).toHaveBeenCalledWith({
         body: 'Memory recall: strategy=heuristic. Selected 1/3 docs.',
         attributes: expect.objectContaining({ selector_skipped: false }),
@@ -386,10 +385,14 @@ describe('loggers', () => {
             selector_skipped: skipped,
           },
         );
+        expect(mockLogger.emit.mock.lastCall?.[0].attributes).toHaveProperty(
+          'selector_skipped',
+          skipped,
+        );
       },
     );
 
-    it('drops the selector_skipped metric dimension when the recall had no skip decision', () => {
+    it('omits selector_skipped when the recall had no skip decision', () => {
       // Legacy-mode recalls never reach the skip guard; stamping a constant
       // `false` there would mix a no-decision series into the experiment's
       // control arm.
@@ -408,6 +411,9 @@ describe('loggers', () => {
           strategy: 'heuristic',
           docs_selected: 1,
         },
+      );
+      expect(mockLogger.emit.mock.lastCall?.[0].attributes).not.toHaveProperty(
+        'selector_skipped',
       );
     });
   });

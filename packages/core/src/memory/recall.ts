@@ -118,13 +118,8 @@ const RECALL_TOKEN_RUN = new RegExp(
 
 /** Whether a matched run is CJK, and therefore bigram-tokenized. */
 const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
+const CJK_RUN_END = new RegExp(`${CJK_CLASS}$`, 'u');
 const CJK_BIGRAM = new RegExp(`^${CJK_CLASS}{2}$`, 'u');
-
-/**
- * Whether a value holds any CJK code point, and so is written without the word
- * separators a token-boundary rule needs.
- */
-const CJK_ANY = new RegExp(CJK_CLASS, 'u');
 
 function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
@@ -332,22 +327,19 @@ function matchesTitleOrKeyword(
   const keywords = doc.keywords
     .map((keyword) => normalizeRecallText(keyword).trim())
     .filter(Boolean);
-  const includesAtBoundary = (value: string) => {
+  // CJK edges and neighbors split non-CJK tokens without a separator; other
+  // edges still need boundaries so Git文档 cannot match inside Legit文档.
+  const includesValue = (value: string) => {
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(
-      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`,
-      'u',
-    ).test(normalizedQuery);
+    const boundary = requireTokenBoundary
+      ? `(?:${CJK_CLASS}|[^\\p{L}\\p{N}])`
+      : '[^\\p{L}\\p{N}]';
+    const leftBoundary = CJK_RUN_START.test(value) ? '' : `(?:^|${boundary})`;
+    const rightBoundary = CJK_RUN_END.test(value) ? '' : `(?:$|${boundary})`;
+    return new RegExp(`${leftBoundary}${escaped}${rightBoundary}`, 'u').test(
+      normalizedQuery,
+    );
   };
-  // One strictness rule for both arms, keyed on the same script split the
-  // tokenizer draws: a value written with word separators must land on a token
-  // boundary. CJK values stay loose, because `includesAtBoundary` demands a
-  // `[^\p{L}\p{N}]` neighbour while Han, Kana, and Hangul are `\p{L}`, so a
-  // boundary rule would cancel every CJK skip.
-  const includesValue = (value: string) =>
-    CJK_ANY.test(value)
-      ? normalizedQuery.includes(value)
-      : includesAtBoundary(value);
   const includesKeyword = (keyword: string) =>
     requireTokenBoundary || /^[a-z0-9]{1,2}$/.test(keyword)
       ? includesValue(keyword)
@@ -419,33 +411,9 @@ function selectModelCandidateDocuments(
   recentTools: readonly string[],
   fallbackLimit: number,
   useStructuredMetadata = true,
-  countStrongMatches = false,
 ): {
   modelCandidates: ScannedAutoMemoryDocument[];
   fallbackDocs: ScannedAutoMemoryDocument[];
-  /**
-   * How many docs in `modelCandidates` — the pool the suppressed selector is
-   * handed — match the query by title or keyword, or `undefined` when
-   * `countStrongMatches` was off.
-   *
-   * The #13003 skip guard needs the selector's whole pool, not the published
-   * list: `fallbackDocs` is only the top `fallbackLimit`
-   * (`<= MAX_RELEVANT_DOCS`) of the lexical ranking, and the pool's `recent`
-   * reserve is built from `eligible`, so a doc whose only strong-match
-   * evidence is a keyword that is a proper substring of a query token scores
-   * 0, never enters `lexical`, and still sits in the selector's pool.
-   *
-   * Counts title/keyword matches, not `isStrongFastMatch`: that predicate's
-   * "≥2 query tokens anywhere in metadata" arm is loose enough that almost
-   * every pool would hold two of them, which would empty the experiment's
-   * treatment arm. The guard's contract is a unique *title or keyword* match.
-   *
-   * Computed only while the guard is live: `matchesTitleOrKeyword` builds a
-   * RegExp per short keyword per document, and this pool is roughly 36x wider
-   * than the fast list, on a path that carries a latency budget for every
-   * structured recall including knob-off ones.
-   */
-  candidateTitleKeywordMatchCount: number | undefined;
 } {
   const isActiveToolNoise = createActiveToolUsageFilter(
     recentTools,
@@ -475,13 +443,9 @@ function selectModelCandidateDocuments(
     return recentDoc ? [doc, recentDoc] : [doc];
   });
   modelCandidates.push(...recent.slice(modelLexical.length));
-  const candidateTitleKeywordMatchCount = countStrongMatches
-    ? modelCandidates.filter((doc) => matchesTitleOrKeyword(query, doc)).length
-    : undefined;
   return {
     modelCandidates,
     fallbackDocs: lexical.slice(0, fallbackLimit),
-    candidateTitleKeywordMatchCount,
   };
 }
 
@@ -763,9 +727,6 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   if (options.config) {
     try {
       const fastStartedAt = Date.now();
-      // Evaluate once, before the candidate pass: the same value decides
-      // whether the widened count is paid for and whether the guard below may
-      // fire, so the two cannot disagree if the environment changes mid-call.
       const skipGateEnabled =
         !legacy && isSkipSelectorOnUniqueStrongHitEnabled();
       const candidates = selectModelCandidateDocuments(
@@ -774,7 +735,6 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         options.recentTools ?? [],
         limit,
         !legacy,
-        skipGateEnabled,
       );
       fallbackDocs = candidates.fallbackDocs;
       // Publish the deterministic candidates before blocking on the selector
@@ -810,13 +770,10 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       fastDurationMs = Date.now() - fastStartedAt;
       // Count before rendering: a second candidate trimmed by the prompt
       // budget must not turn an ambiguous recall into a selector skip.
-      // `candidateTitleKeywordMatchCount` covers the selector's whole pool for
-      // the same reason — see its doc comment.
       const uniqueStrongHit = publishedFast?.selectedDocs[0];
       if (
         skipGateEnabled &&
         fastCandidateCount === 1 &&
-        (candidates.candidateTitleKeywordMatchCount ?? 0) === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
         // Strict arm: this match decides whether the selector runs at all, so
@@ -824,6 +781,13 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         matchesTitleOrKeyword(query, uniqueStrongHit, true) &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted &&
+        // Count ranking and strict matches across the full selector pool,
+        // including CJK-adjacent short keywords in the recent reserve.
+        candidates.modelCandidates.filter(
+          (doc) =>
+            matchesTitleOrKeyword(query, doc) ||
+            matchesTitleOrKeyword(query, doc, true),
+        ).length === 1 &&
         (await rereadSelectedDocuments([uniqueStrongHit]))[0]?.mtimeMs ===
           uniqueStrongHit.mtimeMs &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&

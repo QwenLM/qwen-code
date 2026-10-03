@@ -1620,8 +1620,10 @@ export function logMemoryRecall(
     scan_duration_ms: event.scan_duration_ms,
     fast_duration_ms: event.fast_duration_ms,
     selector_duration_ms: event.selector_duration_ms,
-    selector_skipped: event.selector_skipped,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1637,8 +1639,8 @@ export function logMemoryRecall(
     // legacy recalls leave the event field undefined), so deployments
     // without the flag keep the pre-existing attribute space on these
     // series and legacy-mode recalls do not mix a constant `false` into the
-    // experiment's control series. The log attribute above stays
-    // unconditional on purpose.
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
     ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
     typeof event.selector_skipped === 'boolean'
       ? { selector_skipped: event.selector_skipped }
