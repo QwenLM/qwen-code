@@ -70,6 +70,25 @@ class ManagedSessionStoreContractFixtureTest {
         }
 
         JsonNode transaction = contract.required("genesisTransaction");
+        JsonNode request = transaction.required("expectedRequest");
+        // Internal coherence of the published shape, not only of the digest:
+        // an edit regenerating one field must not keep the fixture green
+        // while its request summary disagrees with its records.
+        assertEquals(request.required("recordCount").intValue(),
+                transaction.required("records").size());
+        String sessionId = contract.required("sessionKey")
+                .required("sessionId").textValue();
+        for (JsonNode record : transaction.required("records")) {
+            assertEquals(sessionId, record.required("sessionId").textValue());
+        }
+        long firstSequence = request.required("firstSequence").longValue();
+        long lastSequence = request.required("lastSequence").longValue();
+        long eventCount = request.required("eventCount").longValue();
+        org.junit.jupiter.api.Assertions.assertTrue(
+                firstSequence <= lastSequence
+                        && eventCount >= 0
+                        && lastSequence - firstSequence + 1 >= eventCount,
+                "first/lastSequence and eventCount are mutually inconsistent");
         StringBuilder jsonl = new StringBuilder();
         for (JsonNode record : transaction.required("records")) {
             jsonl.append(JSON.writeValueAsString(record)).append('\n');

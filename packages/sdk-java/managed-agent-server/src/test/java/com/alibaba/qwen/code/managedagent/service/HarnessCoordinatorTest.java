@@ -381,7 +381,6 @@ class HarnessCoordinatorTest {
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.hasUnknownOutcome()).thenReturn(false);
         when(recovery.isCancellationReady()).thenReturn(true);
-        when(recovery.getPhase()).thenReturn("await_runtime");
         when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
         when(recovery.getActivationId()).thenReturn("activation-1");
         when(runtimeWarmer.isEnabled()).thenReturn(true);
@@ -462,7 +461,6 @@ class HarnessCoordinatorTest {
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.hasUnknownOutcome()).thenReturn(false);
         when(recovery.isCancellationReady()).thenReturn(true);
-        when(recovery.getPhase()).thenReturn("results_ready");
         when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
         when(recovery.getActivationId()).thenReturn("activation-1");
         when(runtimeWarmer.isEnabled()).thenReturn(false);
@@ -525,7 +523,6 @@ class HarnessCoordinatorTest {
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.hasUnknownOutcome()).thenReturn(false);
         when(recovery.isCancellationReady()).thenReturn(true);
-        when(recovery.getPhase()).thenReturn("results_ready");
         when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
         when(recovery.getActivationId()).thenReturn("activation-1");
         when(runtimeWarmer.isEnabled()).thenReturn(false);
@@ -924,6 +921,161 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
         verify(harness, never()).submit(anyString(), anyString(), anyString(),
                 any(), anyString());
+    }
+
+    @Test
+    void failsTurnWhenARecoveredRuntimeIsNotReadyForContinuation() {
+        String tenantId = "tenant-recovery-not-ready";
+        String sessionId = "session-recovery-not-ready";
+        String turnId = "turn-recovery-not-ready";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-old", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-old", 7);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isContinuationReady()).thenReturn(false);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", recovery));
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        // A recovered-but-not-ready execution must fail terminally with the
+        // fence's own code, not drive a second execution.
+        verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), eq("managed_runtime_recovery_incomplete"),
+                anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).submit(anyString(), anyString(), anyString(),
+                any(), anyString());
+    }
+
+    @Test
+    void failsTerminallyWhenTheRecoveredGenerationMoved() {
+        String tenantId = "tenant-recovery-generation";
+        String sessionId = "session-recovery-generation";
+        String turnId = "turn-recovery-generation";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-old", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-old", 7);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isContinuationReady()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", recovery, 9L,
+                        "epoch-new"));
+        when(store.bindRecoveredHarness(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("boot-old"), eq("boot-new")))
+                .thenReturn(false);
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        // A generation mismatch is terminal, not retryable: another owner
+        // may already hold the stopped Turn's effects.
+        verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(),
+                eq("hosted_harness_recovery_generation_mismatch"),
+                anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).cancelManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void retriesTheTurnWhenTheRecoveryWatermarkMoved() {
+        String tenantId = "tenant-recovery-watermark";
+        String sessionId = "session-recovery-watermark";
+        String turnId = "turn-recovery-watermark";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-new", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-new", 7);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isContinuationReady()).thenReturn(true);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
+        when(recovery.getActivationId()).thenReturn("activation-1");
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", recovery, 9L,
+                        "epoch-new"));
+        when(store.bindRecoveredHarness(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("boot-old"), eq("boot-new")))
+                .thenReturn(true);
+        when(store.findTurn(tenantId, sessionId, turnId))
+                .thenReturn(Optional.of(claimed));
+        // The continuation answers under a different epoch than the
+        // takeover advertised: drive must stop here, not double-execute.
+        when(harness.continueManagedRuntime(tenantId, sessionId, promptId,
+                "checkpoint-1", "activation-1"))
+                .thenReturn(new Admission(9, "epoch-moved"));
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store).scheduleTurnRetry(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyLong());
+        verify(store, never()).recordRecoveryAdmission(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyLong());
     }
 
     private static TurnRecord turn(String tenantId, String sessionId,
