@@ -638,6 +638,30 @@ describe('useManagedActions', () => {
     expect(hook.latest?.action).toBeUndefined();
   });
 
+  it('drops an approval another client already answered', async () => {
+    // The code Java returns when a stale tab answers an Action that another
+    // tab or the REST API already decided.
+    const ended = Object.assign(new Error('Action already resolved'), {
+      status: 409,
+      code: 'action_already_resolved',
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'deny'));
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+  });
+
   it('shows an ended approval again when the next read still lists it', async () => {
     const ended = Object.assign(new Error('Action cancelled'), {
       status: 409,
