@@ -258,8 +258,9 @@ Semantics mounted on the contract:
   entry's input, encoded input and result payload, keeps the reference and
   the digests, and moves the entry to the terminal `acknowledged` state. A
   later `execute` with the same `callId` is a 409 identity conflict,
-  `status` answers `acknowledged` with the retained digests, and a repeated
-  `acknowledge` answers it again. A known entry that has not settled —
+  `status` answers `acknowledged` for the reference after its payload is
+  dropped, and a repeated `acknowledge` answers it again. The entry keeps
+  the reference, with its `argsDigest`, so the repeat still mismatches. A known entry that has not settled —
   `prepared`, `executing`, or `cancel_requested` — is a 409 identity
   conflict; the caller retries only after the call settles. An unknown
   reference gets the 200 `unknown` answer.
