@@ -4008,6 +4008,7 @@ export function createServeApp(
     app,
     credentials,
     originAllowlist,
+    daemonLog,
     // Resolved through the ref on each call rather than captured so Local
     // Control cannot attach to a stale ACP mount.
     attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
@@ -4022,6 +4023,7 @@ export function createServeApp(
 
   registerWorkspaceLocalControlRoutes(app, {
     service: localControlService,
+    daemonLog,
     mutate,
     safeBody,
     isDaemonDraining: deps.isChannelControlDraining,

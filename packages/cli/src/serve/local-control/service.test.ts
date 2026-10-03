@@ -4,22 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express from 'express';
+import express, { type Request } from 'express';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MutableOriginAllowlist } from '../auth.js';
 import { CredentialStore } from './credentials.js';
-import { LocalControlService } from './service.js';
+import { listenerIdentityOf } from './listener-identity.js';
+import { LocalControlBindError, LocalControlService } from './service.js';
 
 const sleep = vi.hoisted(() => ({ release: vi.fn() }));
 const sleepInhibitorMock = vi.hoisted(() => ({
   acquire: vi.fn(() => sleep),
   isRunning: vi.fn(() => true),
 }));
+const writeStderrLineSafeMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   sleepInhibitor: sleepInhibitorMock,
+}));
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
+  writeStderrLineSafe: writeStderrLineSafeMock,
 }));
 
 vi.mock('./lan-interfaces.js', async (importOriginal) => ({
@@ -108,6 +115,45 @@ describe('LocalControlService', () => {
     await service.disable();
   });
 
+  it('derives an ephemeral endpoint from the address the server bound', async () => {
+    const credentials = new CredentialStore();
+    const origins = new MutableOriginAllowlist({
+      allowAny: false,
+      origins: new Set(),
+    });
+    const attached: Server[] = [];
+    const service = new LocalControlService({
+      app: express(),
+      credentials,
+      originAllowlist: origins,
+      attachWebSocket: (server) => attached.push(server),
+      detachWebSocket: vi.fn(),
+      getPort: () => 0,
+    });
+
+    try {
+      const status = await service.enable();
+      const boundPort = (attached[0].address() as AddressInfo).port;
+      const authority = `127.0.0.1:${boundPort}`;
+
+      expect(boundPort).toBeGreaterThan(0);
+      expect(status.port).toBe(boundPort);
+      expect(new URL(status.url!).host).toBe(authority);
+      expect(origins.allows(`http://${authority}`)).toBe(true);
+      expect(
+        listenerIdentityOf({
+          socket: { server: attached[0] },
+        } as unknown as Request),
+      ).toEqual({
+        kind: 'local-control',
+        authority,
+        origin: `http://${authority}`,
+      });
+    } finally {
+      if (service.active) await service.disable();
+    }
+  });
+
   it('orders disable after an in-flight enable', async () => {
     const port = await unusedPort();
     const service = new LocalControlService({
@@ -171,45 +217,245 @@ describe('LocalControlService', () => {
     await service.disable();
   });
 
-  it('detaches the temporary listening handler when listen fails', async () => {
-    // Occupy the port so `listen()` rejects with EADDRINUSE. The pending
-    // `once('listening')` handler must be removed on the error path; if it
-    // lingered, a retry on the same server could resolve via the stale handler.
-    const blocker = createServer();
-    await new Promise<void>((resolve) =>
-      blocker.listen(0, '127.0.0.1', resolve),
-    );
-    const busyPort = (blocker.address() as AddressInfo).port;
+  it.each(['stderr', 'daemon', 'broken-daemon'])(
+    'falls back to a free port and propagates the bound endpoint with %s logging',
+    async (logging) => {
+      const blocker = createServer();
+      await new Promise<void>((resolve) =>
+        blocker.listen(0, '127.0.0.1', resolve),
+      );
+      const busyPort = (blocker.address() as AddressInfo).port;
 
-    const attached: Server[] = [];
-    const service = new LocalControlService({
-      app: express(),
-      credentials: new CredentialStore(),
-      originAllowlist: new MutableOriginAllowlist({
+      const credentials = new CredentialStore();
+      const origins = new MutableOriginAllowlist({
         allowAny: false,
         origins: new Set(),
-      }),
-      attachWebSocket: (server) => attached.push(server),
-      detachWebSocket: vi.fn(),
-      getPort: () => busyPort,
+      });
+      const attached: Server[] = [];
+      let initialListeningHandlers: ReturnType<Server['listeners']> = [];
+      const daemonLog = logging === 'stderr' ? undefined : { warn: vi.fn() };
+      if (logging === 'broken-daemon') {
+        daemonLog!.warn.mockImplementation(() => {
+          throw new Error('Log sink closed');
+        });
+      }
+      const service = new LocalControlService({
+        app: express(),
+        credentials,
+        originAllowlist: origins,
+        daemonLog,
+        attachWebSocket: (server) => {
+          initialListeningHandlers = server.listeners('listening');
+          attached.push(server);
+        },
+        detachWebSocket: vi.fn(),
+        getPort: () => busyPort,
+      });
+
+      try {
+        const status = await service.enable();
+        expect(status.active).toBe(true);
+        expect(status.port).not.toBe(busyPort);
+        expect(attached).toHaveLength(1);
+
+        const boundPort = (attached[0].address() as AddressInfo).port;
+        const authority = `127.0.0.1:${boundPort}`;
+        expect(status.port).toBe(boundPort);
+        expect(new URL(status.url!).host).toBe(authority);
+        expect(origins.allows(`http://${authority}`)).toBe(true);
+        expect(origins.allows(`http://127.0.0.1:${busyPort}`)).toBe(false);
+        expect(
+          listenerIdentityOf({
+            socket: { server: attached[0] },
+          } as unknown as Request),
+        ).toEqual({
+          kind: 'local-control',
+          authority,
+          origin: `http://${authority}`,
+        });
+
+        const pairingToken = new URL(status.url!).hash.slice('#token='.length);
+        expect(
+          credentials.verify(pairingToken, {
+            kind: 'local-control',
+            authority,
+          }),
+        ).toBe(true);
+        // Preserve Node's connection-tracking handler, but no temporary handlers.
+        expect(attached[0].listeners('listening')).toEqual(
+          initialListeningHandlers,
+        );
+        expect(attached[0].listenerCount('error')).toBe(1);
+        const diagnostic =
+          'Local Control preferred port is in use (EADDRINUSE); listening on an available port instead';
+        if (daemonLog) {
+          expect(daemonLog.warn).toHaveBeenCalledExactlyOnceWith(diagnostic, {
+            errno: 'EADDRINUSE',
+          });
+        }
+        if (logging === 'daemon') {
+          expect(writeStderrLineSafeMock).not.toHaveBeenCalled();
+        } else {
+          expect(writeStderrLineSafeMock).toHaveBeenCalledWith(
+            `qwen serve: ${diagnostic}`,
+          );
+        }
+
+        await service.disable();
+        expect(origins.allows(`http://${authority}`)).toBe(false);
+        expect(attached[0].listening).toBe(false);
+        expect(
+          credentials.verify(pairingToken, { kind: 'local-control' }),
+        ).toBe(false);
+      } finally {
+        if (service.active) await service.disable();
+        await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      }
+    },
+  );
+
+  it.each([
+    {
+      errno: 'EACCES',
+      code: 'bind_denied',
+      expectedPorts: [4170],
+    },
+    {
+      errno: 'EPERM',
+      code: 'bind_denied',
+      expectedPorts: [4170],
+    },
+    {
+      errno: 'EADDRINUSE',
+      code: 'address_in_use',
+      expectedPorts: [4170, 0],
+    },
+    {
+      errno: 'EADDRNOTAVAIL',
+      code: 'invalid_address',
+      expectedPorts: [4170],
+    },
+    {
+      errno: 'EINVAL',
+      code: 'invalid_address',
+      expectedPorts: [4170],
+    },
+  ] as const)(
+    'rolls back $errno as $code and only retries address collisions',
+    async ({ errno, code, expectedPorts }) => {
+      const credentials = new CredentialStore();
+      const addToken = vi.spyOn(credentials, 'addPairingToken');
+      const origins = new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      });
+      const error = Object.assign(new Error(`listen ${errno}`), {
+        code: errno,
+      });
+      const attemptedPorts: unknown[] = [];
+      const attached: Server[] = [];
+      const detachWebSocket = vi.fn();
+      let initialListeningHandlers: ReturnType<Server['listeners']> = [];
+      const service = new LocalControlService({
+        app: express(),
+        credentials,
+        originAllowlist: origins,
+        attachWebSocket: (server) => {
+          attached.push(server);
+          initialListeningHandlers = server.listeners('listening');
+          vi.spyOn(server, 'listen').mockImplementation((...args) => {
+            attemptedPorts.push(args[0]);
+            if (errno === 'EINVAL') throw error;
+            queueMicrotask(() => server.emit('error', error));
+            return server;
+          });
+        },
+        detachWebSocket,
+        getPort: () => 4170,
+      });
+
+      const rejection = await service
+        .enable()
+        .catch((failure: unknown) => failure);
+
+      expect(rejection).toBeInstanceOf(LocalControlBindError);
+      expect(rejection).toMatchObject({ code, errno, cause: error });
+      expect(attemptedPorts).toEqual(expectedPorts);
+      expect(service.status()).toEqual({ active: false });
+      expect(attached[0].listening).toBe(false);
+      expect(attached[0].listeners('listening')).toEqual(
+        initialListeningHandlers,
+      );
+      expect(attached[0].listenerCount('error')).toBe(0);
+      expect(detachWebSocket).toHaveBeenCalledExactlyOnceWith(attached[0]);
+      expect(origins.allows('http://127.0.0.1:4170')).toBe(false);
+      expect(
+        credentials.verify(addToken.mock.calls[0][1], {
+          kind: 'local-control',
+        }),
+      ).toBe(false);
+      expect(sleepInhibitorMock.acquire).not.toHaveBeenCalled();
+      expect(writeStderrLineSafeMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('closes the fallback listener when endpoint initialization fails', async () => {
+    const credentials = new CredentialStore();
+    const addToken = vi.spyOn(credentials, 'addPairingToken');
+    const origins = new MutableOriginAllowlist({
+      allowAny: false,
+      origins: new Set(),
+    });
+    const addOrigin = origins.add.bind(origins);
+    const error = new Error('Origin registration failed');
+    const originRegistration = vi
+      .spyOn(origins, 'add')
+      .mockImplementation((key, origin) => {
+        addOrigin(key, origin);
+        throw error;
+      });
+    const attached: Server[] = [];
+    const detachWebSocket = vi.fn();
+    const service = new LocalControlService({
+      app: express(),
+      credentials,
+      originAllowlist: origins,
+      attachWebSocket: (server) => {
+        attached.push(server);
+        vi.spyOn(server, 'listen').mockImplementationOnce(() => {
+          queueMicrotask(() =>
+            server.emit(
+              'error',
+              Object.assign(new Error('Address in use'), {
+                code: 'EADDRINUSE',
+              }),
+            ),
+          );
+          return server;
+        });
+      },
+      detachWebSocket,
+      getPort: () => 4170,
     });
 
-    await expect(service.enable()).rejects.toThrow();
-    expect(service.active).toBe(false);
-    expect(attached).toHaveLength(1);
+    try {
+      await expect(service.enable()).rejects.toBe(error);
 
-    // Node attaches its own internal 'listening' listener during listen(), so
-    // compare against a control server that failed the same way without any of
-    // the service's handlers: a leftover temporary handler would show up as +1.
-    const control = createServer();
-    await new Promise<void>((resolve) => {
-      control.once('error', () => resolve());
-      control.listen(busyPort, '127.0.0.1');
-    });
-    expect(attached[0].listenerCount('listening')).toBe(
-      control.listenerCount('listening'),
-    );
-
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      expect(service.status()).toEqual({ active: false });
+      expect(attached[0].listening).toBe(false);
+      expect(attached[0].address()).toBeNull();
+      expect(detachWebSocket).toHaveBeenCalledExactlyOnceWith(attached[0]);
+      for (const [, origin] of originRegistration.mock.calls) {
+        expect(origins.allows(origin)).toBe(false);
+      }
+      expect(
+        credentials.verify(addToken.mock.calls[0][1], {
+          kind: 'local-control',
+        }),
+      ).toBe(false);
+      expect(sleepInhibitorMock.acquire).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => attached[0].close(() => resolve()));
+    }
   });
 });
