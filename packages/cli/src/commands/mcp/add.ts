@@ -13,6 +13,24 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
+// yargs reports a list flag in three shapes without usable values, and an
+// unset list (no filter) differs from an empty one (allow none): an omitted
+// flag is `undefined` (unset), a negated flag such as `--no-include-tools` is
+// `[false]` (unset), and a flag given with no value is `[]` (empty). A
+// negation given alongside values (`['a', false]`) is ignored: the explicit
+// values win.
+function splitCommaList(values: unknown[] | undefined): string[] | undefined {
+  if (values === undefined) return undefined;
+  const strings = values.filter(
+    (value): value is string => typeof value === 'string',
+  );
+  if (strings.length === 0) return values.length ? undefined : [];
+  return strings
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 async function addMcpServer(
   name: string,
   commandOrUrl: string,
@@ -32,7 +50,7 @@ async function addMcpServer(
     oauthRedirectUri?: string;
     oauthAuthorizationUrl?: string;
     oauthTokenUrl?: string;
-    oauthScopes?: string[];
+    oauthScopes?: unknown[];
   },
 ) {
   const {
@@ -68,10 +86,7 @@ async function addMcpServer(
 
   let newServer: Partial<MCPServerConfig> = {};
 
-  const scopes = oauthScopes
-    ?.flatMap((s) => s.split(','))
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const scopes = splitCommaList(oauthScopes);
 
   const hasOAuth = Boolean(
     oauthClientId ||
@@ -322,8 +337,12 @@ export const addCommand: CommandModule = {
         timeout: argv['timeout'] as number | undefined,
         trust: argv['trust'] as boolean | undefined,
         description: argv['description'] as string | undefined,
-        includeTools: argv['includeTools'] as string[] | undefined,
-        excludeTools: argv['excludeTools'] as string[] | undefined,
+        includeTools: splitCommaList(
+          argv['includeTools'] as unknown[] | undefined,
+        ),
+        excludeTools: splitCommaList(
+          argv['excludeTools'] as unknown[] | undefined,
+        ),
         oauthClientId: argv['oauthClientId'] as string | undefined,
         oauthClientSecret: argv['oauthClientSecret'] as string | undefined,
         oauthRedirectUri: argv['oauthRedirectUri'] as string | undefined,
@@ -331,7 +350,7 @@ export const addCommand: CommandModule = {
           | string
           | undefined,
         oauthTokenUrl: argv['oauthTokenUrl'] as string | undefined,
-        oauthScopes: argv['oauthScopes'] as string[] | undefined,
+        oauthScopes: argv['oauthScopes'] as unknown[] | undefined,
       },
     );
   },
