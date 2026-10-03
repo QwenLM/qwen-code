@@ -4088,6 +4088,9 @@ export class QQChannel extends ChannelBase {
           // while it is still present it is itself a holder, so reclaiming
           // first would always veto. A still-live holder (session anchor,
           // stream entry, in-flight send, routing map) vetoes as before.
+          // Pre-reorder, that first call was a self-vetoed no-op and this
+          // tick's orphan pass below reclaimed the counter anyway, so the
+          // ordering has no observable difference (accepted zero coverage).
           this.replyMsgId.delete(chatId);
           if (this.reclaimMsgSeq(entry.msgId)) reclaimed = true;
           dirty = true;
