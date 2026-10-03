@@ -217,6 +217,8 @@ class HarnessCoordinatorTest {
         HarnessConnector takeoverHarness = mock(HarnessConnector.class);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
         when(takeover.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -238,6 +240,59 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong());
         verify(takeover, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A lease-shaped 409 exempts only on a bound Session; on an unbound
+    // one the wait names no predecessor's lease and meets the budget.
+    @Test
+    void unboundSessionMeetsRetryBudgetOnLeaseBounded409() {
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(conflict,
+                false, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // A configuration-shaped 409 (its code is durable, no lease semantics)
+    // meets the pre-admission budget even on a bound Session.
+    @Test
+    void boundSessionMeetsRetryBudgetOnConfiguration409() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("hosted_tool_profile_conflict");
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(conflict);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     // An unbound Session has no prior generation whose lease bounds the

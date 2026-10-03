@@ -492,6 +492,8 @@ class QwenHostedHarnessConnectorTest {
         when(client.capabilities()).thenReturn(capabilities);
         when(fresh.getHarnessBootId()).thenReturn(NEW_BOOT_ID);
         when(stale.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery())
+                .thenReturn(mock(HarnessRuntimeRecovery.class));
         when(client.loadSession(any(LoadHarnessSession.class)))
                 .thenReturn(fresh, stale);
         QwenHostedHarnessConnector connector =
@@ -499,7 +501,7 @@ class QwenHostedHarnessConnectorTest {
                         mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(
                 connector, "client", client);
-        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
         connector.createOrLoad("tenant-a", secondSessionId, true);
 
         HostedHarnessGenerationException mismatch =
@@ -520,6 +522,14 @@ class QwenHostedHarnessConnectorTest {
                 .noneMatch(ref -> BOOT_ID.equals(ref.getHarnessBootId()));
         assertThat(attachments.values())
                 .anyMatch(ref -> NEW_BOOT_ID.equals(ref.getHarnessBootId()));
+        // The equal-boot exception names the live client, so the markers
+        // it minted stay: a pending recovery is not collateral damage.
+        @SuppressWarnings("unchecked")
+        java.util.Set<Object> pendingRecovery =
+                (java.util.Set<Object>)
+                        org.springframework.test.util.ReflectionTestUtils
+                                .getField(connector, "pendingRecovery");
+        assertThat(pendingRecovery).isNotEmpty();
     }
 
     // The shared bean must rebuild exactly once when two attempts surface a
@@ -556,10 +566,16 @@ class QwenHostedHarnessConnectorTest {
         };
         java.util.concurrent.ExecutorService pool =
                 java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.Future<?>[] futures;
         try {
-            pool.submit(attempt);
-            pool.submit(attempt);
+            futures = new java.util.concurrent.Future<?>[] {
+                    pool.submit(attempt), pool.submit(attempt)};
             start.countDown();
+            // get() rethrows a worker's failed assertion; submit() alone
+            // would swallow it into the discarded FutureTask forever.
+            for (java.util.concurrent.Future<?> future : futures) {
+                future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            }
             pool.shutdown();
             assertThat(pool.awaitTermination(10,
                     java.util.concurrent.TimeUnit.SECONDS)).isTrue();
@@ -567,6 +583,10 @@ class QwenHostedHarnessConnectorTest {
             pool.shutdownNow();
         }
         verify(oldClient, org.mockito.Mockito.times(1)).close();
+        // Neither worker fell through into a real client build: a live
+        // GET /capabilities from a unit test must stay impossible.
+        assertThat(ReflectionTestUtils.getField(connector, "client"))
+                .isNull();
     }
 
     // The one code-aware call site: a takeover refusal that cannot change

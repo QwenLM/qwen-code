@@ -158,16 +158,18 @@ Session 停靠 Turn 的回答）、`shell_in_flight`（一个 Shell 执行在
 load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批次停在
 `await_runtime` 之前且参数不耐久）、`checkpoint_blocked`（checkpoint
 已无法解析回可运行状态）、`unresolved_after_settle`（checkpoint 指向
-另一个 Turn，或结算后仍不可运行）。有一个最初起草为 decline 的状态
-其实不是：checkpoint 相位为 `turn_settled` 的 journal 返回独立的
-`settled` 结局并携带 prompt id，load 路由为它跑自己的结算收尾——
-结算，永不失败。
+另一个 Turn，或结算后仍不可运行）、`turn_settled`（journal 中已结算
+但终态记录尚未投影——换绑续读归 Step 3，本切片让该耐久判定带类型化
+reason decline，而不是驱动普通 load 的结算尾巴）。
 
 `checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
 `invalid_state`、`identity_mismatch`）。被 authorization 层抹平成
 `missing_state` / `missing_checkpoint` 的瞬时 Managed Session Store
 失败会作为瞬态重新抛出，永不 decline：这条边界刻意收窄，接管 load
-期间的一次 store 抖动不能把 journal 完好的 Turn 终态掉。
+期间的一次 store 抖动不能把 journal 完好的 Turn 终态掉。load 路由的
+restore 守卫在接管分支之前做同一次判读，因为 restore bundle 会把两种
+判定折叠成一个 `blocked` 位——耐久 reason 在那里变成类型化 decline，
+其余仍回答可重试的 409。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管
@@ -221,8 +223,10 @@ writer 无法改动 journal——但不是 binding 半边：
 开放问题」）。replacement Spring 继承原来的端口，因为被冻结
 Harness 的 journal store URL 在 load 时已经固定：苏醒后它的 store
 调用遇到的是活着的、会 fence 的控制面，而不是死 socket——否则
-苏醒后的断言靠断连成立，而不是靠 fencing 成立。teardown 不需要
-额外信号顺序（Harness 已经被 SIGCONT 过）。同一个 PR 把
+苏醒后的断言靠断连成立，而不是靠 fencing 成立。teardown 在停止子进程清单之前，
+先按子进程注册表里的启动名唤醒被冻结的
+Harness（注册键与唤醒查找共用同一个常量；查不到就直接让运行失败，
+而不是留下卡死的 writer）。同一个 PR 把
 `npm run test:e2e:managed-session-failover` 接进 `hosted-harness-mysql`
 CI 任务——它此前是遗漏而非刻意缺席。
 
@@ -240,18 +244,23 @@ Session 的下一个 Turn 完成，且在模型边界看到第一个 Turn 的 pr
 画面由同一支路在 `main` 上产出：必须以 README 记录的 generation
 error 失败。README `:185` 那句随之删除。Spring 与其 Broker 都活着时
 worker 不会成孤儿，不需要 W0e reclaim，所以代码里对 workspace-turns
-场景解除了 Linux 门禁；杀两棵树的模式保留门禁。但运行这些支路的
-所有 lane 都是 Linux（`hosted-harness-mysql` 仅 ubuntu），所以
+场景解除了 Linux 门禁；杀两棵树的模式保留门禁。这些支路还钉住
+它们之所以是「只重启 Harness」而非变相 kill-both 的本体事实：存活的
+Spring、Broker 与耐久 Worker 持续服务同一个
+`runtime_session_id`，活着的 Broker 在其已持有的代际上重派发（恰为
+`'0'` 或 `'1'`——不再是只允许 `'1'`，也不接受无界值）。但运行这些
+支路的所有 lane 都是 Linux（`hosted-harness-mysql` 仅 ubuntu），所以
 darwin 是一个未被验证的预期，而不是等待首个不可能发生的运行来拍板
 的门禁。
 
 ### D9 —— 生产默认值改到自洽（按 issue 的拍板项）
 
 - **D9a，重试预算对 writer lease。** 已绑定 Session 的恢复附着路径
-  上、一个 takeover 形态的 409 豁免于准入前上限，因为该等待以前任
-  自己的 lease 为上界。其他一切——传输失败、配置形态的错误——都
-  计入预算，所以 Harness 永久缺席的 Turn 仍以
-  `hosted_harness_unavailable` 终结。
+  上，一个 body 带 lease 形态 code（`hosted_turn_recovery_required`、
+  `hosted_prompt_recovery_required`、`hosted_session_already_attached`）
+  的 409 豁免于准入前上限——该等待以前任自己的 lease 为上界。其他
+  一切——传输失败与配置形态的 4xx/409——都计入预算，所以 Harness
+  永久缺席的 Turn 仍以 `hosted_harness_unavailable` 终结。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
   只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
   `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，
@@ -279,29 +288,32 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 ## 改动与属主
 
-| 层                        | 文件                                                                                        | 改动                                                                                              |
-| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Java qwencode             | `HostedHarnessClient.java`、`DaemonHttpException.java`                                      | 按请求 load 超时；错误体 code 访问器（无全局 code 表）                                            |
-| Java managed-agent-server | `QwenHostedHarnessConnector.java`、新增 `HostedHarnessRecoveryDeclinedException.java`       | D1 接纳（client 重建 + 缓存失效），D5 在 `recoverManagedRuntime` 单点解析 409 code 并抛类型化异常 |
-| Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch 改动、D4 撤回的使用、D9a 豁免                                                            |
-| Java managed-agent-server | `ManagedAgentStore.java`                                                                    | `withdrawSubmissionAttempted` CAS（D4）                                                           |
-| Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）                                                                             |
-| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、快照保留与幂等重复 load（D6）                                            |
-| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | 可判别的 decline 结果（D5），复用 core 的 `HARNESS_MODEL_START_PHASES`                            |
-| TS CLI                    | `capabilities.ts`、`routes/capabilities.ts`、`qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token（D9c）                                           |
-| Java qwencode             | `HostedHarnessClient.java`（协商处）                                                        | 硬编码的 `managed_session_journal_delta_v1` feature 检查（D9c）——刻意不设配置旋钮                 |
-| TS core                   | `managed-harness-checkpoint.ts`                                                             | 不改；D5 的命名复用 `HARNESS_MODEL_START_PHASES`                                                  |
-| Runner + CI               | `scripts/run-managed-agent-server-e2e.ts`、`package.json`、`.github/workflows/sdk-java.yml` | D7 冻结支路、D8 只重启 Harness 支路、 `--session-failover` 步骤                                   |
-| 文档                      | `managed-agent-server/README.md`                                                            | 删除 generation error 那句；记录接纳行为                                                          |
-| 单元测试                  | 上述各文件的 collocated `*.test.*`                                                          | 按决策覆盖；见验证                                                                                |
+| 层                        | 文件                                                                                        | 改动                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Java qwencode             | `HostedHarnessClient.java`、`DaemonHttpException.java`                                      | 按请求 load 超时；错误体 code 访问器（无全局 code 表）                                                |
+| Java managed-agent-server | `QwenHostedHarnessConnector.java`、新增 `HostedHarnessRecoveryDeclinedException.java`       | D1 接纳（client 重建 + 缓存失效），D5 在 `recoverManagedRuntime` 单点解析 409 code 并抛类型化异常     |
+| Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch 改动、D4 撤回的使用、D9a 豁免                                                                |
+| Java managed-agent-server | `ManagedAgentStore.java`、`AgentStateStore.java`                                            | `withdrawSubmissionAttempted` CAS 及其 store 接口签名（D4）                                           |
+| Java managed-agent-server | `ActionResponseCoordinator.java`                                                            | capability 不匹配的终态 catch：action outbox 记为带 code 的 FAILED（诚实终态，区别于生命周期 outbox） |
+| Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` 标志访问器（D9b）                                                           |
+| Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）                                                                                 |
+| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、快照保留与幂等重复 load（D6）                                                |
+| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | 可判别的 decline 结果（D5），复用 core 的 `HARNESS_MODEL_START_PHASES`                                |
+| TS CLI                    | `capabilities.ts`、`routes/capabilities.ts`、`qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token（D9c）                                               |
+| Java qwencode             | `HostedHarnessClient.java`（协商处）                                                        | 硬编码的 `managed_session_journal_delta_v1` feature 检查（D9c）——刻意不设配置旋钮                     |
+| TS core                   | `managed-harness-checkpoint.ts`                                                             | 不改；D5 的命名复用 `HARNESS_MODEL_START_PHASES`                                                      |
+| Runner + CI               | `scripts/run-managed-agent-server-e2e.ts`、`package.json`、`.github/workflows/sdk-java.yml` | D7 冻结支路、D8 只重启 Harness 支路、 `--session-failover` 步骤                                       |
+| 文档                      | `managed-agent-server/README.md`                                                            | 删除 generation error 那句；记录接纳行为                                                              |
+| 单元测试                  | 上述各文件的 collocated `*.test.*`                                                          | 按决策覆盖；见验证                                                                                    |
 
 属主沿共享 bean 结构走：`HarnessCoordinator`、
 `SessionLifecycleCoordinator`、`ActionResponseCoordinator` 与
 `ManagedAgentService` 注入的是同一个 connector bean，D1 不需要逐调用方
 改动；三个 coordinator 的重试机制完成剩余部分。`ManagedAgentService`
 不同：它唯一的同步 Harness attach（rename）没有重试机制，所以调用
-中途换代会表现为客户端可见的 `hosted_harness_unavailable`；重试的
-客户端下一次尝试会落到已接纳的新代上。
+中途换代——以及同一 attach 顺带观测到的 capability digest 不匹配——
+都会表现为客户端可见的 `hosted_harness_unavailable`（503）；重试的
+客户端下一次尝试会落到已接纳（或已对齐）的新代上。
 
 ## 验证与验收
 
@@ -314,15 +326,16 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
   （`HostedHarnessClientTest`）与各 coordinator 的终态 catch——而不是
   由 connector 级测试钉住，因为 connector 没有添加第三道门禁。
 - coordinator：线上不一致排重试而非失败；已绑定 Session 的恢复附着在
-  传输失败时计入准入前预算、在 takeover 409 上豁免；decline →
-  `managed_runtime_recovery_blocked`。
-- store：`withdrawSubmissionAttempted` 只在守卫成立时成功（owner、
-  lease 有效、状态窗口、无 epoch、已标记）；第二次撤回输掉 CAS。
-- TS：每种 decline reason 都由其 journal 状态产出；`turn_settled`
-  checkpoint 返回 `settled` 结局而非 decline；瞬时 blocked 的
-  authorization（`missing_state`）抛出而非 decline，耐久判定
-  （`opaque_state`）走终态；重复接管 load 在被消费前返回同一快照
-  200，普通重复 load 返回 409 `hosted_session_already_attached`。
+  除 lease 形态 code 的 409 之外都计入准入前预算，未绑定 Session 的
+  409 一律不豁免；decline → `managed_runtime_recovery_blocked`。
+- store：coordinator 层钉住 拒绝→撤回→重绑→标记→提交 的顺序，第二次
+  撤回输掉 CAS（CAS 本身的真 MySQL 守卫测试留作 store IT 家族的后续）。
+- TS：除 `await_action` 外每种 decline reason 都有从 journal 状态产出的
+  测试（`await_action` 夹具与路由级 202-replay 水印的测试钉同属
+  Step 3 欠账）；瞬时 blocked 的 authorization（`missing_state`）抛出
+  而非 decline，耐久判定（`opaque_state`）走终态；重复接管 load 在被
+  消费前返回同一快照 200，普通重复 load 返回 409
+  `hosted_session_already_attached`。
 
 E2E（runner 支路，全部对着打包后的栈）：
 
@@ -333,8 +346,9 @@ E2E（runner 支路，全部对着打包后的栈）：
    Spring 不重启下移动。
 3. D7 冻结支路：SIGCONT 后的断言如上。删掉任一断言该支路必须失败。
 4. CI：`hosted-harness-mysql` 增加 D7 支路、D8 各支路与
-   `--session-failover`，任务上限随之从 60 分钟放宽到 95 分钟，让
-   七条步骤上限之和（92）保留余量。
+   `--session-failover`，任务上限随之从 60 分钟放宽到 105 分钟，让
+   九条步骤上限之和（12+10+8×10 = 92）加上不设上限的安装准备步骤
+   保留余量。
 
 D4 背后的丢回复竞态（旧代准入、202 回复被丢、Harness 重启后 Turn 必须
 完成且其 `promptId` 的 `command_id` 在 journal 中恰好一次准入）需要在

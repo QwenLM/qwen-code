@@ -45,6 +45,12 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessCoordinator {
+    // 409 bodies whose wait is bounded by the predecessor's writer lease;
+    // every other body shape (configuration, conflicts with no lease
+    // semantics, code-blind) meets the pre-admission budget instead.
+    private static final Set<String> LEASE_BOUNDED_409_CODES = Set.of(
+            "hosted_turn_recovery_required", "hosted_prompt_recovery_required",
+            "hosted_session_already_attached");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -208,13 +214,16 @@ public class HarnessCoordinator {
                 terminal = failTerminally(claimed, "hosted_harness_rejected",
                         "Hosted Harness rejected the Turn.", error);
             } else {
-                // Only a live predecessor's guardrails may stretch past the
-                // pre-admission budget: a 409 on the recovery attach is a
-                // wait bounded by that predecessor's own lease. Transport
-                // and configuration-shaped failures must meet the budget.
+                // Only a live predecessor's guardrails may stretch past
+                // the pre-admission budget: a lease-bounded 409 on the
+                // recovery attach of a bound Session is a wait bounded by
+                // that predecessor's own lease. Configuration-shaped 409s
+                // (the code says so) and every other failure meet it.
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error,
-                        error.getStatusCode() == 409 && recoveryPath.get());
+                        recoveryPath.get()
+                                && LEASE_BOUNDED_409_CODES.contains(
+                                        error.getErrorCode()));
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()

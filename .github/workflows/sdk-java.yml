@@ -294,10 +294,11 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+10+10+5×10 = 92) need headroom beyond a
-    # healthy run's ~20-25 min end-to-end; each added arm buys its own 10
-    # minutes instead of sharing the prior 20-minute envelope.
-    timeout-minutes: 95
+    # The step ceilings (12+10+8×10 = 92) plus ~10 minutes for the
+    # uncapped setup steps (Checkout..Install MySQL binaries, the two
+    # report checks) need ~102; 105 keeps a thin margin, and each arm
+    # buys its own 10 instead of sharing the prior 20-minute envelope.
+    timeout-minutes: 105
     services:
       mysql:
         image: 'mysql:8.4.6'

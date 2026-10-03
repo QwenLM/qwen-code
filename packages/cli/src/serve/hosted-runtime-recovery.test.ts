@@ -510,9 +510,11 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('answers a turn_settled checkpoint as settled, never declined', async () => {
-    // The journal has settled the Turn with the terminal event still
-    // unprojected: the takeover must settle, never fail the Turn.
+  it('declines a turn_settled checkpoint with its own typed reason', async () => {
+    // Settled in the journal with the terminal record still unprojected:
+    // rebind-and-keep-reading is Step 3's row, so this slice declines the
+    // verdict with a typed reason instead of fabricating a settlement
+    // tail on phase alone.
     await parkAtAwaitRuntime();
     const replacement = await open('boot-2', false);
     vi.spyOn(
@@ -544,7 +546,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(outcome).toEqual({ kind: 'settled', promptId: PROMPT_ID });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'turn_settled',
+      });
     } finally {
       await replacement.close();
     }

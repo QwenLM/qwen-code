@@ -178,17 +178,21 @@ parks the same journal state instead), `batch_not_durable` (parked before
 `await_runtime` without durable args), `checkpoint_blocked` (the checkpoint
 no longer parses back to a runnable state), `unresolved_after_settle` (the
 checkpoint names another Turn, or the state after settling is still not
-runnable). One state that was first drafted as a decline is not one: a
-journal whose checkpoint phase is `turn_settled` returns a distinct
-`settled` outcome carrying the prompt id, and the load route runs its own
-settlement tail for it — settle, never fail.
+runnable), `turn_settled` (settled in the journal with the terminal record
+not yet projected — rebind-and-keep-reading is Step 3's row, so in this
+slice the durable verdict declines with a typed reason rather than driving
+the plain-load settlement tail).
 
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store
 failure erased into `missing_state` / `missing_checkpoint` by the
 authorization layer is re-thrown as transient, never a decline: the
 boundary is deliberately narrow so one store blip during a takeover load
-cannot terminally fail a Turn whose journal is intact.
+cannot terminally fail a Turn whose journal is intact. The load route's
+restore guard applies the same read before the takeover branch runs,
+because the restore bundle collapses both verdict kinds into one `blocked`
+bit — there a durable reason becomes the typed decline and anything else
+keeps the retriable 409.
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`
@@ -250,8 +254,11 @@ The replacement Spring inherits the original's port, because the frozen
 Harness's journal-store URL was fixed at load: on wake its store calls
 meet a live, fencing control plane rather than a dead socket — otherwise
 the post-wake assertions would hold by disconnection, not fencing.
-Teardown needs no special signal ordering (the Harness is already
-continued). The same PR also wires `npm run test:e2e:managed-session-failover` into the
+Teardown re-continues the
+frozen Harness before stopping the children, through the children
+registry's startup-name lookup (one constant names both the registry
+entry and the wake lookup; a miss fails the run instead of leaving a
+wedged writer). The same PR also wires `npm run test:e2e:managed-session-failover` into the
 `hosted-harness-mysql` CI job, where it was previously absent by omission.
 
 ### D8 — E2E: the Harness-only restart arm
@@ -271,19 +278,27 @@ same arm on `main`: it must fail with the generation error the README
 documents. The README sentence at `:185` is deleted. With Spring and its
 Broker alive the worker is not orphaned and no W0e reclaim is needed, so
 this arm drops the Linux guard for the workspace-turns scenarios in code;
-the kill-both modes keep it. Every lane that runs these arms is Linux
+the kill-both modes keep it. The arms also pin what makes them
+Harness-only restarts rather than kill-boths in disguise: the surviving
+Spring, Broker and durable Worker keep serving the same
+`runtime_session_id`, and the live Broker re-dispatches on the
+generation it already owns (exactly `'0'` or `'1'` — never `'1'`-only,
+never unbounded). Every lane that runs these arms is Linux
 (`hosted-harness-mysql` is ubuntu-only), so darwin stays an unverified
 expectation, not a decision gate waiting on a first run that cannot
 happen.
 
 ### D9 — Production defaults made consistent (settled, per the issue)
 
-- **D9a, retry budget vs writer lease.** A takeover-shaped 409 on the
-  recovery attach path of a bound Session is exempt from the pre-admission
-  retry cap because that wait is bounded by the predecessor's own lease.
-  Everything else — transport failures, configuration-shaped errors —
-  always meets the budget, so a permanently absent Harness still ends a
-  Turn as `hosted_harness_unavailable`.
+- **D9a, retry budget vs writer lease.** A 409 on the recovery attach
+  path of a bound Session is exempt from the pre-admission retry cap only
+  when its body carries a lease-shaped code
+  (`hosted_turn_recovery_required`, `hosted_prompt_recovery_required`,
+  `hosted_session_already_attached`) — that wait is bounded by the
+  predecessor's own lease. Everything else — transport failures and
+  configuration-shaped 4xx/409s alike — always meets the budget, so a
+  permanently absent Harness still ends a Turn as
+  `hosted_harness_unavailable`.
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag
@@ -314,30 +329,33 @@ when the model-round slice lands.
 
 ## Changes and ownership
 
-| Layer                     | Files                                                                                       | Change                                                                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Java qwencode             | `HostedHarnessClient.java`, `DaemonHttpException.java`                                      | per-request load timeout; error-body code accessor (no global code table)                                                                |
-| Java managed-agent-server | `QwenHostedHarnessConnector.java`, new `HostedHarnessRecoveryDeclinedException.java`        | D1 adoption (client rebuild + cache invalidation), D5 single-site 409-code parse in `recoverManagedRuntime` throwing the typed exception |
-| Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch change, D4 withdrawal use, D9a exemption                                                                                        |
-| Java managed-agent-server | `ManagedAgentStore.java`                                                                    | `withdrawSubmissionAttempted` CAS (D4)                                                                                                   |
-| Java managed-agent-server | `ManagedAgentProperties.java`, `application.yml`                                            | `load-timeout` (D9b)                                                                                                                     |
-| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline-code mapping (D5), retained snapshot + idempotent repeat load (D6)                                                               |
-| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | discriminated decline result (D5), reusing core's `HARNESS_MODEL_START_PHASES`                                                           |
-| TS CLI                    | `capabilities.ts`, `routes/capabilities.ts`, `qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token (D9c)                                                                                   |
-| Java qwencode             | `HostedHarnessClient.java` (negotiation)                                                    | hardcoded `managed_session_journal_delta_v1` feature check (D9c) — no config knob by design                                              |
-| TS core                   | `managed-harness-checkpoint.ts`                                                             | nothing; D5's naming reuses `HARNESS_MODEL_START_PHASES`                                                                                 |
-| Runner + CI               | `scripts/run-managed-agent-server-e2e.ts`, `package.json`, `.github/workflows/sdk-java.yml` | D7 freeze arm, D8 Harness-only arm, `--session-failover` step                                                                            |
-| Docs                      | `managed-agent-server/README.md`                                                            | delete the generation-error sentence; document adoption behavior                                                                         |
-| Unit tests                | collocated `*.test.*` per file above                                                        | per-decision coverage; see validation                                                                                                    |
+| Layer                     | Files                                                                                       | Change                                                                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Java qwencode             | `HostedHarnessClient.java`, `DaemonHttpException.java`                                      | per-request load timeout; error-body code accessor (no global code table)                                                                       |
+| Java managed-agent-server | `QwenHostedHarnessConnector.java`, new `HostedHarnessRecoveryDeclinedException.java`        | D1 adoption (client rebuild + cache invalidation), D5 single-site 409-code parse in `recoverManagedRuntime` throwing the typed exception        |
+| Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch change, D4 withdrawal use, D9a exemption                                                                                               |
+| Java managed-agent-server | `ManagedAgentStore.java`, `AgentStateStore.java`                                            | `withdrawSubmissionAttempted` CAS and its store-interface signature (D4)                                                                        |
+| Java managed-agent-server | `ActionResponseCoordinator.java`                                                            | terminal capability-mismatch catch completing the action outbox as FAILED with the mismatch code (honest terminal, unlike the lifecycle outbox) |
+| Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` flag accessor (D9b)                                                                                                   |
+| Java managed-agent-server | `ManagedAgentProperties.java`, `application.yml`                                            | `load-timeout` (D9b)                                                                                                                            |
+| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline-code mapping (D5), retained snapshot + idempotent repeat load (D6)                                                                      |
+| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | discriminated decline result (D5), reusing core's `HARNESS_MODEL_START_PHASES`                                                                  |
+| TS CLI                    | `capabilities.ts`, `routes/capabilities.ts`, `qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token (D9c)                                                                                          |
+| Java qwencode             | `HostedHarnessClient.java` (negotiation)                                                    | hardcoded `managed_session_journal_delta_v1` feature check (D9c) — no config knob by design                                                     |
+| TS core                   | `managed-harness-checkpoint.ts`                                                             | nothing; D5's naming reuses `HARNESS_MODEL_START_PHASES`                                                                                        |
+| Runner + CI               | `scripts/run-managed-agent-server-e2e.ts`, `package.json`, `.github/workflows/sdk-java.yml` | D7 freeze arm, D8 Harness-only arm, `--session-failover` step                                                                                   |
+| Docs                      | `managed-agent-server/README.md`                                                            | delete the generation-error sentence; document adoption behavior                                                                                |
+| Unit tests                | collocated `*.test.*` per file above                                                        | per-decision coverage; see validation                                                                                                           |
 
 Ownership follows the shared-bean structure: `HarnessCoordinator`,
 `SessionLifecycleCoordinator`, `ActionResponseCoordinator` and
 `ManagedAgentService` all inject the same connector bean, so D1 needs no
 per-caller change. The three coordinators' retry mechanics do the rest.
 `ManagedAgentService` differs: its one synchronous Harness attach (rename)
-has no retry mechanics, so a generation change mid-call surfaces as a
-client-visible `hosted_harness_unavailable`; the retrying client's next
-attempt lands on the adopted generation.
+has no retry mechanics, so a generation change mid-call — and likewise a
+capability digest mismatch from the same attach — surfaces as a
+client-visible `hosted_harness_unavailable` (503); the retrying client's
+next attempt lands on the adopted (or realigned) generation.
 
 ## Validation and acceptance
 
@@ -351,18 +369,20 @@ Unit tests (collocated):
   (`HostedHarnessClientTest`) and the coordinators' terminal catches — not
   by a connector-level test, because the connector adds no third gate.
 - Coordinator: wire mismatch schedules a retry, not a fail; a bound
-  Session's recovery attach meets the pre-admission budget on transport
-  failures but is exempt on a takeover 409; decline →
-  `managed_runtime_recovery_blocked`.
-- Store: `withdrawSubmissionAttempted` succeeds only under its guards
-  (owner, live lease, status window, no epoch, mark set); a second
-  withdrawal loses the CAS.
-- TS: each decline reason is produced from its journal state; a
-  `turn_settled` checkpoint returns the `settled` outcome instead of a
-  decline; a transiently blocked authorization (`missing_state`) throws
-  rather than declining while a durable verdict (`opaque_state`) goes
-  terminal; a repeated takeover load returns the same snapshot 200 until
-  consumed and 409 `hosted_session_already_attached` for plain repeats.
+  Session's recovery attach meets the pre-admission budget on everything
+  but a lease-coded 409, and the same 409 exempts nothing on an unbound
+  one; decline → `managed_runtime_recovery_blocked`.
+- Store: the withdraw sequence binds refuse → withdraw → rebind → mark →
+  submit at the coordinator; a second withdrawal loses the CAS (the
+  real-MySQL guard test of the CAS itself stays a follow-up with the
+  store IT family).
+- TS: every decline reason except `await_action` is produced from its
+  journal state by a test (the `await_action` fixture and the
+  route-level 202-replay watermark pin stay Step 3 debts); a transiently
+  blocked authorization (`missing_state`) throws rather than declining
+  while a durable verdict (`opaque_state`) goes terminal; a repeated
+  takeover load returns the same snapshot 200 until consumed and 409
+  `hosted_session_already_attached` for plain repeats.
 
 E2E (runner arms, all against the packaged stack):
 
@@ -374,8 +394,9 @@ E2E (runner arms, all against the packaged stack):
 3. D7 freeze arm: post-SIGCONT assertions as listed. Deleting any of them
    fails the arm.
 4. CI: `hosted-harness-mysql` gains the D7 arm, the D8 arms and
-   `--session-failover`, and the job ceiling moves from 60 to 95 minutes
-   so the seven summed step ceilings (92) keep headroom.
+   `--session-failover`, and the job ceiling moves from 60 to 105 minutes
+   so the nine summed step ceilings (12+10+8×10 = 92) plus the uncapped
+   setup steps keep headroom.
 
 The lost-reply race behind D4 (the old generation admits, its 202 reply is
 dropped, the Harness restarts, and the Turn must complete with exactly one

@@ -92,6 +92,10 @@ if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
 // The Stage A acceptance criterion names a 15-second Runtime delay; the
 // real-provider TTFT margin under it is unrecorded (tracked in #12941).
 const modelBeforeRuntimeAssertionDelayMs = 15_000;
+// The frozen-arm teardown wakes the former writer by this registry key, so
+// the start name and the wake-up lookup must share it (a rename drift
+// would leave a stopped child wedged on the runner).
+const hostedHarnessLabel = 'Hosted Harness';
 
 if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
   throw new Error('--runtime-delay-ms must be a non-negative integer');
@@ -960,7 +964,7 @@ try {
           heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
       },
     },
-    'Hosted Harness',
+    hostedHarnessLabel,
   );
   await waitUntil(
     'Hosted Harness',
@@ -1019,6 +1023,7 @@ try {
     let firstTurnLastSequence = 0;
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
+    let originalRuntimeSessionId: string | undefined;
     if (inflightFailover) {
       if (heldStartProxy === undefined) {
         throw new Error('In-flight failover did not start its Broker proxy');
@@ -1069,16 +1074,17 @@ try {
       );
       const execution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
       ).split('\t');
       const sideEffectBytes = existsSync(inflightSideEffect)
         ? readFileSync(inflightSideEffect, 'utf8')
         : '';
       if (
-        execution.length !== 3 ||
+        execution.length !== 4 ||
         execution[0]?.length === 0 ||
         execution[1] !== 'SETTLED' ||
         execution[2] !== '1' ||
+        execution[3]?.length === 0 ||
         sideEffectBytes !== inflightSideEffectContent
       ) {
         throw new Error(
@@ -1086,6 +1092,7 @@ try {
         );
       }
       originalExecutionCallId = execution[0];
+      originalRuntimeSessionId = execution[3];
     } else {
       const firstTurn = await waitForTerminal(
         springUrl,
@@ -1153,6 +1160,7 @@ try {
         );
       }
       originalExecutionCallId = execution[0];
+      originalRuntimeSessionId = execution[3];
     }
 
     if (freeze) {
@@ -1384,7 +1392,7 @@ try {
       );
       const recoveredExecution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
       ).split('\t');
       const executionCount = Number(
         runMysql(
@@ -1423,7 +1431,7 @@ try {
         : '';
       if (
         recoveredTerminal?.type !== 'turn.completed' ||
-        recoveredExecution.length !== 4 ||
+        recoveredExecution.length !== 5 ||
         recoveredExecution[0] !== originalExecutionCallId ||
         recoveredExecution[1] !== 'SETTLED' ||
         // A replaced Broker bumps the re-dispatch to generation 1; a live
@@ -1431,6 +1439,10 @@ try {
         (harnessOnly
           ? !(recoveredExecution[2] === '0' || recoveredExecution[2] === '1')
           : Number(recoveredExecution[2]) !== 1) ||
+        // Under --harness-only the surviving Spring, Broker and durable
+        // Worker keep serving the same runtime session; re-provisioning
+        // would redefine the arm as a kill-both.
+        (harnessOnly && recoveredExecution[4] !== originalRuntimeSessionId) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||
@@ -1492,7 +1504,7 @@ try {
       const visibleText = textDeltas.map((event) => eventText(event)).join('');
       const recoveredExecution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
       ).split('\t');
       const executionCount = Number(
         runMysql(
@@ -1527,13 +1539,16 @@ try {
         recoveredTerminal?.type !== 'turn.completed' ||
         visibleText !== continuationResponse ||
         visibleText.includes(continuationPartial) ||
-        recoveredExecution.length !== 4 ||
+        recoveredExecution.length !== 5 ||
         recoveredExecution[0] !== originalExecutionCallId ||
         recoveredExecution[1] !== 'SETTLED' ||
         // See the in-flight arm: a live Broker keeps the generation it owns.
         (harnessOnly
           ? !(recoveredExecution[2] === '0' || recoveredExecution[2] === '1')
           : Number(recoveredExecution[2]) !== 1) ||
+        // See the in-flight arm: the surviving owner keeps the durable
+        // runtime session; a new Worker is a kill-both in disguise.
+        (harnessOnly && recoveredExecution[4] !== originalRuntimeSessionId) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||
@@ -1983,12 +1998,20 @@ try {
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
   // failure or success. `harness` is try-block scoped, so reach it through
-  // the children registry by its start() name.
+  // the children registry by its start() name — and fail loudly rather
+  // than leaving a wedged writer behind when the name drifts.
   if (freeze) {
+    let woke = false;
     for (const child of children) {
-      if (child.name === 'Hosted Harness') {
+      if (child.name === hostedHarnessLabel) {
         signalProcessTree(child.child, 'SIGCONT');
+        woke = true;
       }
+    }
+    if (!woke) {
+      failure ??= new Error(
+        'Frozen-owner arm could not find the Harness child to wake: the registry key drifted',
+      );
     }
   }
   for (const child of children.reverse()) {

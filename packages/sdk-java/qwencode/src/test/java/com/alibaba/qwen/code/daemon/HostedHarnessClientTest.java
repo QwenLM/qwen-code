@@ -732,14 +732,44 @@ class HostedHarnessClientTest {
     }
 
     // The load timeout is a distinct builder knob, validated like the
-    // other timeouts. No unit or E2E pin discriminates it from
-    // request-timeout today (every arm runs both at 120 s); the
-    // recovery-only selection lives at the loadSession call site.
+    // other timeouts.
     @Test
     void loadTimeoutMustBePositive() {
         assertThrows(IllegalArgumentException.class,
                 () -> HostedHarnessClient.builder()
                         .loadTimeout(Duration.ZERO));
+    }
+
+    // The two knobs discriminate at the call site: a recovery-flagged load
+    // pays loadTimeout while a plain attach load meets requestTimeout
+    // (which also guards the connector's ConcurrentHashMap bin locks).
+    @Test
+    void recoveryLoadUsesLoadTimeoutPlainLoadUsesRequestTimeout()
+            throws Exception {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    try {
+                        Thread.sleep(400);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                .requestTimeout(Duration.ofMillis(150))
+                .loadTimeout(Duration.ofSeconds(5))
+                .build()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(
+                            new LoadHarnessSession(SESSION_ID, null,
+                                    false)));
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, true)));
+        }
     }
 
     // The serve delegating app answers with a bare 404 while its runtime is

@@ -186,7 +186,11 @@ until no Harness holds its journal writer under an unexpired lease (the
 holding Harness seals it when closing), drains the Runtime binding (currently
 only an in-process retirement flag) and completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
-never means that tools stopped. When the Hosted Harness restarts, a live
+never means that tools stopped (a Harness whose capability digest no longer
+matches retries the same way, logged with the permanent reason — nothing
+may complete honestly before an operator realigns the versions, because a
+confirmation requires the Harness's own acknowledgement). When the Hosted
+Harness restarts, a live
 control plane adopts the new process generation: the connector renegotiates
 once instead of failing every bound Session, pending Turns re-attach through
 the takeover load as their retries come due, and the Session's bound boot ID

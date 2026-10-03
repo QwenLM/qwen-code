@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -126,18 +125,12 @@ public class SessionLifecycleCoordinator {
                                 + " worker tenant={} session={} operation={}",
                         tenantId, sessionId, operationId);
             }
-        } catch (HostedHarnessCapabilityMismatchException error) {
-            // A Harness whose capability digest no longer matches will
-            // still mismatch on every future negotiation, so complete
-            // terminally with the truth in the record instead of retrying
-            // forever — the one retry behavior this operation exists to
-            // bound.
-            LOG.warn("Managed Session operation completed terminally"
-                            + " tenant={} session={} operation={} code={}",
-                    tenantId, sessionId, operationId, error.getCode());
-            store.completeOperation(tenantId, sessionId, operationId,
-                    owner, claimed.claimGeneration(), false);
         } catch (RuntimeException error) {
+            // A capability digest mismatch lands here too: nothing may be
+            // completed honestly (completing unconfirmed would flip the
+            // session while skipping the drain and record a clean row),
+            // so the reason-loud retry below is deliberately the end of
+            // the line until an operator realigns the versions.
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             Throwable cause = error;

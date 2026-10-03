@@ -1610,6 +1610,23 @@ export function registerHostedHarnessSessionRoutes(
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
         await managed.close();
+        // The bundle only carries the ok/blocked verdict; the verdict's
+        // reason decides the refusal: a durable parse/identity failure can
+        // never change on retry, so it declines with its typed reason,
+        // while transport shape (erased store failures) keeps the
+        // retriable 409.
+        const verdict = await managed.authority
+          .harnessRunAuthorization()
+          .catch(() => undefined);
+        if (
+          verdict?.status === 'blocked' &&
+          (verdict.reason === 'opaque_state' ||
+            verdict.reason === 'invalid_state' ||
+            verdict.reason === 'identity_mismatch')
+        ) {
+          recoveryDeclined(res, 'checkpoint_blocked');
+          return;
+        }
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
@@ -1657,12 +1674,7 @@ export function registerHostedHarnessSessionRoutes(
             brokerOptions,
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
-          if (outcome.kind === 'settled') {
-            // The journal already settled the Turn with the terminal event
-            // still unprojected: settle through the same tail the route runs
-            // for a plain load — never a terminal failure.
-            settlePromptId = outcome.promptId;
-          } else if (outcome.kind === 'declined') {
+          if (outcome.kind === 'declined') {
             await managed.close();
             recoveryDeclined(res, outcome.reason);
             return;
@@ -2006,7 +2018,8 @@ export function registerHostedHarnessSessionRoutes(
       session.hooks?.hasPendingOperations
     )
       return error(res, 409, 'hosted_turn_recovery_required');
-    if (hasAcceptedInput(session, promptId)) {
+    const acceptedSequence = acceptedInputSequence(session, promptId);
+    if (acceptedSequence !== undefined) {
       if (!unsettledInputs(session).has(promptId)) {
         // The journal already accepted and settled this prompt — replay is
         // the point of the journal's commandId idempotency, so answer the
@@ -2015,9 +2028,7 @@ export function registerHostedHarnessSessionRoutes(
         // hint that loops the destination unboundedly.
         res.status(202).json({
           promptId,
-          lastEventId:
-            acceptedInputSequence(session, promptId) ??
-            session.managed.authority.committedSequence,
+          lastEventId: acceptedSequence,
           eventEpoch: epoch,
         });
         return;

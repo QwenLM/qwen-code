@@ -72,6 +72,8 @@ export type HostedRecoveryDeclineReason =
   | 'shell_in_flight'
   /** A batch was prepared but its arguments never became durable. */
   | 'batch_not_durable'
+  /** Settled in the journal, terminal record unprojected (Step 3 row). */
+  | 'turn_settled'
   /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
@@ -79,8 +81,7 @@ export type HostedRecoveryDeclineReason =
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
-  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason }
-  | { readonly kind: 'settled'; readonly promptId: string };
+  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason };
 
 function declined(
   reason: HostedRecoveryDeclineReason,
@@ -392,10 +393,11 @@ export async function recoverHostedRuntimeTurn(input: {
       checkpoint.approval.state === 'requested'
     )
       return declined('await_action');
-    // Settled on the journal with its terminal event still unprojected:
-    // the load route's settlement path completes it — never an error.
+    // Settled in the journal with the terminal record still unprojected:
+    // rebind-and-keep-reading is Step 3's row, so in this slice the same
+    // durable verdict declines with its own typed reason instead.
     if (checkpoint.continuation.phase === 'turn_settled')
-      return { kind: 'settled', promptId };
+      return declined('turn_settled');
     if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase))
       return declined('model_start');
     // A phase outside the model-start vocabulary is not one a takeover

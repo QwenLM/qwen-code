@@ -545,7 +545,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      * lock order and could deadlock). Cached Attachments re-mint on
      * demand: a differing generation loses the client and every entry;
      * an equal-boot exception only evicts entries minted under an older
-     * boot, so Sessions the live client still heartbeats keep working.
+     * boot, so Sessions the live client still heartbeats keep working —
+     * and its recovery markers stay, because they were minted by loads
+     * this same live client served.
      */
     private void adoptGeneration(HostedHarnessGenerationException error) {
         HostedHarnessClient stale = null;
@@ -570,7 +572,6 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String bootId = currentBootId;
             attachments.entrySet().removeIf(entry ->
                     !bootId.equals(entry.getValue().getHarnessBootId()));
-            pendingRecovery.clear();
             return;
         }
         attachments.clear();

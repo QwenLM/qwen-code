@@ -231,36 +231,46 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    ['Run in-flight owner failover E2E', 'test:e2e:managed-inflight-failover'],
+    [
+      'Run in-flight owner failover E2E',
+      'test:e2e:managed-inflight-failover',
+      [],
+    ],
     [
       'Run continuation owner failover E2E',
       'test:e2e:managed-continuation-failover',
+      [],
     ],
-    ['Run session owner failover E2E', 'test:e2e:managed-session-failover'],
+    ['Run session owner failover E2E', 'test:e2e:managed-session-failover', []],
     [
       'Run Harness-restart session failover E2E',
       'test:e2e:managed-harness-restart-failover',
+      ['--harness-only'],
     ],
     [
       'Run Harness-restart in-flight failover E2E',
       'test:e2e:managed-harness-restart-inflight-failover',
+      ['--harness-only'],
     ],
     [
       'Run Harness-restart continuation failover E2E',
       'test:e2e:managed-harness-restart-continuation-failover',
+      ['--harness-only'],
     ],
     [
       'Run frozen former-owner fencing E2E',
       'test:e2e:managed-continuation-frozen-owner-failover',
+      ['--freeze'],
     ],
-  ])('pins the %s arm into the Hosted MySQL job', (stepName, script) => {
+  ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(95);
+    expect(job['timeout-minutes']).toBe(105);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
     const step = job.steps.find((s) => s.name === stepName);
     expect(step, stepName).toBeDefined();
+    expect(install, 'the MySQL binaries install step').toBeDefined();
     expect(
       job.steps.indexOf(step),
       `${stepName} must run after the MySQL binaries install`,
@@ -269,10 +279,21 @@ describe('Hosted real-process gates', () => {
     expect(step['timeout-minutes'], stepName).toBe(10);
     expect(step.if, stepName).toBeUndefined();
     expect(step['continue-on-error'], stepName).toBeUndefined();
-    // A renamed or deleted npm script would leave the step failing for the
-    // wrong reason; pin that it drives the failover runner.
+    // A renamed or deleted npm script would leave the step failing for
+    // the wrong reason; pin that it drives the failover runner — with
+    // the flags that make each row a different arm.
     expect(pkg.scripts[script], script).toContain(
       'run-managed-agent-server-e2e',
     );
+    for (const flag of flags) {
+      expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(flag);
+    }
+    for (const flag of ['--harness-only', '--freeze']) {
+      if (!flags.includes(flag)) {
+        expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
+          flag,
+        );
+      }
+    }
   });
 });
