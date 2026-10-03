@@ -46,6 +46,8 @@ class LocalRuntimeStoreTest {
         }
     }
 
+    // The store owns Posix permissions; Windows has none to validate against.
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
     @Test
     void brokerUserNeedNotResolveByNameInThePasswdDatabase(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {

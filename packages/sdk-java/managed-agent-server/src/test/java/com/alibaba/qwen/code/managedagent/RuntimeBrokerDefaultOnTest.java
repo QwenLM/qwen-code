@@ -74,7 +74,8 @@ class RuntimeBrokerDefaultOnTest {
         assertThat(broker.isTrustedLocalRebootRecovery()).isTrue();
         // The scan must actually reach the candidate query, not just no-op.
         ((EmbeddedRuntimeBroker) runtimeWarmer).recoverSavedRuntimes();
-        verify(bindingRepository, atLeastOnce()).findRecoveryCandidates("local-process", isNull(), eq(8));
+        verify(bindingRepository, atLeastOnce()).findRecoveryCandidates(
+                eq("local-process"), isNull(), eq(8));
     }
 
     /** Removes the ambient copies of the two documented opt-out variables. */
