@@ -83,6 +83,9 @@ public class ManagedAgentService {
     // "text" is the spelling that clients used before the contract.
     private static final Set<String> INPUT_TYPES = Set.of("input_text",
             "text");
+    // The per-block cap (1M chars) times the per-list cap (100) would
+    // otherwise admit ~100M characters in a single command.
+    private static final int MAX_AGGREGATE_INPUT_CHARS = 4 * 1000 * 1000;
     private final AgentStateStore store;
     private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
@@ -660,7 +663,7 @@ public class ManagedAgentService {
     private static WebShellTurn webShellTurn(TurnRecord turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
                 turn.status().toLowerCase(), turn.createdAt(),
-                turn.completedAt(), turn.errorCode(), null);
+                turn.completedAt(), turn.errorCode());
     }
 
     PublicEvent publicEvent(EventRecord event) {
@@ -869,12 +872,20 @@ public class ManagedAgentService {
             return List.of();
         }
         List<Map<String, Object>> result = new ArrayList<>();
+        long totalChars = 0;
         for (InputBlock block : blocks) {
             if (block == null || !INPUT_TYPES.contains(block.type())
                     || block.text() == null || block.text().isEmpty()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "unsupported_input",
                         "Phase 1 accepts non-empty text input only.");
+            }
+            totalChars += block.text().length();
+            if (totalChars > MAX_AGGREGATE_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input exceeds the 4000000 character aggregate"
+                                + " limit.");
             }
             result.add(Map.of("type", "text", "text", block.text()));
         }

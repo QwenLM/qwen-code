@@ -1572,6 +1572,71 @@ class ManagedAgentServerIntegrationTest {
                                 + " 'turn.cancelled')]").isNotEmpty()));
     }
 
+    @Test
+    void rejectsInputBeyondTheAggregateCharacterBudget() throws Exception {
+        String tenant = "tenant-input-budget-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"budget-create",
+                                 "agentId":"qwen-code","input":[]}
+                                """))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        String chunk = "x".repeat(1_000_000);
+        StringBuilder oversized = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-submit\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        StringBuilder okay = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-okay\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        for (int index = 0; index < 5; index++) {
+            String block = "{\"type\":\"text\",\"text\":\"" + chunk + "\"}";
+            oversized.append(block);
+            if (index < 4) {
+                oversized.append(",");
+                okay.append(block).append(index < 3 ? "," : "");
+            }
+        }
+        oversized.append("]}");
+        okay.append("]}");
+
+        // 5 × 1M chars passes the per-block caps yet must fail the
+        // aggregate budget; 4 × 1M remains admitted.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(oversized.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_input"));
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(okay.toString()))
+                .andExpect(status().isAccepted());
+    }
+
+    @Test
+    void acceptsWebShellMetadataWithoutAClientIdOnlyContract()
+            throws Exception {
+        String tenant = "tenant-metadata-" + UUID.randomUUID();
+        // Phase 1 persists metadata.title only; anything else the client
+        // sends is accepted and ignored instead of validated and dropped.
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"metadata-create",
+                                 "agentId":"qwen-code","input":[],
+                                 "metadata":{"clientId":"client-1",
+                                             "other":"trace"}}
+                                """))
+                .andExpect(status().isAccepted());
+    }
+
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
             String tenant, String idempotencyKey) throws Exception {
         return mvc.perform(request.header(TenantContextFilter.HEADER, tenant)

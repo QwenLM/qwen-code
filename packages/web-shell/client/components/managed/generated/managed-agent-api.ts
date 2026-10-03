@@ -470,9 +470,6 @@ export interface components {
             /** Format: int64 */
             completedAt?: number | null;
             errorCode?: string | null;
-            usage?: {
-                [key: string]: unknown;
-            } | null;
         };
         WebShellSession: {
             /** Format: uuid */

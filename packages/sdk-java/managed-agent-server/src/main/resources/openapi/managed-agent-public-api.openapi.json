@@ -4607,10 +4607,6 @@
           "errorCode": {
             "type": ["string", "null"]
           },
-          "usage": {
-            "type": ["object", "null"],
-            "additionalProperties": true
-          },
           "operationId": {
             "type": "string",
             "minLength": 1,

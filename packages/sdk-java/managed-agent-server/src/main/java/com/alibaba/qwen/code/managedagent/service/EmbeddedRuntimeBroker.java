@@ -257,7 +257,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     "Runtime Broker state directory");
             require(broker.getNodeExecutable(), "Node.js executable");
             require(broker.getWorkerEntry(), "Runtime worker entry");
-            require(broker.getCliEntry(), "Qwen CLI entry");
             if (!broker.getEnvironment().isEmpty()) {
                 throw new IllegalStateException("Merged local Runtime"
                         + " provisioner does not accept extra environment");

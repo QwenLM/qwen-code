@@ -19,8 +19,11 @@ public class MessageMaterializer {
         this.store = store;
     }
 
-    @Scheduled(fixedDelayString =
-            "${qwen.managed-agent.events.materialize-interval:100ms}")
+    // The interval's single source of truth is this placeholder fallback;
+    // ManagedAgentPropertiesTest pins the typed default against it.
+    @Scheduled(scheduler = "messageMaterializerScheduler",
+            fixedDelayString =
+                    "${qwen.managed-agent.events.materialize-interval:100ms}")
     public void materialize() {
         for (MaterializationTarget target :
                 store.findMaterializationTargets(TARGET_LIMIT)) {
