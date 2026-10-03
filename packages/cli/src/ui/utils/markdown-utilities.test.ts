@@ -10,9 +10,9 @@ import {
   splitFencedMarkdown,
   parseCodeFenceInfo,
   getEnclosingFenceInfo,
-} from './markdownUtilities.js';
+} from './markdown-utilities.js';
 
-describe('markdownUtilities', () => {
+describe('markdown-utilities', () => {
   describe('findLastSafeSplitPoint', () => {
     it('should split at the last double newline if not in a code block', () => {
       const content = 'paragraph1\n\nparagraph2\n\nparagraph3';
@@ -282,5 +282,65 @@ describe('markdownUtilities', () => {
         startLine: 7,
       });
     });
+  });
+
+  describe('fence recognition', () => {
+    it.each([
+      ['~~~', 'Use `~~~` as the fence marker.'],
+      ['```', 'Use ``` as the fence marker.'],
+    ])('keeps an inline %s marker in ordinary prose', (_marker, intro) => {
+      const content = `${intro}\nMore ordinary prose follows.`;
+      const splitPoint = content.indexOf('More');
+
+      expect(getEnclosingFenceInfo(content, splitPoint)).toBeNull();
+      expect(findLastSafeSplitPoint(content, splitPoint + 8)).toBe(splitPoint);
+      expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+        before: `${intro}\n`,
+        after: 'More ordinary prose follows.',
+      });
+    });
+
+    it.each(['```ts`invalid', '~~~ts`invalid'])(
+      'rejects an opening fence with a backtick in its info string: %s',
+      (opening) => {
+        const content = `${opening}\nMore ordinary prose follows.`;
+        const splitPoint = content.indexOf('More');
+
+        expect(getEnclosingFenceInfo(content, splitPoint)).toBeNull();
+        expect(findLastSafeSplitPoint(content, splitPoint + 8)).toBe(
+          splitPoint,
+        );
+        expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+          before: `${opening}\n`,
+          after: 'More ordinary prose follows.',
+        });
+      },
+    );
+
+    it.each(['````', '~~~~'])(
+      'recognizes an indented %s fence after ordinary prose',
+      (delimiter) => {
+        const intro = 'Use `~~~` as the fence marker.\n';
+        const content = `${intro}  ${delimiter}ts\nline1\nline2\n  ${delimiter}\n\nAfter prose.`;
+        const splitPoint = content.indexOf('line2');
+        const afterBlock = content.indexOf('After');
+
+        expect(getEnclosingFenceInfo(content, splitPoint)).toEqual({
+          lang: 'ts',
+          startLine: 1,
+        });
+        expect(findLastSafeSplitPoint(content, splitPoint)).toBe(
+          intro.length + 2,
+        );
+        expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+          before: `${intro}  ${delimiter}ts\nline1\n${delimiter}\n`,
+          after: `${delimiter}ts qwen-code:start-line=2\nline2\n  ${delimiter}\n\nAfter prose.`,
+        });
+        expect(getEnclosingFenceInfo(content, afterBlock)).toBeNull();
+        expect(findLastSafeSplitPoint(content, afterBlock + 3)).toBe(
+          afterBlock,
+        );
+      },
+    );
   });
 });

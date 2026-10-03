@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CODE_FENCE_RE } from './pending-rendered-height.js';
+
 /*
 **Background & Purpose:**
 
@@ -40,9 +42,9 @@ so rendered history chunks do not break fenced code blocks unnecessarily.
 */
 
 /**
- * Finds the next fenced-code delimiter (a run of 3+ ``` or ~~~) at or after
- * `from`, returning its index, fence character and the FULL run length. Both
- * fence types are recognized. The run length matters: `indexOf('```')` matches
+ * Finds the next standalone fenced-code delimiter at or after `from`, using
+ * MarkdownDisplay's line-matching rules and returning its index, fence character
+ * and the FULL run length. The run length matters: `indexOf('```')` matches
  * only the first 3 chars of a longer run, so callers must advance past the whole
  * run (index + length) or a 6-backtick fence would be miscounted as two.
  */
@@ -50,21 +52,26 @@ const findNextFence = (
   content: string,
   from: number,
 ): { index: number; char: '`' | '~'; length: number } | null => {
-  const backtick = content.indexOf('```', from);
-  const tilde = content.indexOf('~~~', from);
-  if (backtick === -1 && tilde === -1) return null;
-  let index: number;
-  let char: '`' | '~';
-  if (tilde === -1 || (backtick !== -1 && backtick < tilde)) {
-    index = backtick;
-    char = '`';
-  } else {
-    index = tilde;
-    char = '~';
+  let lineStart = from === 0 ? 0 : content.lastIndexOf('\n', from - 1) + 1;
+  while (lineStart < content.length) {
+    const newlineIndex = content.indexOf('\n', lineStart);
+    const lineEnd = newlineIndex === -1 ? content.length : newlineIndex;
+    const line = content.slice(lineStart, lineEnd);
+    const match = CODE_FENCE_RE.exec(line);
+    if (match) {
+      const delimiter = match[1]!;
+      const index = lineStart + line.indexOf(delimiter);
+      if (index >= from) {
+        return {
+          index,
+          char: delimiter[0] === '`' ? '`' : '~',
+          length: delimiter.length,
+        };
+      }
+    }
+    lineStart = lineEnd + 1;
   }
-  let length = 0;
-  while (content[index + length] === char) length++;
-  return { index, char, length };
+  return null;
 };
 
 /**
