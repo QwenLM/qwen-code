@@ -3446,6 +3446,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState()
                     == RuntimeSessionRecord.State.RELEASING) {
+                // A row already persisted as RELEASING can predate the
+                // guarded transition: an older peer's check-then-act let an
+                // admission in and its worker release then failed. Admission
+                // needs READY under the row lock, so nothing new can join
+                // now, but completing this release would free a worker that
+                // is still running a tool, so the retry is only idempotent
+                // once nothing active is left.
+                if (executionRepository.hasActiveByRuntimeSession(
+                        current.getBindingId(),
+                        current.getRuntimeGeneration(),
+                        current.getRuntimeSessionId())) {
+                    throw conflict("runtime_session_busy",
+                            "Runtime Session has an active operation");
+                }
                 return current;
             }
             if (current.getState()

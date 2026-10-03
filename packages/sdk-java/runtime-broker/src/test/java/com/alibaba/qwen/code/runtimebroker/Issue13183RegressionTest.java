@@ -841,6 +841,87 @@ class Issue13183RegressionTest {
     }
 
     /**
+     * A Session row already persisted as RELEASING — what a pre-fix peer
+     * leaves behind when its unguarded check-then-act let an admission in
+     * and its worker release then failed — must not complete its release
+     * over a live execution: the re-entry short-circuits the guarded
+     * transition, so it has to ask the execution repository itself. The
+     * retry stays idempotent once nothing active is left.
+     */
+    @Test
+    void releaseRetryOverAPersistedReleasingRowRefusesALiveExecution()
+            throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        AtomicInteger releaseCalls = new AtomicInteger();
+        RuntimeTransport transport = new NoopTransport() {
+            @Override
+            public CompletionStage<Boolean> release(RuntimeLease lease,
+                    RuntimeSession session) {
+                releaseCalls.incrementAndGet();
+                return CompletableFuture.completedFuture(true);
+            }
+        };
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                harnessId -> CompletableFuture.completedFuture(SCOPE),
+                new StaticRuntimeProvisioner(new RuntimeLease("instance",
+                        URI.create("http://127.0.0.1:1234"), "token", "lease",
+                        1)),
+                transport, bindings, sessions, executions, "broker",
+                Duration.ofMinutes(1), Duration.ofMinutes(1));
+        try {
+            service.acquire("harness", "releasing-session", "bootstrap")
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            RuntimeSessionRecord ready = sessions.findById(SCOPE,
+                    "releasing-session");
+            bindings.admitExecution(sessions, executions,
+                    ToolExecutionRecord.prepared("live-execution", "live-key",
+                            ready.getBindingId(), ready.getRuntimeGeneration(),
+                            "harness", ready.getRuntimeSessionId(), "turn",
+                            "call", "digest",
+                            Map.of("sessionId", ready.getRuntimeSessionId(),
+                                    "promptId", "turn", "callId", "call",
+                                    "argsDigest", "digest")));
+            // The row an older peer persisted before its release failed.
+            RuntimeSessionRecord releasing = sessions.compareAndSet(ready,
+                    ready.withState(RuntimeSessionRecord.State.RELEASING,
+                            Instant.now()));
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
+                    releasing.getState());
+
+            CompletionException failure = assertThrows(
+                    CompletionException.class,
+                    () -> service.release("harness", "releasing-session")
+                            .toCompletableFuture().join());
+            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
+            assertEquals("runtime_session_busy",
+                    ((RuntimeBrokerException) failure.getCause()).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
+                    sessions.findById(SCOPE, "releasing-session").getState());
+            assertEquals(0, releaseCalls.get(),
+                    "the worker must not be released over a live execution");
+
+            // With nothing active left, the same retry completes. Cancelling
+            // a never-dispatched execution settles it at once.
+            ToolExecutionRecord live = executions.findByExecutionCallId(
+                    "live-execution");
+            assertNotNull(executions.requestCancel("live-execution",
+                    live.getVersion()));
+            assertEquals(Boolean.TRUE, service.release("harness",
+                    "releasing-session").toCompletableFuture().join());
+            assertEquals(1, releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    sessions.findById(SCOPE, "releasing-session").getState());
+        } finally {
+            service.close();
+        }
+    }
+
+    /**
      * Finding 2 (v3 polling): result polling backs off exponentially from
      * 100ms instead of pinning two repository reads and one worker call at
      * 10/s for the whole window. Gaps are bounded both ways: the doubling

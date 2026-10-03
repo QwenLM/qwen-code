@@ -12,13 +12,13 @@
 
 ## 决策
 
-**单事务释放。** `RuntimeBindingRepository.beginSessionRelease` 把"无活跃 execution"检查移入 RELEASING 转换自身的事务。该转换持有 Session 行的 `FOR UPDATE` 锁——与 `admitExecution` 获取的是同一把锁——因此两条路径在跨进程场景下按会话行互斥。带活跃 execution 的释放以 `runtime_session_busy` 失败；输给 RELEASING 会话的准入以 `runtime_admission_closed` 失败。进程内预检只保留零成本的 `hasActiveControl` 判断；原先那次数据库往返被取消，因为转换自身的检查以相同的 code 和消息回答同一个 409。
+**单事务释放。** `RuntimeBindingRepository.beginSessionRelease` 把"无活跃 execution"检查移入 RELEASING 转换自身的事务。该转换持有 Session 行的 `FOR UPDATE` 锁——与 `admitExecution` 获取的是同一把锁——因此两条路径在跨进程场景下按会话行互斥。带活跃 execution 的释放以 `runtime_session_busy` 失败；输给 RELEASING 会话的准入以 `runtime_admission_closed` 失败。进程内预检只保留零成本的 `hasActiveControl` 判断，转换自身的检查以相同的 code 和消息回答同一个 409。已持久化为 RELEASING 的行根本不会进入该转换，因此它的幂等重入自行复查活跃 execution：这样的行可能早于本次加固存在——旧版本对端的 check-then-act 放进了准入，而它的 worker 释放随后失败——若把这次释放做完，就会放走一个仍在执行工具的 worker。
 
-**续约线程池。** 续约（binding claim 与 dispatch claim）运行在独立的双线程 `ScheduledThreadPoolExecutor`；协调工作（重试、围栏、轮询）保留单线程调度器。一次卡在 JDBC 调用里的 tick 会占用池中两个线程之一并持有该 claim 的续约监视器，因此它可能拖慢其它续约，但不再拖慢协调工作，且 `close()` 会中断两个线程池、不等待卡住的 tick。v3 结果轮询从 100ms 起指数退避、2s 封顶（该上限约束了已完成结果被取走的最大延迟），轮询所处的窗口可配置（`v3ResultWindow`，默认 30 分钟，下限 1 秒——无后缀的配置值会被解析为毫秒，构造函数现在拒绝这种值）；窗口到期后，已派发的执行被标记为 UNKNOWN 而不是无限轮询，因此它是轮询截止期，不是结果保留期。对 UNKNOWN 执行的自动观测在 1 秒冷却内复用最近一次查询结果，不再把每次轮询穿透到 worker；自身记录已不再是 UNKNOWN 的缓存查询整体回放，两侧都仍为 UNKNOWN 时取 version 更大的一方，因此绝不会把已结算的答案与过期记录拼配。显式 `reconcile=true` 与 mutation 响应（`:start`、`:cancel`）永远不走缓存。
+**续约线程池。** 续约（binding claim 与 dispatch claim）运行在独立的双线程 `ScheduledThreadPoolExecutor`；协调工作（重试、围栏、轮询）保留单线程调度器。一次卡在 JDBC 调用里的 tick 会占用池中两个线程之一并持有该 claim 的续约监视器，因此它可能拖慢其它续约，但不再拖慢协调工作，且 `close()` 会中断两个线程池、不等待卡住的 tick。v3 结果轮询从 100ms 起指数退避、2s 封顶（该上限约束了已完成结果被取走的最大延迟），轮询所处的窗口可配置（`v3ResultWindow`，默认 30 分钟，下限 1 秒——无后缀的配置值会被解析为毫秒，构造函数现在拒绝这种值）；窗口到期后，已派发的执行被标记为 UNKNOWN 而不是无限轮询，因此它是轮询截止期，不是结果保留期。对 UNKNOWN 执行的自动观测在 1 秒冷却内复用最近一次查询结果，不再把每次轮询穿透到 worker；自身记录已不再是 UNKNOWN 的缓存查询整体回放，两侧都仍为 UNKNOWN 时取 version 更大的一方，因此绝不会把已结算的答案与过期记录拼配。显式 `reconcile=true` 与 mutation 响应（`:start`、`:cancel`）永远不走缓存——这也意味着现网的 MCP 轮询器每 250ms 以 `reconcile=true` 询问，仍然每次穿透到 worker：该路径上实测到的扇出量并未改变，需要客户端退避或另行决策。
 
 **默认回环。** `RuntimeBrokerHttpServer` 拒绝非回环或未解析的绑定地址，除非部署方显式开启（`allow-non-loopback` / `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK`)，因为该面在明文 HTTP 上没有租户级授权。
 
-**有界强杀关停。** 被释放的非 durable worker 先 `destroy()`，经 5 秒有界宽限后 `destroyForcibly()`;`close()` 与非 durable provisioner 的 JVM 退出钩子同样如此。worker 从 spawn 起即登记进 `starting` 集合（在 `lifecycle` 锁下注册）,ready 握手期的退出不会再遗弃它。
+**有界强杀关停。** 被释放的非 durable worker 先 `destroy()`，经 5 秒有界宽限后 `destroyForcibly()`;`close()` 与非 durable provisioner 的 JVM 退出钩子同样如此。worker 从 spawn 起到租约签发前登记在 `starting` 集合中，从释放起到强制升级完成前再次登记——两次搬移都在 `lifecycle` 锁内完成——因此无论是 ready 握手期的退出还是宽限期内的退出，都不会遗弃 worker。
 
 **排空式回收。** LOST 回收循环驱动有界的 100 行恢复批次直到代际排空，每次调用最多 16 趟；更大的代际回答 `runtime_broker_runtime_lost`，由下一次 reclaim 继续——因为各批次是逐批提交的。
 
