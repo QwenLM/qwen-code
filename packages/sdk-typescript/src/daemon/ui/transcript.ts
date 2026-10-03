@@ -258,7 +258,11 @@ function userBlockForAttachment(
   event: Extract<
     DaemonUiEvent,
     {
-      type: 'user.image.delta' | 'user.file.delta' | 'user.resource_link.delta';
+      type:
+        | 'user.image.delta'
+        | 'user.file.delta'
+        | 'user.resource_link.delta'
+        | 'user.resource.delta';
     }
   >,
 ): DaemonTextTranscriptBlock {
@@ -393,6 +397,23 @@ function applyDaemonTranscriptEvent(
           : links.map((link, position) =>
               position === index ? resourceLink : link,
             );
+      block.updatedAt = next.now;
+      if (event.eventId !== undefined) block.eventId = event.eventId;
+      next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+      break;
+    }
+    case 'user.resource.delta': {
+      const block = userBlockForAttachment(next, event);
+      const bytesBefore = estimateBlockBytes(block);
+      if (event.meta) block.meta = { ...block.meta, ...event.meta };
+      const resources = block.embeddedResources ?? [];
+      const serializedResource = JSON.stringify(event.resource);
+      const duplicate = resources.some(
+        (resource) => JSON.stringify(resource) === serializedResource,
+      );
+      if (!duplicate) {
+        block.embeddedResources = [...resources, cloneJsonLike(event.resource)];
+      }
       block.updatedAt = next.now;
       if (event.eventId !== undefined) block.eventId = event.eventId;
       next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
@@ -2283,8 +2304,16 @@ function cloneBlockForWrite(
       rawOutput: cloneJsonLike(block.rawOutput),
     };
   }
-  if (block.kind === 'user' && block.resourceLinks) {
-    return { ...block, resourceLinks: cloneJsonLike(block.resourceLinks) };
+  if (block.kind === 'user') {
+    return {
+      ...block,
+      ...(block.resourceLinks
+        ? { resourceLinks: cloneJsonLike(block.resourceLinks) }
+        : {}),
+      ...(block.embeddedResources
+        ? { embeddedResources: cloneJsonLike(block.embeddedResources) }
+        : {}),
+    };
   }
   return { ...block };
 }

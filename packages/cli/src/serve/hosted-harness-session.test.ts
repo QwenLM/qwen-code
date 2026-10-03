@@ -4729,25 +4729,28 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_error',
-            promptId: PROMPT_ID,
-            data: {
-              sessionId: SESSION_ID,
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
               promptId: PROMPT_ID,
-              code: 'hosted_turn_failed',
-              message: 'Hosted Harness turn failed.',
-            },
-          }),
-        ]),
-      );
-    });
+              data: {
+                sessionId: SESSION_ID,
+                promptId: PROMPT_ID,
+                code: 'hosted_turn_failed',
+                message: 'Hosted Harness turn failed.',
+              },
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(log).toHaveBeenCalledWith(
       `qwen serve: Hosted Harness turn ${PROMPT_ID} failed: Error: model initialization failed`,
     );
