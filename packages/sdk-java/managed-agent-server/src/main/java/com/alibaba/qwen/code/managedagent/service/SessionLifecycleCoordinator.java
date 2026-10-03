@@ -121,8 +121,9 @@ public class SessionLifecycleCoordinator {
                 valid.set(false);
             }
         }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+        Boolean harnessConfirmed = null;
         try {
-            boolean harnessConfirmed = settle(claimed);
+            harnessConfirmed = settle(claimed);
             if (!valid.get()) {
                 return;
             }
@@ -155,11 +156,15 @@ public class SessionLifecycleCoordinator {
             }
             // The budget bounds every settle outcome, blocked or not, and
             // the terminal record keeps the cause instead of certifying a
-            // completion that never settled. A live journal writer is the
-            // one exception: the close can still succeed once it stops, so
-            // the operation keeps waiting rather than recording a failure.
-            if (claimed.attemptCount() >= maxOperationRetries && valid.get()
-                    && !writerStillLive(claimed)) {
+            // completion that never settled. Two exceptions keep waiting
+            // instead: a live journal writer (the close can still succeed
+            // once it stops), and a failure thrown AFTER settle() returned —
+            // the settle did happen then, and a terminal
+            // session_lifecycle_delivery_failed would certify the opposite;
+            // the completion write is simply retried (settle is idempotent).
+            if (harnessConfirmed == null
+                    && claimed.attemptCount() >= maxOperationRetries
+                    && valid.get() && !writerStillLive(claimed)) {
                 LOG.error("Managed Session operation exhausted retries"
                                 + " tenant={} session={} operation={}"
                                 + " attempts={}",

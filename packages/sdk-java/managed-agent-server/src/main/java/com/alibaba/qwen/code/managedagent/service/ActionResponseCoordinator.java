@@ -95,14 +95,22 @@ public class ActionResponseCoordinator {
             if (settled(op, response)) {
                 return;
             }
-            throw new IllegalStateException("The Action has no committed decision yet");
+            throw new DecisionNotYetProjected();
         } catch (RuntimeException error) {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             if (settled(op, actions.response(tenant, session, operation))) {
                 return;
             }
-            if (op.attemptCount() >= dispatch.getMaxOperationRetries()) {
+            // The budget terminal records "the Harness never answered", so
+            // only a genuinely undelivered answer may reach it. A 200 from
+            // resolveAction means the decision IS committed (the Harness
+            // commits before it answers) and only Java's projection lags —
+            // that attempt keeps retrying until the projection heals or the
+            // Action's own end state settles it, and is never recorded as a
+            // delivery failure.
+            if (op.attemptCount() >= dispatch.getMaxOperationRetries()
+                    && !(error instanceof DecisionNotYetProjected)) {
                 LOG.error(
                         "Action response exhausted retries tenant={} session={} operation={} attempts={}",
                         tenant,
@@ -158,5 +166,14 @@ public class ActionResponseCoordinator {
                 true,
                 clock.millis());
         return true;
+    }
+
+    // The Harness answered 200, which it only does after committing the
+    // decision, but Java's projection does not show it yet. The delivery
+    // succeeded; the pending work is the projection's.
+    private static final class DecisionNotYetProjected extends IllegalStateException {
+        DecisionNotYetProjected() {
+            super("The Action has no committed decision yet");
+        }
     }
 }

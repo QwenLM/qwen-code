@@ -507,6 +507,13 @@ export class EmbeddedHarnessScheduler {
         const timer = setTimeout(resolve, RELEASE_RETRY_DELAY_MS);
         timer.unref();
       });
+      // A dispose or halt that landed during the sleep must stop the write:
+      // dispose leaves the lease to lapse so a successor re-queues the
+      // activation, and a terminal release here would make that retryable
+      // failure permanent.
+      if (this.disposed || this.fatalError || this.store.haltedError) {
+        return 'exhausted';
+      }
       try {
         await this.store.release(run.lease, outcome);
         this.noteStoreOutcome();

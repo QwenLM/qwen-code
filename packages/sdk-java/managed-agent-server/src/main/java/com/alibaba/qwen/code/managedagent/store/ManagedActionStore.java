@@ -353,12 +353,19 @@ public class ManagedActionStore {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
-            if ("FAILED".equals(existing.state())) {
+            if ("FAILED".equals(existing.state())
+                    && "action_response_delivery_failed"
+                            .equals(existing.failureCode())) {
                 // The delivery failed past its budget while the Action is
                 // still waiting: the caller's retry re-admits the same
                 // response under the same key, digest and row — a second
                 // vote stays impossible — instead of returning the stale
-                // failure receipt forever. Unlike a fresh admission this
+                // failure receipt forever. Only the budget terminal is
+                // re-admissible: a FAILED the Harness itself produced (a
+                // definitive 400 invalid_action_response, or an ended
+                // Action) keeps replaying its recorded terminal row, since
+                // re-sending the identical body would only repeat a refusal
+                // the Harness already made. Unlike a fresh admission this
                 // does not re-check the Action's expiry: the vote was cast
                 // while the Action was live, and the retry only re-drives
                 // its delivery (the Harness still refuses a decided answer

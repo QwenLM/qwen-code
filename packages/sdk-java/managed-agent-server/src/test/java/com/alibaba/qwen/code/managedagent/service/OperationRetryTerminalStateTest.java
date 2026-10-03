@@ -325,8 +325,9 @@ class OperationRetryTerminalStateTest {
 
     // A delete of an already closed bound Session whose retention
     // retirement keeps refusing (a residual live writer) must also keep
-    // waiting past the budget: the writer gate keys on the writer itself,
-    // not on the status the operation was admitted on.
+    // waiting past the budget — both because the writer gate keys on the
+    // writer itself rather than the admitted status, and because settle()
+    // returned for this shape, so the completion write is simply retried.
     @Test
     void deleteOfAClosedSessionKeepsWaitingWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
@@ -374,12 +375,14 @@ class OperationRetryTerminalStateTest {
         }
     }
 
-    // The terminal arm honours settle()'s zero-Runtime-calls invariant for a
-    // delete of an already closed bound Session: the completed CLOSE is the
-    // cleanup authority, so the give-up path must not call into the workspace
-    // either — even when the budget is spent for a non-writer reason.
+    // A delete of an already closed bound Session settles with zero Runtime
+    // calls (the completed CLOSE is the cleanup authority), so settle always
+    // returns for this shape — and a completion-write failure therefore
+    // retries instead of terminating: the terminal record would claim a
+    // settle failure for a shape whose settle is a no-op success. No Runtime
+    // call happens on either path.
     @Test
-    void closedSessionDeleteTerminatesWithoutTouchingTheRuntime() {
+    void closedSessionDeleteRetriesACompletionWriteFailureWithoutTouchingTheRuntime() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -399,8 +402,8 @@ class OperationRetryTerminalStateTest {
         // This replica could close the workspace — and still must not, for
         // this shape.
         when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
-        // A non-writer settle failure: the retirement lost its race with
-        // another operation, so the budget can legitimately terminate.
+        // A non-writer completion-write failure: the retirement lost its
+        // race with another operation.
         when(store.completeOperation(eq("tenant"), eq("session"),
                 eq("op-delete"), anyString(), eq(1L), anyBoolean()))
                 .thenThrow(new IllegalStateException(
@@ -413,9 +416,10 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
-            verify(store).failOperation(eq("tenant"), eq("session"),
-                    eq("op-delete"), anyString(), eq(1L),
-                    eq("session_lifecycle_delivery_failed"));
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L), anyLong());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
             verify(runtimeWarmer, never()).drain(anyString());
             verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
                     anyString());
@@ -450,6 +454,55 @@ class OperationRetryTerminalStateTest {
                 new SessionLifecycleCoordinator(store, sessionStore, harness,
                         mock(RuntimeWarmer.class),
                         CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L), anyLong());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The terminal arm records a settle that never happened — so it must
+    // not fire when settle() DID complete and only the completion write
+    // failed: that attempt is retried (settle is idempotent), and the
+    // recorded terminal never claims a delivery failure for a close that
+    // actually settled.
+    @Test
+    void aFailedCompletionWriteAfterASuccessfulSettleRetries() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        // settle() completed; only the durable completion write fails.
+        when(store.completeOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), eq(1L), anyBoolean()))
+                .thenThrow(new IllegalStateException(
+                        "Session session is CLOSED during its CLOSE"
+                                + " operation"));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
                         Clock.systemUTC(), new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
@@ -566,6 +619,44 @@ class OperationRetryTerminalStateTest {
                 anyLong());
         verify(sessions, never()).retryOperation(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyLong());
+    }
+
+    // A 200 from the Harness means the decision is committed and only
+    // Java's projection lags: the budget must never record that shape as a
+    // delivery failure — it keeps retrying until the projection heals or
+    // the Action's own end state settles it.
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {10, 40})
+    void anAnsweredButUnprojectedDecisionNeverTerminatesAsDeliveryFailed(
+            int attemptCount) throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = actionOperation(attemptCount);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        // harness.resolveAction returns normally: the Harness answered 200.
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(harness).resolveAction("tenant", "session", "action-1", body);
+        verify(sessions).retryOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L), anyLong());
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
     }
 
     @ParameterizedTest(name = "attemptCount = {0}")

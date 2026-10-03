@@ -246,6 +246,58 @@ class ManagedActionStoreTest {
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
+    // A FAILED the Harness itself produced is terminal for good: re-sending
+    // the identical body would only repeat the refusal, so the replay keeps
+    // returning the recorded row even while the Action is still requested.
+    @Test
+    void aDefinitiveHarnessRefusalIsNotReadmitted() throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'HARNESS_CONFIRMED',"
+                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 1, 0, 0, 0, 0,"
+                        + " ?, ?, 'invalid_action_response')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().state()).isEqualTo("FAILED");
+        assertThat(admission.operation().failureCode())
+                .isEqualTo("invalid_action_response");
+        assertThat(admission.operation().receiptId()).isEqualTo("rcpt-1");
+        assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+    }
+
     private String stage(String sessionId) {
         return jdbc.queryForObject("SELECT admission_stage FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"

@@ -606,6 +606,54 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(scheduler.haltedError).toBeUndefined();
   });
 
+  // A dispose landing inside the release retry's sleep must stop the retry
+  // write: dispose leaves the lease to lapse so a successor re-queues the
+  // activation, and releasing here would make that retryable failure
+  // permanent.
+  it('does not release after disposal races the release retry sleep', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const item = activation('a1');
+    const releaseSpy = vi.spyOn(store, 'release');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+
+    fsFault.failAppends = 1;
+    gate.resolve();
+    await waitUntil(() => releaseSpy.mock.calls.length === 1);
+    // Let the failed release's repair chain finish and the retry sleep arm,
+    // so the disposal below lands inside the sleep rather than before it.
+    for (let i = 0; i < 20; i++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    scheduler.dispose();
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(250);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(releaseSpy.mock.calls.length).toBe(1);
+    expect(store.get(item)?.status).toBe('assigned');
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
   // Once the release's retry bound is spent the activation is abandoned as
   // before — but its transient-failure budget is spent too, so the scheduler
   // records the terminal outcome itself rather than re-queuing the handler
