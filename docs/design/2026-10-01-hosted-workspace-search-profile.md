@@ -151,4 +151,17 @@ capability or an automatic safety check. Public connector enablement remains
 separate. Mixed-version operation needs a versioned worker identity or
 worker-derived capability advertisement before it can be supported.
 
+**Behavior change for existing Sessions:** the realpath containment that
+glob made necessary applies to `read_file`, `write_file` and `edit` on every
+Hosted profile, `/1` included. On a Workspace-capability worker, shared
+locations inside the mount remain reachable when sibling bindings resolve.
+Directory-external access is refused when its realpath leaves the mount,
+lands in another installed Session's directory, or a sibling binding cannot
+be resolved. A linked dependency inside the mount
+(`node_modules/@acme/ui -> ../../packages/ui`) still reads through with resolved
+bindings. A boot-v1
+worker has no Workspace mount or Session registry, so its boundary is the
+Session directory itself: a path that resolves through a symlink outside it,
+a linked dependency included, is refused where it previously read through.
+
 A lighter dispatch path for read-only, idempotent tools is out of scope.

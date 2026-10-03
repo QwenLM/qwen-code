@@ -1490,6 +1490,8 @@ describe('Managed context tool gate', () => {
       expect(fs.existsSync(path.join(root, 'services/web/new.txt'))).toBe(
         false,
       );
+      if (state === 'missing')
+        expect(fs.existsSync(path.join(root, 'services/web'))).toBe(false);
       const own = await (
         await post(origin, EXECUTE, {
           ...shell('session-1', 'call-2', ''),
