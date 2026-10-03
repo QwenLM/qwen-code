@@ -144,7 +144,7 @@ public final class ManagedExtensionRecords {
             "debounceMs");
     private static final Set<String> CHILD_KEYS = Set.of("kind", "shellId",
             "ownerScopeId", "commandRef", "startReceiptRef", "outputRef",
-            "stopReason", "exitCode", "exitSignal", "run");
+            "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
     private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
             "ownerScopeId", "commandRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
@@ -679,13 +679,21 @@ public final class ManagedExtensionRecords {
                         CHILD_STOP_REASONS.get("failed")),
                         CHILD_STOP_REASONS.get("cancelled")),
                 "childRun.stopReason");
+        JsonNode stopRequested = child.get("stopRequested");
+        require(stopRequested.isBoolean(),
+                "childRun.stopRequested must be boolean");
+        require(!"stop_requested".equals(stopReason)
+                || stopRequested.booleanValue(),
+                "childRun stop_requested needs its stop request");
         JsonNode exitCode = child.get("exitCode");
         if (!exitCode.isNull()) {
             count(exitCode, 0, 255, "childRun.exitCode");
         }
         JsonNode exitSignal = child.get("exitSignal");
         require(exitSignal.isNull()
-                || EXIT_SIGNAL.matcher(exitSignal.textValue()).matches(),
+                || exitSignal.isTextual()
+                        && EXIT_SIGNAL.matcher(exitSignal.textValue())
+                                .matches(),
                 "childRun.exitSignal must be an uppercase signal name");
         String state = text(run, "state");
         String reason = text(run, "reason");
@@ -720,21 +728,25 @@ public final class ManagedExtensionRecords {
 
     /**
      * Whether {@code child} may be the first revision of a background
-     * Shell: its run opens, and it has written no output, which needs a
-     * started process.
+     * Shell: its run opens, nobody has asked it to stop yet, and it has
+     * written no output, which needs a started process.
      */
     public static boolean isChildRunStart(JsonNode child) {
         return accepts(() -> requireChildRun(child))
                 && isRunStart(child.get("run"))
+                && !child.get("stopRequested").booleanValue()
                 && child.get("outputRef").isNull();
     }
 
     /**
      * Whether {@code next} may follow {@code previous} as the next revision
      * of one background Shell: its identity is fixed, its run moves
-     * forward, its start receipt is set once unless the Runtime rebuilt
-     * under a later generation, its output may grow but is never removed,
-     * exit evidence is set once, and nothing changes once it ended.
+     * forward, its start receipt is set once and never changes — a
+     * re-attach under a later generation keeps the receipt whose process
+     * it proves, while a changed receipt is refused as the shape of a
+     * rerun — its stop request is set but never cleared, its output may
+     * grow but is never removed, exit evidence is set once, and nothing
+     * changes once it ended.
      */
     public static boolean isChildRunSuccessor(JsonNode previous,
             JsonNode next) {
@@ -750,24 +762,23 @@ public final class ManagedExtensionRecords {
         if (!isRunSuccessor(previous.get("run"), next.get("run"))
                 || !previous.get("outputRef").isNull()
                         && next.get("outputRef").isNull()
+                || previous.get("stopRequested").booleanValue()
+                        && !next.get("stopRequested").booleanValue()
                 || !previous.get("exitCode").isNull()
                         && !same(previous.get("exitCode"),
                                 next.get("exitCode"))
                 || !previous.get("exitSignal").isNull()
                         && !same(previous.get("exitSignal"),
-                                next.get("exitSignal"))) {
+                                next.get("exitSignal"))
+                || !previous.get("startReceiptRef").isNull()
+                        && !same(previous.get("startReceiptRef"),
+                                next.get("startReceiptRef"))) {
             return false;
         }
         if (TERMINAL.contains(text(previous.get("run"), "state"))) {
             return same(previous, next);
         }
-        JsonNode runtimeBefore = previous.get("run").get("runtime");
-        boolean rebuilt = !runtimeBefore.isNull()
-                && !same(runtimeBefore, next.get("run").get("runtime"));
-        boolean sameReceipt = same(previous.get("startReceiptRef"),
-                next.get("startReceiptRef"));
-        return previous.get("startReceiptRef").isNull()
-                || (rebuilt ? !sameReceipt : sameReceipt);
+        return true;
     }
 
     /**

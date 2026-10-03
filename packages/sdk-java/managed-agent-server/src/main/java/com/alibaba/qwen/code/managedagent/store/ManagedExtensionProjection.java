@@ -117,6 +117,17 @@ public final class ManagedExtensionProjection {
      */
     public static TaskProjection project(TaskProjection previous,
             JsonNode run, long occurredAt) {
+        return project(previous, run, occurredAt, false);
+    }
+
+    /**
+     * The same projection with the record's stop request: a record that
+     * carries one and has not settled projects its Runtime as
+     * {@code draining} (H3's {@code child_run}; every earlier record
+     * passes false).
+     */
+    public static TaskProjection project(TaskProjection previous,
+            JsonNode run, long occurredAt, boolean stopRequested) {
         String state = run.get("state").textValue();
         JsonNode definition = run.get("definition");
         long createdAt = previous == null ? occurredAt : previous.createdAt();
@@ -131,7 +142,7 @@ public final class ManagedExtensionProjection {
                                 ? startedAt : createdAt))
                         : null;
         return new TaskProjection(taskState(state, run.get("reason")),
-                runtimeState(run),
+                runtimeState(run, stopRequested),
                 definition.isNull() ? null : definition
                         .get("definitionRevision").decimalValue()
                         .longValueExact(),
@@ -173,7 +184,7 @@ public final class ManagedExtensionProjection {
         };
     }
 
-    private static String runtimeState(JsonNode run) {
+    private static String runtimeState(JsonNode run, boolean stopRequested) {
         String execution = run.get("execution").textValue();
         if (TERMINAL.contains(run.get("state").textValue())
                 || execution == null) {
@@ -183,13 +194,13 @@ public final class ManagedExtensionProjection {
             return "unbound";
         }
         if ("running_attached".equals(execution)) {
-            return "ready";
+            return stopRequested ? "draining" : "ready";
         }
         if ("runtime_lost".equals(run.get("reason").textValue())) {
             return "lost";
         }
         if ("intent".equals(execution) || "dispatch_started".equals(execution)) {
-            return "provisioning";
+            return stopRequested ? "draining" : "provisioning";
         }
         return null;
     }

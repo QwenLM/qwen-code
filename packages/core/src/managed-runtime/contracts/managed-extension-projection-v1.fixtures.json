@@ -3849,6 +3849,64 @@
         "settledAt": null
       },
       "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-attached",
+      "run": {
+        "state": "waiting",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "running_attached",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "waiting",
+        "runtimeState": "draining",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-provisioning",
+      "run": {
+        "state": "running",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "dispatch_started",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "running",
+        "runtimeState": "draining",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": null
+      },
+      "deliveryPending": false
     }
   ],
   "historyCases": [

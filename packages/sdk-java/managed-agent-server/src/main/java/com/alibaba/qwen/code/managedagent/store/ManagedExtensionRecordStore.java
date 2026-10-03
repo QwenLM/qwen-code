@@ -349,6 +349,14 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("child_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         if (domain.equals("hook_execution")) {
             StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
             if (plan.kind().equals("managed-hook-plan")) {
@@ -485,7 +493,8 @@ public class ManagedExtensionRecordStore {
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
                 previous == null ? null : previous.projection(), run,
-                occurredAt);
+                occurredAt,
+                record.path("stopRequested").asBoolean(false));
         JsonNode delivery = run.get("delivery");
         String deliveryTarget = delivery.isNull() ? null
                 : delivery.get("target").textValue();

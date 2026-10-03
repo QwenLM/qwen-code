@@ -118,26 +118,37 @@ async function withAuthority<T>(
   }
 }
 
-function ref(resourceId: string, kind: string): ManagedSessionDurableRef {
-  return {
-    resourceId,
-    kind,
-    schemaVersion: 1,
-    byteLength: 64,
-    digest: 'a'.repeat(64),
-  };
+const BINDING_1 = { runtimeBindingId: 'binding-1', generation: '1' };
+
+interface ShellRefs {
+  readonly args: ManagedSessionDurableRef;
+  readonly receipt: ManagedSessionDurableRef;
+  readonly manifestA: ManagedSessionDurableRef;
+  readonly manifestB: ManagedSessionDurableRef;
 }
 
-const BINDING_1 = { runtimeBindingId: 'binding-1', generation: '1' };
-const RECEIPT_1 = ref('receipt-1', 'managed-runtime-receipt');
-const MANIFEST_1 = {
-  resourceId: 'manifest-1',
-  kind: 'managed-tool-result-manifest',
-  schemaVersion: 1,
-  byteLength: 64,
-  digest: 'd'.repeat(64),
-} as const;
-const MANIFEST_2 = { ...MANIFEST_1, resourceId: 'manifest-2' } as const;
+// The writer-side closure reads every reference a body names, so the test
+// publishes real content and builds records from the returned refs.
+async function publishRefs(harness: Harness): Promise<ShellRefs> {
+  return {
+    args: await harness.store.publish(
+      'managed-tool-args',
+      Buffer.from('{"command":"yes"}', 'utf8'),
+    ),
+    receipt: await harness.store.publish(
+      'managed-runtime-receipt',
+      Buffer.from('{"pid":1}', 'utf8'),
+    ),
+    manifestA: await harness.store.publish(
+      'managed-tool-result-manifest',
+      Buffer.from('{"pages":1}', 'utf8'),
+    ),
+    manifestB: await harness.store.publish(
+      'managed-tool-result-manifest',
+      Buffer.from('{"pages":2}', 'utf8'),
+    ),
+  };
+}
 
 function run(overrides: Record<string, unknown>) {
   return {
@@ -156,6 +167,7 @@ function run(overrides: Record<string, unknown>) {
 }
 
 function shell(
+  refs: ShellRefs,
   runOverrides: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
 ) {
@@ -163,10 +175,11 @@ function shell(
     kind: 'shell',
     shellId: 'shell-1',
     ownerScopeId: 'scope-main',
-    commandRef: ref('args-shell-1', 'managed-tool-args'),
+    commandRef: refs.args,
     startReceiptRef: null,
     outputRef: null,
     stopReason: null,
+    stopRequested: false,
     exitCode: null,
     exitSignal: null,
     run: run(runOverrides),
@@ -174,36 +187,42 @@ function shell(
   };
 }
 
-/** A Shell that starts, writes output, loses its Runtime and exits. */
-const LIFE = [
-  shell({}),
-  shell({
-    state: 'running',
-    execution: 'dispatch_started',
-    runtime: BINDING_1,
-  }),
-  shell(
-    { state: 'waiting', execution: 'running_attached', runtime: BINDING_1 },
-    { startReceiptRef: RECEIPT_1 },
-  ),
-  shell(
-    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
-    { startReceiptRef: RECEIPT_1, outputRef: MANIFEST_1 },
-  ),
-  shell(
-    { state: 'waiting', execution: 'running_attached', runtime: BINDING_1 },
-    { startReceiptRef: RECEIPT_1, outputRef: MANIFEST_2 },
-  ),
-  shell(
-    { state: 'settled', execution: 'settled', runtime: BINDING_1 },
-    {
-      startReceiptRef: RECEIPT_1,
-      outputRef: MANIFEST_2,
-      stopReason: 'exited',
-      exitCode: 0,
-    },
-  ),
-];
+/** A Shell that starts, writes output and exits. */
+function life(refs: ShellRefs) {
+  return [
+    shell(refs, {}),
+    shell(refs, {
+      state: 'running',
+      execution: 'dispatch_started',
+      runtime: BINDING_1,
+    }),
+    shell(
+      refs,
+      { state: 'waiting', execution: 'running_attached', runtime: BINDING_1 },
+      { startReceiptRef: refs.receipt },
+    ),
+    shell(
+      refs,
+      { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+      { startReceiptRef: refs.receipt, outputRef: refs.manifestA },
+    ),
+    shell(
+      refs,
+      { state: 'waiting', execution: 'running_attached', runtime: BINDING_1 },
+      { startReceiptRef: refs.receipt, outputRef: refs.manifestB },
+    ),
+    shell(
+      refs,
+      { state: 'settled', execution: 'settled', runtime: BINDING_1 },
+      {
+        startReceiptRef: refs.receipt,
+        outputRef: refs.manifestB,
+        stopReason: 'exited',
+        exitCode: 0,
+      },
+    ),
+  ];
+}
 
 function command(commandId: string) {
   return {
@@ -239,10 +258,12 @@ async function publishedBodies(harness: Harness): Promise<number> {
 describe('managed session authority child_run records', () => {
   it('chains shell revisions and projects the task', async () => {
     const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
     await withAuthority(harness, async (authority) => {
       const first = await authority.commitExtensionRecord(
         command('shell-1:1'),
-        { domain: 'child_run', record: LIFE[0] },
+        { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
       expect(first).toMatchObject({
@@ -256,7 +277,7 @@ describe('managed session authority child_run records', () => {
       // The resource holds exactly the closed body, with no envelope.
       expect(
         JSON.parse((await harness.store.read(first.recordRef)).toString()),
-      ).toEqual(LIFE[0]);
+      ).toEqual(chain[0]);
       expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
@@ -274,7 +295,7 @@ describe('managed session authority child_run records', () => {
       harness.now = 2_000;
       await authority.commitExtensionRecord(
         command('shell-1:2'),
-        { domain: 'child_run', record: LIFE[1] },
+        { domain: 'child_run', record: chain[1] },
         TRUSTED,
       );
       expect(authority.taskViews()).toEqual([
@@ -294,7 +315,7 @@ describe('managed session authority child_run records', () => {
       harness.now = 3_000;
       await authority.commitExtensionRecord(
         command('shell-1:3'),
-        { domain: 'child_run', record: LIFE[2] },
+        { domain: 'child_run', record: chain[2] },
         TRUSTED,
       );
       expect(authority.taskViews()).toEqual([
@@ -314,13 +335,13 @@ describe('managed session authority child_run records', () => {
       harness.now = 4_000;
       await authority.commitExtensionRecord(
         command('shell-1:4'),
-        { domain: 'child_run', record: LIFE[3] },
+        { domain: 'child_run', record: chain[3] },
         TRUSTED,
       );
       harness.now = 5_000;
       await authority.commitExtensionRecord(
         command('shell-1:5'),
-        { domain: 'child_run', record: LIFE[4] },
+        { domain: 'child_run', record: chain[4] },
         TRUSTED,
       );
       expect(await publishedBodies(harness)).toBe(5);
@@ -328,7 +349,7 @@ describe('managed session authority child_run records', () => {
       harness.now = 6_000;
       const last = await authority.commitExtensionRecord(
         command('shell-1:6'),
-        { domain: 'child_run', record: LIFE[5] },
+        { domain: 'child_run', record: chain[5] },
         TRUSTED,
       );
       expect(last.revision).toBe(6);
@@ -350,8 +371,10 @@ describe('managed session authority child_run records', () => {
 
   it('rebuilds the chain and the task view on reopen', async () => {
     const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
     await withAuthority(harness, async (authority) => {
-      for (const [index, record] of LIFE.slice(0, 4).entries()) {
+      for (const [index, record] of chain.slice(0, 4).entries()) {
         harness.now = 1_000 * (index + 1);
         await authority.commitExtensionRecord(
           command(`shell-1:${index + 1}`),
@@ -380,7 +403,7 @@ describe('managed session authority child_run records', () => {
           {
             revision: 4,
             operationId: 'shell-1:1',
-            record: LIFE[3],
+            record: chain[3],
           },
         );
       },
@@ -388,12 +411,60 @@ describe('managed session authority child_run records', () => {
     );
   });
 
+  it('projects draining once a stop is requested', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      for (const [index, record] of chain.slice(0, 3).entries()) {
+        harness.now = 1_000 * (index + 1);
+        await authority.commitExtensionRecord(
+          command(`shell-1:${index + 1}`),
+          { domain: 'child_run', record },
+          TRUSTED,
+        );
+      }
+      harness.now = 4_000;
+      await authority.commitExtensionRecord(
+        command('shell-1:4'),
+        {
+          domain: 'child_run',
+          record: shell(
+            refs,
+            {
+              state: 'running',
+              execution: 'running_attached',
+              runtime: BINDING_1,
+            },
+            { startReceiptRef: refs.receipt, stopRequested: true },
+          ),
+        },
+        TRUSTED,
+      );
+      expect(authority.taskViews()).toEqual([
+        {
+          taskId: TASK_ID,
+          sessionId,
+          kind: 'background_shell',
+          state: 'running',
+          runtimeState: 'draining',
+          definitionRevision: null,
+          createdAt: 1_000,
+          startedAt: 2_000,
+          settledAt: null,
+        },
+      ]);
+    });
+  });
+
   it('refuses a revision that skips a step and commits nothing', async () => {
     const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         command('shell-1:1'),
-        { domain: 'child_run', record: LIFE[0] },
+        { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
       const before = authority.committedSequence;
@@ -404,8 +475,13 @@ describe('managed session authority child_run records', () => {
           {
             domain: 'child_run',
             record: shell(
+              refs,
               { state: 'settled', execution: 'settled', runtime: BINDING_1 },
-              { startReceiptRef: RECEIPT_1, stopReason: 'exited', exitCode: 0 },
+              {
+                startReceiptRef: refs.receipt,
+                stopReason: 'exited',
+                exitCode: 0,
+              },
             ),
           },
           TRUSTED,
@@ -416,14 +492,43 @@ describe('managed session authority child_run records', () => {
     });
   });
 
-  it('refuses the domain while it stays disabled', async () => {
-    enablement.childRun = false;
+  it('refuses a record whose reference was never published', async () => {
     const harness = await createHarness();
+    const unpublished: ManagedSessionDurableRef = {
+      resourceId: 'never-published',
+      kind: 'managed-tool-args',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: 'f'.repeat(64),
+    };
+    const fake: ShellRefs = {
+      args: unpublished,
+      receipt: unpublished,
+      manifestA: unpublished,
+      manifestB: unpublished,
+    };
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitExtensionRecord(
           command('shell-1:1'),
-          { domain: 'child_run', record: LIFE[0] },
+          { domain: 'child_run', record: shell(fake, {}) },
+          TRUSTED,
+        ),
+      ).rejects.toThrow();
+      expect(await publishedBodies(harness)).toBe(0);
+    });
+  });
+
+  it('refuses the domain while it stays disabled', async () => {
+    enablement.childRun = false;
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('shell-1:1'),
+          { domain: 'child_run', record: chain[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
@@ -433,15 +538,17 @@ describe('managed session authority child_run records', () => {
 
   it('replays a repeated command with the original receipt', async () => {
     const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         command('shell-1:1'),
-        { domain: 'child_run', record: LIFE[0] },
+        { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
       const replay = await authority.commitExtensionRecord(
         command('shell-1:1'),
-        { domain: 'child_run', record: LIFE[0] },
+        { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
       expect(replay.revision).toBe(1);

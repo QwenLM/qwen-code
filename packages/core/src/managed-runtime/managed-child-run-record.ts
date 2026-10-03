@@ -52,6 +52,8 @@ export interface ChildRun {
   /** The growing output manifest: `managed-tool-result-manifest` version 1. */
   readonly outputRef: ManagedSessionDurableRef | null;
   readonly stopReason: ChildRunStopReason | null;
+  /** Set once and never cleared: a stop has been requested of the owner. */
+  readonly stopRequested: boolean;
   /** Exit evidence; at least one of the pair is proven when a Shell exits. */
   readonly exitCode: number | null;
   readonly exitSignal: string | null;
@@ -80,6 +82,7 @@ const BODY_KEYS = [
   'shellId',
   'startReceiptRef',
   'stopReason',
+  'stopRequested',
 ] as const;
 /** The fields that no revision of a background Shell may change. */
 const FIXED_KEYS = ['commandRef', 'kind', 'ownerScopeId', 'shellId'] as const;
@@ -210,6 +213,13 @@ export function parseChildRun(value: unknown): ChildRun {
     }
     return reason as ChildRunStopReason;
   });
+  const stopRequested = body.stopRequested;
+  if (typeof stopRequested !== 'boolean') {
+    fail('Child run stopRequested must be boolean.');
+  }
+  if (stopReason === 'stop_requested' && !stopRequested) {
+    fail('Child run stop_requested needs its stop request.');
+  }
   const exitCode = nullable(body.exitCode, (code) => {
     if (
       typeof code !== 'number' ||
@@ -281,6 +291,7 @@ export function parseChildRun(value: unknown): ChildRun {
     startReceiptRef,
     outputRef,
     stopReason,
+    stopRequested,
     exitCode,
     exitSignal,
     run,
@@ -288,22 +299,29 @@ export function parseChildRun(value: unknown): ChildRun {
 }
 
 /**
- * Whether `value` may open a background Shell: its run opens, and it has
- * written no output, which needs a started process.
+ * Whether `value` may open a background Shell: its run opens, nobody has
+ * asked it to stop yet, and it has written no output, which needs a started
+ * process.
  */
 export function isChildRunStart(value: unknown): boolean {
   return accepts(() => {
     const record = parseChildRun(value);
-    return isExtensionRunStart(record.run) && record.outputRef === null;
+    return (
+      isExtensionRunStart(record.run) &&
+      !record.stopRequested &&
+      record.outputRef === null
+    );
   });
 }
 
 /**
  * Whether `next` may follow `previous` as a later revision of one background
  * Shell: its identity is fixed, its run moves forward, its start receipt is
- * set once unless the Runtime rebuilt under a later generation, its output
- * may grow but is never removed, exit evidence is set once, and nothing
- * changes once it ended.
+ * set once and never changes — a re-attach under a later generation keeps
+ * the receipt whose process it proves, while a changed receipt is refused as
+ * the shape of a rerun — its stop request is set but never cleared, its
+ * output may grow but is never removed, exit evidence is set once, and
+ * nothing changes once it ended.
  */
 export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
   return accepts(() => {
@@ -313,20 +331,16 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       FIXED_KEYS.some((key) => !same(before[key], after[key])) ||
       !isExtensionRunSuccessor(before.run, after.run) ||
       (before.outputRef !== null && after.outputRef === null) ||
+      (before.stopRequested && !after.stopRequested) ||
       !setOnce(before.exitCode, after.exitCode) ||
-      !setOnce(before.exitSignal, after.exitSignal)
+      !setOnce(before.exitSignal, after.exitSignal) ||
+      !setOnce(before.startReceiptRef, after.startReceiptRef)
     ) {
       return false;
     }
     if (TERMINAL_RUN_STATES.includes(before.run.state)) {
       return same(before, after);
     }
-    const rebuilt =
-      before.run.runtime !== null &&
-      !same(before.run.runtime, after.run.runtime);
-    return rebuilt
-      ? before.startReceiptRef === null ||
-          !same(before.startReceiptRef, after.startReceiptRef)
-      : setOnce(before.startReceiptRef, after.startReceiptRef);
+    return true;
   });
 }

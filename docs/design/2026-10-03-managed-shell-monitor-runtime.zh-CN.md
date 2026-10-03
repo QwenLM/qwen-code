@@ -23,13 +23,13 @@
 
 参考设计 §3.1 把后台 Shell 指派给既有 `child_run` 域、`kind=shell`。`child_run` 已是封闭 v1 域索引中的名字，因此不提升索引版本。本切片定义 `managed-child_run` 记录体（schema 版本 1），只含后台 Shell 所需内容；H4 再以它自己的体版本把 `kind` 扩展到 `child_agent`/`workflow`/`team`。Shell 记录携带：
 
-- Shell 自身身份（`shellId`）、所属 Session scope，以及启动调用 pin：workspace generation、`cwdRef`、`commandRef`（启动调用的 args，其 digest 即命令 digest）、工具 profile 的 definition revision；
-- 进程身份：`processId`、拥有该进程的 Runtime binding 与 generation，以及 `startReceiptRef`——在 supervisor 真正启动进程之前为 null（与 Monitor 的 start receipt 规则一致）；
-- `status`：run block 状态加上 Shell 专有的停止标记——首个 revision 以 `reserved/admitted` 打开；后继 revision 可携带 stop 请求，它把任务的 Runtime state 投影为 `draining`（即 H0c 的欠账「run block 不携带 stop 请求，由 H3 补上」）；
+- Shell 自身身份（`shellId`）、所属 Session scope，以及启动调用 pin：`commandRef`（启动调用的 args，含命令与目录，其 digest 即命令 digest）——workspace generation 与工具 profile 的 revision 由启动调用自身的固定上下文携带，记录体不为它们单独设键；
+- 进程身份：拥有该进程的 Runtime binding 与 generation（位于 run block，与 Monitor 的携带方式一致），以及 `startReceiptRef`——在 supervisor 真正启动进程之前为 null（与 Monitor 的 start receipt 规则一致）。不存 `processId` 键：跨重启的稳定身份是 supervisor 从执行身份派生的 cgroup unit 名；
+- `status`：run block 状态加上 Shell 专有的停止标记——首个 revision 以 `reserved/admitted` 打开；专门的 `stopRequested` 标志（一旦置位，不可清除）携带 stop 请求；标志已置位而 execution 未结算时，任务的 Runtime state 投影为 `draining`（即 H0c 的欠账「run block 不携带 stop 请求，由 H3 补上」）。以 `stop_requested` 结束必须携带该标志；
 - 输出身份：`outputRef`，一个 `managed-tool-result-manifest` 版本 1 引用，随日志页发布递增 revision；以及「任务事件」一节所述的输出游标；
 - 终态账目：有据可查时的退出码或信号，以及封闭的 stop reason——仿照 Monitor 的规则：`settled` 由 `exited` 关闭，`failed` 由 `start_failed`/`process_failed`/`quota_exceeded` 关闭，`cancelled` 由 `stop_requested` 关闭——各自注明它可关闭的状态及所需证据。
 
-Shell 的 run 只记启动调用的 `executionCallId`：没有 `effectId`、`dispatchId`、`deliveryId`，也没有 pin 之外的 `definition`。Shell 没有 delivery 状态线、不进 outbox：它的完成经任务投影观察，它的输出经 Artifact 读取——正如 Monitor 经水位记录而非 delivery 通知。Shell 记录的 revision 规则仿照 H0b fixture 已固定的 Monitor 规则：身份与 pin 永不改变；输出只增不减；start receipt 设置一次，仅在更晚 generation 的新 Runtime binding 下变更；已 settled 的 Shell 绝不重开。
+Shell 的 run 只记启动调用的 `executionCallId`：没有 `effectId`、`dispatchId`、`deliveryId`，也没有 pin 之外的 `definition`。Shell 没有 delivery 状态线、不进 outbox：它的完成经任务投影观察，它的输出经 Artifact 读取——正如 Monitor 经水位记录而非 delivery 通知。Shell 记录的 revision 规则仿照 H0b fixture 已固定的 Monitor 规则：身份与 pin 永不改变；输出只增不减；已 settled 的 Shell 绝不重开。start receipt 与 Monitor 的 rebuild 规则有意不同：设置一次、永不改变——更晚 generation 下的 re-attach 沿用原 receipt，因为它所证明的进程从未重启，而变更 receipt 会被当作重跑的形态拒绝。（只有启动新 watch 的 Monitor rebuild 才签发新 receipt。）
 
 ### Monitor：启用 `monitor_run`
 
