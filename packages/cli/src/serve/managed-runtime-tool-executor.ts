@@ -319,6 +319,7 @@ export class ManagedToolExecutor {
     // must not be promoted into this Session's system instruction.
     const boundary = await fs.realpath(tools.directory);
     const files: ManagedWorkspaceContextFile[] = [];
+    const seen = new Set<string>();
     for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
       let text: string;
       try {
@@ -332,6 +333,10 @@ export class ManagedToolExecutor {
           path.isAbsolute(rel)
         )
           continue;
+        // One physical file under both names (`AGENTS.md -> QWEN.md`) is
+        // injected once, as core's memory loader does (#9597).
+        if (seen.has(real)) continue;
+        seen.add(real);
         text = await fs.readFile(real, 'utf8');
       } catch {
         continue;
@@ -339,9 +344,14 @@ export class ManagedToolExecutor {
       if (text.length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS) {
         const note =
           '\n[Truncated: the file exceeds the Hosted context limit.]';
-        text =
-          text.slice(0, MANAGED_WORKSPACE_CONTEXT_FILE_CHARS - note.length) +
-          note;
+        text = text.slice(
+          0,
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS - note.length,
+        );
+        // Cut on a code-point boundary: the Java Broker's writer sends a lone
+        // surrogate as '?'.
+        if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+        text += note;
       }
       files.push({ name, text });
     }

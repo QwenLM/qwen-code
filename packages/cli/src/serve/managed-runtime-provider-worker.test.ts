@@ -639,6 +639,29 @@ describe('Managed Runtime provider worker', () => {
           MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
         );
         expect(files[1].text).toContain('[Truncated');
+
+        // An astral character at the cut must not leave a lone surrogate:
+        // one of the two offsets splits a pair whatever the note's length.
+        for (const prefix of ['', 'x']) {
+          fs.writeFileSync(
+            path.join(workspace, 'AGENTS.md'),
+            prefix + '😀'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS),
+          );
+          const astral = await control<{
+            files: Array<{ name: string; text: string }>;
+          }>({ kind: 'workspace-context' });
+          expect(astral.files[1].text).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+          );
+          expect(astral.files[1].text).toContain('[Truncated');
+        }
+
+        // One file under both names is injected once.
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.symlinkSync('QWEN.md', path.join(workspace, 'AGENTS.md'));
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
       } finally {
         fs.rmSync(outside, { recursive: true, force: true });
       }
