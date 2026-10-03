@@ -2000,6 +2000,30 @@ function matchesRestrictiveMcpName(
   );
 }
 
+// `normalizeToolNameForProvider` keeps 55 characters + `_<hash>`, so a long
+// or unsafe key loses its `__` separator in the registered name and the
+// identity wildcard arm has no boundary to place a rule copied from it.
+// Restrictive rules keep main's literal prefix match on that registered name;
+// like the exact fallback above, this must never grant permission (R18-1).
+function matchesRestrictiveCutRegistration(
+  pattern: string,
+  toolName: string,
+  identity: McpToolIdentity | undefined,
+): boolean {
+  if (
+    identity === undefined ||
+    !pattern.startsWith('mcp__') ||
+    !pattern.endsWith('*')
+  ) {
+    return false;
+  }
+  const registeredServerPrefix = `mcp__${identity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
+  return (
+    !toolName.startsWith(registeredServerPrefix) &&
+    toolName.startsWith(pattern.slice(0, -1))
+  );
+}
+
 /**
  * Whether a deny entry covers a tool name, as a subagent's tool filter judges
  * it: an MCP tool matches server-level, wildcard and exact MCP patterns (see
@@ -2035,7 +2059,8 @@ export function matchesToolPattern(
       mcpIdentity,
     ) ||
     matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName) ||
-    matchesRestrictiveMcpName(pattern, mcpIdentity)
+    matchesRestrictiveMcpName(pattern, mcpIdentity) ||
+    matchesRestrictiveCutRegistration(pattern, toolName, mcpIdentity)
   );
 }
 
@@ -2121,7 +2146,12 @@ export function matchesRule(
       matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName) ||
       (restrictive &&
         canonicalCtxToolName.startsWith('mcp__') &&
-        matchesRestrictiveMcpName(rule.toolName, mcpIdentity));
+        (matchesRestrictiveMcpName(rule.toolName, mcpIdentity) ||
+          matchesRestrictiveCutRegistration(
+            rule.toolName,
+            canonicalCtxToolName,
+            mcpIdentity,
+          )));
     if (!matchesMcpName) {
       return false;
     }
