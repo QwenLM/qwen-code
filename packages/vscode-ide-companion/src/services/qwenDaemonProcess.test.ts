@@ -220,3 +220,46 @@ describe('QwenDaemonProcess exit notification', () => {
     expect(childA.listenerCount('stderr:data')).toBe(0);
   });
 });
+
+describe('QwenDaemonProcess multi-root workspace env', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('passes the opened folders to the daemon via the IDE workspace env var', async () => {
+    const child = createFakeChild();
+    spawnMock.mockReturnValueOnce(child.process);
+
+    const daemon = new QwenDaemonProcess();
+    const start = daemon.start('/cli.js', '/workspace-a', [
+      '/workspace-b',
+      '/workspace-c',
+    ]);
+    child.emitStdout('qwen serve listening on http://127.0.0.1:4300\n');
+    await start;
+
+    const spawnCall = spawnMock.mock.calls[0];
+    const env = spawnCall[2].env as Record<string, string>;
+    expect(JSON.parse(env['QWEN_CODE_IDE_WORKSPACE_PATH'])).toEqual([
+      '/workspace-a',
+      '/workspace-b',
+      '/workspace-c',
+    ]);
+  });
+
+  it('still sets the env var with only the bound folder when there are no extras', async () => {
+    const child = createFakeChild();
+    spawnMock.mockReturnValueOnce(child.process);
+
+    const daemon = new QwenDaemonProcess();
+    const start = daemon.start('/cli.js', '/workspace-a');
+    child.emitStdout('qwen serve listening on http://127.0.0.1:4301\n');
+    await start;
+
+    const spawnCall = spawnMock.mock.calls[0];
+    const env = spawnCall[2].env as Record<string, string>;
+    expect(JSON.parse(env['QWEN_CODE_IDE_WORKSPACE_PATH'])).toEqual([
+      '/workspace-a',
+    ]);
+  });
+});
