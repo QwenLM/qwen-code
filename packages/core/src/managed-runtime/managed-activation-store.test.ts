@@ -97,6 +97,48 @@ describe('FileManagedActivationStore', () => {
     expect(await readFile(filePath, 'utf8')).not.toContain('event:a2');
   });
 
+  it('renews from the call-time lease when the caller mutates its input before the write drains', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    const lease = (await store.claim(activation('a1'), 'worker-a', 1000))!;
+    expect(lease.expiresAt).toBe(1100);
+
+    now = 200;
+    const pending = store.renew(lease, 1000);
+    (lease as { workerId: string }).workerId = 'worker-b';
+    await expect(pending).resolves.toMatchObject({
+      workerId: 'worker-a',
+      expiresAt: 1200,
+    });
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      status: 'assigned',
+      lease: { workerId: 'worker-a', expiresAt: 1200 },
+    });
+    expect(await readFile(filePath, 'utf8')).not.toContain('worker-b');
+  });
+
+  it('releases from the call-time lease when the caller mutates its input before the write drains', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    const lease = (await store.claim(activation('a1'), 'worker-a', 1000))!;
+
+    const pending = store.release(lease, 'completed');
+    (lease as { workerId: string }).workerId = 'worker-b';
+    await expect(pending).resolves.toMatchObject({
+      status: 'released',
+      outcome: 'completed',
+    });
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      status: 'released',
+      outcome: 'completed',
+    });
+    expect(await readFile(filePath, 'utf8')).not.toContain('worker-b');
+  });
+
   it('truncates a torn tail before appending the next valid record', async () => {
     const store = await openStore();
     await store.enqueue(activation('a1'), limits);

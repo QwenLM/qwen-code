@@ -2637,7 +2637,6 @@ describe('per-hunk probes against real git', () => {
         // function's screen. Paths go in through JSON.stringify rather than
         // shell interpolation: a TMPDIR holding a space would otherwise split
         // the argument and the shim would silently plant nothing.
-        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         writeFileSync(
           join(shimDir, 'git'),
           `#!/usr/bin/env node
@@ -2666,6 +2665,9 @@ process.exit(r.status === null ? 1 : r.status);
 `,
         );
         chmodSync(join(shimDir, 'git'), 0o755);
+        // Pin the shim's module scope: an ambient package.json up the tmp
+        // tree ({"type":"module"}) would otherwise parse this CJS shim as ESM.
+        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
 
         const got = runOneHunkProbe(

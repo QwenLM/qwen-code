@@ -828,6 +828,116 @@ describe('managed session authority activation fences', () => {
       }
     });
 
+    it('skips a queued renewal when a fresh activation installs behind the release', async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const journal = LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKeyFor(fixture),
+        );
+        const resources = LocalManagedSessionResourceStore.create({
+          runtimeBaseDir: fixture.runtimeBaseDir,
+          sessionKey: sessionKeyFor(fixture),
+        });
+        const authority = await LocalManagedSessionAuthority.open({
+          journal,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now: () => 1_000_000,
+          resources,
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        await authority.installActivation({
+          activationId: 'act-a',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+        // The install queues its commit only once its body publish resolves,
+        // so the renewal below must wait for that publish or it would enter
+        // the serial queue ahead of the install it has to lose to.
+        let installBodyPublished!: () => void;
+        const installBodyVisible = new Promise<void>((resolve) => {
+          installBodyPublished = resolve;
+        });
+        const publish = resources.publish.bind(resources);
+        vi.spyOn(resources, 'publish').mockImplementation(
+          async (kind, body) => {
+            const published = await publish(kind, body);
+            if (
+              kind === 'managed-activation-install' &&
+              (JSON.parse(body.toString('utf8')) as { activationId?: string })[
+                'activationId'
+              ] === 'act-b'
+            ) {
+              setImmediate(installBodyPublished);
+            }
+            return published;
+          },
+        );
+
+        // Hold the release commit inside the serial queue, so the renewal
+        // below reads the still-'active' pre-commit state and queues behind
+        // the install that replaces it.
+        let releaseCommitStarted!: () => void;
+        const releaseCommitting = new Promise<void>((resolve) => {
+          releaseCommitStarted = resolve;
+        });
+        let releaseCommitMayFinish!: () => void;
+        const releaseCommitGate = new Promise<void>((resolve) => {
+          releaseCommitMayFinish = resolve;
+        });
+        const appendTransaction = journal.appendTransaction.bind(journal);
+        vi.spyOn(journal, 'appendTransaction').mockImplementation(
+          async (records) => {
+            if (
+              JSON.stringify(records).includes(
+                '"operation":"releaseActivation"',
+              )
+            ) {
+              releaseCommitStarted();
+              await releaseCommitGate;
+            }
+            return appendTransaction(records);
+          },
+        );
+
+        const release = authority.releaseActivation();
+        await releaseCommitting;
+        const installed = authority.installActivation({
+          activationId: 'act-b',
+          workerId: 'worker-2',
+          leaseDurationMs: 60_000,
+        });
+        await installBodyVisible;
+        const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
+        releaseCommitMayFinish();
+        await release;
+        await expect(installed).resolves.toEqual({
+          activationId: 'act-b',
+          epoch: 2,
+        });
+        await expect(renewed).resolves.toBeUndefined();
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-b',
+          epoch: 2,
+          phase: 'active',
+        });
+      } finally {
+        await lease.release();
+      }
+    });
+
     it('recovers the renewed horizon from a cold reopen', async () => {
       const fixture = await createFixture();
       let now = 1_000_000;
@@ -2531,7 +2641,9 @@ describe('managed session checkpoints', () => {
         },
         HOLDS,
       ),
-    ).rejects.toThrow(/invalid reader-facing record/);
+    ).rejects.toThrow(
+      /invalid reader-facing record: Skipped a transcript record with invalid identity fields\./,
+    );
     expect(harness.authority.committedSequence).toBe(before);
     await harness.close();
   });
@@ -2583,58 +2695,98 @@ describe('managed session checkpoints', () => {
         turnResultBody({
           sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         }),
+      detail: (resultRef: ManagedSessionDurableRef) => resultRef.resourceId,
     },
     {
       label: 'a record without a cwd',
       body: () => turnResultBody({ cwd: undefined }),
+      detail: () => 'missing sessionId/cwd/version/timestamp',
     },
     {
       label: 'non-JSON bytes',
       body: () => Buffer.from('this is not json', 'utf8'),
+      detail: () => 'the body is not JSON',
     },
   ])(
     'rejects a turn-complete whose result body is $label',
-    async ({ body }) => {
+    async ({ body, detail }) => {
       const harness = await openRunnableHarness();
       const resultRef = await harness.store.publish(
         'managed-turn-result',
         body(),
       );
       const before = harness.authority.committedSequence;
-      await expect(
-        harness.authority.commitTurnComplete(
-          inputCommand(harness.fixture, {
-            operation: 'settleTurn',
-            commandId: 'cmd-turn-invalid-body',
-          }),
-          {
-            turn: {
-              turnId: 'turn-1',
-              outcome: 'completed',
-              stopReason: 'end_turn',
-              resultRef,
-              occurredAt: 1,
-              eventId: 'turn:turn-1',
-            },
-            boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
-            state: (identity, previous) =>
-              encodeHarnessCheckpointV1(
-                createNextTurnReadyHarnessCheckpoint({
-                  previous,
-                  ...identity,
-                  activationId: HOLDS.activation.activationId,
-                  turnId: 'turn-1',
-                  promptId: 'turn-1',
-                }),
-              ),
+      const settled = harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-invalid-body',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: 'end_turn',
+            resultRef,
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
           },
-          HOLDS,
-        ),
-      ).rejects.toThrow(/invalid reader-facing record/);
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: (identity, previous) =>
+            encodeHarnessCheckpointV1(
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: HOLDS.activation.activationId,
+                turnId: 'turn-1',
+                promptId: 'turn-1',
+              }),
+            ),
+        },
+        HOLDS,
+      );
+      await expect(settled).rejects.toThrow(/invalid reader-facing record/);
+      await expect(settled).rejects.toThrow(detail(resultRef));
       expect(harness.authority.committedSequence).toBe(before);
       await harness.close();
     },
   );
+
+  it('rejects a turn-complete whose result reference is null', async () => {
+    const harness = await openRunnableHarness();
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-null-result',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: 'end_turn',
+            resultRef: null as unknown as ManagedSessionDurableRef,
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: (identity, previous) =>
+            encodeHarnessCheckpointV1(
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: HOLDS.activation.activationId,
+                turnId: 'turn-1',
+                promptId: 'turn-1',
+              }),
+            ),
+        },
+        HOLDS,
+      ),
+    ).rejects.toThrow(/turn result resource reference is required/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
 
   it('rejects a turn-complete whose result resource was never published', async () => {
     const harness = await openRunnableHarness();

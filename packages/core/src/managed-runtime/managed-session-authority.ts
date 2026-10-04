@@ -2451,24 +2451,28 @@ export class LocalManagedSessionAuthority {
     resultRef: unknown,
   ): Promise<void> {
     const store = this.resources;
-    if (store === undefined || resultRef === null) {
+    if (store === undefined) {
       throw new ManagedSessionRecordError(
-        'turn result resource contains an invalid reader-facing record.',
+        'a resource store is required to settle a turn.',
       );
     }
-    const resultBody = await store
-      .read(resultRef as ManagedSessionDurableRef)
-      .catch((cause: unknown) => {
-        throw new ManagedSessionRecordError(
-          `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-      });
+    if (resultRef === null) {
+      throw new ManagedSessionRecordError(
+        'a turn result resource reference is required to settle a turn.',
+      );
+    }
+    const ref = resultRef as ManagedSessionDurableRef;
+    const resultBody = await store.read(ref).catch((cause: unknown) => {
+      throw new ManagedSessionRecordError(
+        `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    });
     let resultValue: unknown;
     try {
       resultValue = JSON.parse(resultBody.toString('utf8'));
     } catch {
       throw new ManagedSessionRecordError(
-        'turn result resource contains an invalid reader-facing record.',
+        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: the body is not JSON.`,
       );
     }
     const validated = validateTranscriptRecord(resultValue);
@@ -2482,7 +2486,10 @@ export class LocalManagedSessionAuthority {
       validated.diagnostics.length > 0
     ) {
       throw new ManagedSessionRecordError(
-        'turn result resource contains an invalid reader-facing record.',
+        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: ${
+          validated.diagnostics.map((entry) => entry.message).join('; ') ||
+          'missing sessionId/cwd/version/timestamp'
+        }`,
       );
     }
   }

@@ -1452,6 +1452,170 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('commits the base transcript proof a reopen-over-existing-transcript header names', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}', 'utf8'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}', 'utf8'),
+      );
+      const proofRef = await stores.resourceStore.publish(
+        'managed-transcript-proof',
+        Buffer.from('proof', 'utf8'),
+      );
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      // A replacement writer adopting a sealed session reopens over the base
+      // transcript and its header names the proof; no writer in this repo
+      // emits one yet, so the genesis records are written by hand.
+      await journal.appendTransaction([
+        {
+          uuid: 'record-engine',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_execution_engine',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: { version: 1, engine: 'managed' },
+        },
+        {
+          uuid: 'record-header',
+          parentUuid: 'record-engine',
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:00.000Z',
+          type: 'system',
+          subtype: 'managed_session_header_v1',
+          cwd: '/workspace',
+          version: 'test',
+          managedSession: {
+            formatVersion: 1,
+            minimumReader: 'managed-session/1',
+            sessionKey: SESSION_KEY,
+            engine: 'managed',
+            definitionRef,
+            rootSnapshotRef,
+            createdBy: 'test',
+            baseTranscriptProof: proofRef,
+          },
+        },
+      ]);
+      expect(server.commits).toHaveLength(1);
+      expect(server.commits[0]).toMatchObject({ operation: 'session.create' });
+      const resources = server.commits[0]?.['resources'] as Array<
+        Record<string, unknown>
+      >;
+      expect(resources).toHaveLength(3);
+      expect(resources.map((resource) => resource['resourceId'])).toEqual(
+        expect.arrayContaining([
+          definitionRef.resourceId,
+          rootSnapshotRef.resourceId,
+          proofRef.resourceId,
+        ]),
+      );
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('commits the manifest a blocked tool receipt carries only in its resources', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    try {
+      // A blocked Shell capture commits its receipt with resultRef null, so
+      // the manifest reaches the store only through the receipt's resources.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      const manifestRef = await session.resources.publish(
+        'managed-tool-output-manifest',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-blocked',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:blocked',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-blocked',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [manifestRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      const commit = server.commits.at(-1);
+      expect(commit).toMatchObject({ operation: 'recordToolResult' });
+      expect(
+        (commit?.['resources'] as Array<Record<string, unknown>>).map(
+          (resource) => resource['resourceId'],
+        ),
+      ).toContain(manifestRef.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
   it("rejects a restore head regressed below the writer's committed position", async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
