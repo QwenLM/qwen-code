@@ -336,6 +336,14 @@ export class QQChannel extends ChannelBase {
   private maxFlushRetries: number;
   /** Retry delay for subsequent attempts (backoff beyond first retry). */
   private static readonly IDLE_FLUSH_BACKOFF_MS = 4000;
+  /**
+   * Foreground ceiling for the completion-path final segment when
+   * maxFlushRetries is the documented "unlimited" (<= 0). The fire-and-forget
+   * flush paths may retry forever because no caller awaits them, but a
+   * completion send is awaited inside the turn's try, so its readiness to give
+   * up decides when that turn's finally runs and the session lock is released.
+   */
+  private static readonly FINAL_SEGMENT_ROUTE_ATTEMPTS = 3;
   /** Max buffer length before forcing an immediate flush. */
   private static readonly MAX_BUFFER_LENGTH = 4096;
   /** Purge records kept in the rescue file, oldest dropped first. */
@@ -2994,25 +3002,30 @@ export class QQChannel extends ChannelBase {
    * reached the wire but throws nothing, so without this the final segment is
    * indistinguishable from a delivered one: the sealed head's loss log is
    * bypassed and the turn is reported delivered. A transient block (token
-   * refresh failure) can clear on a later attempt, so it is re-attempted under
-   * the same maxFlushRetries bound deliverCancelledStash uses; a permanent
-   * block, or exhaustion, reports the sealed head this path consumed instead of
-   * dropping it silently. The caller holds the msg_seq counter across the whole
-   * call and releases the anchor only after it returns, so a re-attempt cannot
-   * restart at seq 1 (QQ dedupes on msg_id + msg_seq).
+   * refresh failure) can clear on a later attempt, so it is re-attempted; a
+   * permanent block, or exhaustion, reports the sealed head this path consumed
+   * instead of dropping it silently. Exhaustion is bounded by maxFlushRetries
+   * when that is positive, and by FINAL_SEGMENT_ROUTE_ATTEMPTS when
+   * maxFlushRetries is the documented "unlimited" (<= 0): this send is awaited
+   * inside the turn, so unlike the fire-and-forget flush paths it cannot be
+   * allowed to retry forever — the turn's finally (and with it the session's
+   * turn lock) would never run. The caller holds the msg_seq counter across the
+   * whole call and releases the anchor only after it returns, so a re-attempt
+   * cannot restart at seq 1 (QQ dedupes on msg_id + msg_seq).
    */
   private async sendFinalSegmentChecked(
     sessionId: string,
     held: QQOrphanStash | undefined,
     send: () => Promise<SendBlock | undefined>,
   ): Promise<void> {
+    const bound =
+      this.maxFlushRetries > 0
+        ? this.maxFlushRetries
+        : QQChannel.FINAL_SEGMENT_ROUTE_ATTEMPTS;
     for (let attempt = 1; ; attempt++) {
       const blocked = await send();
       if (blocked === undefined) return;
-      if (
-        blocked === 'permanent' ||
-        (this.maxFlushRetries > 0 && attempt >= this.maxFlushRetries)
-      ) {
+      if (blocked === 'permanent' || attempt >= bound) {
         this.logLostSealedHead(
           held?.pre,
           sessionId,

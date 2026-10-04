@@ -7973,6 +7973,52 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
+  it('bounds a completion send by its own ceiling when maxFlushRetries is unlimited', async () => {
+    const ch = makeChannel({ maxFlushRetries: 0 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    // maxFlushRetries: 0 is documented "unlimited" and the fire-and-forget
+    // flush paths rely on that. This send is awaited inside the turn, so
+    // honoring "unlimited" here means a route that never clears keeps the
+    // turn — and the shared session's turn lock — open forever.
+    let routeCalls = 0;
+    chp['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: 'transient' };
+    };
+
+    const completion = onResponseComplete(ch, 'test-chat', '', 's1');
+    // Settlement is observed through a flag, never by awaiting the promise: if
+    // the foreground ceiling is dropped the retry loop never ends, and awaiting
+    // it here would hang the suite instead of failing it.
+    let settled = false;
+    void completion.finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(600_000);
+    await drain();
+
+    expect(settled).toBe(true);
+    // The ceiling, not maxFlushRetries: attempts 1 and 2 back off, attempt 3 is
+    // the bound and reports the loss.
+    expect(routeCalls).toBe(3);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 9 chars of sealed head',
+    );
+    // The caller releases the anchor only after the helper returns, so a
+    // settled completion must have done it.
+    expect(sessionAnchors.has('s1')).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
   it('reports the sealed head a permanently blocked final segment cannot deliver', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
