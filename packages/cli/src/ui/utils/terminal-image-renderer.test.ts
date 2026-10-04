@@ -691,6 +691,14 @@ describe('terminalImageRenderer', () => {
       const binDir = path.join(tempDir, 'bin');
       await fs.mkdir(binDir);
       const chafaPath = path.join(binDir, 'chafa');
+      // Pin the shim to CommonJS: an up-tree package.json with
+      // "type": "module" (a stray /tmp/package.json on a shared runner)
+      // otherwise flips the extensionless shim to ESM, where require and
+      // __dirname do not exist.
+      await fs.writeFile(
+        path.join(binDir, 'package.json'),
+        '{"type":"commonjs"}',
+      );
       await fs.writeFile(
         chafaPath,
         '#!/usr/bin/env node\nconst fs = require("fs");\nconst path = require("path");\nfs.appendFileSync(path.join(__dirname, "count.txt"), "x\\n");\nprocess.stdout.write(`${process.argv.find((arg) => arg.startsWith("--size="))}\\n`);\n',

@@ -38,6 +38,10 @@ function setStdoutIsTTY(value: boolean): void {
 }
 
 function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
+  // The POSIX shim is extensionless: pin its directory to CommonJS so an
+  // up-tree package.json with "type": "module" (a stray /tmp/package.json
+  // on a shared runner) cannot flip it to ESM, where require() is undefined.
+  fs.writeFileSync(path.join(binDir, 'package.json'), '{"type":"commonjs"}');
   const fakeMmdcScript = path.join(binDir, 'fake-mmdc.cjs');
   const defaultBodyLines = [
     'const fs = require("node:fs");',
@@ -65,6 +69,9 @@ function createFakeMmdc(binDir: string, bodyLines?: string[]): void {
 }
 
 function createFakeChafa(binDir: string, bodyLines?: string[]): void {
+  // Same CommonJS pin as createFakeMmdc: the extensionless POSIX shim must
+  // not be flipped to ESM by an up-tree package.json.
+  fs.writeFileSync(path.join(binDir, 'package.json'), '{"type":"commonjs"}');
   const fakeChafaScript = path.join(binDir, 'fake-chafa.cjs');
   const defaultBodyLines = [
     'process.stdout.write("ansi line 1\\nansi line 2\\n");',
