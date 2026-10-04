@@ -39,6 +39,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     },
     environment: { state: 'ready' },
     lastSequence: 0,
+    capabilities: { tasks: true, artifacts: false, actions: false },
   };
   function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
@@ -262,7 +263,9 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await fixture.waitForCurrentStream();
   await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
   await fixture.waitForCurrentStream();
-  expect(fixture.cancellations).toEqual([{ turnId: 'p2' }]);
+  // waitForCurrentStream can pass on the still-running turn's stale cursor
+  // while the cancel POST is still on the wire: poll the actual list.
+  await expect.poll(() => fixture.cancellations).toEqual([{ turnId: 'p2' }]);
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
