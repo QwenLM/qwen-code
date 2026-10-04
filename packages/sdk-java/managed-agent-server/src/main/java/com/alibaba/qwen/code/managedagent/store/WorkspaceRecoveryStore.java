@@ -524,8 +524,12 @@ public final class WorkspaceRecoveryStore {
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "created_at");
+        // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
+        boolean lockHead = lockSources && count(jdbc,
+                "SELECT COUNT(*) FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                tenant, session) != 0;
         var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?"
-                + (lockSources ? " FOR UPDATE" : ""),
+                + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
                     var value = new ColumnMapRowMapper().mapRow(result, index);
                     value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));

@@ -14,6 +14,8 @@
 
 运维关闭 Session 创建、输入准入和派发，结算已接受工作，停止 Harness/journal writer 并防止重启。`retire` 在现有 tenant placement 锁域安装持久 storage 准入 fence，释放精确原 Runtime Session，证明物理 Worker 退役并检查未结算执行/holder。复用可靠 close 的停止回执和有界 claim，不安装永久 Harness close fence。准入和最终元数据检查保留现有 tenant 级 placement 锁：同 tenant 的其他 storage 可能等待这些元数据事务完成；文件扫描和物理退役在锁外运行。未绑定的旧 Session 没有 storage 所有权，不受此 storage fence 约束。旧 FAILED/LOST/RELEASED 记录需要正向停写证据；终态和租约过期不足为证。已有 loss recovery 必须按原协议完成。
 
+创建新迁移操作或 admission fence 之前，检查原 Runtime 状态目录和保留历史目录均为存在的规范目录，并使用未变更的 W1a 读取器证明历史目录身份。不满足条件时在退役任何 placement 之前返回 `migration_state_unavailable` 或 `migration_history_unverified`。有歧义的 birth time 仍不支持。已有操作的查看/回执重放不重复这些前置检查；目标身份仍在外部复制完成后的 prepare 阶段检查。
+
 退役后运维进入 W1a 维护 fence，使用外部准备的 Workspace 副本捕获 W1b 证据。`prepare` 验证固定 capture、当前来源、目标副本、迁移资格和历史卷。`promote` 使用新的运行重复验证；旧成功回执不能授权当前转换。维护期间不获取 Runtime。
 
 ## 证据与原子提升
@@ -25,6 +27,8 @@
 最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可由同一操作续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。若已取消或失效的操作留下 marker 或临时文件，新操作必须通过外部流程重新准备与新 capture 匹配的目标副本，不接受或删除其他操作的产物。反向迁移需要新操作/capture 和更高 revision。
 
 长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close、V33–V34 定义/回收和 V35 Session 工具 profile 迁移字节，W1c 新增 V36 保存迁移状态与 fence，V37 为历史 Session 和已完成迁移查询增加索引。
+
+V38 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认不区分大小写的数据库，不修改 V36/V37 历史。MySQL 专属字符集转换不由 H2 模拟。加锁来源清查先无锁检查 journal head 是否存在，再锁住已有 head；保留的租户权威锁阻止新 writer，同时避免缺失键的 InnoDB gap 锁阻塞其他租户。
 
 ## 部署与 Runtime 路由
 

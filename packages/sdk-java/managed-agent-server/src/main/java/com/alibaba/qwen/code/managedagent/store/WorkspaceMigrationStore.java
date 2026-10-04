@@ -5,10 +5,14 @@ import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.*;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +73,21 @@ public final class WorkspaceMigrationStore {
                 check(!roots.get(left).startsWith(roots.get(right)) && !roots.get(right).startsWith(roots.get(left)),
                         "overlapping_roots");
             }
+        }
+        for (String field : List.of("stateDirectory", "fileHistoryRoot")) {
+            String code = "stateDirectory".equals(field) ? "migration_state_unavailable" : "migration_history_unverified";
+            Path directory = path(field);
+            try {
+                check(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
+                        && directory.equals(directory.toRealPath()), code);
+            } catch (IOException error) {
+                throw failure(code);
+            }
+        }
+        try {
+            guard.migrationIdentity(path("fileHistoryRoot"));
+        } catch (RuntimeBrokerException error) {
+            throw failure("migration_history_unverified");
         }
         var source = guard.migrationSource(tenant, storage, revision, fence);
         check(source.root().equals(text(request, "sourceRoot")), "migration_identity_conflict");

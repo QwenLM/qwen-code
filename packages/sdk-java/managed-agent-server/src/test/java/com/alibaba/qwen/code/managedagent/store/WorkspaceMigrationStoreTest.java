@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -38,9 +40,11 @@ class WorkspaceMigrationStoreTest {
     private ObjectNode request;
     private Path source;
     private Path target;
+    private Path unreadableIdentity;
 
     @BeforeEach
     void setup() throws Exception {
+        temp = temp.toRealPath();
         var data = new DriverManagerDataSource("jdbc:h2:mem:migration-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
@@ -51,9 +55,16 @@ class WorkspaceMigrationStoreTest {
         var properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", source.toString())));
-        guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new WorkspaceStorageGuard.Identity(
-                path.toRealPath().toString(), "test-host", "device", path.getFileName().toString(), "2026-10-02T00:00:00Z"));
+        guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> {
+            if (path.equals(unreadableIdentity)) {
+                throw new IOException("Unverified directory birth time");
+            }
+            return new WorkspaceStorageGuard.Identity(path.toRealPath().toString(), "test-host", "device",
+                    path.getFileName().toString(), "2026-10-02T00:00:00Z");
+        });
         guard.register("tenant", "storage", UUID.randomUUID().toString());
+        Files.createDirectory(temp.resolve("history"));
+        Files.createDirectory(temp.resolve("runtime"));
         request = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
                 .put("migrationOperationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
                 .put("fenceOperationId", UUID.randomUUID().toString()).put("captureOperationId", UUID.randomUUID().toString())
@@ -66,6 +77,33 @@ class WorkspaceMigrationStoreTest {
     private WorkspaceMigrationStore store(boolean create) {
         return new WorkspaceMigrationStore(jdbc, manager, guard, new InMemoryRuntimeBindingRepository(),
                 request.toString().getBytes(StandardCharsets.UTF_8), create);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"stateDirectory,false", "stateDirectory,true", "fileHistoryRoot,false", "fileHistoryRoot,true"})
+    void rejectsUnavailableOriginalDirectoriesBeforeInstallingAnyFence(String field, boolean symlink) throws Exception {
+        Path directory = Path.of(request.path(field).asText());
+        Files.delete(directory);
+        if (symlink) {
+            Files.createSymbolicLink(directory, target);
+        }
+        String code = "stateDirectory".equals(field) ? "migration_state_unavailable" : "migration_history_unverified";
+        assertThatThrownBy(() -> store(true)).hasMessageContaining(code);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+    }
+
+    @Test
+    void rejectsUnprovedHistoryIdentityBeforeInstallingAnyFenceAndPreservesOperationReplay() throws Exception {
+        unreadableIdentity = Path.of(request.path("fileHistoryRoot").asText());
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_history_unverified");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        unreadableIdentity = null;
+        var original = store(true).inspect();
+        Files.delete(Path.of(request.path("stateDirectory").asText()));
+        Files.delete(Path.of(request.path("fileHistoryRoot").asText()));
+        assertThat(store(false).inspect()).isEqualTo(original);
     }
 
     @ParameterizedTest
@@ -87,7 +125,6 @@ class WorkspaceMigrationStoreTest {
                 + "rl.once('line', () => process.exit(1));\n"
                 + "process.stdout.write(JSON.stringify({id: 1, method: 'failure', params: {code: '" + code + "'}}) + '\\n');\n");
         request.put("cliEntry", worker.toString());
-        Files.createDirectory(Path.of(request.path("fileHistoryRoot").asText()));
         var operation = store(true);
         operation.retire(mock(RuntimeBrokerService.class));
         guard.fence("tenant", "storage", 1, request.path("fenceOperationId").asText());
