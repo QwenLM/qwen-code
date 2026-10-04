@@ -19,7 +19,9 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
-export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
+// H3 raises the requirement so a reader from before the `monitor_run` name
+// existed refuses an H3-created Session at its header instead of mid-scan.
+export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/2';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -1162,7 +1164,7 @@ export function isManagedSessionLifecycleTransitionAllowed(
   return LIFECYCLE_TRANSITIONS[from].includes(to);
 }
 
-function managedSessionReaderVersion(value: unknown): number | null {
+export function managedSessionReaderVersion(value: unknown): number | null {
   if (typeof value !== 'string') return null;
   const match = /^managed-session\/(0|[1-9][0-9]*)$/.exec(value);
   if (match === null) return null;

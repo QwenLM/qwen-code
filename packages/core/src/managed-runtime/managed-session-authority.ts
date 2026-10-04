@@ -44,6 +44,7 @@ import {
   assertManagedSessionTransaction,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
+  managedSessionReaderVersion,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
@@ -1299,6 +1300,23 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * `monitor_run` commits only into a Session created by a reader that knows
+   * the name; a Session whose header names less stays openable but never
+   * gains the domain, whatever path the commit arrives on.
+   */
+  private assertDomainAdmittable(domain: ManagedSessionDomain): void {
+    assertManagedSessionDomainEnabled(domain);
+    if (
+      domain === 'monitor_run' &&
+      (managedSessionReaderVersion(this.header.minimumReader) ?? 0) < 2
+    ) {
+      throw new ManagedSessionRecordError(
+        `domain ${domain} requires a Session created by managed-session/2.`,
+      );
+    }
+  }
+
+  /**
    * Commits one registered domain record. The body is published as a resource
    * first, because the event carries only a reference to it; the authority
    * composes the envelope so a caller cannot choose its own revision or break
@@ -1312,7 +1330,7 @@ export class LocalManagedSessionAuthority {
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionDomainReceipt> {
-    assertManagedSessionDomainEnabled(request.domain);
+    this.assertDomainAdmittable(request.domain);
     const store = this.resources;
     if (store === undefined) {
       throw new ManagedSessionRecordError(
@@ -1392,7 +1410,7 @@ export class LocalManagedSessionAuthority {
       // since.
       const replayed = this.replayedExtension(command);
       if (replayed !== undefined) return replayed;
-      assertManagedSessionDomainEnabled(request.domain);
+      this.assertDomainAdmittable(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
       this.assertExtensionRevision(
@@ -2073,7 +2091,7 @@ export class LocalManagedSessionAuthority {
       // Only an enabled domain commits records, whatever the path: the
       // generic appends would otherwise take any name in the index.
       if (event.kind === 'domain.committed') {
-        assertManagedSessionDomainEnabled(
+        this.assertDomainAdmittable(
           event.payload['domain'] as ManagedSessionDomain,
         );
       }

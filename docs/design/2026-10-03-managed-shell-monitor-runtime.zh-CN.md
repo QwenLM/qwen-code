@@ -43,13 +43,13 @@ H0b 契约已固定 `monitor_run` 记录体及其 revision 与 rebuild 规则，
 
 ### 读者门禁
 
-早于 H0b 的二进制会拒绝 `monitor_run` 这个名字，因此持有 `monitor_run` 记录的 Session 必须把这类二进制挡在外面。该要求用两种机制之一落实，与实现一同定案：如果 header 能在日志内改写，就在提交首个 `monitor_run` 记录的事务中抬升该 Session 的 `minimumReader`；如果 header 不可变，就让 H3 时代的 Session 在创建时携带更高的最低读者版本，并在旧二进制可以打开的 Session 上拒绝 `monitor_run`。无论哪种，早于 H0b 的读者都不会打开它无法解析记录的日志。
+早于 H0b 的二进制会拒绝 `monitor_run` 这个名字，因此持有 `monitor_run` 记录的 Session 必须把这类二进制挡在外面。该要求已随 H3 实现定案。header 不可变：日志扫描器拒绝重复的 `managed_session_header_v1` 行，也拒绝 header 之后的任何未知 subtype，因此任何事务都无法在日志内合法抬升 Session 的读者要求。新 Session 在创建时盖上 `minimumReader: managed-session/2`；reader 仍按原规则接受不超过自身版本的要求令牌；提交 `monitor_run` 记录的每条路径，在 Session 的 header 要求低于该版本时额外拒绝。早于 H3 的二进制（≤ v1 的 reader）在 header 解析处就用专用的「不支持该 reader」错误拒绝任何 H3 创建的 Session，根本到不了 `monitor_run` 事件；H3 之前创建的 Session 保留 v1 header，对所有 reader 照旧可开，且永远收不进 `monitor_run`。把所有新 Session 都盖成 v2，意味着陈旧 reader 连从未开过 monitor 的 H3 Session 也打不开——这点代价被接受：Session 随 run 而生、部署内 worker 一并滚动；而改用可顶替的 header 行要在双语言里改日志格式，换来的只是这一段狭窄的混版本窗口。
 
 `child_run` 在每个 managed-session/1 读者上都能解析，但只有 H3 理解其记录体：旧 writer 拒绝提交它（其 `MANAGED_EXTENSION_RECORD_BODIES` 没有该体）。不对称的风险在 server 一侧：旧 Java store 会静默放行未知域的事件，而按 H0c 第 7 个开放问题，事后才获得记录体的 server 看到的第一个 revision 不是 start，会拒绝它并停掉 writer。因此 server 必须先于任何能提交该域的 writer 获得 `child_run` 记录体：`child_run` 在 `MANAGED_SESSION_ENABLED_DOMAINS` 中保持关闭，直到一个发布同时携带两侧且 server 先行部署——即 H1、H2 已经采用的顺序。除已启用域常量与该部署顺序外，不存在别的运行时准入开关。
 
 ### 资源闭包
 
-Java store 只有在记录体点名的每个资源都随提交在场时才会提交该体；点名了 Session 不持有的资源的体会被拒绝（H0c 第 3 个开放问题）。对 `child_run`，这一要求在本 PR 发布时双侧即成立：writer 在发布前逐一读取 `commandRef`、`startReceiptRef`、`outputRef`，server 的提交时检查列出同三项，因此一次失败的检查停掉 writer，而不是提交一个 store 必然拒绝的引用；不豁免任何资源种类。`monitor_run` 在其启用时承担同项义务：H0c 时代的 fixture 与链样引用从未实体化，必须以真实发布的引用重建之后，该域的检查才能开启——列为启用前置，本发布不做。
+Java store 只有在记录体点名的每个资源都随提交在场时才会提交该体；点名了 Session 不持有的资源的体会被拒绝（H0c 第 3 个开放问题）。对 `child_run`，这一要求在本 PR 发布时双侧即成立：writer 在发布前逐一读取 `commandRef`、`startReceiptRef`、`outputRef`，server 的提交时检查列出同三项，因此一次失败的检查停掉 writer，而不是提交一个 store 必然拒绝的引用；不豁免任何资源种类。`monitor_run` 在其启用时承担同项义务，而 H0c 时代 fixture 欠下的前置已由本 PR 偿清：两套 rig 都已用真实发布的引用重建（按被引身份记忆化的同类占位体），两侧 store 都在提交时读取 monitor 的四条引用，且各有一条专门的见证钉住该检查——点名了提交之外资源的 run 会被拒绝。
 
 ## Runtime 所有权
 
