@@ -303,6 +303,10 @@ export function useManagedSession(
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
             gapStalls = 0;
+            // A genuinely new frame is the stream certifying itself: it
+            // retires the stream leg's records. Replays and gap frames do
+            // not count — only data the loop had not seen before does.
+            retire('stream');
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
@@ -486,14 +490,18 @@ export function useManagedSession(
       ? state
       : { events: [], loading: Boolean(sessionId) };
   const entries = Object.values(visible.signals ?? {});
-  const newestFinal = entries
-    .filter((entry) => entry.final)
-    .sort((a, b) => b.seq - a.seq)[0];
+  // The displayed sticky is the standing verdict of the most specific
+  // authority that currently has one: a blip on a less specific leg never
+  // displaces it — it leaves only when its own leg heals (or a more
+  // specific authority also goes terminal).
+  const standing = (['stream', 'transcript', 'session'] as const)
+    .map((leg) => entries.find((entry) => entry.final && entry.leg === leg))
+    .find((entry) => entry !== undefined);
   const newest = entries.sort((a, b) => b.seq - a.seq)[0];
   return {
     ...visible,
-    stoppedReason: newestFinal?.message,
-    stoppedLeg: newestFinal?.leg,
+    stoppedReason: standing?.message,
+    stoppedLeg: standing?.leg,
     error: newest?.final ? undefined : newest?.message,
     loadingOlder,
     loadOlder,

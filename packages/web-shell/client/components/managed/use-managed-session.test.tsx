@@ -273,6 +273,96 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('keeps a transcript verdict standing through a session blip and its recovery', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ sessionId: 'session-1' })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Not found'), { status: 404 }),
+        )
+        .mockResolvedValue({ sessionId: 'session-1' });
+      const provider = {
+        getSession,
+        getTranscript: vi.fn(() =>
+          Promise.reject(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          ),
+        ),
+        subscribeEvents: vi.fn(),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      // The session leg's definite blip lands inside this window: it is
+      // recorded on its own slot but never displaces the standing
+      // transcript verdict...
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      // ...and the verdict is still standing after the session leg heals
+      // and the re-armed bootstrap keeps climbing the transcript ladder.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+      expect(getSession.mock.calls.length).toBeGreaterThan(3);
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('prefers the standing transcript verdict over a later session verdict', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ sessionId: 'session-1' })
+        .mockRejectedValue(
+          Object.assign(new Error('Not found'), { status: 404 }),
+        );
+      const provider = {
+        getSession,
+        getTranscript: vi.fn(() =>
+          Promise.reject(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          ),
+        ),
+        subscribeEvents: vi.fn(),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      // The session leg has answered the same definite 404 for rungs in a
+      // row now — recorded on its own slot — but the standing transcript
+      // verdict of the more specific authority outranks it.
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
   it('records a definite stream answer and keeps resubscribing behind its ladder', async () => {
     vi.useFakeTimers();
     try {
@@ -301,6 +391,97 @@ describe('useManagedSession', () => {
       expect(subscribeEvents.mock.calls.length).toBeLessThanOrEqual(45);
       expect(latest?.stoppedReason).toBe('session gone');
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires a definite stream verdict once the stream delivers again', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        yield event(2);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // The reconnect delivers a genuinely new frame: the stream retires
+      // its own verdict — no other leg's success was involved.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a stream failure visible while the summary poll is healthy', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1)
+          throw Object.assign(new Error('server busy'), { status: 500 });
+        yield event(1);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('server busy');
+      expect(latest?.stoppedReason).toBeUndefined();
+      // Two healthy poll successes inside this window retire only their
+      // own leg: the stream's transient record must still be standing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+      expect(provider.getSession.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.error).toBe('server busy');
+      expect(latest?.stoppedReason).toBeUndefined();
+    } finally {
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
@@ -2827,6 +3008,62 @@ describe('useManagedSession', () => {
       expect(latest?.events.map((item) => item.id)).toEqual([3, 4, 5, 6]),
     );
     expect(latest?.error).toBeUndefined();
+  });
+
+  it('keeps a failed page fetch visible through later summary polls', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before
+            ? Promise.reject(
+                Object.assign(new Error('page failed'), { status: 500 }),
+              )
+            : Promise.resolve({
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }),
+      );
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript,
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { signal?: AbortSignal },
+        ) {
+          yield event(1);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]);
+
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('page failed');
+      // Two healthy poll successes inside this window must not erase the
+      // transcript leg's standing record of the failed click.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(provider.getSession.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(latest?.error).toBe('page failed');
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]);
+      expect(latest?.olderCursor).toBe('cursor-5');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
   });
 
   it('recovers past a run of corrupt frames through the resync path', async () => {
