@@ -745,6 +745,7 @@ export async function launchWebShell({
 }) {
   if (isShuttingDownNow()) return false;
   const webPort = await resolveWebPort(excludedPorts);
+  if (isShuttingDownNow()) return false;
   if (isTTY) {
     console.log(
       `web-shell: ${buildWebShellUrl({ port: webPort, webShellPath })}`,
@@ -958,6 +959,15 @@ export function installTeardownHandlers() {
 async function main() {
   const options = parseLauncherArgs(args);
 
+  // Fail fast on a busy pinned port before anything rotates credentials or
+  // the banner prints: a per-stage recheck alone would only surface this
+  // after writeSpringEnvFiles already rotated the Spring wiring (R4-14).
+  if (options.daemonPort !== undefined) {
+    await ensurePortFree(options.daemonPort, '--daemon-port');
+  }
+  if (options.harnessPort !== undefined) {
+    await ensurePortFree(options.harnessPort, '--harness-port');
+  }
   const daemonPort =
     options.daemonPort ??
     (await findAvailablePort(

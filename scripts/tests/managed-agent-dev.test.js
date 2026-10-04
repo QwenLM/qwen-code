@@ -30,11 +30,14 @@ vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal();
   return {
     ...original,
+    // No pid: a fake pushed into the module's children registry stays a
+    // 'direct' kill target whose fake kill() is a no-op, so teardown code
+    // can never signal a real process through this fixture.
     spawn: vi.fn(() => ({
       on: vi.fn(),
       kill: vi.fn(),
       killed: false,
-      pid: 12345,
+      pid: undefined,
       exitCode: null,
       signalCode: null,
     })),
@@ -318,6 +321,30 @@ describe('findWebPort', () => {
       await new Promise((resolveClose) => viteStandIn.close(resolveClose));
     }
   });
+
+  it('skips DEFAULT_WEB_PORT when Vite’s family already holds it', async () => {
+    const localAddress = await new Promise((resolveLookup) => {
+      dns.lookup('localhost', (_err, address) => resolveLookup(address));
+    });
+    if (!localAddress) {
+      return;
+    }
+    const viteStandIn = net.createServer();
+    const bound = await new Promise((resolveListen) => {
+      viteStandIn.once('error', () => resolveListen(false));
+      viteStandIn.listen(5174, localAddress, () => resolveListen(true));
+    });
+    if (!bound) {
+      return;
+    }
+    try {
+      const found = await findWebPort(new Set());
+      expect(found).toBeGreaterThan(5174);
+      expect(found).toBeLessThanOrEqual(5183);
+    } finally {
+      await new Promise((resolveClose) => viteStandIn.close(resolveClose));
+    }
+  });
 });
 
 describe('buildKillPlan', () => {
@@ -395,6 +422,9 @@ describe('installTeardownHandlers', () => {
       installTeardownHandlers();
       const registered = onSpy.mock.calls.map((call) => call[0]);
       expect(registered).toEqual([...TEARDOWN_SIGNALS, 'exit']);
+      for (const [, handler] of onSpy.mock.calls) {
+        expect(typeof handler).toBe('function');
+      }
     } finally {
       onSpy.mockRestore();
     }
@@ -1173,6 +1203,22 @@ describe('launchWebShell', () => {
     const launch = spawnShell.mock.calls[0][0];
     expect(launch.args).toContain('5199');
     expect(launch.env.QWEN_WEB_SHELL_OPEN_PATH).toContain('token=T');
+  });
+
+  it('spawns nothing when teardown begins while the port probe runs', async () => {
+    let torn = false;
+    const spawnShell = vi.fn();
+    const launched = await launchWebShell({
+      ...base,
+      isShuttingDownNow: () => torn,
+      resolveWebPort: async () => {
+        torn = true;
+        return 5199;
+      },
+      spawnShell,
+    });
+    expect(launched).toBe(false);
+    expect(spawnShell).not.toHaveBeenCalled();
   });
 });
 
