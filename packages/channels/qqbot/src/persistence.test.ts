@@ -622,12 +622,3 @@ describe('fixRestoredSessions', () => {
     expect(toSession.get('k1')).toBe('already-valid');
   });
 });
-
-describe('channel-base test double', () => {
-  it('exports truncateUtf16Units, which QQChannel imports', async () => {
-    const base = await import('@qwen-code/channel-base');
-    expect(
-      typeof (base as { truncateUtf16Units?: unknown }).truncateUtf16Units,
-    ).toBe('function');
-  });
-});

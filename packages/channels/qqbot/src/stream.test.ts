@@ -488,6 +488,12 @@ describe('onResponseChunk', () => {
 
     const seqMap = chp['msgSeqMap'] as Map<string, number>;
 
+    // In flight: the superseded branch's release was vetoed by the live flush
+    // marker, so the counter is still registered. Without this the final
+    // `has('msg-1') === false` below cannot tell that veto apart from an
+    // immediate reclaim (the settling chain would find nothing to delete).
+    expect(seqMap.get('msg-1')).toBe(1);
+
     // Clean up the still-pending turn-1 send; its own chain releases both
     // the marker and the superseded turn's msg_seq counter on settle.
     resolveSend!(mockResponse(true));
@@ -1639,6 +1645,46 @@ describe('onResponseComplete', () => {
       'turn-1-residual',
     );
   });
+
+  it('releases the stale turn anchor even when its send throws', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+
+    // Turn 1 streams and its deferred flush chain still owns the entry, so
+    // turn 2's chunks are all dropped by the stale guard and turn 2 completes
+    // through the stale branch.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'turn-1-residual', 'sess-1');
+    pendingStreamDelete.add('sess-1');
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'turn-2-chunk', 'sess-1');
+    expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-B');
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('FALLBACK_FAILED', 'permanent failure'),
+    );
+
+    await expect(
+      onResponseComplete(ch, 'test-chat', 'TURN-2-FULL', 'sess-1'),
+    ).rejects.toThrow();
+
+    // The throw must not skip the release. onPromptEnd cannot cover it (the
+    // predecessor's park flag makes it early-return) and turn 1's chain
+    // releases only its own expectedMsgId, so an unreleased msg-B would veto
+    // every reclaim of its msg_seq counter until the sweeper TTL.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    onPromptEnd(ch, 'test-chat', 'sess-1');
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    stderrSpy.mockRestore();
+  });
 });
 
 describe('pendingStreamDelete coordination', () => {
@@ -2466,11 +2512,50 @@ describe('buffer limit flush (#11)', () => {
       expect(orphanBuffer.get('s1')!.text.length).toBeLessThanOrEqual(40);
     }
     expect(orphanBuffer.get('s1')!.text.length).toBe(40);
+    // One line for the whole episode, not one per over-cap chunk: the divert
+    // window can stay open for the process's life, so repeats only accumulate
+    // (the cumulative total follows when the stash leaves the buffer).
     expect(
       stderrSpy.mock.calls
         .map((c) => String(c[0]))
         .filter((line) => line.includes('over the buffer limit')),
-    ).not.toHaveLength(0);
+    ).toHaveLength(1);
+
+    stderrSpy.mockRestore();
+    resolveSend(mockResponse(true));
+    await drain();
+  });
+
+  it('reports the cumulative cap total once when the divert episode ends', async () => {
+    const ch = makeChannel({ bufferFlushLength: 40 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; capDropped?: number }
+    >;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const { resolveSend } = await reachStaleStash(ch);
+    for (let i = 0; i < 12; i++) {
+      onResponseChunk(ch, 'test-chat', 'x'.repeat(10), 's1');
+    }
+    expect(
+      stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('over the buffer limit')),
+    ).toHaveLength(1);
+    const droppedTotal = orphanBuffer.get('s1')!.capDropped!;
+    expect(droppedTotal).toBeGreaterThan(0);
+
+    // A fresh prompt supersedes the stash, ending the episode: the aggregate
+    // that the suppressed per-chunk lines would have carried is reported once.
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    expect(orphanBuffer.has('s1')).toBe(false);
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('stash capped:');
+    expect(logged).toContain(`(${droppedTotal} total)`);
 
     stderrSpy.mockRestore();
     resolveSend(mockResponse(true));

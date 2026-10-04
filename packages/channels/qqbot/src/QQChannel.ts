@@ -182,6 +182,23 @@ interface QQStreamState {
   boundaryClearedInFlight?: 'payload' | 'residual';
 }
 
+/**
+ * A diverted turn's stashed head (see streamOrphanBuffer). `capDropped` and
+ * `capLogged` bound the cap log: the first overflow writes one line, later
+ * overflows only accumulate, and the cumulative total is reported once when
+ * the stash leaves the buffer. Without them a permanently parked predecessor
+ * (the divert window can last the process's life) writes one near-identical
+ * line per chunk.
+ */
+interface QQOrphanStash {
+  turn: number;
+  text: string;
+  pre?: string;
+  sourceLabel?: string;
+  capDropped?: number;
+  capLogged?: number;
+}
+
 /** Validate chatId to prevent SSRF when constructing URLs. */
 export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
@@ -445,10 +462,7 @@ export class QQChannel extends ChannelBase {
    * boundary fires for the entry. Entries are cleared when the session dies
    * or the channel disconnects.
    */
-  private streamOrphanBuffer: Map<
-    string,
-    { turn: number; text: string; pre?: string; sourceLabel?: string }
-  > = new Map();
+  private streamOrphanBuffer: Map<string, QQOrphanStash> = new Map();
   /**
    * The turn whose onResponseComplete has already run, per session. The
    * completion that prepends a turn's stash cannot run a second time, so a
@@ -1545,6 +1559,7 @@ export class QQChannel extends ChannelBase {
       parkedStash &&
       parkedStash.turn === (this.turnCounter.get(sessionId) ?? 0)
     ) {
+      this.reportOrphanStashCap(sessionId, parkedStash);
       this.streamOrphanBuffer.delete(sessionId);
       void this.deliverCancelledStash(chatId, sessionId, parkedStash.text);
     }
@@ -1567,6 +1582,7 @@ export class QQChannel extends ChannelBase {
     const stashed = this.streamOrphanBuffer.get(sessionId);
     if (stashed) {
       if (stashed.turn === (this.turnCounter.get(sessionId) ?? 0)) {
+        this.reportOrphanStashCap(sessionId, stashed);
         this.streamOrphanBuffer.delete(sessionId);
         if (!state) {
           state = this.createStreamState(chatId, sessionId, '', stashed.turn);
@@ -1847,17 +1863,14 @@ export class QQChannel extends ChannelBase {
         // bound the stash like state.buffer is bounded. Keep the head — the
         // sealed opening — and log the dropped tail.
         const limit = this.streamBufferLimit(state);
-        const stashed: {
-          turn: number;
-          text: string;
-          pre?: string;
-          sourceLabel?: string;
-        } =
+        const stashed: QQOrphanStash =
           held && held.turn === currentTurn
             ? {
                 turn: currentTurn,
                 text: held.text + chunk,
                 pre: held.pre,
+                capDropped: held.capDropped,
+                capLogged: held.capLogged,
                 ...(segment?.sourceLabel !== undefined ||
                 held.sourceLabel !== undefined
                   ? {
@@ -1887,13 +1900,23 @@ export class QQChannel extends ChannelBase {
             droppedPre = stashed.pre.length - stashed.text.length;
             stashed.pre = stashed.text;
           }
-          process.stderr.write(
-            `[QQ:${this.name}] dropping ${droppedText} chars of diverted turn ${currentTurn} stash` +
-              (droppedPre > 0
-                ? ` and ${droppedPre} chars of its sealed pre`
-                : '') +
-              ` over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
-          );
+          // One line per episode, not per chunk: the divert window can stay
+          // open for the process's life, so the first overflow reports the
+          // loss immediately and every later chunk only accumulates. The
+          // cumulative total is reported once when the stash leaves the buffer
+          // (reportOrphanStashCap).
+          stashed.capDropped =
+            (stashed.capDropped ?? 0) + droppedText + droppedPre;
+          if ((stashed.capLogged ?? 0) === 0) {
+            stashed.capLogged = stashed.capDropped;
+            process.stderr.write(
+              `[QQ:${this.name}] dropping ${droppedText} chars of diverted turn ${currentTurn} stash` +
+                (droppedPre > 0
+                  ? ` and ${droppedPre} chars of its sealed pre`
+                  : '') +
+                ` over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
+            );
+          }
         }
         this.streamOrphanBuffer.set(sessionId, stashed);
         // Self-heal: if the parked entry has no send in flight, its settle
@@ -1987,6 +2010,7 @@ export class QQChannel extends ChannelBase {
           // The previous turn's deferred chain has settled and freed the
           // streamState entry — prepend the stashed chunks so this turn's
           // reply HEAD is delivered in order.
+          this.reportOrphanStashCap(sessionId, held);
           this.streamOrphanBuffer.delete(sessionId);
           // The sealed pre-boundary head has no other copy (the bridge cleared
           // its collection at the boundary), so carry it on the state until the
@@ -2695,6 +2719,7 @@ export class QQChannel extends ChannelBase {
       const held = this.streamOrphanBuffer.get(sessionId);
       if (held !== undefined) {
         if (held.turn === currentTurn) {
+          this.reportOrphanStashCap(sessionId, held);
           this.streamOrphanBuffer.delete(sessionId);
           if (held.pre) {
             replyText = held.pre + fullText;
@@ -2727,14 +2752,22 @@ export class QQChannel extends ChannelBase {
           } finally {
             this.endMsgSeqSend(captured);
           }
-          this.releaseSessionReplyAnchor(sessionId, captured);
         } else {
           await super.onResponseComplete(chatId, replyText, sessionId);
-          this.releaseSessionReplyAnchor(sessionId);
         }
       } catch (e: unknown) {
         this.logLostSealedHead(held?.pre, sessionId, e);
         throw e;
+      } finally {
+        // Release for both outcomes. onPromptEnd cannot cover this branch: the
+        // predecessor's park flag makes it early-return, and on a throw the
+        // in-try release used to be skipped, leaving this turn's anchor (and
+        // its msg_seq counter) behind an in-flight-send veto forever. The
+        // `finally` runs after endMsgSeqSend, so the counter this send owns is
+        // reclaimable, and still passes `captured` for the anchored case so a
+        // successor turn's anchor is never dropped.
+        if (captured) this.releaseSessionReplyAnchor(sessionId, captured);
+        else this.releaseSessionReplyAnchor(sessionId);
       }
       return;
     }
@@ -2766,6 +2799,7 @@ export class QQChannel extends ChannelBase {
     const held = this.streamOrphanBuffer.get(sessionId);
     if (held !== undefined) {
       if (held.turn === currentTurn) {
+        this.reportOrphanStashCap(sessionId, held);
         this.streamOrphanBuffer.delete(sessionId);
         if (held.pre) {
           remaining = held.pre + remaining;
@@ -2936,14 +2970,28 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * Report the tail a capped divert episode accumulated after its first
+   * overflow line. See the cap branch in onResponseChunk: the first drop is
+   * logged immediately so the loss is visible, later chunks only count, and
+   * this emits the cumulative total once per episode when the stash leaves
+   * the side buffer.
+   */
+  private reportOrphanStashCap(sessionId: string, held: QQOrphanStash): void {
+    const total = held.capDropped ?? 0;
+    const logged = held.capLogged ?? 0;
+    if (total <= logged) return;
+    process.stderr.write(
+      `[QQ:${this.name}] diverted turn ${held.turn} stash capped: ${total - logged} further chars dropped (${total} total) for ${sanitizeLogText(sessionId, 64)}\n`,
+    );
+  }
+
+  /**
    * Drop a side-buffer entry that cannot be delivered (it belongs to a
    * superseded turn, or a fresh turn is starting and can never own it) and
    * log the discarded text so the loss is observable.
    */
-  private dropOrphanStash(
-    sessionId: string,
-    held: { turn: number; text: string; pre?: string; sourceLabel?: string },
-  ): void {
+  private dropOrphanStash(sessionId: string, held: QQOrphanStash): void {
+    this.reportOrphanStashCap(sessionId, held);
     this.streamOrphanBuffer.delete(sessionId);
     if (held.text) {
       process.stderr.write(
@@ -3126,13 +3174,24 @@ export class QQChannel extends ChannelBase {
     // a carried seal plus a boundary seal, each derived from a capped buffer —
     // so this write site cannot grow without bound.
     const room = Math.max(0, limit - sealed.length);
-    let merged = { turn: taggedTurn, text: sealed, pre: sealed };
+    let merged: QQOrphanStash = { turn: taggedTurn, text: sealed, pre: sealed };
     if (existing !== undefined) {
       const successorText = truncateUtf16Units(existing.text, room);
+      const dropped = existing.text.length - successorText.length;
       merged = {
         turn: existing.turn,
         text: sealed + successorText,
         pre: sealed + truncateUtf16Units(existing.pre ?? '', room),
+        // Carry the cap accounting across the merge. This site reports its own
+        // drop below, so that count is marked logged as well: the later
+        // summary must not repeat it. Left off entirely when the episode never
+        // hit the cap, so the stash keeps its plain shape.
+        ...(existing.capDropped !== undefined || dropped > 0
+          ? {
+              capDropped: (existing.capDropped ?? 0) + dropped,
+              capLogged: (existing.capLogged ?? 0) + dropped,
+            }
+          : {}),
         ...(existing.sourceLabel !== undefined
           ? { sourceLabel: existing.sourceLabel }
           : {}),
@@ -3140,10 +3199,9 @@ export class QQChannel extends ChannelBase {
       // `pre` is a prefix of `text` and is what onResponseComplete prepends, so
       // it must never outrun the kept text; the trims above keep that true, and
       // this stays as the safety net.
-      if (merged.pre.length > merged.text.length) {
+      if (merged.pre !== undefined && merged.pre.length > merged.text.length) {
         merged.pre = merged.text;
       }
-      const dropped = existing.text.length - successorText.length;
       if (dropped > 0) {
         process.stderr.write(
           `[QQ:${this.name}] dropping ${dropped} chars of successor stash over the buffer limit, sealed head kept, for ${sanitizeLogText(sessionId, 64)}\n`,
@@ -3793,6 +3851,12 @@ export class QQChannel extends ChannelBase {
         // deliberately (with a log): an unrecognized scope cannot tell us which
         // keys a scope would build, so even a currently unreachable
         // `__single__` route is left for the operator rather than guessed at.
+        // Key equality alone is not ownership: channel names are unrestricted
+        // user config and may contain colons, so a sibling named `<ourName>:x`
+        // can route `chatId: 'x', threadId: '__single__'` (or `senderId: 'x',
+        // chatId: '__single__'` under 'user') to the same base string. Apply
+        // the target check here too; a target-less entry still has to be
+        // purgeable, which is why the check permits `undefined`.
         // Legacy user-scope routes of THIS channel are unroutable under every
         // non-'user' scope (including 'single', whose key is
         // `<channel>:__single__`), so a persisted user-era key there can never
@@ -3803,8 +3867,13 @@ export class QQChannel extends ChannelBase {
         // channel name is unrestricted user config and may itself contain
         // colons, so the part count does not identify the scope.
         const baseKey = baseRoutingKey(entry.key);
+        const ownsEntry =
+          entry.target === undefined || entry.target.channelName === this.name;
         const isSingleOrphan =
-          knownScope && !singleScope && baseKey === `${this.name}:__single__`;
+          knownScope &&
+          !singleScope &&
+          baseKey === `${this.name}:__single__` &&
+          ownsEntry;
         const isOwnLegacyUserKey =
           knownScope &&
           scope !== 'user' &&

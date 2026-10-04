@@ -809,6 +809,75 @@ describe('purgeSingleScopeOrphans', () => {
     expect(logged).not.toContain('Saved ');
   });
 
+  it('spares a sibling route whose base key collides with our __single__ form', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        // Channel `qq`'s live `chat_thread` route for `chatId: 'x'` with
+        // `threadId: '__single__'` builds the base key `qq:x:__single__`,
+        // which string-equals channel `qq:x`'s own single-era key. Key
+        // equality alone is not ownership, so the target check must spare it
+        // rather than discard another channel's live daemon session.
+        {
+          key: 'qq:x:__single__',
+          sessionId: 'sibling-live',
+          target: {
+            channelName: 'qq',
+            senderId: 's',
+            chatId: 'x',
+            threadId: '__single__',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'qq:x',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'chat_thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        purgeLegacySessions: true,
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(writeFileSync)
+        .mock.calls.some((c) => String(c[0]).includes('sessions-purged.json')),
+    ).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
+  it('still purges a target-less __single__ key', () => {
+    // The mirror of the collision guard: an entry with no target cannot be
+    // attributed to a sibling, so it stays purgeable.
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [{ key: 'test-bot:__single__', sessionId: 'single-era-1' }],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+  });
+
   it('writes the rescue copy of the doomed routes before deleting any of them', () => {
     vi.mocked(writeFileSync).mockClear();
     const discardSession = vi.fn().mockResolvedValue(undefined);

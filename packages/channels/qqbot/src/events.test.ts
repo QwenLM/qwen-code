@@ -2869,6 +2869,47 @@ describe('resolveRoute chatTypes fallback', () => {
     // resolveRoute names the retry class beside the guard that produced it.
     expect(result).toEqual({ block: 'permanent' });
   });
+
+  it('reports a permanent block for a chatId the API cannot address', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // A slash fails isValidChatId, so the retry can never resolve the route:
+    // the invalid-chatId guard must name the permanent class, not transient.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('bad/chat');
+
+    expect(result).toEqual({ block: 'permanent' });
+  });
+
+  it('reports a transient block when the refreshed token is empty', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = '';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: '',
+      expiresIn: 7200,
+    });
+
+    const pvt = ch as unknown as QQChannelRaw;
+    // An empty token is a recoverable token state: the guard must name the
+    // transient class so a cancelled turn's stashed head is re-attempted
+    // rather than dropped.
+    const result = await (
+      pvt['resolveRoute'] as (
+        chatId: string,
+      ) => Promise<{ base: string; path: string } | { block: string }>
+    )('group-1');
+
+    expect(result).toEqual({ block: 'transient' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3445,11 +3486,29 @@ describe('inbound media', () => {
   });
 });
 
+// The channel-base mock above is a hand-written mirror of the shipped
+// `truncateUtf16Units` that QQChannel imports and the surrogate-boundary tests
+// assert through. Pin the mirror to the real module, so a semantics change on
+// either side reddens here instead of leaving those tests green against a
+// stale double.
 describe('channel-base test double', () => {
-  it('exports truncateUtf16Units, which QQChannel imports', async () => {
-    const base = await import('@qwen-code/channel-base');
-    expect(
-      typeof (base as { truncateUtf16Units?: unknown }).truncateUtf16Units,
-    ).toBe('function');
+  it('truncateUtf16Units mirror matches the real implementation', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mirrored = await import('@qwen-code/channel-base');
+    // `a𠮷b` at max 2 keeps the BMP char and drops the astral pair whole; a
+    // plain `text.slice(0, max)` mirror returns a split surrogate here.
+    const cases: Array<[string, number]> = [
+      ['a𠮷b', 2],
+      ['a𠮷b', 3],
+      ['𠮷𠮷', 3],
+      ['abc', 5],
+    ];
+    for (const [text, max] of cases) {
+      expect(mirrored.truncateUtf16Units(text, max)).toBe(
+        actual.truncateUtf16Units(text, max),
+      );
+    }
   });
 });
