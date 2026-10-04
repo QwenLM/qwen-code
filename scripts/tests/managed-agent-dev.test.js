@@ -179,6 +179,15 @@ describe('parseLauncherArgs', () => {
     ).toBe('http://127.0.0.1:8080');
   });
 
+  it('trims whitespace around the java url before validating', () => {
+    expect(
+      parseLauncherArgs(['--java-url', ' http://127.0.0.1:18218 ']).javaUrl,
+    ).toBe('http://127.0.0.1:18218');
+    expect(() => parseLauncherArgs(['--java-url=   '])).toThrow(
+      '--java-url must be a valid URL',
+    );
+  });
+
   it('preserves values that contain an equals sign', () => {
     expect(parseLauncherArgs(['--workspace=/tmp/with=equals']).workspace).toBe(
       '/tmp/with=equals',
@@ -437,6 +446,95 @@ describe('renderSpringEnv', () => {
   });
 });
 
+describe('Session Store wiring in spring.env', () => {
+  // Without these the Hosted Harness rejects every POST /session
+  // (invalid_managed_session_store) and each Managed Turn fails.
+  it('enables the Store on the Java URL in both renderings', () => {
+    const input = {
+      harnessPort: 4270,
+      harnessToken: 't',
+      capabilityDigest: VALID_DIGEST,
+      javaUrl: 'http://127.0.0.1:18218',
+    };
+    const sh = renderSpringEnv(input);
+    const ps1 = renderSpringPs1Env(input);
+    expect(sh).toContain(
+      `export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'`,
+    );
+    expect(sh).toContain(
+      `export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:18218'`,
+    );
+    expect(sh).toMatch(/^export QWEN_MANAGED_AGENT_WORKSPACE_ID='[^']+'$/m);
+    expect(ps1).toContain(
+      `$env:QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'`,
+    );
+    expect(ps1).toContain(
+      `$env:QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:18218'`,
+    );
+    expect(ps1).toMatch(/^\$env:QWEN_MANAGED_AGENT_WORKSPACE_ID='[^']+'$/m);
+  });
+
+  it('defaults the Store URL to the default Java URL', () => {
+    expect(
+      renderSpringEnv({
+        harnessPort: 4270,
+        harnessToken: 't',
+        capabilityDigest: VALID_DIGEST,
+      }),
+    ).toContain(
+      `export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'`,
+    );
+  });
+
+  it('quotes a Java URL that carries a single quote', () => {
+    const input = {
+      harnessPort: 4270,
+      harnessToken: 't',
+      capabilityDigest: VALID_DIGEST,
+      javaUrl: "http://127.0.0.1:8080/a'b",
+    };
+    expect(renderSpringEnv(input)).toContain(
+      `SESSION_STORE_BASE_URL='http://127.0.0.1:8080/a'\\''b'`,
+    );
+    expect(renderSpringPs1Env(input)).toContain(
+      `SESSION_STORE_BASE_URL='http://127.0.0.1:8080/a''b'`,
+    );
+  });
+});
+
+describe('SERVER_PORT wiring in spring.env', () => {
+  // Without it Spring binds 8080 no matter what --java-url said, and the
+  // launcher waits on a port nothing serves.
+  it('pins SERVER_PORT from a loopback http --java-url in both renderings', () => {
+    const input = {
+      harnessPort: 4270,
+      harnessToken: 't',
+      capabilityDigest: VALID_DIGEST,
+      javaUrl: 'http://127.0.0.1:18218',
+    };
+    expect(renderSpringEnv(input)).toContain(`export SERVER_PORT='18218'`);
+    expect(renderSpringPs1Env(input)).toContain(`$env:SERVER_PORT='18218'`);
+  });
+
+  it('pins the default port too, and skips https and non-loopback URLs', () => {
+    const base = {
+      harnessPort: 4270,
+      harnessToken: 't',
+      capabilityDigest: VALID_DIGEST,
+    };
+    expect(renderSpringEnv(base)).toContain(`export SERVER_PORT='8080'`);
+    expect(
+      renderSpringEnv({ ...base, javaUrl: 'https://127.0.0.1:8443' }),
+    ).not.toContain('SERVER_PORT');
+    expect(
+      renderSpringPs1Env({ ...base, javaUrl: 'https://127.0.0.1:8443' }),
+    ).not.toContain('SERVER_PORT');
+    expect(
+      renderSpringEnv({ ...base, javaUrl: 'http://10.0.0.5:8080' }),
+    ).not.toContain('SERVER_PORT');
+  });
+});
+
 describe('renderSpringPs1Env', () => {
   it('emits the same four values in PowerShell syntax', () => {
     const content = renderSpringPs1Env({
@@ -481,7 +579,7 @@ describe('writeSpringEnvFiles', () => {
     };
   }
 
-  it('creates the directory 0700 on a first run and the env file 0600', () => {
+  it('writes the env content and no ps1 sibling on the POSIX arm', () => {
     const nestedRoot = mkdtempSync(path.join(tmpdir(), 'spring-env-nested-'));
     const nested = path.join(nestedRoot, 'a', 'b');
     try {
@@ -491,15 +589,36 @@ describe('writeSpringEnvFiles', () => {
         springPs1Env: ps1Content,
         isWinPlatform: false,
       });
-      expect(lstatSync(nested).mode & 0o077).toBe(0);
-      expect(statSync(path.join(nested, 'spring.env')).mode & 0o777).toBe(
-        0o600,
+      expect(readFileSync(path.join(nested, 'spring.env'), 'utf8')).toBe(
+        envContent,
       );
       expect(existsSync(path.join(nested, 'spring.env.ps1'))).toBe(false);
     } finally {
       rmSync(nestedRoot, { recursive: true, force: true });
     }
   });
+
+  (onWindows ? it.skip : it)(
+    'creates the directory 0700 and the env file 0600 on POSIX',
+    () => {
+      const nestedRoot = mkdtempSync(path.join(tmpdir(), 'spring-env-perms-'));
+      const nested = path.join(nestedRoot, 'a', 'b');
+      try {
+        writeSpringEnvFiles({
+          directory: nested,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: false,
+        });
+        expect(lstatSync(nested).mode & 0o077).toBe(0);
+        expect(statSync(path.join(nested, 'spring.env')).mode & 0o777).toBe(
+          0o600,
+        );
+      } finally {
+        rmSync(nestedRoot, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('writes the ps1 sibling exactly when the Windows arm asks', () => {
     const { dir, cleanup } = freshDir();

@@ -284,7 +284,8 @@ panel to this Spring service.
 
 The one-shot launcher starts the ordinary daemon and the private Hosted
 Harness from TypeScript source, writes the Harness wiring
-(`QWEN_MANAGED_AGENT_HARNESS_*` and the rotating capability digest) to a
+(`QWEN_MANAGED_AGENT_HARNESS_*`, the rotating capability digest, and the
+HTTP Session Store that Hosted Sessions require) to a
 `spring.env` under the OS temp directory — kept outside the served
 workspace, mode-0600 on POSIX (on Windows NTFS ACLs scope the per-user temp
 directory instead, and a PowerShell `spring.env.ps1` sibling is written next
@@ -317,10 +318,14 @@ path, and the full Managed URL (which carries the daemon token) prints on an
 interactive terminal; ports auto-increment when busy. The launcher verifies
 only that something Spring-Boot-shaped answers `/actuator/health` — it
 cannot prove that Spring loaded this run's `spring.env`, so restart Spring
-whenever the launcher (and its rotating token and digest) restarts. To wire
-the pieces by hand instead, start an ordinary `qwen serve` on port 4170 in
-addition to the private Hosted Harness used by Spring, then run from the
-repository root:
+whenever the launcher (and its rotating token and digest) restarts. If every
+Turn then fails with `hosted_harness_rejected` in the panel: a Harness
+`400` means the Session Store wiring in `spring.env` did not load
+(`invalid_managed_session_store` — an env file from an older run), while a
+Harness `401` means a launcher restarted without restarting Spring —
+re-source the new `spring.env` and restart Spring. To wire the pieces by
+hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
+private Hosted Harness used by Spring, then run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
