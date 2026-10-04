@@ -110,6 +110,11 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     this.started = true;
   }
 
+  /** The caller's explicit broken mark, matching the foreground sink API. */
+  failCapture(): void {
+    this.fail(new Error('Capture transport failed.'));
+  }
+
   setProcessResult(result: {
     exitCode: number | null;
     signal: number | null;

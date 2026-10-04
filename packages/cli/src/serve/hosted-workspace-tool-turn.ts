@@ -936,6 +936,7 @@ export class HostedWorkspaceToolTurn {
           this.shell!.resources,
           this.shell!.assertWritable,
           this.promptId,
+          this.childRuns,
         );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
@@ -1269,6 +1270,7 @@ export class HostedWorkspaceToolTurn {
                 executionCallId,
                 bindingGeneration: this.bindingGeneration!,
                 capturePolicy: 'complete_required',
+                ...(request.background ? { background: true } : {}),
               },
             },
             request.call.callId,
