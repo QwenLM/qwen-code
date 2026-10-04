@@ -7555,9 +7555,16 @@ export class CoreToolScheduler {
   }
 
   private recordToolResults(completedCalls: CompletedToolCall[]): void {
-    if (!this.chatRecordingService) return;
-
     for (const call of completedCalls) {
+      const nested = call.request.source === 'code_mode';
+      // Aggregate owners record the outer exec only. Its script can discard
+      // or rewrite nested output, so Goal facts need their original records.
+      const recorder =
+        this.chatRecordingService ??
+        (nested && call.request.goalContext
+          ? this.config.getChatRecordingService()
+          : undefined);
+      if (!recorder) continue;
       const result = {
         callId: call.request.callId,
         status: call.status,
@@ -7572,12 +7579,13 @@ export class CoreToolScheduler {
         errorType: call.response.errorType,
       };
       const goalProvenance = goalToolResultProvenance(call.request);
-      this.chatRecordingService.recordToolResult(
+      const options = nested
+        ? { ...goalProvenance, subtype: 'code_mode_tool_result' as const }
+        : goalProvenance;
+      recorder.recordToolResult(
         call.response.responseParts,
         result,
-        // Passed only inside a Goal turn, so recording outside one keeps its
-        // two-argument shape.
-        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        ...(options ? ([options] as const) : ([] as const)),
       );
     }
   }
