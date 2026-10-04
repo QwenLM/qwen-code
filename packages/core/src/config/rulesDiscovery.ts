@@ -294,13 +294,19 @@ export class ConditionalRulesRegistry {
   }
 
   /**
-   * Drop the consumed markers so rules can be injected again.
+   * Drop ALL consumed markers so rules can be injected again.
    *
    * A reminder rides the tool result that triggered the match. Anything that
    * evicts that result — pre-send microcompaction, `/compress`,
-   * `/compress-fast`, auto-compaction, `/rewind` or a wholesale history
-   * replacement — drops the text but not the marker, and the marker would
-   * then suppress every later re-injection for the rest of the session.
+   * `/compress-fast`, auto-compaction, `/rewind`, memory-pressure
+   * `compact_history`, or a wholesale history replacement — drops the text
+   * but not the marker, and the marker would then suppress every later
+   * re-injection for the rest of the session.
+   *
+   * This is intentionally a blanket clear: callers evict only *some* tool
+   * results, so rules whose reminder is still resident get re-armed too.
+   * The trade-off is deliberate — a duplicate injection (bounded text cost)
+   * is far cheaper than a silently suppressed rule (the bug this fixes).
    */
   resetInjected(): void {
     if (this.injected.size === 0) {

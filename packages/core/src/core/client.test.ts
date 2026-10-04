@@ -3441,10 +3441,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('resets the conditional rule injection markers', async () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
 
       await client.resetChat();
 
@@ -3601,10 +3598,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('setHistory resets the conditional rule injection markers', () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       client['chat'] = {
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -3617,10 +3611,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('truncateHistory resets the conditional rule injection markers only when entries are removed', () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
 
       client['chat'] = mockChatWithLengths(3, 2);
       client.truncateHistory(2);
@@ -3677,10 +3668,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('stripOrphanedUserEntriesFromHistory resets the conditional rule injection markers only when entries were stripped', () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
 
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
@@ -4011,6 +3999,18 @@ describe('Gemini Client (client.ts)', () => {
       markReadEvictedFromHistory: vi.fn().mockReturnValue(true),
     } as unknown as ReturnType<Config['getFileReadCache']>);
     return clearMock;
+  }
+
+  /**
+   * Install a mock ConditionalRulesRegistry with a spyable `resetInjected`
+   * and return the spy so tests can assert on marker resets.
+   */
+  function mockConditionalRulesReset(): ReturnType<typeof vi.fn> {
+    const resetInjected = vi.fn();
+    vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
+      resetInjected,
+    } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+    return resetInjected;
   }
 
   /**
@@ -4538,10 +4538,7 @@ describe('Gemini Client (client.ts)', () => {
       );
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       const consumeRecall = vi
         .spyOn(client, 'consumeManagedAutoMemoryRecall')
         .mockResolvedValue(null);
@@ -4612,6 +4609,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('logs size overages when protected results leave nothing to clear', async () => {
+      const resetInjected = mockConditionalRulesReset();
       const { clear, markReadEvictedFromHistory, setHistory } =
         await arrangeReads(Date.now(), undefined, 2, 400_000);
       sizeBudget(2);
@@ -4626,6 +4624,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      // No tool results were evicted (all protected), so changed === false
+      // and the conditional-rule markers must NOT be reset.
+      expect(resetInjected).not.toHaveBeenCalled();
       for (const logged of [
         '[TOOL-RESULT MC] tool result chars 800000 > 500000',
         'cleared 0 tool result(s)',
@@ -4752,10 +4753,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       const compressFast = vi.fn().mockReturnValue({
@@ -4955,10 +4953,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       client['lastDeliveredMemoryTreeRevision'] = 'before-compression';
       client['chat'] = {
@@ -5184,10 +5179,7 @@ describe('Gemini Client (client.ts)', () => {
       // the compressed → ChatCompressed bridge in turn.ts. The flip on this
       // path is owned by the for-await loop in client.sendMessageStream, not
       // by tryCompressChat, so this test feeds the event in directly.
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       vi.spyOn(client, 'tryCompressChat').mockResolvedValue(
         compressionInfo(CompressionStatus.NOOP),
       );
@@ -5668,10 +5660,7 @@ Other open files:
     });
 
     it('rolls back the conditional rule injection markers when a tool result never reaches the model', async () => {
-      const resetInjected = vi.fn();
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
-        resetInjected,
-      } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
+      const resetInjected = mockConditionalRulesReset();
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield* [];

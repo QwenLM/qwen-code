@@ -1090,6 +1090,10 @@ export class LlmClient {
     this.config.getFileReadCache().clear();
     // Stripped entries can carry the conditional-rule reminder appended to a
     // read_file result, so the consumed marker must be dropped with them.
+    // Note: the Retry caller (sendMessageStream) strips provisionally — if
+    // the retry itself fails, the send-failure finally block handles the
+    // rollback. The blanket reset here is safe because a successful retry
+    // re-reads the same files and re-triggers the rules.
     this.resetConditionalRuleInjectionMarkers();
     this.config
       .getMemoryManager()
@@ -1238,10 +1242,11 @@ export class LlmClient {
    * A conditional rule reminder is appended to the tool result that matched
    * its `paths:` glob. Anything that evicts that result — pre-send
    * microcompaction, `/compress`, `/compress-fast`, auto-compaction,
-   * `/rewind`, or a wholesale history replacement — removes the text but
-   * leaves the marker behind, which would suppress every later re-injection
-   * for the rest of the session. Call this wherever history loses tool
-   * results, alongside the other derived-state invalidations.
+   * memory-pressure `compact_history`, `/rewind`, or a wholesale history
+   * replacement — removes the text but leaves the marker behind, which
+   * would suppress every later re-injection for the rest of the session.
+   * Call this wherever history loses tool results, alongside the other
+   * derived-state invalidations.
    */
   private resetConditionalRuleInjectionMarkers(): void {
     this.config.getConditionalRulesRegistry()?.resetInjected();
@@ -3311,6 +3316,11 @@ export class LlmClient {
       }
 
       const m = mcResult.meta;
+      // tokensSaved is incremented by tool-result, nested-media, and
+      // top-level-media branches alike, so changed can be true even when
+      // no tool results were evicted (e.g. only media was compacted).
+      // The blanket reset is safe in that case — re-arming a rule whose
+      // reminder is still resident costs one extra injection at most.
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
