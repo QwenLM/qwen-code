@@ -2754,7 +2754,7 @@ export class FeishuChannel extends ChannelBase {
                 if (media) {
                   const dir = join(tmpdir(), 'channel-files', randomUUID());
                   try {
-                    mkdirSync(dir, { recursive: true });
+                    mkdirSync(dir, { recursive: true, mode: 0o700 });
                     const rawName = basename(content.fileName).replace(
                       /\0/g,
                       '',
@@ -2763,7 +2763,7 @@ export class FeishuChannel extends ChannelBase {
                       rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
                       `feishu_file_${Date.now()}`;
                     const filePath = join(dir, safeName);
-                    writeFileSync(filePath, media.buffer);
+                    writeFileSync(filePath, media.buffer, { mode: 0o600 });
                     downloadedFileDir = dir;
 
                     envelope.attachments = [
@@ -2787,6 +2787,15 @@ export class FeishuChannel extends ChannelBase {
                         300,
                       )}\n`,
                     );
+                    if (
+                      envelope.syntheticText &&
+                      (envelope.attachments?.length ?? 0) === 0
+                    ) {
+                      // Keep any quoted context prepended to the placeholder.
+                      envelope.text =
+                        envelope.text.slice(0, -cleanText.length) +
+                        '(User sent media but download failed)';
+                    }
                   }
                 }
               }
