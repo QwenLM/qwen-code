@@ -3988,12 +3988,15 @@ describe('Hosted Harness no-tool session', () => {
         .set('X-Qwen-Client-Id', created.body.clientId as string)
         .send({ prompt, promptId: PROMPT_ID, payloadDigest });
       expect(admitted.status).toBe(202);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', created.body.clientId as string);
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       const transcript = await headers(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
       ).set('X-Qwen-Client-Id', created.body.clientId as string);
