@@ -73,11 +73,12 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
-// The purge's routing-key shape helpers are pure: keep the shipped
-// implementations in the double below rather than mirrors, so the mock cannot
-// diverge from what the router writes. The mirrored pieces (the sanitizers and
-// truncateUtf16Units) are pinned to the real module by the test double suite
-// at the bottom of this file.
+// The purge's routing-key shape helpers and the sanitizers are pure: keep the
+// shipped implementations in the double below rather than mirrors, so the mock
+// cannot diverge from what production imports. `truncateUtf16Units` is the one
+// hand-written mirror; the test double suite at the bottom of this file pins it
+// to the real module and pins the sanitizer exports to the shipped functions,
+// so a reintroduced hand mirror reddens instead of silently drifting.
 const realChannelBase = await vi.importActual<
   typeof import('@qwen-code/channel-base')
 >('@qwen-code/channel-base');
@@ -137,7 +138,8 @@ vi.mock('@qwen-code/channel-base', () => ({
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
   // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
-  // code-point boundaries, so a pair is never split.
+  // code-point boundaries, so a pair is never split. Pinned to the real module
+  // by the test double suite at the bottom of this file.
   truncateUtf16Units: (text: string, max: number): string => {
     if (text.length <= max) return text;
     let kept = '';
@@ -147,32 +149,10 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
     return kept;
   },
-  sanitizeLogText: (text: string, maxLen: number): string => {
-    const sanitized = Array.from(text, (c) => {
-      const cp = c.codePointAt(0)!;
-      if (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d)
-        return `\\x${cp.toString(16).padStart(2, '0')}`;
-      if (cp === 0x7f || (cp >= 0x80 && cp <= 0x9f))
-        return `\\x${cp.toString(16).padStart(2, '0')}`;
-      if (cp === 0x1b) return '\\x1B';
-      return c;
-    }).join('');
-    return sanitized.slice(0, maxLen);
-  },
-  sanitizeSenderName: (name: string): string => {
-    const cleaned = Array.from(name, (c) => {
-      const cp = c.codePointAt(0)!;
-      if (cp < 0x20 || cp === 0x7f) return ' ';
-      if (c === '[' || c === ']') return ' ';
-      return c;
-    }).join('');
-    return cleaned.trim().slice(0, 64) || 'unknown';
-  },
-  sanitizePromptText: (text: string): string => text,
-  truncateCodePoints: (str: string, max: number): string => {
-    const cp = Array.from(str);
-    return cp.length > max ? cp.slice(0, max).join('') : str;
-  },
+  sanitizeLogText: realChannelBase.sanitizeLogText,
+  sanitizeSenderName: realChannelBase.sanitizeSenderName,
+  sanitizePromptText: realChannelBase.sanitizePromptText,
+  truncateCodePoints: realChannelBase.truncateCodePoints,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -3498,11 +3478,12 @@ describe('inbound media', () => {
   });
 });
 
-// The channel-base mock above is a hand-written mirror of the shipped
-// `truncateUtf16Units` that QQChannel imports and the surrogate-boundary tests
-// assert through. Pin the mirror to the real module, so a semantics change on
-// either side reddens here instead of leaving those tests green against a
-// stale double.
+// The channel-base mock above keeps the shipped sanitizer implementations and
+// mirrors only `truncateUtf16Units`. Pin both sides to the real module: the
+// mirror so a semantics change on either side reddens here instead of leaving
+// the surrogate-boundary tests green against a stale double, and the sanitizer
+// exports so reintroducing a hand-written mirror is caught rather than silently
+// drifting from the shipped behaviour.
 describe('channel-base test double', () => {
   it('truncateUtf16Units mirror matches the real implementation', async () => {
     const actual = await vi.importActual<
@@ -3510,17 +3491,31 @@ describe('channel-base test double', () => {
     >('@qwen-code/channel-base');
     const mirrored = await import('@qwen-code/channel-base');
     // `a𠮷b` at max 2 keeps the BMP char and drops the astral pair whole; a
-    // plain `text.slice(0, max)` mirror returns a split surrogate here.
+    // plain `text.slice(0, max)` mirror returns a split surrogate here. The
+    // astral cases also catch a mirror that charges a surrogate pair one unit.
     const cases: Array<[string, number]> = [
       ['a𠮷b', 2],
       ['a𠮷b', 3],
       ['𠮷𠮷', 3],
       ['abc', 5],
+      ['😀', 1],
+      ['a😀b😀c', 5],
     ];
     for (const [text, max] of cases) {
       expect(mirrored.truncateUtf16Units(text, max)).toBe(
         actual.truncateUtf16Units(text, max),
       );
     }
+  });
+
+  it('sanitizer exports are the shipped implementations, not mirrors', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
   });
 });

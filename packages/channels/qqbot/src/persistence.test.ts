@@ -71,17 +71,6 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
-  // code-point boundaries, so a pair is never split.
-  truncateUtf16Units: (text: string, max: number): string => {
-    if (text.length <= max) return text;
-    let kept = '';
-    for (const ch of text) {
-      if (kept.length + ch.length > max) break;
-      kept += ch;
-    }
-    return kept;
-  },
   sanitizeLogText: (text: string, maxLen: number): string => {
     const sanitized = Array.from(text, (c) => {
       const cp = c.codePointAt(0)!;
