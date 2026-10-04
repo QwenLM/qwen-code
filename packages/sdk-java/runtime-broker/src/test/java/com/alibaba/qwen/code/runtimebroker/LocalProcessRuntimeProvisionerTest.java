@@ -724,6 +724,16 @@ class LocalProcessRuntimeProvisionerTest {
             assertEquals(lost.getLossEvidence().evidenceId(),
                     repeated.getLossEvidence().evidenceId());
             assertFalse(provisioner.isUsable(lease));
+            // Only the reaped branch answers NOT_FOUND to a foreign seed; a
+            // retained dead entry would answer CONFLICT on the seed check
+            // first. This is what pins the migration itself.
+            RuntimeObservation foreignAfterReap = provisioner
+                    .reconcile(request,
+                            RuntimeProvisionSeed.create("binding-1", 2),
+                            handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    foreignAfterReap.getOutcome());
             provisioner.stop(lease);
             RuntimeObservation released = provisioner
                     .reconcile(request, seed, handle, lease)
@@ -773,12 +783,25 @@ class LocalProcessRuntimeProvisionerTest {
                     "tombstone must be a SHA-256 digest: " + first);
             assertFalse(first.contains(lease.getToken()));
             assertFalse(first.contains(lease.getEndpoint().toString()));
-            java.util.List<Object> remappedPort = java.util.List.of(
-                    lease.getRuntimeInstanceId(),
-                    java.net.URI.create("http://127.0.0.1:" + (lease.getEndpoint().getPort() + 1)),
-                    lease.getLeaseId(), lease.getEpoch(), lease.getToken());
-            assertFalse(first.equals(
-                    LocalProcessRuntimeProvisioner.tombstone(remappedPort)));
+            // ownershipKey order: runtimeInstanceId, endpoint, leaseId,
+            // epoch, token — each one must feed the digest.
+            Object[] mutatedComponents = {
+                lease.getRuntimeInstanceId() + "-x",
+                java.net.URI.create("http://127.0.0.1:"
+                        + (lease.getEndpoint().getPort() + 1)),
+                lease.getLeaseId() + "-x",
+                lease.getEpoch() + 1,
+                lease.getToken() + "-x",
+            };
+            for (int i = 0; i < mutatedComponents.length; i++) {
+                java.util.List<Object> mutated =
+                        new java.util.ArrayList<>(key);
+                mutated.set(i, mutatedComponents[i]);
+                assertFalse(
+                        first.equals(LocalProcessRuntimeProvisioner
+                                .tombstone(mutated)),
+                        "component " + i + " must feed the digest");
+            }
         } finally {
             ProcessHandle.current().children()
                     .filter(process -> !before.contains(process.pid()))

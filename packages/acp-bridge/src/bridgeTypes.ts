@@ -239,7 +239,10 @@ export function parseBridgeManagedSessionStore(
  * Loopback predicate for the session-store parser. The URL parser has
  * already canonicalized the hostname (inet_aton short forms, case), so the
  * dotted-quad check only needs the 127/8 range; acp-bridge cannot import the
- * CLI's isLoopbackBind and must keep this minimal.
+ * CLI's isLoopbackBind and must keep this minimal. IPv4-mapped loopback
+ * (`[::ffff:127.0.0.1]`, canonicalized to `[::ffff:7f00:1]`) is deliberately
+ * outside this allowlist — isLoopbackBind refuses it the same way, so both
+ * policies agree that the mapped spelling must use HTTPS.
  */
 function isManagedSessionStoreLoopback(hostname: string): boolean {
   const normalized = hostname.toLowerCase();

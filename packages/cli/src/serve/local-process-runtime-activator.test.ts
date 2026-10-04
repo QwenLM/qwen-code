@@ -315,6 +315,7 @@ process.on('SIGTERM', () => process.exit(0));
     // terminate() rejects without proving the exit; the registry's own
     // tracked child is untouched, so it stays committed until shutdown —
     // mirroring the surviving-groups teardown branch.
+    const shutdownSpy = vi.spyOn(ProcessRegistry.prototype, 'shutdown');
     const originalReserve = ProcessRegistry.prototype.reserve;
     const reserveSpy = vi
       .spyOn(ProcessRegistry.prototype, 'reserve')
@@ -362,29 +363,55 @@ process.on('SIGTERM', () => process.exit(0));
       // assertion above is the full teardown of this one.
       active.splice(active.indexOf(activator), 1);
       await activator.close().catch(() => {});
+      // The drain must reach the registry even though the generation's stop
+      // already rejected: Promise.all would skip it, allSettled does not.
+      expect(shutdownSpy).toHaveBeenCalledOnce();
+      shutdownSpy.mockRestore();
     }
   });
 
-  it('aggregates a settled rm-class cleanup failure into close()', async (context) => {
-    if (process.platform === 'win32') return context.skip();
-    const { activator, stateDir } = await setup(1);
-    const workspace = scope();
-    const use = activator.activate(workspace);
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'aggregates a settled rm-class cleanup failure into close()',
+    async () => {
+      const { activator, stateDir } = await setup(1);
+      const workspace = scope();
+      const use = activator.activate(workspace);
+      await use.endpoint;
+      const workersRoot = path.join(stateDir, 'workers');
+      await chmod(workersRoot, 0o500);
+      try {
+        await expect(
+          activator.revokeWorkspace(workspace.runtime),
+        ).rejects.toThrow();
+        // The failure settled before close() — the stop deletion already
+        // dropped it from the map, so only instance state can surface it.
+        await expect(activator.close()).rejects.toThrow();
+      } finally {
+        await chmod(workersRoot, 0o700);
+        // close() intentionally aggregates the recorded failure; asserted
+        // above, so the shared teardown must not re-await it.
+        active.splice(active.indexOf(activator), 1);
+      }
+    },
+  );
+});
+
+describe('admission accounting', () => {
+  it('counts a registry-committed child without a map entry toward admission', async () => {
+    const { activator } = await setup(2);
+    const use = activator.activate(scope());
     await use.endpoint;
-    const workersRoot = path.join(stateDir, 'workers');
-    await chmod(workersRoot, 0o500);
+    // One live generation holds the map count at 1; simulate the registry
+    // still counting a second, unreclaimed child (its map entry is gone).
+    const countSpy = vi
+      .spyOn(ProcessRegistry.prototype, 'committedProcessCount', 'get')
+      .mockReturnValue(2);
     try {
       await expect(
-        activator.revokeWorkspace(workspace.runtime),
-      ).rejects.toThrow();
-      // The failure settled before close() — the stop deletion already
-      // dropped it from the map, so only instance state can surface it.
-      await expect(activator.close()).rejects.toThrow();
+        activator.activate(scope('b')).endpoint,
+      ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
     } finally {
-      await chmod(workersRoot, 0o700);
-      // close() intentionally aggregates the recorded failure; asserted
-      // above, so the shared teardown must not re-await it.
-      active.splice(active.indexOf(activator), 1);
+      countSpy.mockRestore();
     }
   });
 });

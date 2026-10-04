@@ -272,26 +272,23 @@ function waitForLocalSession(
             try {
               await cleanup();
             } catch (error) {
-              // An abort landing after the success handler detached onAbort
-              // leaves nothing that can settle this promise, so a bare return
-              // would wedge the awaiting release; reject() is a no-op when the
-              // promise already settled on abort, preserving the first shape.
+              const cleanupError = new ManagedRuntimeSessionCleanupError(
+                cleanup,
+                error,
+              );
+              // When a non-release abort already settled this promise, the
+              // throw below lands on it as a no-op — so this log is the only
+              // surviving trace of the cleanup failure.
               if (
                 signal.aborted &&
                 !(signal.reason instanceof ManagedRuntimeReleaseAbortError)
               ) {
-                const cleanupError = new ManagedRuntimeSessionCleanupError(
-                  cleanup,
-                  error,
-                );
                 debugLogger.error(
                   'Managed Runtime Session cleanup failed after abort.',
                   error,
                 );
-                reject(cleanupError);
-                return;
               }
-              throw new ManagedRuntimeSessionCleanupError(cleanup, error);
+              throw cleanupError;
             }
             reject(
               signal.aborted
@@ -1166,8 +1163,13 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     } catch (error) {
       // A failed cold start must not pin the v2 marker: keep the entry
       // re-preparable instead of converting the next release into a
-      // permanently closing one.
-      if (this.entries.get(request.sessionId) === entry && !entry.releasing) {
+      // permanently closing one. Gate on the in-flight release promise, not
+      // `releasing` — that flag stays set on the entry a *failed* release
+      // leaves behind, and such an entry must still be evictable.
+      if (
+        this.entries.get(request.sessionId) === entry &&
+        entry.release === undefined
+      ) {
         if (entry.v2 !== undefined) delete entry.v2;
         this.entries.delete(request.sessionId);
       }

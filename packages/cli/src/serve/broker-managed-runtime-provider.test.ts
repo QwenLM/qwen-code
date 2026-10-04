@@ -920,6 +920,57 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
+  it('does not re-drive a start the Broker declared non-retryable', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        starts++;
+        return new Response(
+          JSON.stringify({
+            code: 'runtime_execution_conflict',
+            error: 'Refused.',
+            retryable: false,
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('409');
+    // The declared refusal stays cached: a second execute surfaces the same
+    // answer without re-driving the start or re-sending the reservation.
+    await expect(client.execute(reference())).rejects.toThrow('409');
+    expect(starts).toBe(1);
+    expect(prepares).toBe(1);
+    provider.dispose();
+  });
+
   it('re-prepares an execution after a transient reservation failure', async () => {
     let prepares = 0;
     const preparedStatus = {

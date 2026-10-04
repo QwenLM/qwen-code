@@ -1271,6 +1271,62 @@ describe('Managed Runtime providers', () => {
     }
   });
 
+  it('keeps a failed v2 cold start re-preparable after its release also fails', async () => {
+    let prepares = 0;
+    const releaseVersions: number[] = [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, options?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith('/v1/prepare')) {
+          if (++prepares === 1) return new Response('', { status: 500 });
+          return Response.json({ protocolVersion: 1, ready: true });
+        }
+        if (pathname.endsWith('/release')) {
+          const body = JSON.parse(String(options?.body)) as {
+            protocolVersion: number;
+          };
+          releaseVersions.push(body.protocolVersion);
+          if (releaseVersions.length === 1)
+            return new Response('', { status: 500 });
+          return Response.json({
+            protocolVersion: body.protocolVersion,
+            released: true,
+          });
+        }
+        return Response.json({ protocolVersion: 2, result: {} });
+      },
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+    });
+    try {
+      // Release begins while the (doomed) cold start is still in flight, so
+      // the failed release leaves the entry behind with `releasing` set.
+      const cold = remote.prepare(prepareRequest).ready;
+      void cold.catch(() => {});
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).rejects.toThrow('HTTP 500');
+      await expect(cold).rejects.toThrow('HTTP 500');
+      // The v2 retry must evict that entry rather than decline on the stale
+      // `releasing` flag; otherwise the release below would go terminal.
+      await expect(remote.getToolV2Client(prepareRequest)).rejects.toThrow(
+        'HTTP 500',
+      );
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).resolves.toBe(true);
+      expect(releaseVersions).toEqual([1, 1]);
+      await remote.prepare(prepareRequest).ready;
+      expect(prepares).toBe(2);
+    } finally {
+      remote.dispose();
+    }
+  });
+
   it('treats a zero prepare retry window as the default window', async () => {
     let prepares = 0;
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>

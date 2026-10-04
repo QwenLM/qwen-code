@@ -78,6 +78,18 @@ describe('parseBridgeManagedSessionStore', () => {
     expect(() => parseBridgeManagedSessionStore(input)).toThrow();
   });
 
+  it('refuses IPv4-mapped loopback without HTTPS', () => {
+    // Deliberately outside the loopback allowlist (see the predicate's
+    // comment): the mapped spelling canonicalizes to `[::ffff:7f00:1]` and
+    // must use HTTPS, matching the CLI's isLoopbackBind.
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        baseUrl: 'http://[::ffff:127.0.0.1]:8080',
+      }),
+    ).toThrow('must use HTTPS outside the loopback interface');
+  });
+
   it('rejects control characters and over-byte-limit string fields', () => {
     expect(() =>
       parseBridgeManagedSessionStore({ ...valid, tenantId: 'bad\x07tenant' }),
