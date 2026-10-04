@@ -36,9 +36,15 @@ export interface HostedApprovalSettings {
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file', 'glob'],
-  'auto-edit': ['read_file', 'write_file', 'edit', 'glob'],
+  default: ['read_file'],
+  'auto-edit': ['read_file', 'write_file', 'edit'],
 };
+
+// `glob` ships with the `/2` search profiles, so those pre-approve it and no
+// other profile does. A name-keyed allowance would also pre-approve an
+// MCP-declared tool that happens to be called `glob` — the MCP server picks
+// its own names — and dispatch it without ever asking the operator.
+const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
@@ -90,13 +96,19 @@ export function hostedApprovalDefinition(
     : { approvalMode: settings.mode, approvalTimeoutMs: settings.timeoutMs };
 }
 
+/**
+ * Whether a call asks the operator. `searchProfile` is the Session's own
+ * `/2` search profile, the only place `glob` is pre-approved.
+ */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
   toolName: string,
+  searchProfile: boolean = false,
 ): boolean {
+  if (settings.mode === 'yolo') return false;
   return (
-    settings.mode !== 'yolo' &&
-    !PREAPPROVED_TOOLS[settings.mode].includes(toolName)
+    !PREAPPROVED_TOOLS[settings.mode].includes(toolName) &&
+    !(searchProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
   );
 }
 

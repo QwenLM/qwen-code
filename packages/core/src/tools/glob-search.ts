@@ -110,8 +110,13 @@ export async function searchGlobDirectory(
   };
   const escapesRoot = (full: string, self: boolean): boolean => {
     if (root === undefined) return false;
-    if (!isPathWithinRoot(full, root)) return true;
     const realRoot = realpathOf(root) ?? root;
+    // The walk starts from a canonicalized directory, so a containment root
+    // reached through a symlink has two spellings of the same place. Judge
+    // the lexical arm against either one, or every entry of that walk looks
+    // outside and the search answers "No files found" as a success.
+    if (!isPathWithinRoot(full, root) && !isPathWithinRoot(full, realRoot))
+      return true;
     // Judge a listed entry by its parent's realpath, so a merely listed
     // outward symlink (a venv's `bin/python`) stays visible; judge a
     // directory about to be entered by its own.
