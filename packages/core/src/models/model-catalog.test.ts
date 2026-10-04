@@ -559,9 +559,18 @@ describe('model catalog', () => {
     // that spelling and left its twin serving models.dev's unadjusted numbers,
     // so `glm-4-7` got the 204,800 round-up the correction exists to overwrite
     // and `qwen3-8-max` got the pdf the carve-out exists to withhold.
+    const raw = bundled.models as Record<string, unknown>;
     for (const key of Object.keys(bundled.models)) {
       const alias = versionSpellingAlias(key);
       if (!alias || !(alias in bundled.models)) {
+        continue;
+      }
+      // The projection also commits a spelling it did not alias when the raw
+      // feed carries both as separate models (`never aliases over a key the
+      // projection committed itself`), and those two keep their own numbers on
+      // purpose. Only pairs that already agree in the snapshot are aliases this
+      // adjustment invariant owns; the explicit rows below pin the rest.
+      if (JSON.stringify(raw[key]) !== JSON.stringify(raw[alias])) {
         continue;
       }
       expect({ key, alias: lookupModelCatalog(alias) }).toEqual({
