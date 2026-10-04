@@ -319,12 +319,27 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.match(/--no-defaults/g)).toHaveLength(4);
   });
 
-  it('guards nothing against a hardcoded packaged-jar version', () => {
+  it('names the unclassified packaged jar from the pom version, never a wildcard over every repackaged artifact', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
     expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
-    expect(script).toContain('packagedJars.length !== 1');
-    expect(
-      read('packages/sdk-java/managed-agent-server/Dockerfile'),
-    ).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    // The pom's repackage executions leave three matching artifacts in
+    // target/, so any wildcard or cardinality check is wrong by
+    // construction: the lookup must read the project version and name the
+    // unclassified jar exactly.
+    expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
+    expect(script).not.toContain('packagedJars');
+    const dockerfile = read(
+      'packages/sdk-java/managed-agent-server/Dockerfile',
+    );
+    expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
+    expect(dockerfile).toContain(
+      'workspace-bundle.jar|*-operator-recovery.jar',
+    );
+  });
+
+  it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(/stallTimer\.unref\(\)/);
   });
 });

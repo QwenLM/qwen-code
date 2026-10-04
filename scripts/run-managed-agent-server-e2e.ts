@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -80,26 +79,32 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springTarget = path.join(
+const springModule = path.join(
   root,
   'packages',
   'sdk-java',
   'managed-agent-server',
-  'target',
 );
-// Version-independent: fail (not a stale path) unless exactly one packaged
-// jar exists — a pom version bump must not strand this check.
-const packagedJars = readdirSync(springTarget).filter(
-  (entry) =>
-    /^qwen-managed-agent-server-.+\.jar$/.test(entry) &&
-    !/sources|javadoc|tests/.test(entry),
-);
-if (packagedJars.length !== 1) {
+const springTarget = path.join(springModule, 'target');
+// The pom attaches classified repackage executions (workspace-bundle,
+// operator-recovery) alongside the unclassified server jar, so a wildcard
+// over target/ matches three artifacts. Read the project version from the
+// pom and name the unclassified jar exactly — version-independent without
+// assuming it is the only packaged artifact. The <version> immediately
+// following the module's own <artifactId> (not the <parent> block's).
+const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
+const pomVersion = pomXml.match(
+  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>([^<]+)<\/version>/,
+)?.[1];
+if (!pomVersion) {
   throw new Error(
-    `Expected exactly one packaged server jar in ${springTarget}, found ${packagedJars.length}: ${packagedJars.join(', ')}`,
+    'Could not read the project <version> from managed-agent-server/pom.xml',
   );
 }
-const springJar = path.join(springTarget, packagedJars[0]!);
+const springJar = path.join(
+  springTarget,
+  `qwen-managed-agent-server-${pomVersion}.jar`,
+);
 for (const required of [
   cliBundle,
   springJar,
@@ -552,15 +557,18 @@ async function waitUntil(
     try {
       // Bound one iteration against the remaining deadline: a hung
       // predicate must not outlive timeoutMs, and its last error must
-      // surface instead of vanishing into "did not become ready".
+      // surface instead of vanishing into "did not become ready". unref the
+      // stall timer: a quick success must not keep the event loop (and this
+      // runner) alive until the discarded timeout fires.
       const ready = await Promise.race([
         Promise.resolve().then(predicate),
-        new Promise<boolean>((_, reject) =>
-          setTimeout(
+        new Promise<boolean>((_, reject) => {
+          const stallTimer = setTimeout(
             () => reject(new Error(`${name} predicate stalled`)),
             Math.max(1, deadline - Date.now()),
-          ),
-        ),
+          );
+          stallTimer.unref();
+        }),
       ]);
       if (ready) return;
     } catch (error) {
