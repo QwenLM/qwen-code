@@ -1037,6 +1037,49 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(scheduler.haltedError).toBeUndefined();
   });
 
+  // getCurrentTime() is a validating accessor: a clock that starts returning
+  // garbage must not escape the renewal/release error paths as an unhandled
+  // rejection or a leaked active slot — the run cleans up and the worker
+  // escalates to a loud halt through the consecutive-failure streak.
+  it('halts loudly when the injected store clock starts failing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    let clockBroken = false;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => (clockBroken ? -1 : now),
+    });
+    let runs = 0;
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (_activation, context) => {
+        runs++;
+        if (context.signal.aborted) return;
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+    await waitUntil(() => runs === 1);
+
+    clockBroken = true;
+    await advanceTimersUntil(() => scheduler.haltedError !== undefined, 1_000);
+
+    expect(scheduler.activeSlotCount).toBe(0);
+    expect(scheduler.haltedError?.message).toContain('clock');
+  });
+
   // A disposal racing an in-flight transient claim failure must not arm the
   // recheck wake on the dead scheduler or record a bogus 'is disposed' halt.
   it('does not arm a wake when disposal races a transient claim failure', async () => {

@@ -308,7 +308,11 @@ export class EmbeddedHarnessScheduler {
     };
     this.active.set(activationKey(activation), run);
     this.scheduleRenewal(run);
-    void this.execute(run);
+    // No scheduler promise may reject unhandled: an escape becomes a loud
+    // halt instead of a silent process-level unhandled rejection.
+    void this.execute(run).catch((error: unknown) => {
+      this.halt(toError(error));
+    });
   }
 
   private async execute(run: ActiveRun): Promise<void> {
@@ -330,73 +334,93 @@ export class EmbeddedHarnessScheduler {
       handlerError = error;
     }
 
-    run.finishing = true;
-    if (run.renewalTimer) clearTimeout(run.renewalTimer);
-    await run.renewal;
+    try {
+      run.finishing = true;
+      if (run.renewalTimer) clearTimeout(run.renewalTimer);
+      await run.renewal;
 
-    if (!run.abandoned && !this.disposed && !this.fatalError) {
-      try {
-        await this.store.release(run.lease, outcome);
-        this.noteStoreOutcome();
-        this.activationTransientFailures.delete(activationKey(run.activation));
-      } catch (error) {
-        if (error instanceof ManagedActivationStaleLeaseError) {
-          this.noteAbandonedFailures(run);
-          run.abandoned = true;
-          run.controller.abort(error);
-        } else {
-          const storeHalted = this.store.haltedError;
-          if (storeHalted) {
-            this.halt(storeHalted);
+      if (!run.abandoned && !this.disposed && !this.fatalError) {
+        try {
+          await this.store.release(run.lease, outcome);
+          this.noteStoreOutcome();
+          this.activationTransientFailures.delete(
+            activationKey(run.activation),
+          );
+        } catch (error) {
+          if (error instanceof ManagedActivationStaleLeaseError) {
+            this.noteAbandonedFailures(run);
+            run.abandoned = true;
+            run.controller.abort(error);
           } else {
-            // A transient store failure provably never wrote the outcome (the
-            // journal tail repair succeeded), so retrying within the lease's
-            // remaining window is safe and avoids re-executing an
-            // already-finished handler over one repaired write failure.
-            run.transientFailures++;
-            this.noteStoreOutcome(error);
-            if (!this.fatalError) {
-              const settled = await this.retryReleaseWithinLease(run, outcome);
-              if (settled === 'stale') {
-                this.noteAbandonedFailures(run);
-                run.abandoned = true;
-                run.controller.abort(error);
-              } else if (
-                settled === 'exhausted' &&
-                !this.disposed &&
-                !this.fatalError
-              ) {
-                debugLogger.warn(
-                  `Managed activation '${run.lease.activationId}' abandoned` +
-                    ` after a release failure: ${toError(error).message}`,
+            const storeHalted = this.store.haltedError;
+            if (storeHalted) {
+              this.halt(storeHalted);
+            } else {
+              // A transient store failure provably never wrote the outcome
+              // (the journal tail repair succeeded), so retrying within the
+              // lease's remaining window is safe and avoids re-executing an
+              // already-finished handler over one repaired write failure.
+              run.transientFailures++;
+              this.noteStoreOutcome(error);
+              if (!this.fatalError) {
+                const settled = await this.retryReleaseWithinLease(
+                  run,
+                  outcome,
                 );
-                this.abandonAfterTransientFailures(run, outcome, error);
+                if (settled === 'stale') {
+                  this.noteAbandonedFailures(run);
+                  run.abandoned = true;
+                  run.controller.abort(error);
+                } else if (
+                  settled === 'exhausted' &&
+                  !this.disposed &&
+                  !this.fatalError
+                ) {
+                  debugLogger.warn(
+                    `Managed activation '${run.lease.activationId}'` +
+                      ` abandoned after a release failure:` +
+                      ` ${toError(error).message}`,
+                  );
+                  this.abandonAfterTransientFailures(run, outcome, error);
+                }
               }
             }
           }
         }
       }
-    }
 
-    this.active.delete(activationKey(run.activation));
-    if (handlerError !== undefined && !run.abandoned && !this.disposed) {
-      try {
-        this.options.onActivationError?.(run.activation, handlerError);
-      } catch (error) {
-        this.halt(toError(error));
+      if (handlerError !== undefined && !run.abandoned && !this.disposed) {
+        try {
+          this.options.onActivationError?.(run.activation, handlerError);
+        } catch (error) {
+          this.halt(toError(error));
+        }
       }
-    }
-    if (!this.disposed && !this.fatalError) {
-      void this.requestPump().catch(() => undefined);
+    } finally {
+      // Whatever escaped above, the slot must be released and the pump
+      // re-run: a leaked active entry would exclude this activation from
+      // every future claim (pump skips keys in active) and inflate
+      // activeSlotCount until the worker stops claiming at all.
+      this.active.delete(activationKey(run.activation));
+      if (!this.disposed && !this.fatalError) {
+        void this.requestPump().catch(() => undefined);
+      }
     }
   }
 
   private scheduleRenewal(run: ActiveRun): void {
     const delay = Math.max(1, Math.floor(this.options.leaseDurationMs / 3));
     run.renewalTimer = setTimeout(() => {
-      run.renewal = this.renew(run).finally(() => {
-        run.renewal = undefined;
-      });
+      // The catch keeps a renew failure from sitting unhandled between the
+      // tick and execute()'s `await run.renewal`; halt() makes it loud and
+      // marks the run abandoned, so execute() then skips its release.
+      run.renewal = this.renew(run)
+        .catch((error: unknown) => {
+          this.halt(toError(error));
+        })
+        .finally(() => {
+          run.renewal = undefined;
+        });
     }, delay);
     run.renewalTimer.unref();
   }
@@ -442,7 +466,8 @@ export class EmbeddedHarnessScheduler {
         1,
         Math.floor(this.options.leaseDurationMs / 3),
       );
-      const headroom = run.lease.expiresAt - this.store.getCurrentTime();
+      const now = this.storeNow();
+      const headroom = now === undefined ? 0 : run.lease.expiresAt - now;
       if (headroom > interval) {
         debugLogger.warn(
           `Managed activation '${run.lease.activationId}' renewal failed` +
@@ -460,6 +485,20 @@ export class EmbeddedHarnessScheduler {
           ` after a renewal failure: ${toError(error).message}`,
       );
       this.abandonAfterTransientFailures(run, 'failed', error);
+    }
+  }
+
+  /**
+   * Reads the store clock without letting a validating-clock throw escape an
+   * error path: undefined means "the clock cannot be trusted", which callers
+   * treat as no headroom / lease expired — the fail-safe that abandons and
+   * lets the consecutive-failure streak escalate to a loud halt.
+   */
+  private storeNow(): number | undefined {
+    try {
+      return this.store.getCurrentTime();
+    } catch {
+      return undefined;
     }
   }
 
@@ -500,7 +539,8 @@ export class EmbeddedHarnessScheduler {
       if (this.disposed || this.fatalError || this.store.haltedError) {
         return 'exhausted';
       }
-      if (this.store.getCurrentTime() >= run.lease.expiresAt) {
+      const now = this.storeNow();
+      if (now === undefined || now >= run.lease.expiresAt) {
         return 'exhausted';
       }
       await new Promise((resolve) => {
