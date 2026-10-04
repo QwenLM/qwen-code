@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionService } from '../services/sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -23,9 +23,32 @@ import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
+const enablement = vi.hoisted(() => ({ sessionMetadata: true }));
+
+// Lets a test disable session_metadata as a build that removed the domain
+// would: the enabled list is a constant, so enablement flips only here.
+vi.mock('./managed-session-records.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-session-records.js')>();
+  return {
+    ...actual,
+    assertManagedSessionDomainEnabled: (
+      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+    ) => {
+      if (domain === 'session_metadata' && !enablement.sessionMetadata) {
+        throw new actual.ManagedSessionRecordError(
+          `domain ${domain} is registered but not enabled for submission.`,
+        );
+      }
+      actual.assertManagedSessionDomainEnabled(domain);
+    },
+  };
+});
+
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  enablement.sessionMetadata = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -174,6 +197,141 @@ describe('managed session metadata', () => {
     ) as { revision: number; previousRecordRef: { resourceId: string } | null };
     expect(body.revision).toBe(2);
     expect(body.previousRecordRef?.resourceId).toBe(refs[0].resourceId);
+  });
+
+  it('replays a retried domain record command without publishing again', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const content = {
+        title: 'First title',
+        titleSource: 'auto',
+      } as const;
+      const first = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      const sequence = authority.committedSequence;
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+
+      const replay = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      expect(replay.revision).toBe(1);
+      expect(replay.recordRef).toEqual(first.recordRef);
+      expect(replay.receipt).toMatchObject({ replayed: true });
+      expect(authority.committedSequence).toBe(sequence);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+
+      // A retry still returns its own committed revision after a later one.
+      const second = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Second title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(second.revision).toBe(2);
+      const stale = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      expect(stale.revision).toBe(1);
+      expect(stale.recordRef).toEqual(first.recordRef);
+      expect(stale.receipt).toMatchObject({ replayed: true });
+      expect((await fs.readdir(bodies)).length).toBe(published + 1);
+
+      await expect(
+        authority.commitDomainRecord(
+          { ...renameCommand('cmd-rename-1'), contentDigest: 'e'.repeat(64) },
+          { domain: 'session_metadata', content },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/different content/);
+    });
+  });
+
+  it('replays a retried domain record command after a cold reopen', async () => {
+    const harness = await createHarness();
+    let firstRef: ManagedSessionDurableRef | undefined;
+    await withAuthority(harness, async (authority) => {
+      firstRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    await withAuthority(
+      harness,
+      async (authority) => {
+        const replay = await authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        );
+        expect(replay.revision).toBe(1);
+        expect(replay.recordRef).toEqual(firstRef);
+        expect(replay.receipt).toMatchObject({ replayed: true });
+      },
+      { create: false },
+    );
+  });
+
+  it('replays a committed domain record after its domain was disabled', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const first = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      enablement.sessionMetadata = false;
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).resolves.toMatchObject({
+        recordRef: first.recordRef,
+        receipt: { replayed: true },
+      });
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-2'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'Second title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/not enabled for submission/);
+    });
   });
 
   it.each([
