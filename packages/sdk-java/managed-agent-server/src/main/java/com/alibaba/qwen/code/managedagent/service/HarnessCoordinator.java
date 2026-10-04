@@ -671,11 +671,17 @@ public class HarnessCoordinator {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
-                    error.getClass().getSimpleName(), error);
+                    failureLabel(error), error);
             // A distinct code from the pre-admission arm: the Turn may have
             // been admitted and executed, so blind retry is not safe. A
-            // Runtime Broker refusal keeps its own code — the generic one
-            // would name a component that did not fail.
+            // named load refusal and a Runtime Broker failure each keep
+            // their own code — the generic one would name a component that
+            // did not fail.
+            if (error instanceof HarnessSessionRefusedException refusal) {
+                return fail(turn, refusal.getCode(),
+                        "Hosted Harness refused to open the Session after"
+                                + " Turn admission.");
+            }
             if (error instanceof RuntimeBrokerException brokerError) {
                 return fail(turn, brokerError.getCode(),
                         brokerError.getMessage());

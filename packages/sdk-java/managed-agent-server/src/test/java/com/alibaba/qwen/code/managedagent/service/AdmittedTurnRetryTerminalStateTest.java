@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -101,6 +102,31 @@ class AdmittedTurnRetryTerminalStateTest {
         if (expectFailure) {
             verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), eq("workspace_unavailable"), anyString());
+        } else {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong());
+        }
+    }
+
+    // A named load refusal keeps its own code through this budget too. The
+    // refusal is fail-closed and already named, so the generic
+    // after-admission code would blame Harness availability for a Session
+    // the Harness deliberately refused to open — issue #13320's
+    // mixed-version takeover, re-driven after an earlier attempt submitted.
+    @ParameterizedTest(name = "retryCount = {0}, fails = {1}")
+    @CsvSource({"10, true", "9, false"})
+    void namedLoadRefusalsHonourThePostAdmissionBudget(int retryCount,
+            boolean expectFailure) {
+        HarnessSessionRefusedException refusal = mock(
+                HarnessSessionRefusedException.class);
+        when(refusal.getCode()).thenReturn("managed_session_open_failed");
+        AgentStateStore store = dispatchTransientFailure(retryCount,
+                new ManagedAgentProperties(), refusal);
+
+        if (expectFailure) {
+            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq("managed_session_open_failed"),
+                    anyString());
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong());
