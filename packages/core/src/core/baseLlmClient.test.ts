@@ -1523,6 +1523,48 @@ describe('BaseLlmClient', () => {
       expect(sentThinking()).toEqual({ includeThoughts: true });
     });
 
+    it('budgets the no-thoughts shape every side query actually carries', async () => {
+      // `applyThinkingDefault` (utils/sideQuery.ts) stamps
+      // `thinkingConfig: { includeThoughts: false }` on every side query that
+      // does not set its own, and `runSideQuery` adds no `maxOutputTokens`, so
+      // this is the default production branch - all twelve callers arrive with
+      // it (`tools/web-fetch.ts:609` passes no config at all). Same
+      // 8 192 - 7 000 = 1 192 of room as the case above, which the thinking
+      // split has to leave uncapped: with no reasoning to pay for, the whole
+      // room is visible output and has to be emitted. Collapsing the guard to
+      // `if (!thinking)` routes this into the split instead, where
+      // `Math.floor(1_192 / 2)` = 596 falls below the 1 024 floor and the
+      // request goes out with no budget at all - the #13208 overflow itself.
+      useWindow('deepseek-r1', 8_192);
+
+      await askText('deepseek-r1', 7_000, {
+        config: { thinkingConfig: { includeThoughts: false } },
+      });
+
+      expect(sentBudget()).toBe(1_192);
+      expect(7_000 + 1_192).toBeLessThanOrEqual(8_192);
+      // Apart from the budget the request is returned as built: no
+      // `thinkingBudget` is invented for a caller that asked for no reasoning.
+      expect(sentThinking()).toEqual({ includeThoughts: false });
+    });
+
+    it('leaves a no-thoughts request unpaired where the split would apply', async () => {
+      // Same window and prompt as `pairs the emitted budget with a thinking
+      // budget`, so the room (25 536) is one where the split is legal and does
+      // run for `includeThoughts: true`. With thoughts off the guard returns
+      // before the split, so the emitted budget is the same but no
+      // `thinkingBudget` key may appear: `if (!thinking)` alone would pair
+      // 12 768 here, and `sentBudget()` cannot tell the two apart.
+      useWindow('qwen3-coder-plus', 65_536);
+
+      await askText('qwen3-coder-plus', 40_000, {
+        config: { thinkingConfig: { includeThoughts: false } },
+      });
+
+      expect(sentBudget()).toBe(25_536);
+      expect(sentThinking()).toEqual({ includeThoughts: false });
+    });
+
     it('budgets against the target window, not the session window', async () => {
       // Side queries default to the fast model, and a same-provider target
       // whose registry entry declares no window inherits the *session* model's
