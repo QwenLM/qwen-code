@@ -445,6 +445,9 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({})
         .expect(409);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/cancel`))
+        .send({})
+        .expect(409);
       await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .send({ authority: { operationId: 'op-l3', claimGeneration: 2 } })
         .expect(204);
@@ -453,73 +456,110 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('authorizes detach after the coordinator recovers effects without a Harness lifecycle request', async () => {
-    const { server, authorize, requests } = await hookApp();
-    state.authorizeOrdinary.mockRejectedValue(
-      new ManagedSessionStoreHttpError(
-        409,
-        'managed_session_lifecycle_active',
-        'DRAINING',
-      ),
-    );
-    const authority = { operationId: 'recovered-effects', claimGeneration: 2 };
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({ authority })
-      .expect(204);
-    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(authority);
-    expect(state.authorizeLifecycle).toHaveBeenCalledExactlyOnceWith();
-    expect(state.authorizeOrdinary).not.toHaveBeenCalled();
-    expect(requests).toEqual([]);
-    expect(state.model).not.toHaveBeenCalled();
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .send({})
-      .expect(404);
-  });
+  it.each([true, false])(
+    'authorizes detach after the coordinator recovers effects without a Harness lifecycle request (clientId=%s)',
+    async (withClientId) => {
+      const { server, authorize, requests } = await hookApp();
+      const transcriptPath = path.join(state.root, `${SESSION_ID}.jsonl`);
+      const transcript = await readFile(transcriptPath, 'utf8');
+      const releaseActivation = vi
+        .spyOn(LocalManagedSessionAuthority.prototype, 'releaseActivation')
+        .mockRejectedValue(new Error('journal appends are fenced'));
+      state.authorizeOrdinary.mockRejectedValue(
+        new ManagedSessionStoreHttpError(
+          409,
+          'managed_session_lifecycle_active',
+          'DRAINING',
+        ),
+      );
+      const authority = {
+        operationId: 'recovered-effects',
+        claimGeneration: 2,
+      };
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({})
+        .expect(404);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', 'wrong-client')
+        .send({ authority })
+        .expect(404);
+      expect(state.authorizeLifecycle).not.toHaveBeenCalled();
+      await (withClientId ? authorize : headers)(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .send({ authority })
+        .expect(204);
+      expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(authority);
+      expect(state.authorizeLifecycle).toHaveBeenCalledExactlyOnceWith();
+      expect(state.authorizeOrdinary).not.toHaveBeenCalled();
+      expect(releaseActivation).not.toHaveBeenCalled();
+      expect(await readFile(transcriptPath, 'utf8')).toBe(transcript);
+      expect(requests).toEqual([]);
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({})
+        .expect(404);
+    },
+  );
 
-  it('retains the attachment and restores authority when a recovered detach claim is rejected', async () => {
-    const { server, authorize, requests } = await hookApp();
-    state.authorizeOrdinary.mockRejectedValue(
-      new ManagedSessionStoreHttpError(
-        409,
-        'managed_session_lifecycle_active',
-        'DRAINING',
-      ),
-    );
-    state.authorizeLifecycle.mockRejectedValueOnce(new Error('stale claim'));
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({ authority: { operationId: 'stale', claimGeneration: 1 } })
-      .expect(503);
-    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
-    expect(requests).toEqual([]);
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({})
-      .expect(409);
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
-      .expect(204);
-    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(2);
-    expect(requests).toEqual([]);
-  });
+  it.each([true, false])(
+    'retains the attachment and restores authority when a recovered detach claim is rejected (clientId=%s)',
+    async (withClientId) => {
+      const { server, authorize, requests } = await hookApp();
+      state.authorizeOrdinary.mockRejectedValue(
+        new ManagedSessionStoreHttpError(
+          409,
+          'managed_session_lifecycle_active',
+          'DRAINING',
+        ),
+      );
+      state.authorizeLifecycle.mockRejectedValueOnce(new Error('stale claim'));
+      await (withClientId ? authorize : headers)(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .send({ authority: { operationId: 'stale', claimGeneration: 1 } })
+        .expect(503);
+      expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+      expect(requests).toEqual([]);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({})
+        .expect(409);
+      await (withClientId ? authorize : headers)(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
+        .expect(204);
+      expect(state.authorizeLifecycle).toHaveBeenCalledTimes(2);
+      expect(requests).toEqual([]);
+    },
+  );
 
-  it('rejects malformed detach authority without bypassing a persistent fence', async () => {
-    const { server, authorize, requests } = await hookApp();
-    state.authorizeOrdinary.mockRejectedValue(
-      new ManagedSessionStoreHttpError(
-        409,
-        'managed_session_lifecycle_active',
-        'DRAINING',
-      ),
-    );
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({ authority: { operationId: 'malformed', claimGeneration: 0 } })
-      .expect(400);
-    expect(state.authorizeLifecycle).not.toHaveBeenCalled();
-    expect(state.setLifecycleAuthority).not.toHaveBeenCalled();
-    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
-      .expect(204);
-    expect(requests).toEqual([]);
-  });
+  it.each([true, false])(
+    'rejects malformed detach authority without bypassing a persistent fence (clientId=%s)',
+    async (withClientId) => {
+      const { server, authorize, requests } = await hookApp();
+      state.authorizeOrdinary.mockRejectedValue(
+        new ManagedSessionStoreHttpError(
+          409,
+          'managed_session_lifecycle_active',
+          'DRAINING',
+        ),
+      );
+      await (withClientId ? authorize : headers)(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .send({ authority: { operationId: 'malformed', claimGeneration: 0 } })
+        .expect(400);
+      expect(state.authorizeLifecycle).not.toHaveBeenCalled();
+      expect(state.setLifecycleAuthority).not.toHaveBeenCalled();
+      await (withClientId ? authorize : headers)(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
+        .expect(204);
+      expect(requests).toEqual([]);
+    },
+  );
 
   it('uses the legacy close admission for an attached protocol zero Session with Hooks', async () => {
     const { server, authorize, requests } = await hookApp();
@@ -597,6 +637,66 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .send({})
         .expect(204);
+    },
+  );
+
+  it.each([
+    new TypeError('network timeout'),
+    new ManagedSessionStoreHttpError(
+      503,
+      'internal_error',
+      'Store unavailable',
+    ),
+    new ManagedSessionStoreHttpError(
+      409,
+      'managed_session_writer_conflict',
+      'Writer fenced',
+    ),
+  ])(
+    'cancels an active Turn despite ordinary authorization failure: %s',
+    async (cause) => {
+      const { server, authorize } = await hookApp();
+      let signal!: AbortSignal;
+      let finish!: () => void;
+      state.model.mockImplementationOnce(
+        (input) =>
+          new Promise((resolve) => {
+            signal = input.signal;
+            finish = () => resolve({ text: '', model: 'test-model' });
+            signal.addEventListener('abort', finish, { once: true });
+          }),
+      );
+      const prompt = [{ type: 'text', text: 'wait for cancellation' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+      state.authorizeOrdinary.mockClear();
+      state.authorizeOrdinary.mockRejectedValue(cause);
+      try {
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/cancel`),
+        ).expect(404);
+        expect(signal.aborted).toBe(false);
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/cancel`),
+        ).expect(204);
+        expect(signal.aborted).toBe(true);
+        expect(state.authorizeOrdinary).not.toHaveBeenCalled();
+      } finally {
+        finish();
+      }
+      await vi.waitFor(async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      });
+      state.authorizeOrdinary.mockResolvedValue(undefined);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
     },
   );
 

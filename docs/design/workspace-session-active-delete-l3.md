@@ -83,7 +83,10 @@ This protects persisted Session admission on every hosted
 attachment, including one without local lifecycle state; it does not grant
 every Session L3 delete support. A definite Store lifecycle-fence rejection
 returns 409. Unexpected Store, transport or writer-authority failures return
-503 and admit no execution. Protocol-zero close retains its scoped exception.
+503 and admit no execution. Authenticated cancellation of an admitted Turn is a
+local abort and does not require ordinary Store authorization; the local
+lifecycle fence still excludes cancellation. Protocol-zero close retains its
+scoped exception.
 
 Settle earlier operations, excluding this operation's lifecycle occurrences from
 generic cancellation. Stable occurrence IDs derive from Session, operation and
@@ -115,8 +118,22 @@ Receipt recovery may skip the Harness lifecycle request entirely. Detach must
 therefore validate its operation authority against Session Store even when the
 live attachment has no local lifecycle state. Store authorization checks the
 current claim, original writer, saved effects and DRAINING fence; a rejected
-claim leaves the attachment and its prior authority intact. Ordinary detach
-still requires ordinary execution authorization.
+claim leaves the attachment and its prior authority intact. A successor without
+a cached attachment addresses the original Session ID with its current claim;
+it does not load a Runtime or dispatch Hooks to recover a client ID. Missing
+authority still requires the original client ID, and a supplied wrong client ID
+is rejected. Cleanup authorization accepts only the same writer identity, token
+and generation, including an expired or already sealed writer; it does not renew
+that writer. Hook dispatch still requires an active, unexpired writer. Ordinary
+detach still requires ordinary execution authorization.
+
+After that cleanup authorization, stop activation renewal and seal the original
+writer without appending an activation release record. Expired or sealed writers
+cannot append, and an already-started renewal remains constrained by the Store
+fence and writer seal. The historical activation may still read as active; it is
+not evidence of a normal release. Completion relies on the permanent fence,
+effects receipt, writer seal and original Runtime stop proofs. Ordinary and
+legacy close continue to record activation release before sealing.
 
 Final completion requires the live delivery claim, effects receipt, permanent
 fence, no live writer or unsettled execution, and verifiable original stop
@@ -141,8 +158,8 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V36 after the existing V35 tool-profile migration;
-preserve V32. Historical admitted operations retain their
+Add lifecycle migration V40 after the existing V35 tool-profile and V36–V39
+journal/query migrations; preserve those migrations and V32. Historical admitted operations retain their
 original protocol and evidence, without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary

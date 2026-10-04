@@ -546,6 +546,19 @@ public final class HostedHarnessClient implements AutoCloseable {
         removeAttachment(ref);
     }
 
+    public void detachLifecycle(String harnessSessionId, Map<String, Object> authority) {
+        ensureOpen();
+        String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
+        HttpSupport.Response response = sendMutation(sessionPath(sessionId) + "/detach",
+                Map.of("authority", authority), null, "POST /session/:id/detach");
+        requireMutationStatus(response, 204, "POST /session/:id/detach");
+        AttachmentState state = attachments.remove(sessionId);
+        if (state != null) {
+            state.cancel();
+        }
+        activePrompts.remove(sessionId);
+    }
+
     public void detachSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
         HttpSupport.Response response = sendMutation(

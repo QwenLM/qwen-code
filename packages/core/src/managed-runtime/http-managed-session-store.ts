@@ -429,12 +429,17 @@ class ManagedSessionStoreHttpClient {
   }
 
   async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {
-    await this.assertWritable();
+    if (kind) await this.assertWritable();
+    const grant = this.grant;
+    if (!grant)
+      throw new ManagedSessionRecordError(
+        'the HTTP Managed Session writer is not active.',
+      );
     await this.json('/lifecycle:authorize', 'POST', {
       ...(kind ? { kind } : {}),
       workspaceId: this.sessionKey.workspaceId,
       writerId: this.writerId,
-      writerGeneration: this.grant!.writerGeneration,
+      writerGeneration: grant.writerGeneration,
     });
   }
   private readonly publicationAdmissions = new Map<string, string>();

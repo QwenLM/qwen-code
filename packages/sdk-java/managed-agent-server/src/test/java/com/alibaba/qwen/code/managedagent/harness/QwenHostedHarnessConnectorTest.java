@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
@@ -47,6 +48,45 @@ class QwenHostedHarnessConnectorTest {
             "33333333-3333-4333-8333-333333333333";
     private static final String BOOT_ID =
             "11111111-1111-4111-8111-111111111111";
+
+    @Test
+    void successorDetachesTheOriginalSessionWithoutLoadingAnAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector successor = connector(client);
+        OperationRecord operation = mock(OperationRecord.class);
+        when(operation.tenantId()).thenReturn("tenant-a");
+        when(operation.sessionId()).thenReturn(SESSION_ID);
+        when(operation.operationId()).thenReturn("delete-1");
+        when(operation.claimGeneration()).thenReturn(2L);
+
+        successor.detachLifecycle(operation);
+
+        verify(client).detachLifecycle(SESSION_ID, Map.of("operationId", "delete-1", "claimGeneration", 2L));
+        verify(client, never()).createSession(any());
+        verify(client, never()).loadSession(any());
+        verify(client, never()).settleLifecycle(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {404, 409, 503})
+    void successorOnlyIgnoresAnAbsentAttachmentDuringLifecycleDetach(int status) {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        OperationRecord operation = mock(OperationRecord.class);
+        when(operation.tenantId()).thenReturn("tenant-a");
+        when(operation.sessionId()).thenReturn(SESSION_ID);
+        when(operation.operationId()).thenReturn("delete-1");
+        when(operation.claimGeneration()).thenReturn(2L);
+        DaemonHttpException failure = mock(DaemonHttpException.class);
+        when(failure.getStatusCode()).thenReturn(status);
+        doThrow(failure).when(client).detachLifecycle(SESSION_ID,
+                Map.of("operationId", "delete-1", "claimGeneration", 2L));
+        QwenHostedHarnessConnector successor = connector(client);
+        if (status == 404) {
+            assertThatCode(() -> successor.detachLifecycle(operation)).doesNotThrowAnyException();
+        } else {
+            assertThatThrownBy(() -> successor.detachLifecycle(operation)).isSameAs(failure);
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})

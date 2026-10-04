@@ -66,7 +66,8 @@ placement guard 先于 retention、Session 和 journal 锁。仅检查 journal h
 这保护所有 hosted attachment 的持久会话准入，包括没有本地 lifecycle
 状态的 attachment，不代表所有会话都支持 L3 删除。明确的 Store 生命周期围栏
 拒绝返回 409；意外 Store、传输或 writer 权限故障返回 503，均不放行执行。
-protocol-zero close 保留限定的例外。
+已接纳 Turn 的认证取消是本地 abort，不要求普通 Store 授权；本地生命周期围栏
+仍禁止取消生命周期操作。protocol-zero close 保留限定的例外。
 
 先结算此前操作，通用取消不得包含本 operation 的生命周期 occurrence。
 稳定 occurrence ID 由 Session、operation、事件派生，复用 H2 的 catalog、plan、
@@ -91,7 +92,17 @@ receipt 已保存时跳过 Hook，否则从相同 H2 occurrence 恢复进度。H
 receipt 恢复可能完全跳过 Harness lifecycle 请求。因此，即使存活 attachment
 没有本地 lifecycle 状态，detach 也必须向 Session Store 核验 operation 权限。
 Store 授权检查当前 claim、原 writer、已保存的 effects 与 DRAINING 围栏；
-claim 被拒绝时保留 attachment 及其原权限。普通 detach 仍须通过普通执行授权。
+claim 被拒绝时保留 attachment 及其原权限。没有缓存 attachment 的接管者凭
+当前 claim 直接访问原 Session ID，不为恢复 client ID 加载 Runtime 或派发 Hook。
+缺少 authority 时仍要求原 client ID，提供错误 client ID 也会被拒绝。普通 detach
+仍须通过普通执行授权。清理授权仅接受原 writer 身份、token 与 generation，
+包括已过期或已封存的 writer，且不续租；Hook 派发仍要求 ACTIVE 且未过期的 writer。
+
+通过该清理授权后，停止 activation 续租并封存原 writer，不追加 activation release
+记录。过期或已封存的 writer 无权追加；已开始的续租仍受 Store 围栏和 writer seal
+约束。历史 activation 可能仍显示 active，不能作为正常释放的证据。完成依据仍为
+永久围栏、effects receipt、writer 封存与原 Runtime 停机证明。普通与 legacy close
+仍在封存前记录 activation release。
 
 最终完成要求有效 delivery claim、effects receipt、永久围栏、无有效 writer 或
 未结算执行，以及可核验的原停机证明。CLOSE 提交 CLOSED；DELETE 原子提交 O4
@@ -110,7 +121,8 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置迁移之后新增 V36 生命周期迁移，保留 V32。
+在已有 V35 工具配置及 V36–V39 journal/查询迁移之后新增 V40 生命周期迁移，
+保留这些迁移和 V32。
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。

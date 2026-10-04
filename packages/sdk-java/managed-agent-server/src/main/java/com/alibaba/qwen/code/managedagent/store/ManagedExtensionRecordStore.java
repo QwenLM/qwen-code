@@ -270,7 +270,13 @@ public class ManagedExtensionRecordStore {
             Function<String, StoredResource> resources) {
         boolean dispatch = false;
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
-            JsonNode event = parse(line).path("managedSession");
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
             JsonNode payload = event.path("payload");
             if ("input.accepted".equals(event.path("kind").asText())
                     || "tool.intent".equals(event.path("kind").asText())) {
@@ -304,7 +310,13 @@ public class ManagedExtensionRecordStore {
     void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
-            JsonNode event = parse(line).path("managedSession");
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
             String kind = event.path("kind").asText();
             JsonNode payload = event.path("payload");
             if ("input.accepted".equals(kind) || "tool.intent".equals(kind)

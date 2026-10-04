@@ -2148,7 +2148,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       session &&
       req.method !== 'GET' &&
-      !['/lifecycle', '/detach', '/heartbeat'].includes(req.path) &&
+      !['/lifecycle', '/detach', '/heartbeat', '/cancel'].includes(req.path) &&
       !session.lifecycle
     ) {
       try {
@@ -3674,7 +3674,17 @@ export function registerHostedHarnessSessionRoutes(
     res: Response,
     allowMissingClientId = false,
   ): Promise<void> => {
-    const session = identity(req, sessions, allowMissingClientId);
+    let authority: ManagedSessionLifecycleAuthority | undefined;
+    try {
+      authority = lifecycleAuthority(object(req.body)?.['authority']);
+    } catch {
+      return error(res, 400, 'invalid_hosted_lifecycle_authority');
+    }
+    const session = identity(
+      req,
+      sessions,
+      allowMissingClientId || authority !== undefined,
+    );
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (
       session.active ||
@@ -3683,12 +3693,6 @@ export function registerHostedHarnessSessionRoutes(
       session.hooksBusy
     )
       return error(res, 409, 'hosted_turn_active');
-    let authority: ManagedSessionLifecycleAuthority | undefined;
-    try {
-      authority = lifecycleAuthority(object(req.body)?.['authority']);
-    } catch {
-      return error(res, 400, 'invalid_hosted_lifecycle_authority');
-    }
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
@@ -3742,7 +3746,9 @@ export function registerHostedHarnessSessionRoutes(
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
       await session.mcp?.close();
-      await session.managed.close();
+      await session.managed.close(
+        session.lifecycle ? { releaseActivation: false } : undefined,
+      );
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);

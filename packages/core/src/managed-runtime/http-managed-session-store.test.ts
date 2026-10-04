@@ -224,6 +224,63 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('authorizes cleanup with the original expired or sealed writer without renewing it', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000, toFake: ['Date'] });
+    const server = new FakeManagedSessionStore();
+    const authorize = vi.fn();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const path = new URL(requestUrl(input)).pathname;
+        if (path.endsWith('/writers:renew'))
+          throw new Error('Original writer lease expired');
+        if (path.endsWith('/lifecycle:authorize')) {
+          authorize();
+          expect(JSON.parse(String(init?.body))).toEqual({
+            workspaceId: SESSION_KEY.workspaceId,
+            writerId: 'harness-a',
+            writerGeneration: 1,
+          });
+          const headers = new Headers(init?.headers);
+          expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+          expect(headers.get('X-Qwen-Lifecycle-Operation-Id')).toBe(
+            'delete-original',
+          );
+          expect(headers.get('X-Qwen-Lifecycle-Claim-Generation')).toBe('2');
+          return jsonResponse({});
+        }
+        return server.fetch(input, init);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      vi.setSystemTime(1_790_000_400_000);
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 2,
+      });
+      await stores.authorizeLifecycle();
+      expect(authorize).toHaveBeenCalledTimes(1);
+      await expect(stores.authorizeLifecycle('delete')).rejects.toThrow(
+        'Original writer lease expired',
+      );
+      expect(authorize).toHaveBeenCalledTimes(1);
+      await stores.close();
+      await stores.authorizeLifecycle();
+      expect(authorize).toHaveBeenCalledTimes(2);
+      await expect(stores.authorizeLifecycle('delete')).rejects.toThrow(
+        'writer is not active',
+      );
+      expect(authorize).toHaveBeenCalledTimes(2);
+    } finally {
+      await stores.close();
+      vi.useRealTimers();
+    }
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;

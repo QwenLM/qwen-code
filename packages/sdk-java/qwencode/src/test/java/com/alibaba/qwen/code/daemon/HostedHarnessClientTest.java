@@ -103,6 +103,31 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void successorLifecycleDetachNeedsNoNewAttachmentOrLifecycleDispatch() {
+        AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            detach.set(JsonSupport.parseObject(readBody(exchange), "detach"));
+            assertPrivateHeaders(exchange, false);
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            exchange.getResponseHeaders().set("Connection", "close");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        AtomicInteger otherMutations = new AtomicInteger();
+        server.createContext("/session", exchange -> {
+            otherMutations.incrementAndGet();
+            sendSessionJson(exchange, 500, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            client.detachLifecycle(SESSION_ID, authority);
+            assertEquals(Map.of("authority", authority), detach.get());
+            assertEquals(0, otherMutations.get());
+        }
+    }
+
+    @Test
     void legacyHarnessCannotFallBackToDeleteForLifecycleSettlement() {
         AtomicInteger requests = new AtomicInteger();
         createSessionRoute();

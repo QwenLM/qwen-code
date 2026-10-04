@@ -137,11 +137,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
-        if (ref == null) {
-            return;
-        }
         try {
-            client().detachLifecycle(ref, Map.of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration()));
+            var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
+            if (ref == null) {
+                client().detachLifecycle(operation.sessionId(), authority);
+            } else {
+                client().detachLifecycle(ref, authority);
+            }
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() != 404) {
                 throw error;

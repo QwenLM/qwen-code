@@ -162,7 +162,14 @@ public class ManagedSessionStore {
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
-        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        if (request.kind() != null) {
+            requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        } else if (!List.of("ACTIVE", "SEALED").contains(head.state())
+                || request.writerGeneration() != head.writerGeneration()
+                || !request.writerId().equals(head.writerId())
+                || !secureEquals(tokenHash(writerToken), head.leaseTokenHash())) {
+            throw writerConflict();
+        }
     }
 
     private void checkLifecycleWriter(String tenantId, String sessionId,
