@@ -937,7 +937,13 @@ setInterval(() => {}, 1000);
           'Hook execution cancelled (aborted)',
         );
         expect(isRunning(supervisorPid as number)).toBe(false);
-        expect(isRunning(hookPid as number)).toBe(false);
+        // #13356: the final kill's effect on the descendant is observed one
+        // scheduling hop later — under runner load that hop lands after a
+        // bare assertion. Wait for the reap like the sibling case above.
+        await waitFor(
+          () => !isRunning(hookPid as number),
+          PROCESS_REAP_TIMEOUT_MS,
+        );
       } finally {
         controller.abort();
         if (supervisorPid && isRunning(supervisorPid)) {
