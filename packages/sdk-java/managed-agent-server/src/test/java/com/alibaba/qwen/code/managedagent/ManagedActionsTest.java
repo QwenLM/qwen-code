@@ -10,10 +10,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
@@ -26,6 +31,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -139,8 +145,12 @@ class ManagedActionsTest {
 
     @Test
     void missingInvalidAndCorruptInputNeverFailsTheActionRead() throws Exception {
+        Logger log = (Logger) LoggerFactory.getLogger(ManagedActionService.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
         for (String fault : List.of("missing", "null", "scalar", "shape", "kind", "version", "length", "digest",
-                "corrupt", "unreferenced")) {
+                "corrupt", "unreferenced", "null-bytes")) {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = inputJournal(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
@@ -162,6 +172,12 @@ class ManagedActionsTest {
                 jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                         new byte[] {1}, tenant, session, resourceId);
+            } else if ("null-bytes".equals(fault)) {
+                // The damage shape the other two arms miss: the row is still
+                // committed and REFERENCED, but its bytes are gone.
+                jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                        tenant, session, resourceId);
             } else if ("unreferenced".equals(fault)) {
                 jdbc.update("UPDATE qwen_managed_session_resource SET state = 'UNREFERENCED'"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
@@ -169,8 +185,25 @@ class ManagedActionsTest {
             } else {
                 corruptOptions(tenant, session, journal);
             }
+            logged.list.clear();
             assertNoInputPreview(tenant, session, journal.id);
+            if (List.of("missing", "digest", "corrupt", "unreferenced", "null-bytes").contains(fault)) {
+                // Omitting the preview is deliberate; its cause must still be
+                // greppable, and must never carry the stored payload.
+                assertThat(logged.list).anySatisfy(event ->
+                        assertThat(event.getFormattedMessage()).contains(journal.id));
+                assertThat(logged.list).allSatisfy(event ->
+                        assertThat(event.getFormattedMessage()).doesNotContain("toolName"));
+            }
         }
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal plain = action(tenant, session, 100, 1000);
+        logged.list.clear();
+        inputViews(tenant, session, plain.id);
+        // A version 1 Action stops at the eligibility gate and must not warn.
+        assertThat(logged.list).isEmpty();
+        log.detachAppender(logged);
     }
 
     @Test
@@ -202,7 +235,7 @@ class ManagedActionsTest {
     @Test
     void omitsMalformedPayloadsAndInternalMcpInputs() throws Exception {
         for (String fault : List.of("session", "runtime", "extra", "json", "duplicate", "tool",
-                "scalar", "mcp", "utf8", "empty")) {
+                "scalar", "mcp", "utf8", "empty", "surrogate")) {
             String tenant = tenant();
             String session = session(tenant);
             ObjectNode wrapper = (ObjectNode) json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
@@ -223,6 +256,15 @@ class ManagedActionsTest {
             } else if ("utf8".equals(fault)) {
                 int offset = new String(bytes, StandardCharsets.UTF_8).indexOf("runtime-actions");
                 bytes[offset] = (byte) 0xff;
+            } else if ("surrogate".equals(fault)) {
+                // The escape has to sit in the wrapper bytes, so that readJson
+                // decodes it into an unpaired surrogate inside payloadJson: the
+                // wrapper stays valid UTF-8 while the payload text no longer
+                // round-trips through it, which is what the reader must reject.
+                bytes = ("{\"harnessSessionId\":\"" + session + "\",\"runtimeSessionId\":\"runtime-actions\","
+                                + "\"payloadJson\":\"{\\\"toolName\\\":\\\"write_file\\\","
+                                + "\\\"input\\\":{\\\"content\\\":\\\"\\uD800\\\"}}\"}")
+                        .getBytes(StandardCharsets.UTF_8);
             }
             ActionJournal journal = new ActionJournal(journals, tenant, session, 100, 1000).withInput(bytes);
             if ("mcp".equals(fault)) {

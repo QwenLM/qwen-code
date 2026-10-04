@@ -16,6 +16,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +31,8 @@ import java.util.Set;
 
 @Service
 public class ManagedActionService {
+    private static final Logger LOG =
+            LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("read_file", "write_file", "edit", "run_shell_command");
@@ -305,6 +309,14 @@ public class ManagedActionService {
                     .put("truncated", end < bytes.length)
                     .put(web ? "byteLength" : "byte_length", bytes.length);
         } catch (ApiException | IllegalArgumentException error) {
+            // Stored-input integrity failure, not the normal version 1 path.
+            // The preview is still omitted; the reason must remain greppable
+            // and must never carry payload or preview text.
+            LOG.warn(
+                    "Omitting Managed Action {} input preview, stored input rejected: {}: {}",
+                    action.id(),
+                    error.getClass().getSimpleName(),
+                    error.getMessage());
             return null;
         }
     }
