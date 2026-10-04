@@ -186,6 +186,15 @@ export default defineConfig(({ command }) => ({
       'Referrer-Policy': 'no-referrer',
     },
     port: 5173,
+    // Dev launchers (scripts/managed-agent-dev.js) hand the token-bearing
+    // open path through the environment instead of argv: npm echoes expanded
+    // argv to its inherited stdio, and argv is world-readable in
+    // /proc/<pid>/cmdline. Caveat: server.open spawns the browser launcher
+    // with the full URL as an argv element, so on POSIX the token still
+    // reaches one world-readable argv before landing in the page — this
+    // transport removes only the npm hop's echo. Unset means no browser is
+    // opened, as before.
+    open: process.env['QWEN_WEB_SHELL_OPEN_PATH'],
     proxy: {
       [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
       [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,

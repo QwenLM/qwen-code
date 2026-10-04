@@ -713,6 +713,32 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('preserves original Code Mode facts on the message channel', async () => {
+    const harness = await createHarness();
+    const fact = record({
+      uuid: 'rec-code-mode-result',
+      type: 'tool_result',
+      subtype: 'code_mode_tool_result',
+      provenance: 'tool_result',
+      goalContext: { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'exec-1:code:1',
+              name: 'read_file',
+              response: { output: 'ORIGINAL_FILE_FACT' },
+            },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(fact);
+    expect(await harness.sink.project()).toEqual([fact]);
+    await harness.close();
+  });
+
   it('refuses an unmapped record instead of appending it directly', async () => {
     const harness = await createHarness();
     const before = await fs.readFile(harness.transcriptPath, 'utf8');

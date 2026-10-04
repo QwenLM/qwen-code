@@ -52,6 +52,7 @@ import {
   resolveHostedAction,
   type HostedApprovalMode,
 } from './hosted-tool-approval.js';
+import * as stdio from '../utils/stdioHelpers.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
@@ -1099,25 +1100,102 @@ it.each([
   expect(broker.release).not.toHaveBeenCalled();
 });
 
-it.each(['workspace_busy', 'workspace_unavailable'])(
-  'allows another attempt after a definite %s acquire refusal',
-  async (code) => {
-    const refusal = new HostedWorkspaceBrokerRejection(409, code);
-    broker.acquire.mockRejectedValueOnce(refusal);
-    await expect(
-      turn.execute(calls, parts, 'model', new AbortController().signal),
-    ).rejects.toBe(refusal);
-    await expect(turn.finish()).resolves.toBeUndefined();
-    expect(broker.prepare).not.toHaveBeenCalled();
-    expect(broker.release).not.toHaveBeenCalled();
-    expect(await session.sink.project()).toEqual([]);
-    await turn.execute(calls, parts, 'model', new AbortController().signal);
-    await turn.consumeResults();
-    await turn.finish();
-    expect(broker.acquire).toHaveBeenCalledTimes(2);
-    expect(broker.release).toHaveBeenCalledOnce();
-  },
-);
+it('allows another attempt after a definite workspace_unavailable acquire refusal', async () => {
+  const refusal = new HostedWorkspaceBrokerRejection(
+    409,
+    'workspace_unavailable',
+  );
+  broker.acquire.mockRejectedValueOnce(refusal);
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBe(refusal);
+  await expect(turn.finish()).resolves.toBeUndefined();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(await session.sink.project()).toEqual([]);
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.acquire).toHaveBeenCalledTimes(2);
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('queues a definite workspace_busy acquire refusal until the mount frees', async () => {
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  broker.acquire.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.acquire).toHaveBeenCalledTimes(2);
+  expect(broker.release).toHaveBeenCalledOnce();
+  expect(log).toHaveBeenCalledWith(
+    expect.stringContaining(
+      'waits for the Workspace mount held by another Session.',
+    ),
+  );
+});
+
+it('keeps polling across repeated workspace_busy refusals until the mount frees', async () => {
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  broker.acquire
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    )
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.acquire).toHaveBeenCalledTimes(3);
+  expect(broker.release).toHaveBeenCalledOnce();
+  expect(log).toHaveBeenCalledTimes(1);
+});
+
+it('cancels a queued workspace_busy acquisition with the turn', async () => {
+  const controller = new AbortController();
+  broker.acquire.mockImplementation(async () => {
+    queueMicrotask(() => controller.abort());
+    throw new HostedWorkspaceBrokerRejection(409, 'workspace_busy');
+  });
+  const rejection = await turn
+    .execute(calls, parts, 'model', controller.signal)
+    .then(
+      () => {
+        throw new Error('expected the queued acquisition to reject');
+      },
+      (cause: unknown) => cause,
+    );
+  expect(rejection).toBe(controller.signal.reason);
+  await expect(turn.finish()).resolves.toBeUndefined();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.release).not.toHaveBeenCalled();
+});
+
+it('keeps an ambiguous queued-acquire failure recovery-blocking even when the turn is cancelled', async () => {
+  const controller = new AbortController();
+  broker.acquire
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    )
+    .mockImplementationOnce(async () => {
+      controller.abort();
+      throw new Error('lost acquire response');
+    });
+  await expect(
+    turn.execute(calls, parts, 'model', controller.signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.release).not.toHaveBeenCalled();
+});
 
 it.each([
   new Error('lost acquire response'),
