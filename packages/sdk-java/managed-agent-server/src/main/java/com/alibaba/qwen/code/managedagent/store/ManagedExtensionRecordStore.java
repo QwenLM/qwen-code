@@ -263,9 +263,12 @@ public class ManagedExtensionRecordStore {
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
-            if (domain == null) {
+            if (!"domain.committed".equals(kind)) {
                 continue;
             }
+            // Run the payload checks for every domain.committed event, not
+            // only ones with a parseable domain — a line without a textual
+            // domain must not skip into the journal the reader refuses.
             requireDomainCommitted(payload, domain, body != null);
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"

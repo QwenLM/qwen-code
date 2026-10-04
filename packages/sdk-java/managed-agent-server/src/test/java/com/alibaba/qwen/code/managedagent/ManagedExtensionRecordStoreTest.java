@@ -469,6 +469,14 @@ class ManagedExtensionRecordStoreTest {
                         + " entry", goal, "event.payload.domain must be one"
                         + " of", event -> {
                 }, records -> records, 0, "not_a_domain", 0);
+        refuseOrdinary("a domain.committed without a textual domain", goal,
+                "event.payload must be an object with exactly",
+                event -> ((ObjectNode) event.get("payload"))
+                        .remove("domain"), records -> records, 0);
+        refuseOrdinary("a domain.committed with a numeric domain", goal,
+                "event.payload.domain must be one of",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("domain", 123), records -> records, 0);
         String marker = "{\"subtype\":\"managed_session_commit_v1\","
                 + "\"managedSession\":{\"commandId\":\"big\","
                 + "\"padding\":\"" + "x".repeat(100_000) + "\"}}\n";
