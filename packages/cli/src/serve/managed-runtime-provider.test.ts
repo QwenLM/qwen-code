@@ -29,6 +29,18 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 
+const debugSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+  isEnabled: () => true,
+}));
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', async (original) => ({
+  ...(await original<object>()),
+  createDebugLogger: () => debugSpy,
+}));
+
 const workspaceCwd = '/tmp/managed-runtime-p8';
 const workspaceId = 'workspace-p8';
 const token = 'runtime-secret';
@@ -1167,6 +1179,47 @@ describe('Managed Runtime providers', () => {
       clientId: 'runtime-client-p8',
     });
     local.dispose();
+  });
+
+  it('settles a restore-path cleanup that fails after a non-release abort', async () => {
+    const runtime = fakeRuntime();
+    // Invalid for the restore path (active prompt), so cleanup runs; its
+    // close hangs until the test aborts the provider mid-flight — the window
+    // where nothing else can settle the awaiting release.
+    vi.mocked(runtime.bridge.resumeSession).mockResolvedValueOnce({
+      sessionId: prepareRequest.sessionId,
+      workspaceCwd,
+      attached: false,
+      clientId: 'runtime-client-p8',
+      hasActivePrompt: true,
+      sourceType: 'managed-gateway',
+      sourceId: prepareRequest.sessionId,
+    } as Awaited<ReturnType<AcpSessionBridge['resumeSession']>>);
+    let rejectClose!: (error: unknown) => void;
+    const closing = new Promise<never>((_resolve, reject) => {
+      rejectClose = reject;
+    });
+    runtime.close.mockReturnValueOnce(closing);
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    const sentinel = new Error('bridge exploded');
+    const released = local.release(prepareRequest.sessionId, prepareRequest);
+    await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledTimes(1));
+    local.dispose();
+    rejectClose(sentinel);
+    const outcome = await Promise.race([
+      released.then(
+        () => 'resolved',
+        (error: unknown) =>
+          `rejected:${error instanceof Error ? error.message : String(error)}`,
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1000)),
+    ]);
+    expect(outcome).toBe('rejected:Managed Runtime Session cleanup failed.');
+    expect(
+      debugSpy.error.mock.calls
+        .flat()
+        .some((argument: unknown) => argument === sentinel),
+    ).toBe(true);
   });
 
   it('re-prepares a remote Session after a failed v2 cold start instead of closing permanently', async () => {

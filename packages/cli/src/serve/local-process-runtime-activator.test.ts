@@ -12,6 +12,7 @@ import {
   LocalProcessRuntimeActivator,
   managedWorkerEnvironment,
 } from './local-process-runtime-activator.js';
+import { ProcessRegistry } from '@qwen-code/acp-bridge';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const fixture = `
@@ -274,7 +275,11 @@ const fs = require('node:fs');
 process.on('message', b => {
   if (b.type === 'shutdown') process.exit(0);
   if (b.type === 'boot') {
-    fs.writeFileSync(${JSON.stringify(path.join(dir, 'observed.json'))}, JSON.stringify(${JSON.stringify(SECRETS)}.filter(k => process.env[k])));
+    fs.writeFileSync(${JSON.stringify(path.join(dir, 'observed.json'))}, JSON.stringify({
+      leaked: ${JSON.stringify(SECRETS)}.filter(k => process.env[k]),
+      path: process.env.PATH,
+      qwenHome: process.env.QWEN_HOME,
+    }));
     setTimeout(() => process.send({ ...b, token: undefined, type: 'ready', url: 'http://127.0.0.1:12345' }), 50);
   }
 });
@@ -285,6 +290,7 @@ process.on('SIGTERM', () => process.exit(0));
       {
         PATH: process.env['PATH'],
         HOME: process.env['HOME'],
+        QWEN_HOME: 'config',
         OPENAI_API_KEY: 'leak-check',
         QWEN_SERVER_TOKEN: 'leak-check',
         QWEN_MANAGED_RUNTIME_TOKEN: 'leak-check',
@@ -294,11 +300,58 @@ process.on('SIGTERM', () => process.exit(0));
     );
     const use = activator.activate(scope());
     await use.endpoint;
+    // Both halves: no secrets leak *and* the allowlist is delivered — an
+    // empty spawned environment would pass a leak-only check.
     const observed = JSON.parse(
       await readFile(path.join(stateDir, 'observed.json'), 'utf8'),
-    ) as string[];
-    expect(observed).toEqual([]);
+    ) as { leaked: string[]; path?: string; qwenHome?: string };
+    expect(observed.leaked).toEqual([]);
+    expect(observed.path).toBe(process.env['PATH']);
+    expect(observed.qwenHome).toBe(path.resolve('config'));
     use.release('completed');
+  });
+
+  it('counts an unreclaimed child toward admission after a failed cleanup', async () => {
+    // terminate() rejects without proving the exit; the registry's own
+    // tracked child is untouched, so it stays committed until shutdown —
+    // mirroring the surviving-groups teardown branch.
+    const originalReserve = ProcessRegistry.prototype.reserve;
+    const reserveSpy = vi
+      .spyOn(ProcessRegistry.prototype, 'reserve')
+      .mockImplementation(function (this: ProcessRegistry) {
+        const reservation = originalReserve.call(this);
+        return {
+          ...reservation,
+          attach: (
+            child: Parameters<typeof reservation.attach>[0],
+            options?: Parameters<typeof reservation.attach>[1],
+          ) => {
+            const tracked = reservation.attach(child, options);
+            return {
+              ...tracked,
+              terminate: async () => {
+                throw new Error(
+                  'ACP child did not exit with its owned process groups (surviving pgids=[stub])',
+                );
+              },
+            };
+          },
+        };
+      });
+    const { activator } = await setup(1);
+    const workspace = scope();
+    const use = activator.activate(workspace);
+    await use.endpoint;
+    try {
+      await expect(
+        activator.revokeWorkspace(workspace.runtime),
+      ).rejects.toThrow();
+      await expect(
+        activator.activate(scope('b')).endpoint,
+      ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
+    } finally {
+      reserveSpy.mockRestore();
+    }
   });
 });
 
@@ -320,15 +373,35 @@ process.on('SIGTERM', () => process.exit(0));
     ['wrong epoch', 'ready.epoch += 1;'],
     ['wrong gatewayIncarnation', "ready.gatewayIncarnation = 'forged';"],
     ['wrong message type', "ready.type = 'banner';"],
+    ['wrong boot version', 'ready.version = 2;'],
+    ['wrong tenantId', "ready.tenantId = 'forged';"],
+    ['wrong workspaceId', "ready.workspaceId = 'forged';"],
+    ['wrong workspaceCwd', "ready.workspaceCwd = '/forged';"],
     ['unparseable URL', "ready.url = 'not a url';"],
     ['non-http protocol', "ready.url = 'https://127.0.0.1:12345';"],
     ['non-loopback host', "ready.url = 'http://192.168.1.10:12345';"],
+    ['portless URL', "ready.url = 'http://127.0.0.1';"],
+    ['path prefix', "ready.url = 'http://127.0.0.1:12345/prefix';"],
+    ['fragment', "ready.url = 'http://127.0.0.1:12345/#f';"],
     ['embedded credentials', "ready.url = 'http://user:pw@127.0.0.1:12345';"],
+    ['password only', "ready.url = 'http://:pw@127.0.0.1:12345';"],
     ['query string', "ready.url = 'http://127.0.0.1:12345/?q=1';"],
   ])('rejects the endpoint on %s', async (_label, mutations) => {
     const { activator } = await setup(4, handshakeFixture(mutations));
     await expect(activator.activate(scope()).endpoint).rejects.toThrow(
       /invalid (handshake|URL|endpoint)/,
+    );
+  });
+
+  // Non-string URL pins the `typeof ready.url` clause specifically: without
+  // it the failure would surface one error later as an unparseable URL.
+  it('rejects a non-string endpoint URL as an invalid handshake', async () => {
+    const { activator } = await setup(
+      4,
+      handshakeFixture('ready.url = 12345;'),
+    );
+    await expect(activator.activate(scope()).endpoint).rejects.toThrow(
+      /invalid handshake/,
     );
   });
 

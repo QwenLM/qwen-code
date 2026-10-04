@@ -768,16 +768,20 @@ export class ManagedToolRuntime {
       entry.result = structuredClone(result);
     } catch (error) {
       // A hook payload with non-cloneable values must not wedge the
-      // invocation: drop the hooks and keep the terminal outcome.
+      // invocation: replace only the hook that ran, and preserve the stop
+      // directive the hook actually issued.
+      const hookError = `Cannot serialize managed tool hooks: ${String(error)}`;
       entry.result = structuredClone({
         ...result,
-        postHook: {
-          shouldStop: false,
-          hookError: `Cannot serialize managed tool hooks: ${String(error)}`,
-        },
-        failureHook: {
-          hookError: `Cannot serialize managed tool hooks: ${String(error)}`,
-        },
+        ...(result.postHook
+          ? {
+              postHook: {
+                shouldStop: result.postHook.shouldStop === true,
+                hookError,
+              },
+            }
+          : {}),
+        ...(result.failureHook ? { failureHook: { hookError } } : {}),
       });
     }
     return entry.result;

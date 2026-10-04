@@ -272,16 +272,23 @@ function waitForLocalSession(
             try {
               await cleanup();
             } catch (error) {
-              // After a non-release abort the awaiting promise has already
-              // rejected, so throwing here would land on a settled promise and
-              // the cleanup failure would vanish.
+              // An abort landing after the success handler detached onAbort
+              // leaves nothing that can settle this promise, so a bare return
+              // would wedge the awaiting release; reject() is a no-op when the
+              // promise already settled on abort, preserving the first shape.
               if (
                 signal.aborted &&
                 !(signal.reason instanceof ManagedRuntimeReleaseAbortError)
               ) {
-                debugLogger.error(
-                  new ManagedRuntimeSessionCleanupError(cleanup, error),
+                const cleanupError = new ManagedRuntimeSessionCleanupError(
+                  cleanup,
+                  error,
                 );
+                debugLogger.error(
+                  'Managed Runtime Session cleanup failed after abort.',
+                  error,
+                );
+                reject(cleanupError);
                 return;
               }
               throw new ManagedRuntimeSessionCleanupError(cleanup, error);

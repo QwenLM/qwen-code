@@ -79,6 +79,7 @@ interface BrokerEntry {
   readonly acquisition: Promise<void>;
   acquisitionFailed?: boolean;
   readonly executions: Map<string, BrokerExecution>;
+  readonly failedDigests: Map<string, string>;
   client?: ManagedToolV2Client;
   release?: Promise<boolean>;
   releasing?: boolean;
@@ -712,6 +713,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         harnessSessionId,
         acquisition,
         executions: new Map(),
+        failedDigests: new Map(),
       };
       this.entries.set(request.sessionId, entry);
       const acquiredEntry = entry;
@@ -991,6 +993,14 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           false,
         );
       }
+      const failedDigest = entry.failedDigests.get(reference.invocationId);
+      if (failedDigest !== undefined && failedDigest !== referenceDigest) {
+        throw new ManagedRuntimeProviderError(
+          'managed_runtime_identity_conflict',
+          'Managed Runtime Broker invocation identity changed.',
+          false,
+        );
+      }
       if (!execution) {
         assertEntry();
         execution = {
@@ -1008,10 +1018,17 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         entry.executions.set(reference.invocationId, execution);
         const retained = execution;
         // A transiently rejected reservation must not be cached forever: the
-        // next attempt re-prepares under the stable idempotency key.
+        // next attempt re-prepares under the stable idempotency key. The
+        // eviction drops the recorded digest with it, so keep it tombstoned
+        // or a changed-args retry would pass the identity check on an empty
+        // cache.
         void retained.reserved.catch(() => {
           if (entry.executions.get(reference.invocationId) === retained) {
             entry.executions.delete(reference.invocationId);
+            entry.failedDigests.set(
+              reference.invocationId,
+              retained.referenceDigest,
+            );
           }
         });
       }
@@ -1072,6 +1089,19 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         }
         return parseExecutionResult(status.result);
       })();
+      const startedExecution = execution;
+      // A transiently rejected start must not be cached forever either:
+      // re-execution re-prepares under the stable idempotency key, with the
+      // failed digest tombstoned for the same reason as above.
+      void execution.started.catch(() => {
+        if (entry.executions.get(reference.invocationId) === startedExecution) {
+          entry.executions.delete(reference.invocationId);
+          entry.failedDigests.set(
+            reference.invocationId,
+            startedExecution.referenceDigest,
+          );
+        }
+      });
       return execution.started;
     };
     return {

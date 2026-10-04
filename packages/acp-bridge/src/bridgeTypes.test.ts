@@ -38,6 +38,19 @@ describe('parseBridgeManagedSessionStore', () => {
   });
 
   it.each([
+    ['http://127.1', 'http://127.0.0.1'],
+    ['http://0x7f.1', 'http://127.0.0.1'],
+    ['http://LOCALHOST:8080', 'http://localhost:8080'],
+  ])(
+    'accepts canonicalized loopback spelling %s as %s',
+    (spelling, canonical) => {
+      expect(
+        parseBridgeManagedSessionStore({ ...valid, baseUrl: spelling }).baseUrl,
+      ).toBe(canonical);
+    },
+  );
+
+  it.each([
     null,
     'store',
     [],
@@ -49,6 +62,9 @@ describe('parseBridgeManagedSessionStore', () => {
     { ...valid, baseUrl: 'http://10.0.0.1:8080' },
     { ...valid, baseUrl: 'http://store.example.com' },
     { ...valid, baseUrl: 'http://169.254.0.1' },
+    { ...valid, baseUrl: 'http://127.0.0.1.evil.test' },
+    { ...valid, baseUrl: 'http://localhost.evil.test' },
+    { ...valid, baseUrl: 'http://notlocalhost' },
     { ...valid, tenantId: 'bad tenant!' },
     { ...valid, tenantId: '' },
     { ...valid, tenantId: 'x'.repeat(129) },

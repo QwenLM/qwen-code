@@ -981,6 +981,87 @@ describe('BrokerManagedRuntimeProvider', () => {
     );
   });
 
+  it('re-drives an execution after a transient start failure', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        if (++starts === 1) return new Response('{}', { status: 503 });
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(starts).toBe(2);
+    expect(prepares).toBe(2);
+    provider.dispose();
+  });
+
+  it('rejects a changed-args retry after an evicted reservation', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        if (++prepares <= 2) return new Response('{}', { status: 503 });
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(2);
+    await expect(
+      client.execute({ ...reference(), argsDigest: 'c'.repeat(64) }),
+    ).rejects.toMatchObject({ code: 'managed_runtime_identity_conflict' });
+    expect(prepares).toBe(2);
+    provider.dispose();
+  });
+
   it('rejects a release the Broker does not confirm and keeps it retryable', async () => {
     let confirm = false;
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {

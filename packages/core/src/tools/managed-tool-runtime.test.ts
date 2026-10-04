@@ -406,11 +406,17 @@ describe('ManagedToolRuntime', () => {
   });
 
   it('binds media-capable builtins to the modality view and rejects media on other tools', async () => {
-    const { ReadFileTool } = await import('./read-file.js');
+    const { ReadFileTool, buildReadFileDescription } = await import(
+      './read-file.js'
+    );
     const { WriteFileTool } = await import('./write-file.js');
     const parentRead = new ReadFileTool(config);
     const parentWrite = new WriteFileTool(config);
     config.isLsToolEnabled = () => false;
+    // A bound tool that inherits the host config's modalities instead of the
+    // caller's context takes the audio/video branch of the description
+    // builder, while the declared context stays image-only.
+    config.getEffectiveInputModalities = () => ({ audio: true, video: true });
     config.getFileService = () =>
       ({ shouldQwenIgnoreFile: () => false }) as unknown as ReturnType<
         Config['getFileService']
@@ -466,6 +472,12 @@ describe('ManagedToolRuntime', () => {
       expect(prepared.params).toEqual({ file_path: '/managed-child/a.png' });
       expect(build).toHaveBeenCalledOnce();
       expect(build.mock.instances[0]).not.toBe(parentRead);
+      const boundView = build.mock.instances[0] as unknown as {
+        schema: { description?: string };
+      };
+      expect(boundView.schema.description).toBe(
+        buildReadFileDescription(media.inputModalities),
+      );
       await expect(
         builtin.prepare(
           { ...call, callId: 'call-2' },
@@ -747,6 +759,47 @@ describe('ManagedToolRuntime', () => {
     expect(runtime.status(ref).result?.postHook?.hookError).toContain(
       'Cannot serialize managed tool hooks',
     );
+    // The fallback drops only the hook that ran and keeps the terminal
+    // outcome with its payload.
+    expect(result.failureHook).toBeUndefined();
+    expect(runtime.status(ref).result?.failureHook).toBeUndefined();
+    expect(result.result?.llmContent).toEqual(rawResult.llmContent);
+    expect(runtime.status(ref).result?.result?.llmContent).toEqual(
+      rawResult.llmContent,
+    );
+  });
+
+  it('preserves the stop directive when the postHook payload cannot be cloned', async () => {
+    hooks.post.mockResolvedValue({
+      shouldStop: true,
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.post>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('success');
+    expect(result.postHook?.shouldStop).toBe(true);
+    expect(result.postHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(result.failureHook).toBeUndefined();
+  });
+
+  it('records only the failure hook when the failure payload cannot be cloned', async () => {
+    tool.setup = (invocation) => {
+      invocation.execute.mockRejectedValue(new Error('boom'));
+    };
+    hooks.failure.mockResolvedValue({
+      nonCloneable: () => {},
+    } as unknown as Awaited<ReturnType<typeof hooks.failure>>);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const result = await runtime.execute(ref);
+    expect(result.executionStatus).toBe('error');
+    expect(result.failureHook?.hookError).toContain(
+      'Cannot serialize managed tool hooks',
+    );
+    expect(result.postHook).toBeUndefined();
   });
 
   it('requires preflight and supports trusted automatic allow without onConfirm', async () => {

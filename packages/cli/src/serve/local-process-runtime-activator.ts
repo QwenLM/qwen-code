@@ -116,10 +116,17 @@ export class LocalProcessRuntimeActivator {
     }
     if (!generation) {
       const limit = this.options.maxWorkers ?? 4;
+      // A generation whose cleanup failed is deleted from the map, but its
+      // child may still be alive; the registry still counts it until the
+      // known tree is gone, so admission must read the larger figure.
+      const admitted = Math.max(
+        this.generations.size,
+        this.registry.committedProcessCount,
+      );
       let eviction: Promise<void> | undefined;
-      if (this.generations.size > limit)
+      if (admitted > limit)
         return this.unavailable('managed_runtime_capacity_exhausted');
-      if (this.generations.size >= limit) {
+      if (admitted >= limit) {
         const idle = [...this.generations.values()]
           .filter((g) => !g.retiring && g.uses.size === 0 && g.operations === 0)
           .sort((a, b) => a.lastUsed - b.lastUsed)[0];
