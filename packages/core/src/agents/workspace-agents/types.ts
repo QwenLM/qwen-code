@@ -17,6 +17,31 @@
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOSTS_SCHEMA_VERSION = 1;
+export const LOCAL_AGENT_RUNTIME_ID = 'local';
+
+export interface AgentHost {
+  id: string;
+  name: string;
+  secretHash: string;
+  workspaceCwd: string;
+  providers: string[];
+  createdAt: number;
+  lastSeenAt?: number;
+}
+
+export type AgentHostView = Omit<AgentHost, 'secretHash'>;
+
+export interface AgentHostEnrollment {
+  tokenHash: string;
+  expiresAt: number;
+}
+
+export interface AgentHostsFile {
+  schemaVersion: typeof AGENT_HOSTS_SCHEMA_VERSION;
+  hosts: AgentHost[];
+  enrollment?: AgentHostEnrollment;
+}
 
 /**
  * One external caller's permission to call one agent.
@@ -48,6 +73,52 @@ export interface WorkspaceAgentsFile {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   agents: WorkspaceAgent[];
 }
+
+/** A program a runtime can run an agent with. */
+export type AgentProgram = 'qwen' | 'codex' | 'claude';
+
+/**
+ * How a host names each program in its advertised `providers`. The one table
+ * the host, the daemon's validation and pickup all read.
+ */
+export const AGENT_PROGRAM_LABELS: Readonly<Record<AgentProgram, string>> = {
+  qwen: 'Qwen Code ACP',
+  codex: 'Codex CLI',
+  claude: 'Claude Code ACP',
+};
+
+export function isAgentProgram(value: unknown): value is AgentProgram {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(AGENT_PROGRAM_LABELS, value)
+  );
+}
+
+export function hostOffersProgram(
+  host: { providers: readonly string[] },
+  program: AgentProgram,
+): boolean {
+  return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
+}
+
+/**
+ * The coordinator's pinned answer for a Host credential it will not accept.
+ *
+ * A Host clears its stored credential and re-joins only on this exact body;
+ * every other 401 — the bearer gate while the runtime is still starting, or
+ * the routes being unmounted — is worth a retry. Both halves read this
+ * constant so the coupling is a compile error rather than a string match.
+ */
+export const AGENT_HOST_CREDENTIAL_REJECTED = 'Invalid Agent Host credential.';
+
+export type WorkspaceAgentExecution =
+  | { mode: 'local' }
+  | {
+      mode: 'managed-host';
+      hostIds: string[];
+      /** The program to run on the host; the host's default when absent. */
+      provider?: AgentProgram;
+    };
 
 /**
  * A durable agent identity, scoped to one workspace.
@@ -113,6 +184,8 @@ export interface WorkspaceAgent {
    * Distinct from {@link queueLimit}, which bounds how much may wait.
    */
   maxConcurrentRuns?: number;
+  /** Where this workspace-scoped identity may execute. Absent means local. */
+  execution?: WorkspaceAgentExecution;
 }
 
 /**
@@ -225,6 +298,17 @@ export type ThreadRunStatus =
   | 'failed'
   | 'cancelled';
 
+/** One Host's temporary hold on a run. */
+export interface RunLease {
+  hostId: string;
+  /** Minted fresh on every acquisition; never reused across attempts. */
+  leaseId: string;
+  /** The run attempt this lease is for. A later attempt invalidates it. */
+  attempt: number;
+  expiresAt: number;
+  acquiredAt: number;
+}
+
 /**
  * How a run ended.
  *
@@ -293,6 +377,12 @@ export interface ThreadRun {
   closeKind?: RunCloseKind;
   closeAcknowledgedAtSequence?: number;
   finalMessageId?: string;
+  /** Written with terminal settlement only when a Host result was accepted. */
+  hostResultReceipt?: {
+    attempt: number;
+    leaseId: string;
+    digest: string;
+  };
   usageByRound: RunUsageRound[];
   /**
    * The task session's cumulative token total when this run started. The delta
@@ -300,6 +390,16 @@ export interface ThreadRun {
    */
   usageBaselineTokens?: number;
   failureStage?: string;
+  /**
+   * The outbound Host currently holding this run, if any.
+   *
+   * A lease rather than an assignment: a Host on the far side of a NAT can
+   * vanish without saying so, and work has to become available again without
+   * a person intervening. What makes that safe is that re-leasing mints a new
+   * `leaseId` and the attempt moves on, so the vanished worker's late write is
+   * refused rather than overwriting whoever picked the work up next.
+   */
+  lease?: RunLease;
   /** Workspace-wide FIFO key. */
   queueSequence: number;
   /**

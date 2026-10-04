@@ -109,6 +109,13 @@ public class ManagedAgentProperties {
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
+        /**
+         * Turn-level deadline passed to the Harness at prompt admission. An
+         * admitted Turn outliving it is settled by the Harness as a
+         * classified deadline failure, so a stalled model stream cannot pin
+         * a Session forever.
+         */
+        private Duration turnDeadline = Duration.ofMinutes(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -181,6 +188,14 @@ public class ManagedAgentProperties {
         public void setHeartbeatInterval(Duration heartbeatInterval) {
             this.heartbeatInterval = heartbeatInterval;
         }
+
+        public Duration getTurnDeadline() {
+            return turnDeadline;
+        }
+
+        public void setTurnDeadline(Duration turnDeadline) {
+            this.turnDeadline = turnDeadline;
+        }
     }
 
     public static class SessionStore {
@@ -237,6 +252,13 @@ public class ManagedAgentProperties {
         private Duration claimTimeout;
         private Long verificationBytesPerSecond;
         private Duration maxVerificationTimeout;
+        private boolean gcEnabled;
+        private Duration deletionGrace = Duration.ofHours(24);
+
+        public boolean isGcEnabled() { return gcEnabled; }
+        public void setGcEnabled(boolean value) { gcEnabled = value; }
+        public Duration getDeletionGrace() { return deletionGrace; }
+        public void setDeletionGrace(Duration value) { deletionGrace = value; }
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -413,8 +435,8 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
-        private boolean durableLocalProcess;
-        private boolean trustedLocalRebootRecovery;
+        private boolean durableLocalProcess = true;
+        private boolean trustedLocalRebootRecovery = true;
         private boolean operatorRecoveryEnabled;
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";

@@ -571,4 +571,41 @@ describe('trailingSystemNotifications provenance signal', () => {
       ).kind,
     ).toBe('none');
   });
+
+  it('does not count a delivered notification turn entry (#12042 shape A)', () => {
+    // `client.ts` stamps the record of a notification turn it actually sends
+    // with `deliveredTurn: true`. The trim exists only for records persisted
+    // BEFORE their turn ran; a delivered-but-unanswered entry is an
+    // interrupted prompt, so it must stay classifiable.
+    const messages = [
+      modelRecord('earlier answer'),
+      { ...notificationRecord(), deliveredTurn: true },
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('counts a cold record behind a delivered one only up to the delivered entry', () => {
+    // A failed delivered turn leaves [cold, delivered] at the tail: the
+    // trailing count is 0 (the last entry is delivered), so neither entry is
+    // trimmed and both ride the Retry re-submission. The reverse order —
+    // [delivered, cold], a new notification persisted after the turn failed —
+    // counts 1 and trims only the genuinely cold tail entry.
+    const delivered = {
+      ...notificationRecord(),
+      deliveredTurn: true,
+    };
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [notificationRecord(), delivered],
+      }).trailingSystemNotifications,
+    ).toBe(0);
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [delivered, notificationRecord()],
+      }).trailingSystemNotifications,
+    ).toBe(1);
+  });
 });

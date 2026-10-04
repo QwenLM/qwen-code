@@ -60,7 +60,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1));
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "hosted-workspace-files/1");
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
         when(registry.canRead("tenant", "actor", "ws-a"))
