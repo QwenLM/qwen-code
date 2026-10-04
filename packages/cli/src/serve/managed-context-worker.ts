@@ -30,6 +30,7 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
@@ -61,6 +62,18 @@ import {
   MANAGED_MCP_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedShellRuntime } from './managed-shell-runtime.js';
+import {
+  MANAGED_SHELL_WORKER_ROUTE,
+  registerManagedShellRoutes,
+} from './managed-shell-routes.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorRuntime } from './managed-monitor-runtime.js';
+import {
+  MANAGED_MONITOR_WORKER_ROUTE,
+  registerManagedMonitorRoutes,
+} from './managed-monitor-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -71,6 +84,8 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
+  MANAGED_SHELL_WORKER_ROUTE,
+  MANAGED_MONITOR_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -242,6 +257,14 @@ export function registerManagedContextRoutes(
     loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
   );
   registerManagedHookRoutes(app, boot, hooks);
+  // H3 background Shells share the delegation the Hook commands already use;
+  // unset or empty both mean no delegation, and the executor keeps its
+  // committed refusal then.
+  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const backgroundSupervisor = cgroupRoot
+    ? ManagedChildRunSupervisor.create({ cgroupRoot })
+    : undefined;
+  const backgroundRegistry = new ManagedBackgroundShellRegistry();
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -275,6 +298,18 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
+    backgroundSupervisor,
+    backgroundRegistry,
+  );
+  registerManagedShellRoutes(
+    app,
+    boot,
+    new ManagedShellRuntime(backgroundRegistry),
+  );
+  registerManagedMonitorRoutes(
+    app,
+    boot,
+    new ManagedMonitorRuntime(new ManagedMonitorRegistry()),
   );
   registerManagedRuntimeProviderRoute(
     app,

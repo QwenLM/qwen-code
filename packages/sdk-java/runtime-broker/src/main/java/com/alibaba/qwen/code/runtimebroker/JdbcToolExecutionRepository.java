@@ -306,6 +306,30 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
+    public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord current = selectByExecutionId(connection,
+                    expected.getExecutionCallId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || current.isTerminal()
+                    || current.getState() != ToolExecutionRecord.State.PREPARED) {
+                return null;
+            }
+            ToolExecutionRecord settled = current.withResult(result,
+                    current.getLastSequence(), settlementTime)
+                    .withVersion(current.getVersion() + 1);
+            updateExecution(connection, settled);
+            return settled;
+        });
+    }
+
+    @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         return resolve(expected, resolutionResult, resolutionTime, true);
@@ -416,26 +440,52 @@ public final class JdbcToolExecutionRepository
     @Override
     public boolean hasActiveByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId) {
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT binding_id, runtime_session_id FROM qwen_tool_execution "
-                            + "WHERE binding_id = ? AND runtime_generation = ? "
-                            + "AND runtime_session_key = ? "
-                            + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')")) {
-                statement.setString(1, bindingId);
-                statement.setLong(2, runtimeGeneration);
-                statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
-                try (ResultSet result = statement.executeQuery()) {
-                    while (result.next()) {
-                        if (bindingId.equals(result.getString("binding_id"))
-                                && runtimeSessionId.equals(result.getString("runtime_session_id"))) {
-                            return true;
-                        }
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByRuntimeSession(connection, bindingId,
+                        runtimeGeneration, runtimeSessionId,
+                        java.util.Set.of()));
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByRuntimeSession(connection, bindingId,
+                        runtimeGeneration, runtimeSessionId,
+                        excludingExecutionCallIds));
+    }
+
+    static boolean hasActiveByRuntimeSession(Connection connection,
+            String bindingId, long runtimeGeneration, String runtimeSessionId)
+            throws SQLException {
+        return hasActiveByRuntimeSession(connection, bindingId,
+                runtimeGeneration, runtimeSessionId, java.util.Set.of());
+    }
+
+    static boolean hasActiveByRuntimeSession(Connection connection,
+            String bindingId, long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT binding_id, runtime_session_id, execution_call_id FROM qwen_tool_execution "
+                        + "WHERE binding_id = ? AND runtime_generation = ? "
+                        + "AND runtime_session_key = ? "
+                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')")) {
+            statement.setString(1, bindingId);
+            statement.setLong(2, runtimeGeneration);
+            statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    if (bindingId.equals(result.getString("binding_id"))
+                            && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                            && !excludingExecutionCallIds.contains(result.getString("execution_call_id"))) {
+                        return true;
                     }
                 }
             }
-            return false;
-        });
+        }
+        return false;
     }
 
     private static ToolExecutionRecord selectByExecutionId(

@@ -207,6 +207,29 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized ToolExecutionRecord settlePrepared(
+            ToolExecutionRecord expected, Map<String, Object> result,
+            Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        ToolExecutionRecord current = recordsById.get(
+                expected.getExecutionCallId());
+        if (current == null || !current.sameIdentity(expected)
+                || current.getVersion() != expected.getVersion()
+                || current.isTerminal()
+                || current.getState() != ToolExecutionRecord.State.PREPARED) {
+            return null;
+        }
+        ToolExecutionRecord settled = current.withResult(result,
+                current.getLastSequence(), settlementTime)
+                .withVersion(current.getVersion() + 1);
+        recordsById.put(settled.getExecutionCallId(), settled);
+        return settled;
+    }
+
+    @Override
     public synchronized ToolExecutionRecord resolveUnknown(
             ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
@@ -281,6 +304,17 @@ public final class InMemoryToolExecutionRepository
                 && record.getBindingId().equals(bindingId)
                 && record.getRuntimeGeneration() == runtimeGeneration
                 && record.getRuntimeSessionId().equals(runtimeSessionId));
+    }
+
+    @Override
+    public synchronized boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return recordsById.values().stream().anyMatch(record -> !record.isTerminal()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId)
+                && !excludingExecutionCallIds.contains(record.getExecutionCallId()));
     }
 
     @Override

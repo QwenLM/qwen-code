@@ -47,7 +47,12 @@ public final class ManagedExtensionProjection {
                     ManagedHookRecords::requireExecution,
                     body -> body.get("hookExecutionId").textValue(),
                     ManagedHookRecords::isExecutionStart,
-                    ManagedHookRecords::isExecutionSuccessor));
+                    ManagedHookRecords::isExecutionSuccessor),
+            "child_run", new Body("background_shell",
+                    ManagedExtensionRecords::requireChildRun,
+                    body -> body.get("shellId").textValue(),
+                    ManagedExtensionRecords::isChildRunStart,
+                    ManagedExtensionRecords::isChildRunSuccessor));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
@@ -112,6 +117,19 @@ public final class ManagedExtensionProjection {
      */
     public static TaskProjection project(TaskProjection previous,
             JsonNode run, long occurredAt) {
+        return project(previous, run, occurredAt, false);
+    }
+
+    /**
+     * The same projection with the record's stop request: a stop-requested
+     * record whose run is attached ({@code running_attached}) or still
+     * provisioning ({@code intent}/{@code dispatch_started}) projects its
+     * Runtime as {@code draining}; a lost, terminal or unbound row keeps
+     * its own Runtime state (H3's {@code child_run}; every earlier record
+     * passes false).
+     */
+    public static TaskProjection project(TaskProjection previous,
+            JsonNode run, long occurredAt, boolean stopRequested) {
         String state = run.get("state").textValue();
         JsonNode definition = run.get("definition");
         long createdAt = previous == null ? occurredAt : previous.createdAt();
@@ -126,7 +144,7 @@ public final class ManagedExtensionProjection {
                                 ? startedAt : createdAt))
                         : null;
         return new TaskProjection(taskState(state, run.get("reason")),
-                runtimeState(run),
+                runtimeState(run, stopRequested),
                 definition.isNull() ? null : definition
                         .get("definitionRevision").decimalValue()
                         .longValueExact(),
@@ -175,7 +193,7 @@ public final class ManagedExtensionProjection {
         };
     }
 
-    private static String runtimeState(JsonNode run) {
+    private static String runtimeState(JsonNode run, boolean stopRequested) {
         String execution = run.get("execution").textValue();
         if (TERMINAL.contains(run.get("state").textValue())
                 || execution == null) {
@@ -185,13 +203,13 @@ public final class ManagedExtensionProjection {
             return "unbound";
         }
         if ("running_attached".equals(execution)) {
-            return "ready";
+            return stopRequested ? "draining" : "ready";
         }
         if ("runtime_lost".equals(run.get("reason").textValue())) {
             return "lost";
         }
         if ("intent".equals(execution) || "dispatch_started".equals(execution)) {
-            return "provisioning";
+            return stopRequested ? "draining" : "provisioning";
         }
         return null;
     }

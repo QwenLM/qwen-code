@@ -80,17 +80,25 @@ public class ManagedExtensionRecordStore {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
+    private final ManagedTaskEventStore taskEvents;
 
     @Autowired
     public ManagedExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions) {
+            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
+        this.taskEvents = taskEvents;
     }
 
     /** A store beside no public Session table, which announces nothing. */
     ManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, null);
+    }
+
+    /** A store that journals its own task events beside the table. */
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+            AgentStateStore sessions) {
+        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
     public record TaskRow(String taskId, String kind,
@@ -169,6 +177,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -180,13 +196,14 @@ public class ManagedExtensionRecordStore {
      * transaction must hold only those events and then its commit marker,
      * as the authority writes it.
      */
-    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
         int applied = 0;
+        JsonNode lastActivation = null;
         boolean shaped = true;
         boolean managed = false;
         String lastSubtype = null;
@@ -240,6 +257,9 @@ public class ManagedExtensionRecordStore {
                         "event id " + eventId
                                 + " is reserved for Stage H records.");
             }
+            if ("activation.changed".equals(kind)) {
+                lastActivation = payload;
+            }
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
@@ -260,7 +280,7 @@ public class ManagedExtensionRecordStore {
         require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return receipts;
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -434,6 +454,23 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("child_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("monitor_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "lastObservationRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         if (domain.equals("hook_execution")) {
             StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
             if (plan.kind().equals("managed-hook-plan")) {
@@ -570,7 +607,8 @@ public class ManagedExtensionRecordStore {
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
                 previous == null ? null : previous.projection(), run,
-                occurredAt);
+                occurredAt,
+                record.path("stopRequested").asBoolean(false));
         JsonNode delivery = run.get("delivery");
         String deliveryTarget = delivery.isNull() ? null
                 : delivery.get("target").textValue();
@@ -626,9 +664,12 @@ public class ManagedExtensionRecordStore {
         }
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
-            announce(tenantId, sessionId,
-                    ManagedExtensionProjection.taskId(recordKey),
-                    projection.state(), revision);
+            String taskId = ManagedExtensionProjection.taskId(recordKey);
+            announce(tenantId, sessionId, taskId, projection.state(),
+                    revision);
+            taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                    projection.state(), projection.runtimeState(),
+                    occurredAt);
         }
     }
 

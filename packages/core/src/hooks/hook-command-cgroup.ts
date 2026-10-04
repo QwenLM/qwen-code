@@ -48,11 +48,10 @@ child.on('exit', (code) => process.exit(code ?? 1));
 export class HookCommandCgroup {
   private constructor(readonly directory: string) {}
 
-  static create(root: string | undefined): HookCommandCgroup {
-    let directory: string | undefined;
+  private static resolveRoot(root: string | undefined): string {
+    if (process.platform !== 'linux' || !root || !isAbsolute(root))
+      throw new HookCommandIsolationUnavailableError();
     try {
-      if (process.platform !== 'linux' || !root || !isAbsolute(root))
-        throw new HookCommandIsolationUnavailableError();
       const resolved = realpathSync(root);
       if (statfsSync(resolved).type !== 0x63677270)
         throw new HookCommandIsolationUnavailableError();
@@ -60,8 +59,33 @@ export class HookCommandCgroup {
         readFileSync(join(resolved, 'cgroup.type'), 'utf8').trim() !== 'domain'
       )
         throw new HookCommandIsolationUnavailableError();
-      directory = join(resolved, `qwen-hook-${randomUUID()}`);
+      return resolved;
+    } catch (cause) {
+      if (cause instanceof HookCommandIsolationUnavailableError) throw cause;
+      // A missing or unreadable root is indistinguishable from no delegation.
+      throw new HookCommandIsolationUnavailableError();
+    }
+  }
+
+  static create(
+    root: string | undefined,
+    unitName?: string,
+  ): HookCommandCgroup {
+    let directory: string | undefined;
+    let created = false;
+    try {
+      // A caller-supplied name must stay one unit: the same containment
+      // rule attach() applies before it joins the name into the root.
+      if (
+        unitName !== undefined &&
+        (unitName.includes('/') || unitName.includes(''))
+      ) {
+        throw new HookCommandIsolationUnavailableError();
+      }
+      const resolved = HookCommandCgroup.resolveRoot(root);
+      directory = join(resolved, unitName ?? `qwen-hook-${randomUUID()}`);
       mkdirSync(directory, { mode: 0o700 });
+      created = true;
       const unit = new HookCommandCgroup(directory);
       if (!unit.empty()) throw new HookCommandIsolationUnavailableError();
       for (const file of ['cgroup.procs', 'cgroup.kill']) {
@@ -70,7 +94,9 @@ export class HookCommandCgroup {
       }
       return unit;
     } catch {
-      if (directory) {
+      // Only a unit this call created may be removed: a named unit that
+      // already exists belongs to whoever made it, never to us.
+      if (created && directory) {
         try {
           rmdirSync(directory);
         } catch {
@@ -79,6 +105,29 @@ export class HookCommandCgroup {
       }
       throw new HookCommandIsolationUnavailableError();
     }
+  }
+
+  /**
+   * Opens a unit somebody else created, for a worker that (re)attaches a
+   * supervised process after a replacement. A missing unit answers
+   * `undefined`; an unusable root answers the isolation error, never a guess.
+   */
+  static attach(
+    root: string | undefined,
+    unitName: string,
+  ): HookCommandCgroup | undefined {
+    const resolved = HookCommandCgroup.resolveRoot(root);
+    if (unitName.includes('/') || unitName.includes('')) return undefined;
+    let directory: string;
+    try {
+      directory = realpathSync(join(resolved, unitName));
+      if (!directory.startsWith(resolved + '/')) return undefined;
+      if (statfsSync(directory).type !== 0x63677270) return undefined;
+      readFileSync(join(directory, 'cgroup.events'), 'utf8');
+    } catch {
+      return undefined;
+    }
+    return Reflect.construct(HookCommandCgroup, [directory]);
   }
 
   launch(executable: string, args: string[], env: NodeJS.ProcessEnv) {

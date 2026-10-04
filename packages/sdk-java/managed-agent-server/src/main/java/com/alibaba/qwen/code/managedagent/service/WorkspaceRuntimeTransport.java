@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -278,16 +279,20 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
+                || ManagedShellProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             if (ManagedHookProtocol.isOperation(operation)) {
                 ManagedHookProtocol.validateSession(session, operation);
+            } else if (ManagedShellProtocol.isOperation(operation)) {
+                ManagedShellProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
-            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
+                    || ManagedShellProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery);
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {

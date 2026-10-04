@@ -19,6 +19,12 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
+// Sessions stay readable by every deployed reader: every domain the log
+// may hold, `monitor_run` included, parses in readers since #12837
+// (v0.24.7). A `managed-session/2` stamp on each new Session would make a
+// rollback or a mixed-version rollout lose access to every Session
+// created in between (H3 round-5 verification matrix), so the stamp
+// rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
@@ -61,6 +67,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'lifecycle.changed',
   'domain.committed',
   'message.delta',
+  'message.retracted',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -662,6 +669,16 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         text: 'rawText',
       },
     },
+    // A published message whose deltas a restarted model attempt replaces
+    // (#13319). `fromSequence` is the journal sequence of the message's first
+    // delta; every delta of the message carries a sequence >= it.
+    'message.retracted': {
+      fields: {
+        messageId: 'id',
+        turnId: 'id',
+        fromSequence: 'sequence',
+      },
+    },
     'action.changed': {
       fields: {
         requestId: 'id',
@@ -760,6 +777,7 @@ const EVENT_ACTORS: Readonly<
   'message.committed': ['harness', 'trusted_entry'],
   'tool.intent': ['harness'],
   'message.delta': ['harness'],
+  'message.retracted': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -781,6 +799,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'message.committed': false,
   'tool.intent': true,
   'message.delta': true,
+  'message.retracted': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -1011,6 +1030,7 @@ function assertPayloadRules(
     case 'message.committed':
     case 'tool.intent':
     case 'message.delta':
+    case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
@@ -1162,7 +1182,7 @@ export function isManagedSessionLifecycleTransitionAllowed(
   return LIFECYCLE_TRANSITIONS[from].includes(to);
 }
 
-function managedSessionReaderVersion(value: unknown): number | null {
+export function managedSessionReaderVersion(value: unknown): number | null {
   if (typeof value !== 'string') return null;
   const match = /^managed-session\/(0|[1-9][0-9]*)$/.exec(value);
   if (match === null) return null;
