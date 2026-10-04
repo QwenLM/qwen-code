@@ -63,6 +63,8 @@ import type {
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import { HostedMonitorLoop } from './hosted-monitor-loop.js';
+import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
 import {
   HookEventName,
   PreToolUseHookOutput,
@@ -109,6 +111,10 @@ export interface HostedShellTurnOptions {
   // endpoint after the registering turn ends (H3 fifth slice drains it at
   // the Session's ordered close).
   publisher?: HostedShellPublisher;
+  // The Session-scoped observation loops of running Monitor watches,
+  // keyed by their execution identity; they outlive their starting turns
+  // exactly like the publisher.
+  monitorLoops?: Map<string, HostedMonitorLoop>;
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -1022,6 +1028,7 @@ export class HostedWorkspaceToolTurn {
           this.shell!.resources,
           this.shell!.assertWritable,
           this.childRuns,
+          this.monitors,
         );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
@@ -1853,6 +1860,9 @@ export class HostedWorkspaceToolTurn {
           },
         );
       }
+      // A fresh accept starts the observation lifecycle; a replay never
+      // reopens it, exactly like a replay never re-attaches.
+      await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
@@ -1984,6 +1994,38 @@ export class HostedWorkspaceToolTurn {
       );
     }
     return converted;
+  }
+
+  /**
+   * Starts the observation loop for a watch fresh out of its v3 start,
+   * once per Session lifetime: the loop resumes an already-attached
+   * record and is fed lines through the Session publisher's fan-out.
+   */
+  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+    if (!this.shell || !this.publisher || !this.monitors) return;
+    const loops = (this.shell.monitorLoops ??= new Map());
+    if (loops.has(executionCallId)) return;
+    const record = this.monitors.record(executionCallId);
+    if (!record) return;
+    const argsBody = JSON.parse(
+      (await this.session.resources.read(record.commandRef)).toString('utf8'),
+    ) as Record<string, unknown>;
+    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    const loop = new HostedMonitorLoop(
+      this.monitors,
+      executionCallId,
+      executor,
+    );
+    loops.set(executionCallId, loop);
+    await loop.resumeAttached({
+      ownerScopeId: this.session.authority.sessionHeader.sessionKey.sessionId,
+      executionCallId,
+      args: argsBody,
+      maxEvents: record.maxEvents,
+      idleTimeoutMs: record.idleTimeoutMs,
+      debounceMs: record.debounceMs,
+      runtime: record.run.runtime!,
+    });
   }
 
   /**

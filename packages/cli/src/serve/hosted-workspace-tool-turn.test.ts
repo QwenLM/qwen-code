@@ -45,6 +45,7 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
+  type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -4128,19 +4129,66 @@ function monitorTurnRig(outcome: ToolResultEnvelope) {
   enablement.childRun = true;
   enablement.monitorRun = true;
   const order: string[] = [];
+  const options = {
+    resources: {} as never,
+    assertWritable: async () => {},
+    monitorLoops: undefined as Map<string, unknown> | undefined,
+    publisher: undefined as unknown,
+  } as unknown as HostedShellTurnOptions;
   const monitors = {
     calls: [] as Array<readonly [string, unknown]>,
-    record(_id: string) {
-      return undefined;
+    attached: new Map<string, unknown>(),
+    record(id: string) {
+      return monitors.attached.get(id);
     },
-    async admit(params: unknown) {
+    lastAdmit: undefined as Record<string, unknown> | undefined,
+    async admit(params: Record<string, unknown>) {
       monitors.calls.push(['admit', params]);
+      monitors.lastAdmit = params;
     },
     async dispatchStarted(id: string, runtime: unknown) {
       monitors.calls.push(['dispatchStarted', { id, runtime }]);
     },
     async attach(id: string, runtime: unknown, receipt: unknown) {
       monitors.calls.push(['attach', { id, runtime, receipt }]);
+      const argsRef = await session.resources.publish(
+        'managed-tool-args',
+        Buffer.from(JSON.stringify(monitors.lastAdmit?.['args'] ?? {}), 'utf8'),
+      );
+      const bound = runtime as { runtimeBindingId: string; generation: string };
+      monitors.attached.set(id, {
+        monitorId: id,
+        ownerScopeId: session.authority.sessionHeader.sessionKey.sessionId,
+        commandRef: argsRef,
+        maxEvents: (monitors.lastAdmit?.['maxEvents'] as number) ?? 100,
+        idleTimeoutMs:
+          (monitors.lastAdmit?.['idleTimeoutMs'] as number) ?? 300_000,
+        debounceMs: (monitors.lastAdmit?.['debounceMs'] as number) ?? 1_000,
+        startReceiptRef: {
+          resourceId: `receipt-${id}`,
+          kind: 'managed-runtime-receipt',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest: 'a'.repeat(64),
+        },
+        observationSequence: 0,
+        lastObservationRef: null,
+        notifiedThrough: 0,
+        stopReason: null,
+        outputRef: null,
+        run: {
+          state: 'running',
+          reason: null,
+          definition: null,
+          executionCallId: id,
+          effectId: null,
+          dispatchId: null,
+          deliveryId: null,
+          execution: 'running_attached',
+          runtime: bound,
+          delivery: null,
+        },
+      });
     },
     async settleFailed(id: string, params: unknown) {
       monitors.calls.push(['settleFailed', { id, params }]);
@@ -4207,10 +4255,7 @@ function monitorTurnRig(outcome: ToolResultEnvelope) {
     },
     () => true,
     { owner, captureBytes: 1024 * 1024 },
-    {
-      resources: {} as never,
-      assertWritable: async () => {},
-    } as never,
+    options,
     undefined,
     undefined,
     undefined,
@@ -4223,7 +4268,7 @@ function monitorTurnRig(outcome: ToolResultEnvelope) {
     } as never,
     monitors as never,
   );
-  return { order, monitors, turn };
+  return { order, monitors, options, turn };
 }
 
 function monitorCall() {
@@ -4314,6 +4359,8 @@ describe('hosted Monitor admission arm', () => {
       resultRef: null,
       resources: [],
     });
+    // A fresh accept starts exactly one observation lifecycle on the Session.
+    expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 
   it('settles a proven-unstarted monitor as start_failed', async () => {

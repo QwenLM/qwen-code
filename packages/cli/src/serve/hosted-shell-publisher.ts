@@ -21,6 +21,7 @@ import type { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
   ResourceToolResultSegmentStore,
@@ -54,11 +55,19 @@ interface RegisteredCapture {
   envelope?: ToolResultEnvelope;
   finalizing?: Promise<ToolResultEnvelope>;
   accepting?: Promise<LocalShellReceipt>;
-  // H3: the open-ended background capture of a proven child_run start, with
-  // the manifest revisions it has already forwarded to the record.
+  // H3: the open-ended background capture of a proven child_run or
+  // monitor_run start, with the manifest revisions it has already
+  // forwarded to the record. A Monitor watch also carries the observer
+  // the hosted observation loop registers on it.
   background?: {
     sink?: LocalShellStreamCapture;
     lastManifest: ManagedSessionDurableRef | null;
+    recordDomain: 'child_run' | 'monitor_run';
+    remainder: string;
+    observer?: {
+      onLine: (line: string) => void;
+      onExit: (failed: boolean) => void;
+    };
   };
 }
 
@@ -80,6 +89,7 @@ export class HostedShellPublisher {
     private readonly resources: DurableToolResultResourceStore,
     private readonly assertWritable: () => Promise<void>,
     private readonly childRuns?: HostedChildRunSession,
+    private readonly monitors?: HostedMonitorSession,
   ) {}
 
   async start(): Promise<ShellPublisherDescriptor> {
@@ -184,6 +194,13 @@ export class HostedShellPublisher {
         'Background Shell capture was not registered with its orchestrator.',
       );
     }
+    const monitoringRequested =
+      backgroundRequested && request.capture.monitoring === true;
+    if (monitoringRequested && this.monitors === undefined) {
+      throw new Error(
+        'Monitor capture was not registered with its orchestrator.',
+      );
+    }
     const admission = backgroundRequested
       ? new LocalShellStreamResultSession(
           this.session,
@@ -192,6 +209,7 @@ export class HostedShellPublisher {
           this.assertWritable,
           request.reference.sessionId,
           this.session.resources,
+          monitoringRequested ? 'monitor_run' : 'child_run',
         )
       : new ManagedShellResultSession(
           this.session,
@@ -208,7 +226,15 @@ export class HostedShellPublisher {
       admission,
       offsets: { stdout: 0, stderr: 0 },
       ended: { stdout: false, stderr: false },
-      ...(backgroundRequested ? { background: { lastManifest: null } } : {}),
+      ...(backgroundRequested
+        ? {
+            background: {
+              lastManifest: null,
+              recordDomain: monitoringRequested ? 'monitor_run' : 'child_run',
+              remainder: '',
+            },
+          }
+        : {}),
     });
   }
 
@@ -285,6 +311,11 @@ export class HostedShellPublisher {
       entry.offsets[stream] += bytes.byteLength;
       await sink.write(stream, bytes);
       await this.advanceBackgroundManifest(entry, String(id));
+      if (
+        entry.background?.recordDomain === 'monitor_run' &&
+        stream === 'stdout'
+      )
+        this.fanMonitorLines(entry.background, bytes.toString('utf8'));
       return { accepted: true };
     }
     if (body['operation'] === 'finish') {
@@ -473,6 +504,54 @@ export class HostedShellPublisher {
   }
 
   /**
+   * Registers the monitor watch's observation loop behind one admitted
+   * capture: lines the capture publishes land as its onLine, its final
+   * end as onExit.
+   */
+  setMonitorObserver(
+    executionCallId: string,
+    observer: {
+      readonly onLine: (line: string) => void;
+      readonly onExit: (failed: boolean) => void;
+    },
+  ): void {
+    const background = this.captures.get(executionCallId)?.background;
+    if (!background || background.recordDomain !== 'monitor_run')
+      throw new Error(
+        `Monitor ${executionCallId} has no registered observation watch.`,
+      );
+    background.observer = observer;
+  }
+
+  /**
+   * Forwards whole lines from the watch's durable stream to the hosted
+   * observation loop, with the watch-side remainder kept across chunks
+   * and the Legacy partial-line cap honored.
+   */
+  private fanMonitorLines(
+    background: {
+      remainder: string;
+      observer?: {
+        onLine: (line: string) => void;
+        onExit: (failed: boolean) => void;
+      };
+    },
+    chunk: string,
+  ): void {
+    const observer = background.observer;
+    if (!observer) return;
+    background.remainder += chunk;
+    let at = background.remainder.indexOf('\n');
+    while (at >= 0) {
+      const line = background.remainder.slice(0, at);
+      background.remainder = background.remainder.slice(at + 1);
+      if (line.length > 0) observer.onLine(line);
+      at = background.remainder.indexOf('\n');
+    }
+    if (background.remainder.length > 4096) background.remainder = '';
+  }
+
+  /**
    * Forwards the latest published manifest revision of the background
    * capture to its record, always after the awaited write or finish that
    * edged the manifest and always only forward.
@@ -562,6 +641,26 @@ export class HostedShellPublisher {
         | undefined) ?? undefined,
     );
     await this.advanceBackgroundManifest(entry, executionCallId);
+    const observer =
+      background.recordDomain === 'monitor_run'
+        ? background.observer
+        : undefined;
+    if (observer && background.remainder.length > 0) {
+      observer.onLine(background.remainder);
+      background.remainder = '';
+    }
+    if (background.recordDomain === 'monitor_run') {
+      observer?.onExit(evidence === null);
+      if (evidence === null) {
+        await this.monitors?.settleFailed(executionCallId, {
+          stopReason: 'watch_failed',
+          started: true,
+        });
+      } else {
+        await this.monitors?.settleQuiet(executionCallId, 'exited');
+      }
+      return envelope;
+    }
     if (evidence === null) {
       // The record proves the process started; without physical facts the
       // finalize path never reports an exit either.

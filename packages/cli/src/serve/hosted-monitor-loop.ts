@@ -33,6 +33,7 @@ export interface MonitorWatchExecutor {
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
     onExit: (failed: boolean) => void,
+    identity?: { readonly unitName: string; readonly cwd?: string },
   ): Promise<MonitorWatchHandle>;
 }
 
@@ -52,7 +53,9 @@ export interface MonitorLoopClock {
 
 const GLOBAL_CLOCK: MonitorLoopClock = {
   now: () => Date.now(),
-  setTimeout: (handler, ms) => setTimeout(handler, ms),
+  // Never anchor the process to an observation window: a live Runtime
+  // always has other handles, and a dead one rewinds on the next resume.
+  setTimeout: (handler, ms) => setTimeout(handler, ms).unref(),
   clearTimeout: (handle) => clearTimeout(handle),
 };
 
@@ -135,6 +138,31 @@ export class HostedMonitorLoop {
     await this.monitors.attach(this.monitorId, params.runtime, {
       ...handle.receipt,
     });
+    this.armWindow();
+    this.armIdle();
+  }
+
+  /**
+   * Resumes the observation lifecycle for a watch whose admission arm
+   * already committed intent, dispatch and the start receipt (the hosted
+   * turn path). This loop must never re-commit any of those: a record
+   * without its start receipt refuses instead of silently minting one.
+   */
+  async resumeAttached(params: MonitorLoopParams): Promise<void> {
+    this.params = params;
+    this.debounceMs = Math.max(params.debounceMs, MONITOR_DEBOUNCE_FLOOR_MS);
+    const record = this.monitors.record(this.monitorId);
+    if (record === undefined || record.startReceiptRef === null) {
+      throw new Error(
+        `Monitor ${this.monitorId} has no attached watch to resume.`,
+      );
+    }
+    this.handle = await this.executor.start(
+      params.args,
+      (line) => this.onLine(line),
+      (failed) => this.onExit(failed),
+      { unitName: this.monitorId },
+    );
     this.armWindow();
     this.armIdle();
   }
