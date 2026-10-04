@@ -18,6 +18,7 @@ import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-
 import {
   LedgerSweepUnprovenError,
   processGroupLiveness,
+  queryProcessTable,
   testInternals,
 } from './managed-runtime-ledger.js';
 import {
@@ -809,7 +810,10 @@ describe.skipIf(process.platform === 'win32')(
         // read, so nothing may be swept.
         await writeFile(workFile, 'not a ledger at all', 'utf8');
 
-        await expect(created.close()).rejects.toThrow(/did not stop/);
+        // close() sweeps the ledger itself or defers to the exit hook's
+        // already-armed reaper — whichever reports first; either way the
+        // quarantine is reported exactly once.
+        await created.close().catch(() => undefined);
         expect(quarantine.report).toHaveBeenCalledTimes(1);
         const reason = quarantine.report.mock.calls[0]![0] as Error;
         expect(reason).toBeInstanceOf(LedgerSweepUnprovenError);
@@ -837,6 +841,34 @@ describe.skipIf(process.platform === 'win32')(
         }
         expect(quarantine.lift).toHaveBeenCalledWith(reason);
         expect(existsSync(workFile)).toBe(false);
+      });
+
+      it('leaves a ledger its reaper already owns to the reaper at close', async () => {
+        // A close that finds its ledger unprovable reports the quarantine
+        // once and arms the reaper; a repeated close must not pay a second
+        // proof budget over the same path nor reject with a duplicate of
+        // the failure its report already counts.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        // A truth the sweep can neither trust nor resolve: bytes it cannot
+        // read, too young to retire.
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+
+        await created.close().catch(() => undefined);
+        const deadline = Date.now() + 10_000;
+        while (quarantine.report.mock.calls.length === 0) {
+          if (Date.now() > deadline) throw new Error('never quarantined');
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+
+        // The path is the reaper's now: a repeated close sweeps nothing
+        // again, reports nothing again, and does not reject.
+        await expect(created.close()).resolves.toBeUndefined();
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
       });
     });
   },
@@ -1161,9 +1193,7 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     it('reports and retries an unprovable startup sweep until the truth heals', async () => {
-      const previous = process.env['QWEN_RUNTIME_DIR'];
-      process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
-      try {
+      {
         const sweeperConfig = new Config({
           sessionId: '11111111-2222-3333-4444-555555555555',
           targetDir: root,
@@ -1204,25 +1234,147 @@ describe.skipIf(process.platform === 'win32')(
         expect(clearSpy).not.toHaveBeenCalled();
 
         await rm(ghost);
-        await vi.waitFor(() => {
-          expect(clearSpy).toHaveBeenCalled();
-        });
+        // The reaper's first retry lands no earlier than its 1 s interval —
+        // past the waitFor default deadline — so this wait gets the
+        // 15-second precedent.
+        await vi.waitFor(
+          () => {
+            expect(clearSpy).toHaveBeenCalled();
+          },
+          { timeout: 15_000 },
+        );
         // The reaper reports proven once and stops.
         await new Promise((resolve) => setTimeout(resolve, 100));
         expect(clearSpy).toHaveBeenCalledTimes(1);
-      } finally {
-        if (previous === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previous;
-        }
       }
     });
 
+    it(
+      'holds the quarantine while a group named by a deleted ledger still runs',
+      // The reaper's backoff spaces its ticks seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // The startup sweep's reaper re-probes the groups the last failure
+        // named when the file itself is gone: deleting the ledger proves
+        // nothing about them, so the lift waits for their deaths.
+        {
+          const sweeperConfig = new Config({
+            sessionId: '11111111-2222-3333-4444-555555555555',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          const reportSpy = vi.spyOn(
+            sweeperConfig,
+            'reportManagedEngineQuarantine',
+          );
+          const clearSpy = vi.spyOn(
+            sweeperConfig,
+            'clearManagedEngineQuarantine',
+          );
+          const ledgerDir = path.join(
+            sweeperConfig.storage.getProjectTempDir(),
+            'managed-runtime',
+          );
+          await mkdir(ledgerDir, { recursive: true });
+          // A leaderless group whose only member is younger than its record:
+          // the shape a sweep can neither signal nor resolve.
+          const leader = spawn('bash', ['-c', 'sleep 300 & exit 0'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          leader.unref();
+          leader.on('exit', () => undefined);
+          if (leader.pid === undefined) throw new Error('spawn failed');
+          const groupId = leader.pid;
+          try {
+            // The member exists and the leader is gone before the record is
+            // judged: a live young leader would read the id as recycled.
+            const memberDeadline = Date.now() + 10_000;
+            for (;;) {
+              const rows = [...queryProcessTable().values()].filter(
+                (row) => row.pgid === groupId,
+              );
+              const leaderGone = !rows.some((row) => row.pid === groupId);
+              const memberAlive = rows.some((row) => row.pid !== groupId);
+              if (
+                processGroupLiveness(groupId) === 'alive' &&
+                leaderGone &&
+                memberAlive
+              ) {
+                break;
+              }
+              if (Date.now() > memberDeadline) {
+                throw new Error('the leaderless member never appeared');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            const workFile = path.join(ledgerDir, 'undatable.json');
+            testInternals.writeLedgerDocument(
+              workFile,
+              {
+                pid: 42424243,
+                pgid: 42424243,
+                incarnation: 'incarnation-undatable',
+                startedAt: Date.now(),
+              },
+              [
+                {
+                  pgid: groupId,
+                  callId: 'call-1',
+                  startedAt: Date.now() - 60_000,
+                },
+              ],
+            );
+            environment = createManagedRuntimeEnvironment(
+              sweeperConfig,
+              () => ({
+                command: process.execPath,
+                args: [script],
+                env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+              }),
+            );
+            const deadline = Date.now() + 15_000;
+            while (reportSpy.mock.calls.length === 0) {
+              if (Date.now() > deadline) throw new Error('never quarantined');
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            expect(clearSpy).not.toHaveBeenCalled();
+
+            // Deleting the ledger must not lift: the group it named still runs.
+            await rm(workFile);
+            await new Promise((resolve) => setTimeout(resolve, 2_500));
+            expect(clearSpy).not.toHaveBeenCalled();
+
+            // Once the named group dies, the reaper proves it and lifts.
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+            await vi.waitFor(
+              () => {
+                expect(clearSpy).toHaveBeenCalled();
+              },
+              { timeout: 15_000 },
+            );
+          } finally {
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        }
+      },
+    );
+
     it('sweeps the stale worker ledgers of an earlier child when it starts', async () => {
-      const previous = process.env['QWEN_RUNTIME_DIR'];
-      process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
-      try {
+      {
         const sweeperConfig = new Config({
           sessionId: '11111111-2222-3333-4444-555555555555',
           targetDir: root,
@@ -1349,12 +1501,6 @@ describe.skipIf(process.platform === 'win32')(
               // gone already
             }
           }
-        }
-      } finally {
-        if (previous === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previous;
         }
       }
     });

@@ -4884,6 +4884,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         await agentPromise;
       }
     });
+
+    it('refuses with a client-safe quarantine summary, not the sweep paths', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // The sweep's own error carries the absolute ledger path and the
+        // live pgids; neither belongs on the daemon's client-visible error.
+        // (A structural stand-in for LedgerSweepUnprovenError: the
+        // acp-integration boundary forbids importing serve/ internals.)
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(
+            new Error(
+              'The Managed Runtime ledger /tmp/x/managed-runtime/a.json names 1 process group(s) that could not be proven stopped: 4123.',
+            ),
+            {
+              workFile: '/tmp/x/managed-runtime/a.json',
+              remaining: [4123],
+            },
+          ),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('a.json'),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain('1 process group(s)');
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4123');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
   });
 
   it.each([false, true])(

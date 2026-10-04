@@ -854,6 +854,44 @@ const SESSION_WRITER_MESSAGES = {
   session_writer_unavailable: 'Session write ownership could not be verified.',
 } as const;
 
+/**
+ * The client-safe shape of a quarantine reason: a sweep error's own message
+ * carries absolute server paths and live pgids, neither of which belongs on
+ * the daemon's error surface, so the refusal names the ledger's basename and
+ * the count it could not prove. The full reason stays in the daemon log.
+ */
+function managedQuarantineSummary(reason: Error): string {
+  const failures = reason instanceof AggregateError ? reason.errors : [reason];
+  const named = failures.filter(isUnprovenSweepReport);
+  if (
+    named.length === 0 ||
+    named.some((failure) => failure.remaining.length === 0)
+  ) {
+    return 'a ledger it could not read held the unproven stop';
+  }
+  return named
+    .map(
+      (failure) =>
+        `${path.basename(failure.workFile)}: ${failure.remaining.length} process group(s) not proven stopped`,
+    )
+    .join('; ');
+}
+
+/**
+ * The structural half of the serve side's LedgerSweepUnprovenError, which the
+ * acp-integration boundary forbids importing here.
+ */
+function isUnprovenSweepReport(
+  failure: unknown,
+): failure is { workFile: string; remaining: unknown[] } {
+  return (
+    typeof failure === 'object' &&
+    failure !== null &&
+    typeof (failure as { workFile?: unknown }).workFile === 'string' &&
+    Array.isArray((failure as { remaining?: unknown }).remaining)
+  );
+}
+
 function getSessionWriterError(error: unknown):
   | {
       rpcCode: number;
@@ -4066,7 +4104,7 @@ class QwenAgent implements Agent {
     if (quarantine !== undefined) {
       throw new RequestError(
         -32024,
-        `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${quarantine.message}).`,
+        `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${managedQuarantineSummary(quarantine)}).`,
         { errorKind: 'managed_engine_quarantined' },
       );
     }

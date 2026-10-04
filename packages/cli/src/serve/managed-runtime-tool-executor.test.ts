@@ -174,6 +174,125 @@ describe.skipIf(process.platform === 'win32')(
       strayGroups.delete(pgid);
     });
 
+    it('fails the call and kills the group when the ledger cannot record it', async () => {
+      // A group that never reached the ledger must not outlive the failure:
+      // the pid callback stops it first, then the call fails loudly.
+      const realWait = ledger.waitForGroupExit.bind(ledger);
+      const seen: number[] = [];
+      const doubled = {
+        addGroup: () => {
+          throw new Error('ledger disk full');
+        },
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: (pgid: number, budgetMs: number) => {
+          seen.push(pgid);
+          return realWait(pgid, budgetMs);
+        },
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const result = await exec.execute(
+        reference('call-3a', input),
+        'run_shell_command',
+        input,
+      );
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toContain('ledger disk full');
+      expect(seen).toHaveLength(1);
+      // The callback killed the group it could not record.
+      expect(processGroupLiveness(seen[0]!)).toBe('gone');
+      await exec.close();
+    });
+
+    it('maps a throwing group-exit proof to an unknown outcome', async () => {
+      // The settle-evidence read is itself a filesystem move: its failure is
+      // contained as 'denied', which makes the outcome unknown — never a
+      // settled cancel over a group that may still run.
+      const waitForGroupExit = vi.fn(async () => {
+        throw new Error('ledger unreadable');
+      });
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit,
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const ref = reference('call-3b', input);
+      const running = exec.execute(ref, 'run_shell_command', input);
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+
+      exec.cancel(ref);
+      await expect(running).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+      expect(exec.status(ref)).toMatchObject({ state: 'unknown' });
+      await exec.close();
+      strayGroups.delete(pgid);
+    });
+
+    it('close() leaves an unproven survivor named in the ledger on disk', async () => {
+      // A group that could not be proven stopped keeps the ledger truth for
+      // the host's sweeps; close() itself still completes.
+      const survivor = { pgid: 42424242, callId: 'c-x', startedAt: 1 };
+      const complete = vi.fn(() => true);
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: ledger.waitForGroupExit.bind(ledger),
+        killOutstanding: vi.fn(async () => [survivor]),
+        complete,
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+      });
+      await expect(exec.close()).resolves.toBeUndefined();
+      expect(complete).not.toHaveBeenCalled();
+      expect(existsSync(ledgerFile)).toBe(true);
+    });
+
+    it('close() contains a failing ledger sweep instead of rejecting', async () => {
+      // A bookkeeping filesystem failure at close keeps the ledger and never
+      // turns into a shutdown rejection.
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: ledger.waitForGroupExit.bind(ledger),
+        killOutstanding: vi.fn(async () => {
+          throw new Error('ledger directory vanished');
+        }),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+      });
+      await expect(exec.close()).resolves.toBeUndefined();
+      expect(existsSync(ledgerFile)).toBe(true);
+    });
+
     it('close() kills what is still running and removes a proven ledger', async () => {
       const exec = executor();
       const input = {

@@ -37,7 +37,7 @@ export const GROUP_EXIT_EVIDENCE_TIMEOUT_MS = 10_000;
 const SWEEP_PROOF_TIMEOUT_MS = 5_000;
 /** The worker closes with at most this much extra time for its own sweep. */
 export const CLOSE_SWEEP_TIMEOUT_MS = 5_000;
-/** How often the worker prunes dead groups and a failed sweep retries. */
+/** The worker's prune cadence, and the interval a failed sweep's reaper starts retrying at before backing off to its cap. */
 const LEDGER_WATCH_INTERVAL_MS = 1_000;
 /** How often an exit proof re-checks the group's liveness. */
 const POLL_GROUP_EXIT_MS = 50;
@@ -238,7 +238,12 @@ function recordAgeMs(
   platform: NodeJS.Platform = process.platform,
 ): number {
   if (record.uptimeMs !== undefined && platform === 'linux') {
-    return os.uptime() * 1000 - record.uptimeMs;
+    const bootNow = os.uptime() * 1000;
+    // A stamp ahead of this boot belongs to a previous one: the ledger
+    // outlived a reboot, and a negative age here would read its groups as
+    // older than any live process — the identity guard inverted into an
+    // ownership assertion. The wall clock ages such a record instead.
+    if (record.uptimeMs <= bootNow) return bootNow - record.uptimeMs;
   }
   return now - record.startedAt;
 }
@@ -412,7 +417,11 @@ export class ManagedRuntimeLedger {
   addGroup(record: ManagedRuntimeLedgerGroupRecord): void {
     this.groups.set(record.pgid, {
       ...record,
-      uptimeMs: record.uptimeMs ?? os.uptime() * 1000,
+      // The boot-domain stamp of the caller's own startedAt, so both clocks
+      // tell one story even when the caller backdates the record.
+      uptimeMs:
+        record.uptimeMs ??
+        Math.max(0, os.uptime() * 1000 - (Date.now() - record.startedAt)),
     });
     this.rewrite();
   }
@@ -514,7 +523,16 @@ export class ManagedRuntimeLedger {
       );
       state = processGroupLiveness(pgid);
     }
-    if (state === 'gone' && this.groups.delete(pgid)) this.safeRewrite();
+    if (
+      state === 'gone' &&
+      record !== undefined &&
+      this.groups.get(pgid) === record
+    ) {
+      // Only the record this wait judged is dropped: a group re-recorded on
+      // the same id meanwhile is a different truth it proved nothing about.
+      this.groups.delete(pgid);
+      this.safeRewrite();
+    }
     return state;
   }
 
@@ -585,6 +603,20 @@ export class ManagedRuntimeLedger {
   }
 }
 
+/** How a ledger sweep ended for the truth it swept. */
+export type LedgerSweepVerdict =
+  /** Every group the ledger named is proven gone; the file is removed. */
+  | 'proven'
+  /** No file was there: nothing was proven about what it last named. */
+  | 'absent'
+  /** A live sibling child's ledger: its own lifecycle owns the sweep. */
+  | 'held'
+  /**
+   * Unreadable past the debris age and set aside: nothing it named can ever
+   * be proven, so a reaper must never read this as a proof.
+   */
+  | 'retired';
+
 /** A stop a sweep could not prove; the ledger stays on disk. */
 export class LedgerSweepUnprovenError extends Error {
   constructor(
@@ -598,7 +630,6 @@ export class LedgerSweepUnprovenError extends Error {
 
 export interface LedgerSweepOptions {
   readonly now?: () => number;
-  readonly table?: ReadonlyMap<number, ProcessTableRow>;
   /** Per-file proof budget after signalling. */
   readonly proofTimeoutMs?: number;
   /**
@@ -608,10 +639,14 @@ export interface LedgerSweepOptions {
    */
   readonly skip?: ReadonlySet<string>;
   /**
-   * Set when the caller witnessed the worker's exit: everything recorded is
-   * the dead worker's, so no identity is checked. Otherwise the sweep proves
-   * a recorded process is still the ledger's worker before killing it, and
-   * resolves recycled group ids without killing anything.
+   * Set when the caller witnessed the worker's exit: the witness stands in
+   * for identity where no live table can be read, and groups the table
+   * cannot date stay signalled. Where a table exists it is still consulted —
+   * the witness is fresh only at the exit it names, so a reaper's retry
+   * resolves a provably recycled id instead of signalling its new holder.
+   * Without a witness the sweep proves a recorded process is still the
+   * ledger's worker before killing it and resolves recycled group ids
+   * without killing anything.
    */
   readonly exitWitnessed?: boolean;
   /** Test seam over the process primitives and the platform shape. */
@@ -639,7 +674,7 @@ export interface LedgerSweepOptions {
 export async function sweepWorkerLedger(
   workFile: string,
   options: LedgerSweepOptions = {},
-): Promise<void> {
+): Promise<LedgerSweepVerdict> {
   const now = options.now ?? Date.now;
   const platform = options.sys?.platform ?? process.platform;
   const liveness = options.sys?.liveness ?? processGroupLiveness;
@@ -653,7 +688,7 @@ export async function sweepWorkerLedger(
     } catch (error) {
       if (errnoCode(error) === 'ENOENT') exists = false;
     }
-    if (!exists) return;
+    if (!exists) return 'absent';
     // A ledger nobody can read is an operator's evidence, not a retryable
     // stop: a reaper would re-read the same immutable bytes forever and
     // the quarantine could never lift. Once it outlives the debris age —
@@ -666,7 +701,7 @@ export async function sweepWorkerLedger(
         debugLogger.warn(
           `The Managed Runtime ledger ${workFile} cannot be read; moved aside to ${aside}.`,
         );
-        return;
+        return 'retired';
       } catch {
         // Could not move it either: fall through to the unproven report.
       }
@@ -701,11 +736,11 @@ export async function sweepWorkerLedger(
   };
 
   const readTable = (): ReadonlyMap<number, ProcessTableRow> | undefined =>
-    options.exitWitnessed === true || platform === 'win32'
+    platform === 'win32'
       ? undefined
       : options.sys?.table !== undefined
         ? options.sys.table()
-        : (options.table ?? queryTableQuietly());
+        : queryTableQuietly();
 
   // The worker itself. An orphaned worker that survived its child still runs
   // its Shells, so it must die too; a pid that answers for another process
@@ -713,16 +748,24 @@ export async function sweepWorkerLedger(
   // here, so a live pid neither dies nor resolves without a witness.
   let table: ReadonlyMap<number, ProcessTableRow> | undefined;
   let workerProven = liveness(worker.pgid) === 'gone';
+  if (!workerProven && platform !== 'win32') table = readTable();
   if (!workerProven && options.exitWitnessed === true) {
-    signal(worker.pgid, 'SIGKILL');
-    workerProven = await prove(worker.pgid);
+    // The witness is fresh at the exit it names; a retry hours later is not.
+    // A table that shows the pid answering for another process proves the
+    // worker gone without a signal; without a table the witness stands.
+    const row = table?.get(worker.pid);
+    if (row !== undefined && !isLedgerWorker(row, worker, now(), platform)) {
+      workerProven = true;
+    } else {
+      signal(worker.pgid, 'SIGKILL');
+      workerProven = await prove(worker.pgid);
+    }
   } else if (!workerProven && platform !== 'win32') {
-    table = readTable();
     const alive = options.sys?.alive ?? pidAlive;
     if (holdsForLiveHost(worker, table, now(), alive)) {
       // The ledger's own child still runs an ACP host on its recorded pid:
       // the ledger is that child's to sweep, never a sibling sweep's.
-      return;
+      return 'held';
     }
     const row = table?.get(worker.pid);
     if (row && isLedgerWorker(row, worker, now(), platform)) {
@@ -733,9 +776,10 @@ export async function sweepWorkerLedger(
       workerProven = true;
     }
   }
-  if (options.exitWitnessed !== true && platform !== 'win32') {
+  if (platform !== 'win32' && document.groups.length > 0) {
     // The identity a group is judged with is never older than the proof
-    // waits it may have outlasted: re-read the snapshot after them.
+    // waits it may have outlasted: re-read the snapshot after them. No
+    // groups, no table to read.
     table = readTable();
   }
   if (!workerProven) unproven.push(worker.pgid);
@@ -760,10 +804,11 @@ export async function sweepWorkerLedger(
         remaining.delete(group.pgid);
         continue;
       }
-      if (identity === 'unknown') {
+      if (identity === 'unknown' && options.exitWitnessed !== true) {
         // No leader to date the group by and no member old enough to be the
         // record's: indistinguishable from work backgrounded late by the
-        // session itself. Hold the truth, signal nothing.
+        // session itself. Hold the truth, signal nothing. A witnessed sweep
+        // signals it: the witness names the group the dead worker's.
         if (liveness(group.pgid) === 'gone') remaining.delete(group.pgid);
         else unproven.push(group.pgid);
         continue;
@@ -781,7 +826,7 @@ export async function sweepWorkerLedger(
 
   if (unproven.length === 0) {
     rmSync(workFile, { force: true });
-    return;
+    return 'proven';
   }
   try {
     writeLedgerDocument(workFile, worker, [...remaining.values()]);
@@ -862,15 +907,16 @@ function pidAlive(pid: number): boolean {
 export async function sweepStaleLedgers(
   directory: string,
   options: LedgerSweepOptions = {},
-): Promise<void> {
+): Promise<LedgerSweepVerdict> {
   let entries: Dirent[];
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
-    if (errnoCode(error) === 'ENOENT') return;
+    if (errnoCode(error) === 'ENOENT') return 'proven';
     throw error;
   }
   const failures: Error[] = [];
+  let retired = false;
   for (const entry of entries) {
     // Only what writeLedgerDocument could have made: regular files. A
     // foreign entry named like a ledger — a directory, a socket, a device
@@ -902,7 +948,9 @@ export async function sweepStaleLedgers(
     try {
       // Each file gets its identity snapshot itself, after its own worker's
       // proof wait; a shared one would age by everything before it.
-      await sweepWorkerLedger(workFile, options);
+      if ((await sweepWorkerLedger(workFile, options)) === 'retired') {
+        retired = true;
+      }
     } catch (error) {
       failures.push(error as Error);
     }
@@ -922,6 +970,9 @@ export async function sweepStaleLedgers(
       `The Managed Runtime ledgers under ${directory} could not be fully swept: ${detail}`,
     );
   }
+  // A retired ledger resolved without proving anything: the directory reads
+  // clean, but the groups it named stay unproven for good.
+  return retired ? 'retired' : 'proven';
 }
 
 function isOlderThan(file: string, ageMs: number): boolean {
@@ -933,18 +984,33 @@ function isOlderThan(file: string, ageMs: number): boolean {
   }
 }
 
+/** What one reaper sweep proved about its target. */
+export type LedgerReaperVerdict =
+  /** The remainders are gone: `onProven` fires and the reaper stops. */
+  | 'proven'
+  /** Still outstanding (a rejection reads the same): retry on the backoff. */
+  | 'unproven'
+  /**
+   * Never provable — a ledger nobody could read was set aside, so nothing
+   * it named can be proven: the reaper stops WITHOUT `onProven`, and the
+   * quarantine it armed stands until the child restarts.
+   */
+  | 'terminal';
+
 /**
  * Retries a failed sweep until it proves its remainders gone, then calls
  * `onProven` once. Each retry begins only after the previous one settled: a
  * slow proof never piles retries on top of itself, and a remainder that
  * keeps answering the same way backs off to a bounded cadence — retries
  * that cannot change anything must not cost a `ps` and a signal every
- * second for the lifetime of a quarantine. The timer is unref'd: a dying
+ * second for the lifetime of a quarantine. A sweep that resolves without
+ * proving its remainders — a ledger file gone or set aside — is no proof:
+ * only the sweep's own verdict lifts. The timer is unref'd: a dying
  * process is not kept alive by the truth another process's startup sweep
  * owns.
  */
 export function startLedgerReaper(
-  sweep: () => Promise<void>,
+  sweep: () => Promise<LedgerReaperVerdict>,
   onProven: () => void,
   intervalMs: number = LEDGER_WATCH_INTERVAL_MS,
   maxIntervalMs: number = 30_000,
@@ -953,18 +1019,22 @@ export function startLedgerReaper(
   let timer: NodeJS.Timeout | undefined;
   let interval = intervalMs;
   const tick = async () => {
-    let proven = false;
+    let verdict: LedgerReaperVerdict;
     try {
-      await sweep();
-      proven = true;
+      verdict = await sweep();
     } catch {
+      verdict = 'unproven';
       // Retry at the next tick, doubling the wait up to the cap.
       interval = Math.min(interval * 2, maxIntervalMs);
     }
     if (stopped) return;
-    if (proven) {
+    if (verdict === 'proven') {
       stopped = true;
       onProven();
+      return;
+    }
+    if (verdict === 'terminal') {
+      stopped = true;
       return;
     }
     timer = setTimeout(() => void tick(), interval);
@@ -998,7 +1068,9 @@ export function managedRuntimeLedgerFromEnvironment(
     worker: {
       pid: process.pid,
       pgid: process.pid,
-      hostPid: process.ppid,
+      // An orphaned worker's ppid is 1: no host to hold the ledger for, and
+      // the reader's validation refuses the id — leave the record without it.
+      ...(process.ppid > 1 ? { hostPid: process.ppid } : {}),
       incarnation,
       startedAt: Date.now(),
       uptimeMs: os.uptime() * 1000,
