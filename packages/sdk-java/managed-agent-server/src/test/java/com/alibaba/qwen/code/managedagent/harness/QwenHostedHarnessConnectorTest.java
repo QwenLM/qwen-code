@@ -32,7 +32,12 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -558,6 +563,91 @@ class QwenHostedHarnessConnectorTest {
         assertThatCode(() -> new QwenHostedHarnessConnector(atMax,
                 sessions(), mock(WorkspaceExecutionStore.class)))
                 .doesNotThrowAnyException();
+    }
+
+    @Test
+    void concurrentFirstAttachmentOfOneSessionCreatesItOnce()
+            throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        CountDownLatch inCreate = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    inCreate.countDown();
+                    release.await(30, TimeUnit.SECONDS);
+                    HarnessSessionRef created = mock(HarnessSessionRef.class);
+                    when(created.getHarnessBootId()).thenReturn(BOOT_ID);
+                    return created;
+                });
+        QwenHostedHarnessConnector connector = connector(client);
+        List<Throwable> failures =
+                Collections.synchronizedList(new ArrayList<>());
+        Runnable caller = () -> {
+            try {
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+            } catch (RuntimeException error) {
+                failures.add(error);
+            }
+        };
+
+        Thread first = Thread.ofVirtual().start(caller);
+        assertThat(inCreate.await(30, TimeUnit.SECONDS)).isTrue();
+        Thread second = Thread.ofVirtual().start(caller);
+        // The second caller must be queued on the per-key lock when the
+        // first create returns, or it never exercises the re-read under
+        // the lock and the single-flight half of the connector could
+        // regress without this test noticing.
+        Thread.sleep(1000);
+        release.countDown();
+        first.join(30_000);
+        second.join(30_000);
+
+        assertThat(failures).isEmpty();
+        assertThat(first.isAlive()).isFalse();
+        assertThat(second.isAlive()).isFalse();
+        verify(client, times(1)).createSession(any(CreateHarnessSession.class));
+    }
+
+    @Test
+    void attachmentLocksAreReclaimedOnceAttachmentsSettle() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    HarnessSessionRef created = mock(HarnessSessionRef.class);
+                    when(created.getHarnessBootId()).thenReturn(BOOT_ID);
+                    return created;
+                });
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession(any(String.class), any(String.class)))
+                .thenAnswer(invocation -> new SessionRecord(
+                        invocation.getArgument(0), invocation.getArgument(1),
+                        "qwen-code", null, "ACTIVE", null, null, 0, 0, 1, 1,
+                        null, 1));
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions,
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        for (int index = 0; index < 8; index++) {
+            String sessionId = "00000000-0000-4000-8000-"
+                    + String.format("%012d", index);
+            connector.createOrLoad("tenant-a", sessionId, false);
+            connector.closeSession("tenant-a", sessionId);
+        }
+
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
+        connector.close();
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
     }
 
     private static QwenHostedHarnessConnector connector(

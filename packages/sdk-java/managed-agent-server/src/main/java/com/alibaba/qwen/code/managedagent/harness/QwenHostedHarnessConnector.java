@@ -46,8 +46,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             new ConcurrentHashMap<>();
     // Single flight for the first attachment of a Session. computeIfAbsent
     // would run the blocking Harness call under the map bin monitor, which
-    // pins the caller virtual thread to its carrier on JDK 21.
-    private final Map<AttachmentKey, ReentrantLock> attachmentLocks =
+    // pins the caller virtual thread to its carrier on JDK 21. Entries are
+    // reference-counted and dropped when their last caller leaves, so the
+    // map drains with each burst instead of growing with Session churn.
+    private final Map<AttachmentKey, AttachmentLock> attachmentLocks =
             new ConcurrentHashMap<>();
 
     public QwenHostedHarnessConnector(ManagedAgentProperties properties,
@@ -139,9 +141,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         HarnessSessionRef attached = passiveManagedRuntimeRecovery
                 ? load(session, true) : attachments.get(key);
         if (attached == null) {
-            ReentrantLock lock = attachmentLocks.computeIfAbsent(key,
-                    ignored -> new ReentrantLock());
-            lock.lock();
+            AttachmentLock slot = attachmentLocks.compute(key,
+                    (ignored, held) -> {
+                        AttachmentLock next = held == null
+                                ? new AttachmentLock() : held;
+                        next.holders++;
+                        return next;
+                    });
+            slot.lock.lock();
             try {
                 attached = attachments.get(key);
                 if (attached == null) {
@@ -150,7 +157,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     attachments.put(key, attached);
                 }
             } finally {
-                lock.unlock();
+                slot.lock.unlock();
+                attachmentLocks.compute(key, (ignored, held) ->
+                        --held.holders == 0 ? null : held);
             }
         }
         if (session.workspace() != null
@@ -460,6 +469,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException(
                     "Unsupported Hosted Harness approval mode", error);
         }
+    }
+
+    private static final class AttachmentLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int holders;
     }
 
     private record AttachmentKey(String tenantId, String sessionId) {

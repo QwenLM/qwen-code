@@ -5,7 +5,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -13,14 +12,12 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -78,10 +75,13 @@ class HostedHarnessCreateOrLoadPinningTest {
         AtomicBoolean allOk = new AtomicBoolean(true);
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
+        List<String> sessionIds = new ArrayList<>();
+        List<String> unsettled = new ArrayList<>();
         int callerCount = carrierCount() + 2;
         try {
             for (int index = 0; index < callerCount; index++) {
                 String sessionId = java.util.UUID.randomUUID().toString();
+                sessionIds.add(sessionId);
                 callers.add(Thread.ofVirtual().start(() -> {
                     try {
                         connector.createOrLoad("tenant-burst", sessionId,
@@ -114,10 +114,15 @@ class HostedHarnessCreateOrLoadPinningTest {
                             + ") — a map bin monitor pinned its carrier");
         } finally {
             open.countDown();
-            for (Thread caller : callers) {
-                caller.join(30_000);
+            for (int index = 0; index < callers.size(); index++) {
+                callers.get(index).join(30_000);
+                if (callers.get(index).isAlive()) {
+                    unsettled.add(sessionIds.get(index));
+                }
             }
         }
+        assertTrue(unsettled.isEmpty(),
+                "callers never settled after the latch opened: " + unsettled);
         assertTrue(allOk.get(), "callers failed after the latch opened");
     }
 
