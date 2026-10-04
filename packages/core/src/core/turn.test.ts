@@ -272,6 +272,36 @@ describe('Turn', () => {
       expect(events).toEqual([contentEvent('Hello'), contentEvent(' world')]);
     });
 
+    it('forwards retractDeliveredOutputOnRetry to the chat send options', async () => {
+      // The Hosted Harness retracts published output on a fresh retry; the
+      // flag must reach LlmChat or a post-delivery cut continues instead of
+      // replaying (#13319).
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        'stable-prompt-id',
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        'test-model',
+        expect.objectContaining({
+          config: { abortSignal: expect.any(AbortSignal) },
+        }),
+        'prompt-id-1',
+        undefined,
+        { promptId: 'stable-prompt-id', retractDeliveredOutputOnRetry: true },
+      );
+    });
+
     it('should preserve ordered image parts in content events', async () => {
       const png = {
         inlineData: {

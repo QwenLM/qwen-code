@@ -993,6 +993,24 @@ async function eventEnvelope(
       },
     };
   }
+  if (event.kind === 'message.retracted') {
+    // A restarted model attempt retracts the orphaned prefix it published
+    // (#13319). The coordinator blanks the turn's deltas from
+    // `fromSequence` onward and announces the repair as `stream.reconciled`.
+    const turnId = event.payload['turnId'];
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'message_retracted',
+      ...(typeof turnId === 'string' ? { promptId: turnId } : {}),
+      data: {
+        sessionId,
+        turnId: event.payload['turnId'],
+        messageId: event.payload['messageId'],
+        fromSequence: event.payload['fromSequence'],
+      },
+    };
+  }
   if (
     event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
