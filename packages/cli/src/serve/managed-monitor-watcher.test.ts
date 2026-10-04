@@ -115,11 +115,18 @@ describe('ManagedMonitorWatcher', () => {
   it('keeps a rune intact across chunk ends and the capture byte-exact', async () => {
     const { supervisor, process, watcher, lines, exits } = rig();
     const chunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     await watcher.start(
       { command: 'du -sh .' },
       (line) => lines.push(line),
       (failed) => exits.push(failed),
-      { unitName: 'qwen-mon-watch-1', onChunk: (chunk) => chunks.push(chunk) },
+      {
+        unitName: 'qwen-mon-watch-1',
+        onChunk: (stream, chunk) => {
+          if (stream === 'stdout') chunks.push(chunk);
+          else stderrChunks.push(chunk);
+        },
+      },
     );
     const onOutput = supervisor.spec.given!.onOutput;
     const cjk = Buffer.from('中');
@@ -128,11 +135,14 @@ describe('ManagedMonitorWatcher', () => {
       Buffer.concat([Buffer.from('first\n\n'), cjk.subarray(0, 2)]),
     );
     onOutput('stdout', Buffer.concat([cjk.subarray(2), Buffer.from('\nlast')]));
+    onOutput('stderr', Buffer.from('du: cannot read\n'));
     process.child.emit('exit', 0, null);
     // Observation lines drop blanks like the Legacy emit path does; the
-    // raw-hunk stream reproduces the command's stdout byte for byte.
+    // raw-hunk stream reproduces the command's stdout byte for byte, and
+    // the durable capture keeps stderr too rather than sealing a discard.
     expect(lines).toEqual(['first', '中', 'last']);
     expect(Buffer.concat(chunks).toString()).toBe('first\n\n中\nlast');
+    expect(Buffer.concat(stderrChunks).toString()).toBe('du: cannot read\n');
     expect(exits).toEqual([false]);
   });
 

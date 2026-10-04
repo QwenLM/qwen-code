@@ -516,3 +516,130 @@ it('melds a monitor watch through one terminal step only after its start receipt
     run: { state: 'settled', execution: 'settled' },
   });
 });
+
+it('settles an unproven background end as a failure, never as an exit', async () => {
+  const r = await rig();
+  const request = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(1);
+  await prepared.sink.write('stdout', Buffer.from('half a line\n'));
+  // The worker's end-without-proof arm reports exactly this null pair.
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: null,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const envelope = await prepared.sink.finalize('error', [], {
+    message: 'Background Shell ended without exit evidence.',
+  });
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'process_failed',
+    run: { state: 'failed', execution: 'settled' },
+  });
+});
+
+it('settles an unproven monitor end as watch_failed, never as a clean exit', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-unproven',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-unproven',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-unproven', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-unproven';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-unproven', BINDING, { pid: 9 });
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('still watching\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: null,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize('error', [], {
+    message: 'Background Shell ended without exit evidence.',
+  });
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-unproven')!
+      .record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'watch_failed',
+    run: { state: 'failed', execution: 'settled' },
+  });
+});
+
+it('replays the lines a monitor wrote before its observer registered', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-lines',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-lines',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-lines', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-lines';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('one\ntwo\nthree'));
+  const lines: string[] = [];
+  publisher!.setMonitorObserver('monitor-lines', {
+    onLine: (line) => lines.push(line),
+    onExit: () => undefined,
+  });
+  expect(lines).toEqual(['one', 'two']);
+  await prepared.sink.write('stdout', Buffer.from('-and-a-half\nfour\n'));
+  expect(lines).toEqual(['one', 'two', 'three-and-a-half', 'four']);
+});

@@ -232,6 +232,30 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('does not resume a record the publisher already settled', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    // The watch ended before its observation arm could register; the
+    // publisher's fallback settled the record. A later resume must
+    // recognize the terminal record instead of driving a watch nobody
+    // watches and settling it twice.
+    await rig.session.admit({
+      monitorId: 'monitor-1',
+      ownerScopeId: 'scope-main',
+      executionCallId: 'call-monitor-1',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await rig.session.dispatchStarted('monitor-1', BINDING);
+    await rig.session.attach('monitor-1', BINDING, { watch: 'started' });
+    await rig.session.settleQuiet('monitor-1', 'exited');
+    await rig.loop.resumeAttached(params());
+    expect(rig.executor.commands).toEqual([]);
+    await closeLoop(rig);
+  });
+
   it('aggregates lines into one observation per floored debounce window', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
