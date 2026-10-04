@@ -604,6 +604,15 @@ The stock image contains the Java control plane only. Use the static Runtime
 provisioner, or provide a derived image/mount with Node.js and the Qwen worker
 artifacts, before enabling the local-process provisioner in a container.
 
+The image exports both listeners on `0.0.0.0` (`-p` DNATs to the container's
+bridge IP, so a loopback listener is unreachable), which makes the
+authentication consequence load-bearing: there is no HTTP authentication —
+tenancy is whatever `X-Qwen-Tenant-Id` says — so publishing a port with
+`docker run -p` exposes the tenant-scoped API to anything that can route to
+it. Map ports only inside your own network policy (or put the image behind a
+tenant-authenticating gateway); a plain `docker run -p 8080:8080` on a shared
+host is publishing that surface to every interface on it.
+
 ## Managed Session Store verification
 
 Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`

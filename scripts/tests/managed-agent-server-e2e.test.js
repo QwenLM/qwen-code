@@ -342,4 +342,21 @@ describe('managed-agent-server e2e runner', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/stallTimer\.unref\(\)/);
   });
+
+  it('keeps the published bind and jar guard explicit and loud', () => {
+    const dockerfile = read(
+      'packages/sdk-java/managed-agent-server/Dockerfile',
+    );
+    // A loopback-only image makes \u0060docker run -p\u0060 a no-op; the shipped
+    // default must stay explicit — and the cardinality guard loud, so the
+    // image fails loudly rather than shipping a wrong or glob-stat jar.
+    expect(dockerfile).toContain('QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
+    expect(dockerfile).toContain(
+      'QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0',
+    );
+    expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
+    expect(dockerfile).toContain(
+      'expected exactly one unclassified server jar',
+    );
+  });
 });
