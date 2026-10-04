@@ -83,6 +83,7 @@ import {
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+const ACQUIRE_BUSY_POLL_MS = 250;
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -92,6 +93,11 @@ export function isRetryableWorkspaceAcquisition(
     cause instanceof HostedWorkspaceBrokerRejection &&
     cause.status === 409 &&
     (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
+  );
+}
+function isBusyWorkspaceAcquisition(cause: unknown): boolean {
+  return (
+    isRetryableWorkspaceAcquisition(cause) && cause.code === 'workspace_busy'
   );
 }
 export type HostedWorkspaceToolProfile =
@@ -397,11 +403,52 @@ export class HostedWorkspaceToolTurn {
     this.uncertain = false;
   }
 
-  private async acquire(recovering = false): Promise<void> {
+  private async acquire(
+    recovering = false,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.uncertain = true;
+    let waitAborted = false;
     try {
-      if (this.hooks && !this.mcp) await this.hooks.acquire();
-      else await this.broker.acquire();
+      let queued = false;
+      for (;;) {
+        try {
+          if (this.hooks && !this.mcp) await this.hooks.acquire();
+          else await this.broker.acquire();
+          break;
+        } catch (cause) {
+          // A definite busy refusal before claiming storage means another
+          // Session's tool turn holds the mount: the turn waits for that
+          // holder to release instead of failing terminally. Only the
+          // turn-execution path queues (it passes the turn's AbortSignal, so
+          // cancellation and the prompt deadline still apply); recovery
+          // acquisitions and the workspace_unavailable refusal keep the
+          // fast, classified refusal.
+          if (signal === undefined || !isBusyWorkspaceAcquisition(cause))
+            throw cause;
+          if (!queued) {
+            queued = true;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness turn ${this.promptId} waits for the Workspace mount held by another Session.`,
+            );
+          }
+          try {
+            await waitForTurn(
+              new Promise((resolve) =>
+                setTimeout(resolve, ACQUIRE_BUSY_POLL_MS),
+              ),
+              signal,
+            );
+          } catch (waitCause) {
+            // Every response so far was a definite refusal, so a cancelled
+            // queue wait provably leaves nothing held or unknown — unlike an
+            // ambiguous acquire failure, which keeps recovery blocking even
+            // when the turn itself is being cancelled.
+            waitAborted = true;
+            throw waitCause;
+          }
+        }
+      }
       this.acquired = true;
       if (!this.mcp) {
         const saved = await readHostedFileHistory(this.session);
@@ -427,7 +474,8 @@ export class HostedWorkspaceToolTurn {
       }
     } catch (cause) {
       if (
-        (!this.acquired && isRetryableWorkspaceAcquisition(cause)) ||
+        (!this.acquired &&
+          (isRetryableWorkspaceAcquisition(cause) || waitAborted)) ||
         cause instanceof HostedFileHistoryRefusedError
       ) {
         this.uncertain = false;
@@ -856,7 +904,7 @@ export class HostedWorkspaceToolTurn {
     await waitForTurn(this.warmed, signal);
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
-      await this.acquire();
+      await this.acquire(false, signal);
     }
     const shellBindings = new Map<
       string,
