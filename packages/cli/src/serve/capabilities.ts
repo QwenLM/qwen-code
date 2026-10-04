@@ -245,8 +245,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
   // Inspect bound workspace trust and request local operator action.
-  // Remote clients cannot directly write trustedFolders.json.
+  // Recording the decision itself is the separate grant tag below.
   workspace_trust: { since: 'v1' },
+  // Record the bound workspace as trusted in the local trusted-folders file.
+  // This is the recovery path for Web Shell / Desktop clients, which cannot
+  // render the terminal-only folder-trust prompt (#13130). The route sits
+  // behind the strict mutation gate, so a caller already holds operator
+  // authority over this daemon, and it has no revoke counterpart.
+  // Advertised only where trust hot-reload applies the decision to the running
+  // runtime without a daemon restart.
+  workspace_trust_grant: { since: 'v1' },
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
@@ -755,6 +763,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   [
     'workspace_trust_hot_reload',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
+  [
+    'workspace_trust_grant',
     (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
   ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],

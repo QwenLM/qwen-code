@@ -1960,6 +1960,83 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().cumulativeUsage.promptTokens).toBe(100);
   });
 
+  it('replays only announced outer results alongside internal Code Mode evidence', () => {
+    const machine = createTranscriptReplayMachine();
+    updates(
+      machine,
+      record('calls', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'outer', name: 'exec', args: {} } },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+    );
+    for (const [id, name, provenance] of [
+      ['nested-read', 'read_file', 'tool_result'],
+      ['nested-goal', 'get_goal', 'goal_runtime'],
+    ]) {
+      const item = {
+        ...record(id, 'tool_result', {
+          subtype: 'code_mode_tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id,
+                  name,
+                  response: { output: 'internal' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: 'internal',
+            status: 'success',
+          },
+        }),
+        provenance,
+      };
+      expect(updates(machine, item)).toEqual([]);
+    }
+    for (const [id, name, provenance] of [
+      ['outer', 'exec', 'execution_output'],
+      ['direct-goal', 'get_goal', 'goal_runtime'],
+    ]) {
+      const item = {
+        ...record(id, 'tool_result', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: { id, name, response: { output: 'visible' } },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: 'visible',
+            status: 'success',
+          },
+        }),
+        provenance,
+      };
+      expect(updates(machine, item)).toMatchObject([
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: id,
+          status: 'completed',
+        },
+      ]);
+    }
+    expect(machine.snapshot().pendingToolCalls).toEqual([]);
+    expect([...machine.finalize()]).toEqual([]);
+  });
+
   it('correlates an id-less result only to one same-name pending call', () => {
     const machine = createTranscriptReplayMachine();
     updates(

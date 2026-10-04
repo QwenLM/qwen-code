@@ -6,6 +6,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** One generation- and epoch-fenced Hosted Harness SSE stream. */
 public final class HarnessEventStream implements AutoCloseable {
@@ -20,8 +21,10 @@ public final class HarnessEventStream implements AutoCloseable {
             new AtomicLong(System.nanoTime());
     private final AtomicBoolean consumerWaiting = new AtomicBoolean();
     // Serializes concurrent next() callers so frames cannot interleave;
-    // close() never takes this lock, so a blocked read stays abortable.
-    private final Object cursorLock = new Object();
+    // close() never takes this lock, so a blocked read stays abortable. A
+    // monitor held across the blocking SSE read would pin a virtual thread
+    // to its carrier on JDK 21; a ReentrantLock lets the reader unmount.
+    private final ReentrantLock cursorLock = new ReentrantLock();
     private volatile ScheduledFuture<?> idleWatchdog;
     private volatile long lastEventId;
 
@@ -49,7 +52,8 @@ public final class HarnessEventStream implements AutoCloseable {
         if (closed.get()) {
             throw closedFailure();
         }
-        synchronized (cursorLock) {
+        cursorLock.lock();
+        try {
             // A queued caller re-checks inside the lock: the stream may
             // have been closed (or idle-aborted) while it waited.
             if (closed.get()) {
@@ -96,6 +100,8 @@ public final class HarnessEventStream implements AutoCloseable {
             } finally {
                 consumerWaiting.set(false);
             }
+        } finally {
+            cursorLock.unlock();
         }
     }
 
