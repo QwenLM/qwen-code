@@ -1012,6 +1012,7 @@ describe('HTTP Managed Session store', () => {
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       leaseDurationMs: 1000,
+      allowInsecureHttp: true,
       fetchFn,
     });
     const unhandled: unknown[] = [];
