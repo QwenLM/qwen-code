@@ -296,7 +296,7 @@ panel selected:
 ```bash
 npm run dev:managed-agent
 # In a second terminal, before the Java health wait expires (10 min).
-# One-time, on a fresh clone:
+# Once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
 # One-time, on a fresh MySQL 8 (creates the database and user the URL names):

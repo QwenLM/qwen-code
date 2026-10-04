@@ -579,24 +579,31 @@ describe('writeSpringEnvFiles', () => {
     };
   }
 
-  it('writes the env content and no ps1 sibling on the POSIX arm', () => {
-    const nestedRoot = mkdtempSync(path.join(tmpdir(), 'spring-env-nested-'));
-    const nested = path.join(nestedRoot, 'a', 'b');
-    try {
-      writeSpringEnvFiles({
-        directory: nested,
-        springEnv: envContent,
-        springPs1Env: ps1Content,
-        isWinPlatform: false,
-      });
-      expect(readFileSync(path.join(nested, 'spring.env'), 'utf8')).toBe(
-        envContent,
-      );
-      expect(existsSync(path.join(nested, 'spring.env.ps1'))).toBe(false);
-    } finally {
-      rmSync(nestedRoot, { recursive: true, force: true });
-    }
-  });
+  // `isWinPlatform: false` here is the injected flag, not the host: on a
+  // real Windows runner the production 0700 gate reads the synthesized 777
+  // dir mode and the writer throws before either assertion, so this case
+  // too must gate on the host like its six siblings.
+  (onWindows ? it.skip : it)(
+    'writes the env content and no ps1 sibling on the POSIX arm',
+    () => {
+      const nestedRoot = mkdtempSync(path.join(tmpdir(), 'spring-env-nested-'));
+      const nested = path.join(nestedRoot, 'a', 'b');
+      try {
+        writeSpringEnvFiles({
+          directory: nested,
+          springEnv: envContent,
+          springPs1Env: ps1Content,
+          isWinPlatform: false,
+        });
+        expect(readFileSync(path.join(nested, 'spring.env'), 'utf8')).toBe(
+          envContent,
+        );
+        expect(existsSync(path.join(nested, 'spring.env.ps1'))).toBe(false);
+      } finally {
+        rmSync(nestedRoot, { recursive: true, force: true });
+      }
+    },
+  );
 
   (onWindows ? it.skip : it)(
     'creates the directory 0700 and the env file 0600 on POSIX',
