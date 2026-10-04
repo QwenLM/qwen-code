@@ -71,17 +71,25 @@ public class ManagedExtensionRecordStore {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
+    private final ManagedTaskEventStore taskEvents;
 
     @Autowired
     public ManagedExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions) {
+            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
+        this.taskEvents = taskEvents;
     }
 
     /** A store beside no public Session table, which announces nothing. */
     ManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, null);
+    }
+
+    /** A store that journals its own task events beside the table. */
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+            AgentStateStore sessions) {
+        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
     public record TaskRow(String taskId, String kind,
@@ -559,9 +567,12 @@ public class ManagedExtensionRecordStore {
         }
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
-            announce(tenantId, sessionId,
-                    ManagedExtensionProjection.taskId(recordKey),
-                    projection.state(), revision);
+            String taskId = ManagedExtensionProjection.taskId(recordKey);
+            announce(tenantId, sessionId, taskId, projection.state(),
+                    revision);
+            taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                    projection.state(), projection.runtimeState(),
+                    occurredAt);
         }
     }
 

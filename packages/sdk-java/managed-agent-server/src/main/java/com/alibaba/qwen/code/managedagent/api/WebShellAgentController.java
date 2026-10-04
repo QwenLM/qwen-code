@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
@@ -66,6 +68,15 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellTaskGetRequest request) {
         return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(), request.taskId());
+    }
+
+    @PostMapping("/tasks/events/query")
+    public WebShellPage<WebShellTaskEvent> taskEvents(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskEventQueryRequest request) {
+        return tasks.queryWebShellTaskEvents(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.taskId(),
+                request.after(),
+                request.limit() == null ? 20 : request.limit());
     }
 
     @PostMapping("/sessions/query")
