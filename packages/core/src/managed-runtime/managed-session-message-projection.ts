@@ -104,11 +104,12 @@ export class ManagedSessionMessageProjection {
    * than silently dropping a record, which would present a short history as a
    * complete one.
    *
-   * Deliberately narrower than the cold read: the live projection carries
-   * branch checkpoints and committed messages only. Turn results, compaction
-   * summaries and domain records are events while the session is live — they
-   * materialize as records in `projectManagedSessionRecords`, the cold
-   * restore that rebuilds the whole history for a reader.
+   * Deliberately narrower than the reader-facing list: this projection
+   * carries branch checkpoints and committed messages only. Turn results,
+   * compaction summaries and record-carrying domains are projected by
+   * `projectManagedSessionRecords` — the reader-facing list used both to
+   * rebuild a session for a reader and by the live recorder's chain view
+   * (`ChatRecordingService.readActiveTranscriptChain`).
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
@@ -342,10 +343,10 @@ const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
  * sits under its own key there, unlike the event channels whose body is the
  * record itself.
  *
- * The cold list is deliberately wider than the hot `project()`: a shut-down
- * reader needs the full history, so turn results, compaction summaries and
- * record-carrying domains materialize here while a live projection presents
- * them as events.
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events.
  */
 function readerFacingBody(event: ManagedSessionEvent):
   | {

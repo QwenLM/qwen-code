@@ -444,7 +444,7 @@ describe('managed session message projection', () => {
     ).resolves.toEqual({ title: 'Restored title', source: 'manual' });
   });
 
-  it('keeps the live projection deliberately narrower than the cold restore', async () => {
+  it('keeps the hot projection deliberately narrower than the reader-facing list', async () => {
     const harness = await createHarness();
     const turnResult = {
       ...records[0],
@@ -475,9 +475,10 @@ describe('managed session message projection', () => {
       await sink.write(turnResult);
       await sink.write(fileHistory);
 
-      // The live projection presents turn results and domain records as
-      // events, not message content; the cold restore materializes them for
-      // a reader. The difference is documented at both projection sites.
+      // The hot projection presents turn results and domain records as
+      // events, not message content; the reader-facing list materializes
+      // them for a reader. The width distinction is documented at both
+      // projection sites.
       await expect(sink.project()).resolves.toEqual([user]);
     } finally {
       await harness.close();

@@ -1515,6 +1515,62 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
+  it.each([
+    ['recoveryStatus', 'BLOCKED_RESOURCE'],
+    ['storageVersion', 2],
+  ])(
+    'rejects a restore head not addressable by this writer (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /not readable by this v1 writer/,
+      );
+      await session.close();
+    },
+  );
+
+  it('rejects stored transaction metadata that disagrees with its records', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    // The metadata/records equality runs after the byte/digest check, so a
+    // eventsDigest tamper — not a byte tamper — is what reaches it.
+    server.editStoredTransaction(0, { eventsDigest: '1'.repeat(64) });
+    await expect(journal.read()).rejects.toThrow(
+      /metadata does not match its records/,
+    );
+    await session.close();
+  });
+
+  it('rejects when a page reports no more while the head is still ahead', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    await appendMessage(
+      session,
+      1,
+      await stores.resourceStore.publish(
+        'managed-message',
+        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      ),
+    );
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    // A real (non-empty) page that claims to end the journal while the head
+    // says otherwise must fail the read, not silently truncate history.
+    server.pageOverrides['hasMore'] = false;
+    server.headOverrides['journalRevision'] = 99;
+    await expect(journal.read()).rejects.toThrow(
+      /ended before the journal head/,
+    );
+    await session.close();
+  });
+
   it('rejects an empty transaction page while the journal head is ahead', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -1562,6 +1618,13 @@ describe('HTTP Managed Session store', () => {
       'managed-message',
       Buffer.from('{"retry":true}', 'utf8'),
     );
+    // A staged ref the failed transaction actually carries, so the retry
+    // assertion below measures bytes the commit body posts, not just
+    // clear() not running.
+    const stagedRef = await stores.resourceStore.publish(
+      'managed-session_metadata',
+      Buffer.from('{"title":"t"}', 'utf8'),
+    );
     const missingRef: ManagedSessionDurableRef = {
       resourceId: 'res-never-staged',
       kind: 'managed-session_metadata',
@@ -1569,31 +1632,48 @@ describe('HTTP Managed Session store', () => {
       byteLength: 2,
       digest: createHash('sha256').update('{}').digest('hex'),
     };
-    const event = {
-      v: 1,
-      sequence: session.authority.committedSequence + 1,
-      eventId: 'domain:missing:1',
-      sessionKey: SESSION_KEY,
-      kind: 'domain.committed' as const,
-      occurredAt: 1,
-      payload: {
-        domain: 'session_metadata',
-        version: 1,
-        operationId: 'op-missing',
-        recordRef: missingRef,
+    const committedSoFar = session.authority.committedSequence;
+    const events = [
+      {
+        v: 1,
+        sequence: committedSoFar + 1,
+        eventId: 'domain:missing:1',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 1,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-missing',
+          recordRef: missingRef,
+        },
       },
-    };
+      {
+        v: 1,
+        sequence: committedSoFar + 2,
+        eventId: 'domain:staged:2',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 2,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-staged',
+          recordRef: stagedRef,
+        },
+      },
+    ];
     const marker = {
       transactionId: 'txn-missing',
       commandId: 'op-missing',
       operation: 'commitDomainRecord',
       contentDigest: 'f'.repeat(64),
-      firstSequence: event.sequence,
-      lastSequence: event.sequence,
-      eventCount: 1,
-      eventsDigest: managedSessionEventsDigest([
-        parseManagedSessionEvent(event),
-      ]),
+      firstSequence: events[0].sequence,
+      lastSequence: events[1].sequence,
+      eventCount: 2,
+      eventsDigest: managedSessionEventsDigest(
+        events.map((event) => parseManagedSessionEvent(event)),
+      ),
       previousCommitDigest: session.authority.commitProof.committedPrefixHash,
     };
     const envelope = (
@@ -1613,13 +1693,31 @@ describe('HTTP Managed Session store', () => {
     });
     await expect(
       journal.appendTransaction([
-        envelope('managed_session_event_v1', event, 'rec-missing-event'),
+        envelope('managed_session_event_v1', events[0], 'rec-missing-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-staged-event'),
         envelope('managed_session_commit_v1', marker, 'rec-missing-marker'),
       ]),
     ).rejects.toMatchObject({
       status: 409,
       remoteCode: 'managed_session_resource_missing',
     } satisfies Partial<ManagedSessionStoreHttpError>);
+
+    // Re-post the same transaction: a failed commit must not release the
+    // bytes it carries, or the retry loses them to the same 409 forever.
+    await expect(
+      journal.appendTransaction([
+        envelope('managed_session_event_v1', events[0], 'rec-retry-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-retry-event-2'),
+        envelope('managed_session_commit_v1', marker, 'rec-retry-marker'),
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
+    const retried = server.commits.at(-1);
+    const stagedInRetry = (
+      retried?.['resources'] as Array<Record<string, unknown>>
+    ).find(
+      (resource) => String(resource['resourceId']) === stagedRef.resourceId,
+    );
+    expect(stagedInRetry?.['bytesBase64']).toBeDefined();
 
     // The 409 landed before anything committed, so the failed commit released
     // nothing: the head is unmoved and the previously staged body is still

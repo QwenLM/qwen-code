@@ -583,16 +583,18 @@ describe('managed session record sink', () => {
     ['a non-string state', { promptId: 'turn-1', state: 7 }],
   ] as const)('refuses a turn result with %s', async (_name, systemPayload) => {
     const harness = await createHarness();
-    await expect(
-      harness.sink.write(
-        record({
-          uuid: 'rec-turn-bad',
-          type: 'system',
-          subtype: 'turn_result',
-          systemPayload,
-        } as Partial<ChatRecord>),
-      ),
-    ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    const refused = record({
+      uuid: 'rec-turn-bad',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload,
+    } as Partial<ChatRecord>);
+    // canCarry refuses before write does: a caller refusing up front must
+    // never be able to queue a write that fails mid-turn.
+    expect(harness.sink.canCarry(refused)).toBe(false);
+    await expect(harness.sink.write(refused)).rejects.toThrow(
+      ManagedSessionUnmappedRecordError,
+    );
     await harness.close();
   });
 
@@ -801,6 +803,16 @@ describe('managed session record sink', () => {
         systemPayload,
       } as Partial<ChatRecord>);
       await harness.sink.write(carried);
+      // The name names the channel: a carried subtype lands as one
+      // message.committed event and no domain record, or the live
+      // projection silently drops it.
+      const events = harness.authority.readEvents();
+      expect(
+        events.filter((event) => event.kind === 'message.committed'),
+      ).toHaveLength(1);
+      expect(
+        events.filter((event) => event.kind === 'domain.committed'),
+      ).toHaveLength(0);
       await harness.close();
 
       await expect(

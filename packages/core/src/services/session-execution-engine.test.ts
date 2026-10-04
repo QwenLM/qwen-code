@@ -138,4 +138,26 @@ describe('SessionExecutionEngineAccumulator', () => {
       recorded: true,
     });
   });
+
+  it('returns the raw value alongside the validated record', () => {
+    const accumulator = new SessionExecutionEngineAccumulator('s1');
+    const raw = line({
+      sessionId: 's1',
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'hi' }],
+        'kept-only-in-raw': true,
+      },
+    });
+    // validateTranscriptRecord returns a fresh normalized object that
+    // rebuilds `message` as {role, parts} only, so the two halves of the
+    // pair are independently meaningful and each must be pinned.
+    expect(accumulator.parseLine(raw, snapshot.filePath)).toEqual([
+      {
+        value: JSON.parse(raw),
+        record: expect.objectContaining({ uuid: 'rec-1', sessionId: 's1' }),
+      },
+    ]);
+  });
 });

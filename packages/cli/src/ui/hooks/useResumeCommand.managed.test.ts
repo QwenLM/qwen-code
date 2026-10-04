@@ -26,10 +26,6 @@ it('rejects in-session Managed resume before changing the active session', async
   const workspace = path.join(root, 'workspace');
   const runtime = path.join(root, 'runtime');
   await mkdir(workspace, { recursive: true });
-  // An exported QWEN_RUNTIME_DIR outranks setRuntimeBaseDir
-  // (storage.test.ts pins that order), so an ambient export would redirect
-  // the hook's SessionService away from this test's runtime dir.
-  vi.stubEnv('QWEN_RUNTIME_DIR', undefined);
   Storage.setRuntimeBaseDir(runtime);
   let unmount: (() => void) | undefined;
   try {
@@ -148,7 +144,6 @@ it('rejects in-session Managed resume before changing the active session', async
   } finally {
     unmount?.();
     Storage.setRuntimeBaseDir(null);
-    vi.unstubAllEnvs();
     await rm(root, { recursive: true, force: true });
   }
 });

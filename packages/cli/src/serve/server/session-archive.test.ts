@@ -499,9 +499,6 @@ describe('archiveDaemonSessions', () => {
 
   it('archives a sealed Managed session through the sealed-writer fallback', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440202';
-    // An exported QWEN_RUNTIME_DIR outranks setRuntimeBaseDir and would
-    // redirect SessionService to the ambient runtime root.
-    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
     const transcriptPath = path.join(
       new Storage(workspaceDir, runtimeDir).getProjectDir(),
       'chats',
@@ -572,7 +569,6 @@ describe('archiveDaemonSessions', () => {
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
     expect(fs.readFileSync(lockPath)).toEqual(lockBefore);
-    vi.unstubAllEnvs();
   });
 
   it('collapses case-variant spellings in one batch to a single archive', async () => {
