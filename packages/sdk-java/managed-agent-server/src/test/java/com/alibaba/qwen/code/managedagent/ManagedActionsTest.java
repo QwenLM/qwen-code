@@ -112,21 +112,25 @@ class ManagedActionsTest {
     void boundsInputByUtf8BytesWithoutSplittingCodePoints() throws Exception {
         String prefix = "{\"toolName\":\"write_file\",\"input\":{\"file_path\":\"notes.md\",\"content\":\"";
         String suffix = "\"}}";
-        for (boolean large : List.of(false, true)) {
+        for (String boundary : List.of("exact", "ascii-over", "multibyte")) {
             String tenant = tenant();
             String session = session(tenant);
-            String payload = large
+            boolean multibyte = "multibyte".equals(boundary);
+            int length = "ascii-over".equals(boundary) ? 8193 : 8192;
+            int prefixBytes = multibyte ? 8191 : 8192;
+            String payload = multibyte
                     ? prefix + "a".repeat(8191 - prefix.length()) + "😀tail" + suffix
-                    : prefix + "a".repeat(8192 - prefix.length() - suffix.length()) + suffix;
+                    : prefix + "a".repeat(length - prefix.length() - suffix.length()) + suffix;
             ActionJournal journal = inputAction(tenant, session, payload);
             for (JsonNode view : inputViews(tenant, session, journal.id)) {
                 boolean web = view.has("actionId");
                 JsonNode preview = view.path(web ? "inputPreview" : "input_preview");
                 String text = preview.path("text").asText();
-                assertThat(text).isEqualTo(large ? payload.substring(0, 8191) : payload);
+                assertThat(text).isEqualTo(payload.substring(0, prefixBytes));
                 assertThat(text.getBytes(StandardCharsets.UTF_8).length)
-                        .isEqualTo(large ? 8191 : 8192);
-                assertThat(preview.path("truncated").asBoolean()).isEqualTo(large);
+                        .isEqualTo(prefixBytes);
+                assertThat(preview.path("truncated").asBoolean())
+                        .isEqualTo(!"exact".equals(boundary));
                 assertThat(preview.path(web ? "byteLength" : "byte_length").asLong())
                         .isEqualTo(payload.getBytes(StandardCharsets.UTF_8).length);
             }
@@ -135,23 +139,25 @@ class ManagedActionsTest {
 
     @Test
     void missingInvalidAndCorruptInputNeverFailsTheActionRead() throws Exception {
-        for (String fault : List.of("missing", "null", "kind", "version", "length", "digest",
+        for (String fault : List.of("missing", "null", "scalar", "shape", "kind", "version", "length", "digest",
                 "corrupt", "unreferenced")) {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = inputJournal(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
             ObjectNode ref = (ObjectNode) journal.options.path("inputRef");
             String resourceId = ref.path("resourceId").asText();
+            journal.change("requested", null);
             switch (fault) {
                 case "missing" -> ref.put("resourceId", "missing-input");
                 case "null" -> journal.options.putNull("inputRef");
+                case "scalar" -> journal.options.put("inputRef", 1);
+                case "shape" -> ref.remove("digest");
                 case "kind" -> ref.put("kind", "managed-action-options");
                 case "version" -> ref.put("schemaVersion", 2);
                 case "length" -> ref.put("byteLength", 1);
                 case "digest" -> ref.put("digest", "0".repeat(64));
                 default -> {}
             }
-            journal.change("requested", null);
             if ("corrupt".equals(fault)) {
                 jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
@@ -160,6 +166,8 @@ class ManagedActionsTest {
                 jdbc.update("UPDATE qwen_managed_session_resource SET state = 'UNREFERENCED'"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                         tenant, session, resourceId);
+            } else {
+                corruptOptions(tenant, session, journal);
             }
             assertNoInputPreview(tenant, session, journal.id);
         }
@@ -178,8 +186,16 @@ class ManagedActionsTest {
             ActionJournal local = new ActionJournal(journals, tenant, session, 100, 1000);
             local.options.put("v", 2);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
-            local.change("requested", null);
-            assertNoInputPreview(tenant, session, local.id);
+            assertThatThrownBy(() -> local.change("requested", null))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("managed_session_resource_missing"));
+            assertThat(actions.find(tenant, session, local.id)).isEmpty();
+            ActionJournal committed = new ActionJournal(local, 100, 1000)
+                    .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"local input\"}}"));
+            committed.change("requested", null);
+            committed.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
+            corruptOptions(tenant, session, committed);
+            assertNoInputPreview(tenant, session, committed.id);
         }
     }
 
@@ -219,7 +235,9 @@ class ManagedActionsTest {
 
     @Test
     void stillRejectsUnknownOptionsVersionsAndFields() throws Exception {
-        for (String fault : List.of("oldExtra", "missingRef", "version", "extra")) {
+        for (String fault : List.of("oldExtra", "missingRef", "version", "extra", "danglingRef",
+                "nullRef", "scalarRef", "missingRefField", "extraRefField", "refKind", "refVersion",
+                "refLength", "refDigest")) {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = new ActionJournal(journals, tenant, session, 100, 1000);
@@ -231,11 +249,27 @@ class ManagedActionsTest {
                     journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
                     journal.options.put("extra", true);
                 }
-                default -> throw new AssertionError(fault);
+                default -> {
+                    journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
+                    ObjectNode ref = (ObjectNode) journal.options.path("inputRef");
+                    switch (fault) {
+                        case "danglingRef" -> ref.put("resourceId", "missing-input");
+                        case "nullRef" -> journal.options.putNull("inputRef");
+                        case "scalarRef" -> journal.options.put("inputRef", 1);
+                        case "missingRefField" -> ref.remove("digest");
+                        case "extraRefField" -> ref.put("extra", true);
+                        case "refKind" -> ref.put("kind", "managed-action-options");
+                        case "refVersion" -> ref.put("schemaVersion", 2);
+                        case "refLength" -> ref.put("byteLength", 1);
+                        case "refDigest" -> ref.put("digest", "0".repeat(64));
+                        default -> throw new AssertionError(fault);
+                    }
+                }
             }
-            assertThatThrownBy(() -> journal.change("requested", null))
+            assertThatThrownBy(() -> journal.change("requested", null), "invalid inputRef (%s)", fault)
                     .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
-                            .isEqualTo("managed_session_action_rejected"));
+                            .isEqualTo("danglingRef".equals(fault)
+                                    ? "managed_session_resource_missing" : "managed_session_action_rejected"));
             assertThat(actions.find(tenant, session, journal.id)).isEmpty();
         }
     }
@@ -747,6 +781,12 @@ class ManagedActionsTest {
         ActionJournal journal = inputJournal(tenant, session, payload);
         journal.change("requested", null);
         return journal;
+    }
+
+    private void corruptOptions(String tenant, String session, ActionJournal journal) throws Exception {
+        assertThat(jdbc.update("UPDATE managed_agent_action SET options_json = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND action_id = ?",
+                json.writeValueAsString(journal.options), tenant, session, journal.id)).isEqualTo(1);
     }
 
     private List<JsonNode> inputViews(String tenant, String session, String id) throws Exception {

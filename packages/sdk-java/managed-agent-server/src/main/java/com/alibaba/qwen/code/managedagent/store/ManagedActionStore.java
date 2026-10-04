@@ -200,6 +200,9 @@ public class ManagedActionStore {
                 closed(option, "id", "label");
                 require(text(option.path("label")));
             }
+            if (options.path("v").asLong() == 2) {
+                resource(options.path("inputRef"), "managed-tool-input", resources);
+            }
             Action previous = find(tenantId, sessionId, id).orElse(null);
             require(
                     previous == null

@@ -10,7 +10,7 @@
 
 ## 契约与兼容性
 
-版本 1 options 保持原有精确字段集合。版本 2 新增一个 `inputRef` 字段，指向该调用已发布的 `managed-tool-input` 资源。其余字段、审批策略和决定字节都不变。`action.changed` envelope 不变；引用位于其不透明 options 资源中。未知版本和额外 options 字段仍被拒绝。存储的 options JSON 已能保存这个引用，因此无需数据库迁移。
+版本 1 options 保持原有精确字段集合。版本 2 新增一个 `inputRef` 字段，指向该调用已发布的 `managed-tool-input` 资源。其余字段、审批策略和决定字节都不变。`action.changed` envelope 不变；引用位于其不透明 options 资源中。未知版本和额外 options 字段仍被拒绝。Journal 写入时，对照同一 Session 已提交的资源验证引用的封闭字段集合、kind、schema version、长度和 digest。Workspace 恢复会递归追踪 Action options 中的引用，因此必须在悬空引用进入 authority journal 之前拒绝它。存储的 options JSON 已能保存这个引用，因此无需数据库迁移。
 
 先部署 Java 读取端，再启用版本 2 写入端。旧 Java 会拒绝版本 2，从而拒绝该审批的整笔 journal 事务。目前没有协商 options 版本的能力；本步骤不新增开关或协商协议。版本 1 写入端及历史版本 1 Action 仍可读取和作答。
 
@@ -22,18 +22,20 @@
 
 四个列表和详情路由都在投影前保留 `requireReadableSession`。复用已提交 inline 资源读取端，验证租户及 Session 范围、referenced 状态、引用元数据、存储长度和 SHA-256。每个 Session 只有一个不可变的 journal Workspace 范围，引用不能选择其他 Session 或租户。校验种类 `managed-tool-input`、schema 版本 1、严格 UTF-8/JSON、包装体的 Session 身份和字段集合，以及 payload 工具名与 Action 是否匹配。输入缺失、损坏、格式错误或不匹配时不返回预览，且不让 Action 读取失败。审批选项、仅创建者可作答的规则以及 transcript 投影均保持不变。
 
+Harness 写入端提供审批与已捕获调用之间的不可变绑定。Java 验证被引用资源、Session 和工具，不从私有 checkpoint 或不含参数的 Items 重建该绑定。后续写入端必须在 Action 与 checkpoint 中复用同一个已捕获输入引用，并测试同一工具的不同调用，保证不会混用输入。
+
 ## 改动与验证
 
 扩展 Java options 读取端、共享 Action 投影和已有的已提交资源读取端。在 OpenAPI 增加可选预览 schema，重新生成 WebShell 类型。同步更新 D6 Actions 设计的中英文版本，记录本次上线步骤。
 
-回归测试通过 Session store 提交真实版本 2 Action journal 与工具输入资源，然后读取公开及 WebShell 列表、详情路由。验证小输入精确相等、恰好 8192 字节、在多字节边界附近结束的大输入、缺失或格式错误或不匹配的引用与资源、跨 Session 与跨租户引用、格式错误的 payload、不支持的 MCP 输入，以及版本 1 兼容性。已有 allow/deny、终态结算和访问控制测试必须保持通过。版本 2 回归在旧 Java 读取端应于返回任何预览之前失败。
+回归测试通过 Session store 提交真实版本 2 Action journal 与工具输入资源，然后读取公开及 WebShell 列表、详情路由。验证小输入精确相等、恰好 8192 字节、8193 个 ASCII 字节，以及在多字节边界附近结束的大输入。写入时拒绝格式错误、悬空、元数据不匹配和跨 Session/租户的引用，再损坏已存储的引用或资源，验证读取仍会省略不可用的预览。还需覆盖格式错误的 payload、不支持的 MCP 输入及版本 1 兼容性。已有 allow/deny、终态结算和访问控制测试必须保持通过。版本 2 回归在旧 Java 读取端应于返回任何预览之前失败。
 
 API 响应证据是这一步读取端的可观察结果。浏览器预览渲染、真实 Harness 写版本 2、重启结果和公开 Shell 启用属于后续阶段；本步骤不得声称已验证它们。
 
 ## 验收与后续
 
 - 带有效版本 2 options 的 requested 原生工具 Action 在公开与 WebShell 列表、详情 API 提供一致的有界预览。
-- 输入不可用不会让 Action 无法读取；未知 options 版本和字段集合变化仍在写入时严格拒绝。
+- 输入不可用不会让 Action 无法读取；未知 options 版本、字段集合变化和无效输入引用仍在写入时严格拒绝。
 - 版本 1 Action 继续按已有策略读取和作答。
 - 生成类型与契约一致；两种语言描述相同的上限与上线顺序。
 - Java 读取端部署后，接续 Harness 写版本 2 与 WebShell 审批卡，再重新核对 #13271 剩余的审批、崩溃和启用门禁。
