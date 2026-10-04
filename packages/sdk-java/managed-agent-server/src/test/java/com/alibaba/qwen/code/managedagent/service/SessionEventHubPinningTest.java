@@ -15,8 +15,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-// Regression witness for the hosted-SSE wedge at
-// https://github.com/QwenLM/qwen-code/issues/13333 : every SSE
+// Scale witness for JDK 21 virtual-thread carrier exhaustion in the
+// hosted-SSE fan-out — the same pinning class as #13388, but not the
+// wedge recorded at https://github.com/QwenLM/qwen-code/issues/13333,
+// whose repro observes events by REST polling and never subscribes.
+// Here every SSE
 // subscriber parks in SessionEventHub.Subscription.await on a virtual
 // thread (ManagedEventStreamService runs on the server's
 // newVirtualThreadPerTaskExecutor). If SessionBuffer.await holds a
@@ -46,7 +49,11 @@ class SessionEventHubPinningTest {
     @Timeout(120)
     void parkedSubscribersMustNotStarveOtherVirtualThreads()
             throws Exception {
-        assumeTrue(true, "this module runs on JDK 21+");
+        assumeTrue(Integer.getInteger("jdk.virtualThreadScheduler.maxPoolSize",
+                        256) < SUBSCRIBERS,
+                "jdk.virtualThreadScheduler.maxPoolSize is at or above "
+                        + SUBSCRIBERS
+                        + "; a pin-capable shape would not starve");
         SessionEventHub hub = new SessionEventHub();
         int carriers = ForkJoinPool.getCommonPoolParallelism();
         List<SessionEventHub.Subscription> subscriptions =

@@ -43,6 +43,28 @@ class SessionEventHubTest {
     }
 
     @Test
+    void bufferIsEvictedWhenTheLastSubscriberCloses() throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        SessionEventHub.Subscription first = hub.subscribe("tenant",
+                "session");
+        hub.publish(List.of(event(1)));
+        first.close();
+
+        // A fresh subscription, not the closed handle: await short-circuits
+        // on a closed Subscription, which is indistinguishable from an
+        // evicted buffer. A leaked buffer would hand the stale event to the
+        // new subscriber; an evicted one starts empty.
+        try (SessionEventHub.Subscription second = hub.subscribe("tenant",
+                "session")) {
+            SessionEventHub.Delivery delivery = second.await(0,
+                    Duration.ofMillis(10));
+
+            assertThat(delivery.events()).isEmpty();
+            assertThat(delivery.overflowed()).isFalse();
+        }
+    }
+
+    @Test
     void awaitPropagatesInterruptionLikeObjectWait() throws Exception {
         SessionEventHub hub = new SessionEventHub();
         try (SessionEventHub.Subscription subscription = hub.subscribe(
