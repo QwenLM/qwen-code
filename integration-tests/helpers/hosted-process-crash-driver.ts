@@ -38,6 +38,7 @@ const report = {
   operations: [] as string[],
   signalEvidence: [] as unknown[],
   restoreTransactions: [] as Transaction[],
+  staleWriterConflicts: 0,
   target: undefined as Transaction | undefined,
 };
 const proof = path.join(config.directory, 'proof.txt');
@@ -49,6 +50,8 @@ let restoring = false;
 let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
+// Writer identities (bootIds) of Harness processes this driver has SIGKILLed.
+const killedWriters = new Set<string>();
 
 function events(transaction: Transaction) {
   return Buffer.from(transaction.recordBytesBase64, 'base64')
@@ -73,6 +76,7 @@ async function control(operation: string) {
 async function killHarness() {
   assert(cli.child?.pid);
   const pid = cli.child.pid;
+  killedWriters.add(cli.bootId);
   const exited = once(cli.child, 'exit');
   assert(cli.child.kill('SIGKILL'));
   const [code, signal] = await exited;
@@ -155,14 +159,26 @@ const proxy = createServer(async (req, res) => {
       : undefined;
     if (!serviceKilled) {
       if (upstream.status === 409) {
-        assert(
-          injected &&
-            !store &&
-            ['status', 'cancel'].includes(operation) &&
-            config.fault.startsWith('worker-'),
-          `${url}: ${bytes}`,
-        );
-        assert.equal(json.code, 'runtime_broker_execution_unknown');
+        // A write the killed Harness sent before SIGKILL can be answered only
+        // after the cold load's acquire bumped the writer generation; the
+        // writer fence rejecting it is the designed outcome, not a failure.
+        if (store && killedWriters.has(fields.writerId)) {
+          assert.equal(
+            json.code,
+            'managed_session_writer_conflict',
+            `${url}: ${bytes}`,
+          );
+          report.staleWriterConflicts++;
+        } else {
+          assert(
+            injected &&
+              !store &&
+              ['status', 'cancel'].includes(operation) &&
+              config.fault.startsWith('worker-'),
+            `${url}: ${bytes}`,
+          );
+          assert.equal(json.code, 'runtime_broker_execution_unknown');
+        }
       } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     }
     if (restoring && store && url.pathname.endsWith('/transactions'))
