@@ -313,6 +313,7 @@ describe('CodeModeOnly exposure', () => {
       'setTimeout(callback: () => void, delayMs?: number)',
       'Pending timeouts do not keep exec alive by themselves',
       'clearTimeout(timeoutId?: number)',
+      'prefer a String.raw tagged template',
     ]) {
       expect(buildExecDescription(first)).toContain(fragment);
     }
