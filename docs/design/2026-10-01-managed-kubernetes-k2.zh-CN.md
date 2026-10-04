@@ -415,8 +415,11 @@ binding/session、projection 样本、表与索引均保持不变，并通过当
 升级有效。交付前须再次核对下一个可用版本号。
 
 reserve 只接受当前 PROVISIONING binding。使用配置中的 JDBC repository，在同一已锁定
-事务连接中完整解码持久 seed；比较完整请求、seed、resource/lease 身份、record version
-和精确 coordinator operation。取得物理行锁后再次读取数据库时间，幂等重试也必须如此。
+事务连接中完整解码持久 seed；比较完整请求、seed、binding generation、resource/lease
+身份、PROVISIONING 状态、drain 标志和 coordinator owner/operation generation。
+同一 operation 的合法续期可在调用者快照与锁内读取之间改变 record version 和 operation
+截止时间；reservation 准入不要求这两个字段相等。权威截止时间必须非空，并在取得
+物理行锁后读取的新鲜数据库时间上仍存活，幂等重试也必须如此。
 CSI 事务与权威记录的锁定读取使用十秒 SQL timeout；timeout 不是成功 reservation，
 也不是已证明的 busy。
 同一原 reservation 重试幂等；stale caller 或另一个物理 holder 均不改变任何行。

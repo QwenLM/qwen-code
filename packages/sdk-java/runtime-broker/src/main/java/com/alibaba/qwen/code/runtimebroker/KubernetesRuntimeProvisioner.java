@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 
 /** Session-exclusive ephemeral Pods. Persistent Workspaces and physical retirement remain gated. */
 public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
+    static final int MAX_PLACEMENTS = 1024;
     private static final String KIND = "kubernetes-scratch";
     private static final String IDENTITY = "qwen.ai/runtime-identity";
     private static final String BOOT_PATH = "/var/run/qwen-runtime/boot.json";
@@ -36,6 +37,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     private final HttpRuntimeTransport transport = new HttpRuntimeTransport();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
+    private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
     public KubernetesRuntimeProvisioner(KubernetesRuntimeClient client, String cluster, String namespace,
             String image, List<String> workerCommand) {
@@ -70,6 +72,19 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public void reserveResource(RuntimeBindingRecord binding) {
+        if (binding == null || binding.getState() != RuntimeBindingRecord.State.PROVISIONING
+                || binding.isDrainRequested() || binding.getOperationOwner() == null) {
+            throw conflict();
+        }
+        validate(binding.getRequest(), binding.getProvisionSeed());
+        if (binding.getResourceHandle() != null) {
+            validateHandle(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
+        }
+        admitPlacement(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
+    }
+
+    @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
         return CompletableFuture.supplyAsync(() -> {
@@ -78,10 +93,12 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
             if (knownHandle != null) {
                 validateHandle(request, seed, knownHandle);
             }
+            Placement retained = admitPlacement(request, seed, knownHandle);
+            RuntimeResourceHandle originalHandle = knownHandle == null ? retained.handle() : knownHandle;
             Map<String, Object> secret = get("secrets", name);
             Map<String, Object> pod = get("pods", name);
-            if (knownHandle != null) {
-                verify(request, seed, knownHandle, pod, secret);
+            if (originalHandle != null) {
+                verify(request, seed, originalHandle, pod, secret);
             } else {
                 if (secret == null && pod != null) {
                     throw conflict();
@@ -101,13 +118,13 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 verifyObject(secret, secret(request, seed));
                 verifyObject(pod, pod(request, seed));
             }
-            RuntimeResourceHandle handle = knownHandle == null
+            RuntimeResourceHandle handle = originalHandle == null
                     ? new RuntimeResourceHandle(KIND, 1, Map.of(
                             "cluster", cluster, "namespace", namespace, "name", name,
                             "podUid", uid(pod), "secretUid", uid(secret),
                             "identity", identity(request, seed)))
-                    : knownHandle;
-            placements.put(seed, new Placement(request, seed, handle, null));
+                    : originalHandle;
+            savePlacement(new Placement(request, seed, handle, null));
             return handle;
         }, executor);
     }
@@ -122,14 +139,14 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
         return CompletableFuture.supplyAsync(() -> {
             validate(request, seed);
             Placement saved = placements.get(seed);
-            if (saved == null || !saved.request().equals(request)) {
+            if (saved == null || saved.handle() == null || !saved.request().equals(request)) {
                 throw conflict();
             }
             long deadline = System.nanoTime() + startupTimeout.toNanos();
             while (System.nanoTime() < deadline) {
                 RuntimeObservation observed = observe(request, seed, saved.handle());
                 if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
-                    placements.put(seed, new Placement(request, seed, saved.handle(), observed.getEndpoint()));
+                    savePlacement(new Placement(request, seed, saved.handle(), observed.getEndpoint()));
                     return lease(seed, observed.getEndpoint());
                 }
                 if (observed.getOutcome() != RuntimeObservation.Outcome.STARTING) {
@@ -150,16 +167,25 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
         return CompletableFuture.supplyAsync(() -> {
+            Placement retained = null;
             try {
                 validate(request, seed);
+                validateHandle(request, seed, handle);
                 if (lastLease != null && !seed.matches(lastLease)) {
                     throw conflict();
                 }
+                retained = admitPlacement(request, seed, handle);
                 RuntimeObservation observation = observe(request, seed, handle);
-                placements.put(seed, new Placement(request, seed, handle, observation.getEndpoint()));
+                savePlacement(new Placement(request, seed, handle, observation.getEndpoint()));
                 return observation;
             } catch (RuntimeBrokerException error) {
-                placements.remove(seed);
+                if (retained != null) {
+                    if (error.isRetryable()) {
+                        savePlacement(new Placement(request, seed, handle, null));
+                    } else {
+                        forgetPlacement(retained);
+                    }
+                }
                 return error.isRetryable() ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
             }
         }, executor);
@@ -167,9 +193,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
-        Placement saved = placements.values().stream()
-                .filter(value -> value.request().equals(request) && value.seed().matches(lease)).findFirst().orElse(null);
-        if (saved == null) {
+        Placement saved = placement(lease);
+        if (saved == null || !saved.request().equals(request) || !lease.getEndpoint().equals(saved.endpoint())) {
             return CompletableFuture.failedFuture(conflict());
         }
         return reconcile(request, saved.seed(), saved.handle(), lease).thenCompose(observation -> {
@@ -186,8 +211,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public boolean isUsable(RuntimeLease lease) {
-        return placements.values().stream().anyMatch(value -> value.seed().matches(lease)
-                && lease.getEndpoint().equals(value.endpoint()));
+        Placement saved = placement(lease);
+        return saved != null && lease.getEndpoint().equals(saved.endpoint());
     }
 
     @Override
@@ -200,7 +225,76 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public void close() {
         executor.shutdownNow();
-        placements.clear();
+        synchronized (placements) {
+            placements.clear();
+            placementsByLease.clear();
+        }
+    }
+
+    private Placement admitPlacement(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle) {
+        synchronized (placements) {
+            if (executor.isShutdown()) {
+                throw unavailable();
+            }
+            Placement saved = placements.get(seed);
+            if (saved != null) {
+                if (!saved.request().equals(request) || (saved.handle() != null && handle != null
+                        && !saved.handle().equals(handle))) {
+                    throw conflict();
+                }
+                return saved;
+            }
+            if (placementsByLease.containsKey(ownershipKey(seed))) {
+                throw conflict();
+            }
+            if (placements.size() >= MAX_PLACEMENTS) {
+                throw new RuntimeBrokerException(503, "runtime_kubernetes_capacity",
+                        "Kubernetes Runtime placement capacity is exhausted.", true);
+            }
+            // Reserve before API writes; release cannot prove that a live worker is retired.
+            Placement pending = new Placement(request, seed, handle, null);
+            placements.put(seed, pending);
+            placementsByLease.put(ownershipKey(seed), pending);
+            return pending;
+        }
+    }
+
+    private void savePlacement(Placement value) {
+        synchronized (placements) {
+            Placement current = placements.get(value.seed());
+            if (executor.isShutdown() || current == null || !current.request().equals(value.request())
+                    || (current.handle() != null && !current.handle().equals(value.handle()))) {
+                throw conflict();
+            }
+            placements.put(value.seed(), value);
+            placementsByLease.put(ownershipKey(value.seed()), value);
+        }
+    }
+
+    private void forgetPlacement(Placement observed) {
+        synchronized (placements) {
+            Placement current = placements.get(observed.seed());
+            if (current != null && current.request().equals(observed.request())
+                    && Objects.equals(current.handle(), observed.handle())) {
+                placements.remove(observed.seed());
+                placementsByLease.remove(ownershipKey(observed.seed()));
+            }
+        }
+    }
+
+    private Placement placement(RuntimeLease lease) {
+        if (lease == null) {
+            return null;
+        }
+        synchronized (placements) {
+            return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
+                    lease.getEpoch(), lease.getToken()));
+        }
+    }
+
+    private static List<Object> ownershipKey(RuntimeProvisionSeed seed) {
+        return List.of(seed.getProvisionalRuntimeId(), seed.getLeaseId(), seed.getEpoch(), seed.getToken());
     }
 
     private RuntimeObservation observe(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,

@@ -89,6 +89,20 @@ change invalidates the old lease. UNKNOWN confirmation errors retain a retryable
 policy. Automatic retry/adoption after failed confirmation is deferred. Pod readiness is only transport readiness: the Broker still performs
 attestation, compares the complete boot identity and commits its CAS.
 
+Each provisioner retains at most 1024 seeds, including in-progress or ambiguous
+placements. It reserves a slot before Kubernetes writes and refuses a new seed
+with retryable `runtime_kubernetes_capacity` when full. Existing seeds can still
+be observed at capacity. The Broker checks this in pre-create admission, keeps
+the original binding PROVISIONING, and releases its operation claim for retry;
+a capacity-like error after entering ensure remains fail closed. A supplied
+durable handle always takes priority over an empty pending local entry. Lease lookup uses the complete immutable lease identity
+and checks its endpoint without scanning the seed map. `release` never evicts;
+UNKNOWN revokes local endpoint usability but retains ownership. Only a validated
+reconciliation conflict for that entry's own original resources removes its slot.
+A conflict in another seed cannot evict a live original worker. `close` clears
+both local indexes without deleting Kubernetes resources; process restart does
+not authorize replacing or retiring them.
+
 The Pod IP is an observed endpoint, not identity. Only a literal IPv4 Pod IP returned
 by the trusted Kubernetes API is admitted; invalid, loopback, unspecified,
 link-local or multicast addresses are rejected. The configured worker port is

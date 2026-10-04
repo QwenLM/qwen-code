@@ -9,13 +9,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class KubernetesRuntimeProvisionerTest {
     static final String IMAGE = "registry.example/qwen@sha256:" + "a".repeat(64);
@@ -66,6 +70,135 @@ class KubernetesRuntimeProvisionerTest {
         }
         assertEquals(2, api.creates);
         assertEquals(2, api.objects.size());
+    }
+
+    @Test
+    void boundsReleasedAndUnknownPlacementsWithoutEvictingOtherLiveSeeds() {
+        var api = new FakeKubernetesRuntimeClient();
+        try (var provisioner = provisioner(api)) {
+            var request = request(provisioner, "/workspace");
+            var handle = join(provisioner.ensureResource(request, SEED, null));
+            var live = join(provisioner.provision(request, SEED));
+            for (int index = 1; index < KubernetesRuntimeProvisioner.MAX_PLACEMENTS; index++) {
+                var seed = RuntimeProvisionSeed.create("binding-" + index, 1);
+                join(provisioner.ensureResource(request, seed, null));
+                join(provisioner.release(request, join(provisioner.provision(request, seed))));
+            }
+            join(provisioner.release(request, live));
+            var extra = RuntimeProvisionSeed.create("extra", 1);
+            assertEquals("runtime_kubernetes_capacity", failure(provisioner.ensureResource(request, extra, null)).getCode());
+            var bindings = new InMemoryRuntimeBindingRepository();
+            var binding = bindings.findOrCreate(request);
+            var claimed = bindings.claimOperation(binding.getBindingId(), "owner", Duration.ofSeconds(30));
+            assertEquals("runtime_kubernetes_capacity", assertThrows(RuntimeBrokerException.class,
+                    () -> provisioner.reserveResource(claimed)).getCode());
+            assertTrue(provisioner.isUsable(live));
+            assertEquals(2 * KubernetesRuntimeProvisioner.MAX_PLACEMENTS, api.creates);
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    join(provisioner.reconcile(request, extra, handle, null)).getOutcome());
+            assertTrue(provisioner.isUsable(live));
+
+            api.readFailure = new RuntimeBrokerException(503, "offline", "offline", true);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    join(provisioner.reconcile(request, SEED, handle, live)).getOutcome());
+            assertFalse(provisioner.isUsable(live));
+            assertEquals("runtime_kubernetes_capacity", failure(provisioner.ensureResource(request, extra, null)).getCode());
+            api.readFailure = null;
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    join(provisioner.reconcile(request, SEED, handle, live)).getOutcome());
+            assertTrue(provisioner.isUsable(live));
+            assertEquals(2 * KubernetesRuntimeProvisioner.MAX_PLACEMENTS, api.creates);
+
+            api.objects.remove("pods/runtimes/" + handle.getValue().get("name"));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    join(provisioner.reconcile(request, SEED, handle, live)).getOutcome());
+            assertFalse(provisioner.isUsable(live));
+            join(provisioner.ensureResource(request, extra, null));
+            assertEquals(2 * KubernetesRuntimeProvisioner.MAX_PLACEMENTS + 2, api.creates);
+        }
+    }
+
+    @Test
+    void concurrentAdmissionCannotExceedThePlacementCap() {
+        var api = new FakeKubernetesRuntimeClient();
+        try (var provisioner = provisioner(api)) {
+            var request = request(provisioner, "/workspace");
+            for (int index = 0; index < KubernetesRuntimeProvisioner.MAX_PLACEMENTS - 1; index++) {
+                join(provisioner.ensureResource(request, RuntimeProvisionSeed.create("binding-" + index, 1), null));
+            }
+            var contenders = List.of(
+                    provisioner.ensureResource(request, RuntimeProvisionSeed.create("contender-a", 1), null),
+                    provisioner.ensureResource(request, RuntimeProvisionSeed.create("contender-b", 1), null));
+            int admitted = 0;
+            for (var contender : contenders) {
+                try {
+                    join(contender);
+                    admitted++;
+                } catch (CompletionException error) {
+                    assertEquals("runtime_kubernetes_capacity", ((RuntimeBrokerException) error.getCause()).getCode());
+                }
+            }
+            assertEquals(1, admitted);
+            assertEquals(2 * KubernetesRuntimeProvisioner.MAX_PLACEMENTS, api.creates);
+        }
+    }
+
+    @Test
+    void leaseLookupsNeverScanTheSeedMapAndCheckEveryFence() throws ReflectiveOperationException {
+        var api = new FakeKubernetesRuntimeClient();
+        try (var provisioner = provisioner(api)) {
+            var request = request(provisioner, "/workspace");
+            var handle = join(provisioner.ensureResource(request, SEED, null));
+            var live = join(provisioner.provision(request, SEED));
+            var field = KubernetesRuntimeProvisioner.class.getDeclaredField("placements");
+            field.setAccessible(true);
+            var guarded = new ConcurrentHashMap<RuntimeProvisionSeed, Object>() {
+                @Override
+                public Collection<Object> values() {
+                    throw new AssertionError("Lease lookups must not scan placements");
+                }
+            };
+            ((Map<?, ?>) field.get(provisioner)).forEach((key, value) -> guarded.put((RuntimeProvisionSeed) key, value));
+            field.set(provisioner, guarded);
+            assertTrue(provisioner.isUsable(live));
+            for (var miss : List.of(
+                    new RuntimeLease("other", live.getEndpoint(), live.getToken(), live.getLeaseId(), live.getEpoch()),
+                    new RuntimeLease(live.getRuntimeInstanceId(), live.getEndpoint(), "other", live.getLeaseId(), live.getEpoch()),
+                    new RuntimeLease(live.getRuntimeInstanceId(), live.getEndpoint(), live.getToken(), "other", live.getEpoch()),
+                    new RuntimeLease(live.getRuntimeInstanceId(), live.getEndpoint(), live.getToken(), live.getLeaseId(), live.getEpoch() + 1),
+                    new RuntimeLease(live.getRuntimeInstanceId(), URI.create("http://10.42.0.9:43190/"), live.getToken(), live.getLeaseId(), live.getEpoch()))) {
+                assertFalse(provisioner.isUsable(miss));
+                assertEquals(409, failure(provisioner.confirm(request, miss)).getStatusCode());
+            }
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    join(provisioner.reconcile(request(provisioner, "/different"), SEED, handle, live)).getOutcome());
+            assertTrue(provisioner.isUsable(live));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing-pod", "missing-all", "replaced-pod"})
+    void pendingAdmissionNeverShadowsTheSuppliedOriginalHandle(String mutation) {
+        var api = new FakeKubernetesRuntimeClient();
+        RuntimeResourceHandle original;
+        RuntimeProvisionRequest request;
+        try (var first = provisioner(api)) {
+            request = request(first, "/workspace");
+            original = join(first.ensureResource(request, SEED, null));
+        }
+        try (var restored = provisioner(api)) {
+            api.readFailure = new RuntimeBrokerException(503, "offline", "offline", true);
+            assertEquals(503, failure(restored.ensureResource(request, SEED, null)).getStatusCode());
+            api.readFailure = null;
+            switch (mutation) {
+                case "missing-pod" -> api.remove("pods");
+                case "missing-all" -> api.objects.clear();
+                case "replaced-pod" -> map(api.object("pods").get("metadata")).put("uid", "replacement");
+                default -> throw new AssertionError(mutation);
+            }
+            assertEquals(409, failure(restored.ensureResource(request, SEED, original)).getStatusCode());
+            assertEquals(2, api.creates);
+        }
     }
 
     @Test

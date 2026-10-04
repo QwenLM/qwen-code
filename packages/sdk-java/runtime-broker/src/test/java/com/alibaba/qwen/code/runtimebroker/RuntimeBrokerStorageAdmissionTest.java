@@ -50,6 +50,51 @@ class RuntimeBrokerStorageAdmissionTest {
     }
 
     @Test
+    void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var provisioner = new AdmissionProvisioner();
+        provisioner.provisionerKind = "kubernetes-scratch";
+        provisioner.admit = binding -> {
+            throw new RuntimeBrokerException(503, "runtime_kubernetes_capacity", "Capacity exhausted.", true);
+        };
+        var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
+        for (int round = 0; round < 2; round++) {
+            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+                assertEquals("runtime_kubernetes_capacity", failure(broker.warm("harness")).getCode());
+                var current = bindings.findById(original.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
+                assertEquals(original.getProvisionSeed(), current.getProvisionSeed());
+                assertEquals(original.getGeneration(), current.getGeneration());
+                assertNull(current.getResourceHandle());
+                assertNull(current.getOperationOwner());
+            }
+        }
+        assertEquals(0, provisioner.ensureCalls);
+        provisioner.admit = binding -> { };
+        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+        }
+        assertEquals(1, provisioner.ensureCalls);
+        assertEquals(original.getProvisionSeed(), provisioner.createdWith);
+    }
+
+    @Test
+    void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var provisioner = new AdmissionProvisioner();
+        provisioner.provisionerKind = "kubernetes-scratch";
+        provisioner.ensureFailure = new RuntimeBrokerException(503, "runtime_kubernetes_capacity", "Capacity exhausted.", true);
+        var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
+        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            assertEquals("runtime_kubernetes_capacity", failure(broker.warm("harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findById(original.getBindingId()).getState());
+            assertEquals("runtime_broker_recovery_blocked", failure(broker.warm("harness")).getCode());
+        }
+        assertEquals(1, provisioner.ensureCalls);
+    }
+
+    @Test
     void busyAfterEnteringEnsureDoesNotReceiveThePreCreateRetryException() {
         var bindings = new InMemoryRuntimeBindingRepository();
         var provisioner = new AdmissionProvisioner();
@@ -106,6 +151,7 @@ class RuntimeBrokerStorageAdmissionTest {
     }
 
     private static final class AdmissionProvisioner implements RuntimeProvisioner {
+        private String provisionerKind = "kubernetes-workspace";
         private Consumer<RuntimeBindingRecord> admit = binding -> { };
         private int ensureCalls;
         private RuntimeProvisionSeed createdWith;
@@ -114,12 +160,13 @@ class RuntimeBrokerStorageAdmissionTest {
 
         @Override
         public String kind() {
-            return "kubernetes-workspace";
+            return provisionerKind;
         }
 
         @Override
         public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-            return new RuntimeProvisionRequest(scope, isolationKey, kind(), "storage");
+            return new RuntimeProvisionRequest(scope, isolationKey, kind(),
+                    "kubernetes-workspace".equals(kind()) ? "storage" : null);
         }
 
         @Override

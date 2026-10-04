@@ -23,7 +23,7 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return new RuntimeProvisionRequest(scope, isolationKey, kind());
     }
 
-    /** Short, bounded storage admission only; never creates a resource or calls a worker. */
+    /** Short, bounded pre-create admission only; never creates a resource or calls a worker. */
     default void reserveResource(RuntimeBindingRecord binding) {
     }
 

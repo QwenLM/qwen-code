@@ -145,6 +145,17 @@ and `close` never delete Kubernetes objects; neither is authorization to stop a
 worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
 automatic garbage collection, persistent Workspace storage or volume handoff.
 
+Each instance reserves at most 1024 retained or pending seeds before Kubernetes
+writes. At capacity, new seeds fail with retryable `runtime_kubernetes_capacity`;
+existing identities remain recoverable. Broker pre-create capacity refusal leaves
+the original binding PROVISIONING with its claim released for retry; an error
+after entering ensure keeps the existing fail-closed policy. The supplied durable
+handle is never shadowed by an empty local entry. `release` does not evict, UNKNOWN retains
+the slot while revoking local endpoint usability, and only that entry's own
+validated reconciliation conflict frees it. Lease lookups use a direct identity
+index and compare the endpoint. This bounds local state; it does not retire Pods,
+Secrets or durable bindings.
+
 After building and bundling the CLI, run the opt-in real-worker test from this
 module with Node.js, a reachable non-loopback IPv4 interface and free port `43190`:
 

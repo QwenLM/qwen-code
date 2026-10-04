@@ -70,6 +70,16 @@ UNKNOWN 确认错误保留可重试的 503 诊断；Broker 仍按既有默认策
 失败确认后的自动重试/接管留待后续。
 Pod readiness 仅表示传输就绪，Broker 仍需 attest、完整比较 boot identity 并提交 CAS。
 
+每个 provisioner 最多保留 1024 个 seed，包括进行中或含糊的 placement。在 Kubernetes
+写入之前预占 slot；满额时以可重试的 `runtime_kubernetes_capacity` 拒绝新 seed，既有
+seed 仍可被观测。Broker 在创建前准入阶段检查容量，保留原 binding 的 PROVISIONING
+状态并释放 operation claim 以便重试；进入 ensure 后的同名错误仍失败关闭。传入的
+持久原 handle 始终优先于空 pending 本地条目。租约查询按完整不可变 lease 身份直接索引，并核对 endpoint，不遍历
+seed map。`release` 不淘汰条目；UNKNOWN 撤销本地 endpoint 可用性，但保留所有权。
+只有经过校验、针对该条目自身原资源的 reconciliation conflict 才移除 slot；其他
+seed 的冲突不能淘汰活跃原 worker。`close` 清空两个本地索引，不删除 Kubernetes
+资源；进程重启也不授权替换或退休原资源。
+
 Pod IP 是观测 endpoint，不是身份。只接受可信 Kubernetes API 返回的 IPv4 字面量，
 拒绝无效、loopback、未指定、link-local 和 multicast 地址。worker 固定使用 43190
 端口（避开 Node fetch 的禁止端口列表）；K1 不支持纯 IPv6 集群。禁止自动重启容器，观测发现非零 restart count 即拒绝，防止清空账本后的容器

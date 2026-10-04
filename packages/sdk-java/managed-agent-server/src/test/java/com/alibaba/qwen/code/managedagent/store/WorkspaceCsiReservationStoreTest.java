@@ -131,6 +131,23 @@ class WorkspaceCsiReservationStoreTest {
     }
 
     @Test
+    void sameOperationRenewalAdmitsTheEarlierSnapshotWithoutChangingTheReservation() {
+        var registration = registration("tenant", "storage", "backend", "handle", 1);
+        store.register(registration);
+        var original = binding(registration, "workspace", "session");
+        var renewed = bindings.renewOperation(original.getBindingId(), original.getOperationOwner(),
+                original.getOperationGeneration(), Duration.ofMinutes(10));
+        assertThat(renewed).isNotNull();
+        assertThat(renewed.getVersion()).isGreaterThan(original.getVersion());
+        assertThat(renewed.getOperationLeaseUntil()).isAfter(original.getOperationLeaseUntil());
+        String reservationId = UUID.randomUUID().toString();
+        var reserved = store.reserve(registration, bindings, original, reservationId);
+        var before = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        assertThat(store.reserve(registration, bindings, original, reservationId)).isEqualTo(reserved);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
+    }
+
+    @Test
     void staleOperationAndDrainCannotModifyOrExpireThePhysicalReservation() {
         var registration = registration("tenant", "storage", "backend", "handle", 1);
         store.register(registration);
@@ -138,7 +155,7 @@ class WorkspaceCsiReservationStoreTest {
         String reservationId = UUID.randomUUID().toString();
         var reserved = store.reserve(registration, bindings, original, reservationId);
         var before = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
-        for (String change : new String[] {"record_version = record_version + 1", "operation_owner = 'another'",
+        for (String change : new String[] {"operation_owner = 'another'",
                 "operation_generation = operation_generation + 1", "operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'",
                 "runtime_generation = runtime_generation + 1", "workspace_generation = '2'",
                 "provision_request_id = 'changed'", "drain_requested = TRUE", "binding_state = 'READY'"}) {

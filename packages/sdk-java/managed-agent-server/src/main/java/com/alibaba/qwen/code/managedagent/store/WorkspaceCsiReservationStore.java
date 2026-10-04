@@ -440,14 +440,13 @@ public final class WorkspaceCsiReservationStore {
                 || authoritative == null || !request.equals(authoritative.getRequest())
                 || !original.getProvisionSeed().equals(authoritative.getProvisionSeed())
                 || original.getGeneration() != authoritative.getGeneration()
-                || original.getVersion() != authoritative.getVersion()
                 || authoritative.getState() != RuntimeBindingRecord.State.PROVISIONING
                 || authoritative.isDrainRequested()
                 || !authoritative.hasSameLease(original.getLease())
                 || !Objects.equals(original.getResourceHandle(), authoritative.getResourceHandle())
                 || !original.getOperationOwner().equals(authoritative.getOperationOwner())
                 || original.getOperationGeneration() != authoritative.getOperationGeneration()
-                || !original.getOperationLeaseUntil().equals(authoritative.getOperationLeaseUntil())) {
+                || authoritative.getOperationLeaseUntil() == null) {
             throw unavailable();
         }
         return authoritative.getOperationLeaseUntil();

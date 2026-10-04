@@ -1821,9 +1821,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             provisioner.reserveResource(claimed);
         } catch (RuntimeException failure) {
-            boolean busy = request.isManagedContext() && failure instanceof RuntimeBrokerException brokerFailure
-                    && brokerFailure.getStatusCode() == 409 && brokerFailure.isRetryable()
-                    && "workspace_csi_busy".equals(brokerFailure.getCode());
+            boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
+                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
+                                    && brokerFailure.getStatusCode() == 503
+                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }

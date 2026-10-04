@@ -540,8 +540,12 @@ does not establish a valid upgrade. Recheck the next free version before shippin
 
 Reserve only against the current PROVISIONING binding. Decode the complete durable
 seed through the configured JDBC repository on the same locked transaction connection;
-compare the complete request, seed, resource/lease identity, record version and exact
-coordinator operation. Check fresh database time after acquiring the physical lock,
+compare the complete request, seed, binding generation, resource/lease identity,
+PROVISIONING state, drain flag and coordinator owner/operation generation. The
+same operation's renewal may change record version and operation deadline between
+the caller's snapshot and the locked read; those fields are not equality fences
+for reservation admission. The authoritative deadline must remain non-null and
+live at fresh database time after acquiring the physical lock,
 including on an idempotent retry. CSI transactions and the locked authoritative read
 have a ten-second SQL timeout; timeout is not a successful reservation or a busy proof. The same original reservation
 retries idempotently; stale callers and another physical holder leave all rows

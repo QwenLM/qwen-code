@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -270,6 +271,40 @@ class WorkspaceCsiRuntimeIdentityTest {
     }
 
     @Test
+    void pendingPodReadinessSurvivesRenewalBetweenAdmissionReads() {
+        var pendingReads = new AtomicInteger();
+        var renewals = new AtomicInteger();
+        api.changeCreatedPod = pod -> WorkspaceCsiRuntimeIdentity.map(
+                ((List<?>) nested(pod, "status").get("containerStatuses")).getFirst()).put("ready", false);
+        api.observePod = pod -> {
+            if (pendingReads.incrementAndGet() >= 3) {
+                api.containerStatus().put("ready", true);
+            }
+        };
+        bindings = spy(bindings);
+        doAnswer(call -> {
+            RuntimeBindingRecord snapshot = (RuntimeBindingRecord) call.callRealMethod();
+            if (pendingReads.get() > 0) {
+                var renewed = bindings.renewOperation(snapshot.getBindingId(), snapshot.getOperationOwner(),
+                        snapshot.getOperationGeneration(), Duration.ofMinutes(5));
+                assertThat(renewed).isNotNull();
+                assertThat(renewed.getVersion()).isGreaterThan(snapshot.getVersion());
+                renewals.incrementAndGet();
+            }
+            return snapshot;
+        }).when(bindings).findById(any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(pendingReads).hasValueGreaterThanOrEqualTo(3);
+            assertThat(renewals).hasValueGreaterThanOrEqualTo(2);
+            assertThat(handle.getKind()).isEqualTo("kubernetes-workspace");
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
     void expiredClaimAndNoAdmissionCauseZeroCreates() {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
@@ -368,6 +403,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         private int creates;
         private String loseReply;
         private Consumer<Map<String, Object>> changeCreatedPod = ignored -> { };
+        private Consumer<Map<String, Object>> observePod = ignored -> { };
         private CompletableFuture<Map<String, Object>> secretReply;
 
         private Api() {
@@ -392,6 +428,9 @@ class WorkspaceCsiRuntimeIdentityTest {
 
         @Override
         public CompletionStage<Map<String, Object>> get(String resource, String namespace, String name) {
+            if (resource.equals("pods") && objects.get(resource) != null) {
+                observePod.accept(objects.get(resource));
+            }
             return CompletableFuture.completedFuture(objects.get(resource));
         }
 
