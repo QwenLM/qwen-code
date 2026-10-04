@@ -404,7 +404,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('records no nested code_mode result when the call is outside a Goal turn', async () => {
     const recordToolResult = vi.fn();
-    const { run } = setup(
+    const { run, fnResponse } = setup(
       [
         new MockTool({
           name: 'read_probe',
@@ -430,9 +430,10 @@ describe('CodeModeOnly scheduler dispatch', () => {
       'const result = await tools.read_probe({}); text(result.output);',
     );
 
-    expect(
-      recordToolResult.mock.calls.map((call) => call[1]?.callId),
-    ).not.toContain('exec-nogoal:code:1');
+    // Positive control: without it the negative below also passes when the
+    // nested call never dispatches.
+    expect(fnResponse()?.response?.['output']).toContain('nested output');
+    expect(recordToolResult).not.toHaveBeenCalled();
   }, 10_000);
 
   it('runs Promise.all reads in one scheduler batch', async () => {
