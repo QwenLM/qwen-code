@@ -40,6 +40,9 @@ public interface AgentStateStore {
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection);
 
+    Optional<Admission> findWorkspaceCreateReplay(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest);
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
@@ -193,6 +196,9 @@ public interface AgentStateStore {
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
 
+    void deferTurnRetry(String tenantId, String sessionId, String turnId,
+            String owner, long retryAfter);
+
     void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
 
@@ -245,4 +251,7 @@ public interface AgentStateStore {
             String type, Map<String, Object> data, String sourceKey);
 
     SessionRecord requireSession(String tenantId, String sessionId);
+
+    Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
+            String sessionId);
 }

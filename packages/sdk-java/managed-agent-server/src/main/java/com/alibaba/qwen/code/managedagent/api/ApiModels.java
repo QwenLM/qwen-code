@@ -36,8 +36,11 @@ public final class ApiModels {
     }
 
     public record UpdateSessionRequest(
-            // Same 512 cap as create; see ManagedAgentService.validTitle.
-            @NotBlank @Size(max = 512) String title) {
+            // Single policy owner: ManagedAgentService.validRenameTitle
+            // (256 + control-characters + non-blank), so the rename route
+            // answers the specific invalid_title code instead of bean
+            // validation's generic envelope.
+            String title) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

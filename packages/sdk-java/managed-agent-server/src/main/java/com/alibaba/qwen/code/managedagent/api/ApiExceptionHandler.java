@@ -67,14 +67,13 @@ public class ApiExceptionHandler {
 
     // Client-side dispatch mistakes are not server faults: a 405 carries the
     // Allow header and a 415 names the real problem, instead of the
-    // catch-all turning them into 500 internal_error.
+    // catch-all turning them into 500 internal_error. Spring raises the 405
+    // exception from handler mapping, before any handler method writes, so
+    // no committed-response guard is needed here.
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<Map<String, Object>> methodNotSupported(
             HttpRequestMethodNotSupportedException error,
             HttpServletRequest request, HttpServletResponse response) {
-        if (response.isCommitted()) {
-            return null;
-        }
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
                 .headers(error.getHeaders())
                 .contentType(MediaType.APPLICATION_JSON)

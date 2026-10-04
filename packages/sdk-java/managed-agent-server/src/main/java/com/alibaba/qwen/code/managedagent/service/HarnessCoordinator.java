@@ -586,6 +586,19 @@ public class HarnessCoordinator {
 
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error) {
+        if (!submissionAttempted && isHarnessDisabled(error)) {
+            // An outage defers the turn without spending its pre-admission
+            // budget: a replay answered 202 relies on this hold, and the
+            // recovery sweep (already gated on availability) picks the turn
+            // back up once the Harness returns.
+            long defer = clock.millis() + retryInitialDelay.toMillis();
+            store.deferTurnRetry(turn.tenantId(), turn.sessionId(),
+                    turn.turnId(), owner, defer);
+            LOG.warn("Managed Turn coordination deferred while Harness"
+                            + " unavailable tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId());
+            return true;
+        }
         if (!submissionAttempted
                 && turn.retryCount() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
@@ -607,6 +620,11 @@ public class HarnessCoordinator {
                 turn.retryCount() + 1, delay,
                 error.getClass().getSimpleName());
         return true;
+    }
+
+    private static boolean isHarnessDisabled(RuntimeException error) {
+        return error instanceof IllegalStateException
+                && "Hosted Harness is disabled".equals(error.getMessage());
     }
 
     static long retryDelay(Duration initialDelay, Duration maxDelay,

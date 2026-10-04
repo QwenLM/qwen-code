@@ -159,7 +159,7 @@ class WorkspaceSessionRetentionTest {
     }
 
     @Test
-    void unarchiveKeysAreScopedBySessionAndCaseAndCannotReplayAfterDeletion() throws Exception {
+    void unarchiveKeysAreScopedBySessionAndCaseAndReplayAfterDeletion() throws Exception {
         String tenant = tenant();
         String first = closed(tenant, false);
         String second = closed(tenant, false);
@@ -175,7 +175,12 @@ class WorkspaceSessionRetentionTest {
                 .andExpect(status().isAccepted())).path("id").asText();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, first, id).orElseThrow().state())
                 .isEqualTo("COMPLETED"));
-        web("unarchive", tenant, first, "owner", "same").andExpect(status().isNotFound());
+        // Replay-first, like every other mutation path: the recorded
+        // success answers its body with the Session as last visible
+        // (closed), never a 404 for the later delete.
+        web("unarchive", tenant, first, "owner", "same").andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.status").value("closed"));
         assertThat(count(tenant, first, "session.unarchived")).isEqualTo(2);
     }
 

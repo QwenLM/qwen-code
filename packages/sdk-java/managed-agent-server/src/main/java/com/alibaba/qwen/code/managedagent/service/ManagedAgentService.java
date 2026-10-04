@@ -52,6 +52,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
@@ -188,11 +189,6 @@ public class ManagedAgentService {
                     "actor_required", "A trusted actor is required.");
         }
         List<Map<String, Object>> input = input(blocks, false);
-        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
-            throw new ApiException(HttpStatus.CONFLICT,
-                    "workspace_unavailable",
-                    "Hosted Workspace execution is not available.");
-        }
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
@@ -208,6 +204,19 @@ public class ManagedAgentService {
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
+        // Replay before the availability gate, like the legacy paths: a
+        // recorded success must answer even while Workspace files are off.
+        Optional<Admission> recorded = store.findWorkspaceCreateReplay(
+                tenantId, actorId, idempotencyKey, requestDigest);
+        if (recorded.isPresent()) {
+            dispatch(tenantId, recorded.get());
+            return response(recorded.get());
+        }
+        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
         Admission admission;
         try {
             admission = store.insertWorkspaceSessionCommand(tenantId,
@@ -226,17 +235,19 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        requireSubmitter(tenantId, actorId, sessionId);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
-        // Replay before the harness gate; see createSession.
+        // Replay before every availability gate — the submitter check
+        // included — so a workspace-bound retry answers while Workspace
+        // files are off, like the legacy path. See createSession.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
         }
+        requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
@@ -328,9 +339,12 @@ public class ManagedAgentService {
             }
         }
         // A replay re-reads the row without the visibility filter: the
-        // recorded success must not 404 after a later delete.
+        // recorded success must not 404 after a later delete, and the body
+        // serializes the Session as it was last visible, so the closed
+        // status enum never has to carry "deleted".
         return new SessionMutationResult<>(publicSession(
-                store.requireSession(tenantId, sessionId)), true);
+                asLastVisible(store.requireSession(tenantId, sessionId))),
+                true);
     }
 
     // An archived Session stays closed, so unarchive needs neither the
@@ -338,13 +352,19 @@ public class ManagedAgentService {
     public SessionMutationResult<PublicSession> unarchiveSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
         var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
-        return new SessionMutationResult<>(publicSession(result.session()), result.replayed());
+        SessionRecord session = result.replayed()
+                ? asLastVisible(result.session()) : result.session();
+        return new SessionMutationResult<>(publicSession(session),
+                result.replayed());
     }
 
     public SessionMutationResult<WebShellSession> unarchiveWebShellSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
         var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
-        return new SessionMutationResult<>(webShellSession(result.session(), actorId), result.replayed());
+        SessionRecord session = result.replayed()
+                ? asLastVisible(result.session()) : result.session();
+        return new SessionMutationResult<>(webShellSession(session, actorId),
+                result.replayed());
     }
 
     private StoreModels.SessionMutation unarchive(String tenantId, String actorId,
@@ -371,12 +391,18 @@ public class ManagedAgentService {
         }
         // Replay without the visibility filter; see renameSession.
         return new StoreModels.SessionMutation(
-                store.requireSession(tenantId, sessionId), true);
+                asLastVisible(store.requireSession(tenantId, sessionId)),
+                true);
     }
 
-    private PublicSession getPublicSession(String tenantId,
-            String sessionId) {
-        return publicSession(requireVisibleSession(tenantId, sessionId));
+    private SessionRecord asLastVisible(SessionRecord session) {
+        if (!"DELETED".equals(session.status())) {
+            return session;
+        }
+        return store.findLastVisibleStatusBeforeDelete(session.tenantId(),
+                session.sessionId())
+                .map(session::withStatus)
+                .orElse(session);
     }
 
     public PublicSession getPublicSession(String tenantId, String actorId,
@@ -917,16 +943,17 @@ public class ManagedAgentService {
                 : title instanceof String ? (String) title : null);
     }
 
-    // One title policy for create, metadata and rename: 512 (the column
-    // width) plus the control-character rule. A title the API once stored
-    // must stay writable through every path.
+    // One title policy for create, metadata and rename: 256 — the Hosted
+    // Harness client's own cap, the only downstream bound that cannot be
+    // worked around — plus the control-character rule. A title the API
+    // accepts must stay writable through every path.
     private static String validTitle(String title) {
         if (title == null) {
             return null;
         }
-        if (title.length() > 512) {
+        if (title.length() > 256) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
-                    "Title must not exceed 512 characters.");
+                    "Title must not exceed 256 characters.");
         }
         if (title.chars().anyMatch(character -> character <= 31
                 || character == 127)) {
@@ -939,7 +966,7 @@ public class ManagedAgentService {
     private static String validRenameTitle(String title) {
         if (title == null || title.isBlank()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
-                    "Title must contain 1-512 characters.");
+                    "Title must contain 1-256 characters.");
         }
         return validTitle(title);
     }

@@ -19,7 +19,7 @@ public class HarnessEventProjector {
             Map<String, Object> data = object(event.data());
             String stopReason = string(data.get("stopReason"));
             boolean cancelled = stopReason != null
-                    && stopReason.toLowerCase().contains("cancel");
+                    && stopReason.toLowerCase(java.util.Locale.ROOT).contains("cancel");
             String type = cancelled ? "turn.cancelled" : "turn.completed";
             String status = cancelled ? "CANCELLED" : "COMPLETED";
             return new ProjectedEvent(type,

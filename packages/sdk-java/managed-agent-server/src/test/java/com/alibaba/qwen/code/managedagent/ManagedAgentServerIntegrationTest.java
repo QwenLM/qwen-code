@@ -1735,7 +1735,9 @@ class ManagedAgentServerIntegrationTest {
         awaitOperation(tenant, sessionId, deleteId);
 
         // The recorded success replays with its original body; it must not
-        // 404 just because the Session was deleted in between.
+        // 404 just because the Session was deleted in between — and the body
+        // serializes the Session as it was last visible, keeping "deleted"
+        // out of the closed status enum.
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"before delete\"}"), tenant,
@@ -1743,49 +1745,183 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "true"))
+                .andExpect(jsonPath("$.status").value("active"))
                 .andExpect(jsonPath("$.metadata.title")
                         .value("before delete"));
     }
 
     @Test
-    void rewritesAStoredLongTitleUnderOneTitlePolicy() throws Exception {
+    void mapsMethodAndMediaTypeErrorsThroughTheAdviceDispatch()
+            throws Exception {
+        // Driven through the real DispatcherServlet so the @ExceptionHandler
+        // mappings are exercised reflectively — a deleted or mistyped
+        // annotation would fall through to the 500 catch-all here.
+        mvc.perform(post("/v1/agents/sessions/{id}", "session-405")
+                        .header(TenantContextFilter.HEADER, "tenant-405"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(header().exists("Allow"))
+                .andExpect(jsonPath("$.error.code")
+                        .value("method_not_allowed"));
+        // Routes here declare no `consumes`, so Spring never raises
+        // HttpMediaTypeNotSupportedException: the text/plain body reaches
+        // the handler and is refused as a client error with the envelope's
+        // 400 invalid_request. The dedicated 415 handler still guards any
+        // route that adds a constraint.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-415")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("not json"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    @Test
+    void replaysACompletedUnarchiveAfterTheSessionWasDeleted()
+            throws Exception {
+        String tenant = "tenant-unarchive-replay-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "replay-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        String closeId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions/{id}/close", sessionId)
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "replay-close"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        awaitOperation(tenant, sessionId, closeId);
+        String archiveId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions/{id}/archive", sessionId)
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "replay-archive"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        awaitOperation(tenant, sessionId, archiveId);
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "replay-unarchive"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("closed"));
+        String deleteId = objectMapper.readTree(lifecycle(
+                        delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                        "replay-delete")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        awaitOperation(tenant, sessionId, deleteId);
+
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "replay-unarchive"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay",
+                        "true"))
+                .andExpect(jsonPath("$.status").value("closed"));
+    }
+
+    @Test
+    void enforcesOneTitlePolicyAcrossCreateAndRename() throws Exception {
         String tenant = "tenant-title-policy-" + UUID.randomUUID();
-        String longTitle = "t".repeat(300);
+        // 256 — the Harness client's own cap, so every accepted title stays
+        // writable through every path end to end.
+        String fullTitle = "t".repeat(256);
         String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "title-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
-                                        + "\"metadata\":{\"title\":\"" + longTitle
+                                        + "\"metadata\":{\"title\":\"" + fullTitle
                                         + "\"}}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
-
-        // A title the API once stored must stay writable through rename.
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + longTitle + "\"}"), tenant,
+                .content("{\"title\":\"" + fullTitle + "\"}"), tenant,
                 "title-rewrite")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.metadata.title").value(longTitle));
+                .andExpect(jsonPath("$.metadata.title").value(fullTitle));
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "title-create-too-long")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
+                                + "\"metadata\":{\"title\":\"" + "t".repeat(257)
+                                + "\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"" + "t".repeat(513) + "\"}"), tenant,
+                .content("{\"title\":\"" + "t".repeat(257) + "\"}"), tenant,
                 "title-too-long")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        // A JSON-escaped newline parses to a raw control character in the
+        // value; the policy (not the JSON parser) must answer.
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"bad\title\"}"), tenant,
+                .content("{\"title\":\"bad\\ntitle\"}"), tenant,
                 "title-control")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-control")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
-                                + "\"metadata\":{\"title\":\"bad\title\"}}"))
-                .andExpect(status().isBadRequest());
+                                + "\"metadata\":{\"title\":\"bad\\ntitle\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+    }
+
+    @Test
+    void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
+            throws Exception {
+        String tenant = "tenant-locale-turn-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "locale-turn-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":["
+                                        + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                assertThat(harness.hasHeldTurn()).isTrue());
+
+        java.util.Locale previous = java.util.Locale.getDefault();
+        java.util.Locale.setDefault(new java.util.Locale("tr", "TR"));
+        try {
+            // "running" and "active" both carry ASCII I; the Turkish fold
+            // would corrupt them into dotless-ı protocol tokens.
+            mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data[0].status").value("running"));
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.activeTurn.status")
+                            .value("running"));
+            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "locale-archive"))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("session_state_conflict"))
+                    .andExpect(jsonPath("$.error.message")
+                            .value(org.hamcrest.Matchers
+                                    .containsString("active")));
+        } finally {
+            java.util.Locale.setDefault(previous);
+        }
     }
 
     @Test

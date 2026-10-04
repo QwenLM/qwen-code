@@ -263,6 +263,24 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public Optional<Admission> findWorkspaceCreateReplay(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest) {
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (existing.isEmpty()) {
+            return Optional.empty();
+        }
+        WorkspaceCommand command = existing.getFirst();
+        if (!command.requestDigest().equals(requestDigest)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+        return Optional.of(new Admission(command.sessionId(),
+                command.turnId(), true, false));
+    }
+
+    @Override
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId,
             String actorId, String idempotencyKey, String requestDigest) {
@@ -664,10 +682,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String actorId, String scopedKey, String requestDigest) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
-        if ("DELETED".equals(session.status())) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
-        }
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
+        // Replay first, like every other mutation path: a recorded success
+        // must not 404 after a later delete.
         Optional<CommandRecord> existing = findCommand(tenantId, namespace, scopedKey, true);
         if (existing.isPresent()) {
             if (!existing.get().requestDigest().equals(requestDigest) || !existing.get().sessionId().equals(sessionId)) {
@@ -675,6 +692,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new SessionMutation(session, true);
+        }
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
         requireSessionStatus(session.status(), "ARCHIVED");
         requireNoOpenOperation(tenantId, sessionId);
@@ -1400,6 +1420,19 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, turnId, owner);
     }
 
+    @Override
+    public void deferTurnRetry(String tenantId, String sessionId,
+            String turnId, String owner, long retryAfter) {
+        jdbc.update("UPDATE managed_agent_turn SET retry_after = ?,"
+                        + " dispatch_owner = NULL, dispatch_lease_until ="
+                        + " NULL, updated_at = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ? AND turn_id = ?"
+                        + " AND dispatch_owner = ? AND status IN"
+                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING')",
+                retryAfter, clock.millis(), tenantId, sessionId, turnId,
+                owner);
+    }
+
     public void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
         jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
@@ -1870,6 +1903,27 @@ public class ManagedAgentStore implements AgentStateStore {
             appendEvent(tenantId, sessionId, null, type, data, false,
                     sourceKey, clock.millis());
         }
+    }
+
+    @Override
+    public Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
+            String sessionId) {
+        List<String> statuses = jdbc.query("SELECT session_status_before"
+                        + " FROM managed_agent_operation WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_kind = 'DELETE'"
+                        + " AND session_status_before IS NOT NULL ORDER BY"
+                        + " created_at DESC LIMIT 1",
+                (rows, row) -> rows.getString(1), tenantId, sessionId);
+        if (!statuses.isEmpty()) {
+            return Optional.ofNullable(statuses.getFirst());
+        }
+        statuses = jdbc.query("SELECT session_status_before FROM"
+                        + " managed_agent_command WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation = 'DELETE_SESSION'"
+                        + " AND session_status_before IS NOT NULL ORDER BY"
+                        + " created_at DESC LIMIT 1",
+                (rows, row) -> rows.getString(1), tenantId, sessionId);
+        return statuses.stream().findFirst();
     }
 
     public SessionRecord requireSession(String tenantId, String sessionId) {

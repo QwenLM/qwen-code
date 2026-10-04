@@ -112,6 +112,22 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // An outage defers without spending the pre-admission budget: a replay
+    // answered 202 relies on this hold, and the recovery sweep picks the
+    // turn back up once the Harness returns (it is gated on availability).
+    @Test
+    void defersWithoutBurningBudgetWhileTheHarnessIsDisabled() {
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                new IllegalStateException("Hosted Harness is disabled"),
+                false, 0);
+        verify(store).deferTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyLong());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+    }
+
     // A claim that already recorded a submission attempt may have been
     // admitted, so even a permanent authorization refusal must not end it
     // before the pre-admission retry budget (retryCount 5 would otherwise be
