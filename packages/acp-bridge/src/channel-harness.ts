@@ -115,7 +115,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   async function killChannelWithLog(
     ci: HarnessChannel,
     context?: string,
+    routineRetirement = false,
   ): Promise<void> {
+    if (routineRetirement && !ci.isDying && !channelShouldReapWhenIdle(ci)) {
+      ci.routineRetirementStarted = true;
+    }
     ci.isDying = true;
     options.onChannelTerminationStart?.(ci);
     cancelIdleTimer(ci);
@@ -193,7 +197,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     cancelIdleTimer(ci);
     const timeoutMs = resolvedChannelIdleTimeoutMs(ci.executionEngine);
     if (timeoutMs <= 0) {
-      await killChannelWithLog(ci, context);
+      await killChannelWithLog(ci, context, true);
       return;
     }
     const idleTimer = setTimeout(() => {
@@ -202,7 +206,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
-        void killChannelWithLog(ci, 'idle timeout');
+        void killChannelWithLog(ci, 'idle timeout', true);
       } else {
         pendingIdleTimers.add(ci);
       }
@@ -212,6 +216,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   }
 
   function retireChannel(info: HarnessChannel, context: string) {
+    if (!info.isDying && !channelShouldReapWhenIdle(info)) {
+      info.routineRetirementStarted = true;
+    }
     info.isDying = true;
     cancelIdleTimer(info);
     if (info.executionEngine === defaultEngine) keepAliveUntil = 0;

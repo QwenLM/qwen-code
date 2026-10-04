@@ -5100,6 +5100,7 @@ export function createSessionControlPlane(
         info.harness.transportFailureCode === 'ndjson_unexpected_eof';
       const routineRetirement =
         channelExitExpected &&
+        info.harness.routineRetirementStarted === true &&
         (exitInfo === undefined ||
           (exitInfo.exitCode === 0 && exitInfo.signalCode === null)) &&
         !channelIsCondemned(info) &&
