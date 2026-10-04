@@ -18,6 +18,7 @@ public final class HarnessEventStream implements AutoCloseable {
     private final AtomicBoolean idleTimedOut = new AtomicBoolean();
     private final AtomicLong lastActivity =
             new AtomicLong(System.nanoTime());
+    private final AtomicBoolean consumerWaiting = new AtomicBoolean();
     // Serializes concurrent next() callers so frames cannot interleave;
     // close() never takes this lock, so a blocked read stays abortable.
     private final Object cursorLock = new Object();
@@ -54,6 +55,10 @@ public final class HarnessEventStream implements AutoCloseable {
             if (closed.get()) {
                 throw closedFailure();
             }
+            // The idle budget measures peer silence while a consumer is
+            // parked here; time between next() calls is not charged.
+            consumerWaiting.set(true);
+            lastActivity.set(System.nanoTime());
             try {
                 SseReader.Frame frame = reader.next();
                 if (frame == null) {
@@ -88,6 +93,8 @@ public final class HarnessEventStream implements AutoCloseable {
             } catch (RuntimeException e) {
                 closeQuietly();
                 throw e;
+            } finally {
+                consumerWaiting.set(false);
             }
         }
     }
@@ -144,6 +151,11 @@ public final class HarnessEventStream implements AutoCloseable {
                 if (watchdog != null) {
                     watchdog.cancel(false);
                 }
+                return;
+            }
+            // Only a consumer parked in next() is waiting on the peer; a
+            // stream nobody is pulling stays open until close().
+            if (!consumerWaiting.get()) {
                 return;
             }
             if (System.nanoTime() - lastActivity.get() >= idleNanos

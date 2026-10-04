@@ -59,9 +59,11 @@ public final class SubmitHarnessTurn {
         }
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            // The hosted route recomputes this value over the `prompt`
-            // member's received bytes, so the digest must cover exactly the
-            // canonical form toJson() also emits. Iteration order is only
+            // The hosted route recomputes this value by re-serializing the
+            // parsed `prompt` member (JavaScript `JSON.stringify`
+            // semantics: compact separators, literal non-ASCII) and hashing
+            // those bytes, so the digest must cover exactly the canonical
+            // form toJson() also emits. Iteration order is only
             // canonicalized recursively because fastjson2 does not sort
             // maps nested in a collection.
             byte[] bytes = JsonSupport.encode(

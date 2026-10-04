@@ -274,10 +274,17 @@ public final class HostedHarnessClient implements AutoCloseable {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
             // An unfenced 408/5xx (for example a gateway error page) cannot
-            // prove the prompt was not admitted, so it is outcome-unknown;
-            // a definitive unfenced 4xx is the server's own refusal.
+            // prove the prompt was not admitted, so it is outcome-unknown.
+            // A definitive unfenced 4xx was produced before the route's
+            // promptId lookup: it refuses this submission, so a marker this
+            // call owns is released, while an earlier same-identity entry
+            // stays — the refusal says nothing about it.
             if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())) {
                 throw new PromptAdmissionUnknownException(e);
+            }
+            if (ownsActivePrompt) {
+                activePrompts.remove(session.getHarnessSessionId(),
+                        candidate);
             }
             throw new DaemonHttpException("POST /session/:id/prompt",
                     raw.statusCode(), e.getMessage());
@@ -317,11 +324,14 @@ public final class HostedHarnessClient implements AutoCloseable {
                 throw new PromptAlreadyActiveException(
                         "Hosted Harness session already has a running turn");
             }
-            // A definitive non-409 failure tells the caller the server is
-            // not running this prompt identity; had an earlier same-identity
-            // admission been running, the server would have answered 409.
-            ActivePrompt retained = ownsActivePrompt ? candidate : existing;
-            activePrompts.remove(session.getHarnessSessionId(), retained);
+            // A definitive non-409 refusal releases only the marker this
+            // call owns: refusals produced before the route's promptId
+            // lookup (auth, rate limiting, body parsing) say nothing about
+            // an earlier same-identity submission, whose entry stays.
+            if (ownsActivePrompt) {
+                activePrompts.remove(session.getHarnessSessionId(),
+                        candidate);
+            }
             throw new DaemonHttpException("POST /session/:id/prompt",
                     response.getStatusCode(), response.getBody());
         }
@@ -424,8 +434,12 @@ public final class HostedHarnessClient implements AutoCloseable {
         String fenceEpoch = request.getEventEpoch() != null
                 ? request.getEventEpoch()
                 : session.getHarnessEventEpoch();
-        long cursor = request.getLastEventId() != 0
-                ? request.getLastEventId()
+        // An explicit cursor always wins, including a deliberate 0 (replay
+        // from the beginning); only an omitted cursor falls back to the
+        // ref's watermark.
+        Long requestedCursor = request.getLastEventId();
+        long cursor = requestedCursor != null
+                ? requestedCursor
                 : (session.getHarnessLastEventId() == null
                         ? 0
                         : session.getHarnessLastEventId());
@@ -1083,6 +1097,11 @@ public final class HostedHarnessClient implements AutoCloseable {
                             JsonSupport.encode(body),
                             StandardCharsets.UTF_8));
         }
+        // Snapshot the executor state ahead of dispatch: a termination
+        // already in effect proves the request never left the JVM, while
+        // one that lands mid-flight (close() racing an in-flight send)
+        // must keep its outcome-unknown classification.
+        boolean terminatedBeforeSend = httpExecutor.isShutdown();
         try {
             return httpClient.send(builder.build(),
                     HttpSupport.bodyHandler());
@@ -1096,9 +1115,10 @@ public final class HostedHarnessClient implements AutoCloseable {
             // the caller-supplied executor runs response delivery tasks too
             // — so this shape alone cannot tell a rejection at dispatch
             // from one after the request was already on the wire. Only the
-            // terminated-executor case proves non-dispatch; everything else
-            // keeps its mid-flight outcome-unknown classification.
-            if (httpExecutor.isShutdown() && isExecutorRejection(e)) {
+            // already-terminated executor case proves non-dispatch;
+            // everything else keeps its mid-flight outcome-unknown
+            // classification.
+            if (terminatedBeforeSend && isExecutorRejection(e)) {
                 throw new DaemonTransportException(
                         "Hosted Harness HTTP executor is saturated", e);
             }
@@ -1456,14 +1476,19 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
 
         /**
-         * Bounds the silence an event stream tolerates before the client
-         * force-closes it and {@code next()} fails with a
-         * {@link DaemonTransportException}. {@link Duration#ZERO} disables
-         * the watchdog for callers that own the deadline themselves. The
-         * bound only works when the peer proves liveness during long silent
-         * phases, the way the hosted events route's keepalive comments do;
-         * against a peer that stays quiet, legitimate silence is treated
-         * as a dead connection.
+         * Bounds how long a consumer parked in {@code next()} waits without
+         * any bytes from the peer before the client force-closes the stream
+         * and {@code next()} fails with a {@link DaemonTransportException}.
+         * Time between {@code next()} calls is not charged, so a caller
+         * that pauses consumption (an approval wait handled outside the
+         * stream, a slow event handler) does not lose a healthy stream. The
+         * bound relies on the peer proving liveness during long silent
+         * phases, the way the hosted events route's keepalive comments do
+         * every 15 seconds, so a custom bound should stay comfortably above
+         * that interval; against a peer that stays quiet while a consumer
+         * is waiting, legitimate silence is treated as a dead connection.
+         * {@link Duration#ZERO} disables the watchdog for callers that own
+         * the deadline themselves.
          */
         public Builder sseIdleTimeout(Duration sseIdleTimeout) {
             if (sseIdleTimeout == null || sseIdleTimeout.isNegative()) {

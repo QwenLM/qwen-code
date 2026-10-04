@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.daemon;
 /** Cursor and epoch used to open one Hosted Harness SSE stream. */
 public final class StreamHarnessEvents {
     private final HarnessSessionRef session;
-    private final long lastEventId;
+    private final Long lastEventId;
     private final String eventEpoch;
     private final boolean snapshot;
 
@@ -11,7 +11,7 @@ public final class StreamHarnessEvents {
         if (builder.session == null) {
             throw new IllegalStateException("session must be provided");
         }
-        if (builder.lastEventId < 0) {
+        if (builder.lastEventId != null && builder.lastEventId < 0) {
             throw new IllegalArgumentException(
                     "lastEventId must be non-negative");
         }
@@ -30,7 +30,7 @@ public final class StreamHarnessEvents {
         return session;
     }
 
-    long getLastEventId() {
+    Long getLastEventId() {
         return lastEventId;
     }
 
@@ -44,7 +44,7 @@ public final class StreamHarnessEvents {
 
     public static final class Builder {
         private HarnessSessionRef session;
-        private long lastEventId;
+        private Long lastEventId;
         private String eventEpoch;
         private boolean snapshot;
 
@@ -57,11 +57,10 @@ public final class StreamHarnessEvents {
         }
 
         /**
-         * Resumes the stream after this event id. A non-zero cursor always
-         * wins; an omitted (or explicitly zero) cursor falls back to the
-         * session ref's watermark when it carries one, so the epoch fence
-         * stays on by default — there is currently no way to request a
-         * deliberate "replay from the beginning" against a watermarked ref.
+         * Resumes the stream after this event id. An explicit cursor always
+         * wins — including 0, which asks for a replay from the beginning;
+         * only an omitted cursor falls back to the session ref's watermark,
+         * so the epoch fence stays on by default.
          */
         public Builder lastEventId(long lastEventId) {
             this.lastEventId = lastEventId;
