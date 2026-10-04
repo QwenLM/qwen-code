@@ -315,6 +315,13 @@ describe('applyReplacementPreservingLineEndings', () => {
     ).toBe('const a = 1;\nconst B = 2;\r\nconst c = 3;\n');
   });
 
+  it('does not treat a bare CR at the start of a match as a CRLF break', () => {
+    const raw = 'a\r\nb\rc\nd\n';
+
+    expect(splice(raw, '\rc', '\rC\nD')).toBe('a\r\nb\rC\nD\nd\n');
+    expect(splice(raw, '\rc', 'XYZ\nW')).toBe('a\r\nbXYZ\nW\nd\n');
+  });
+
   it('replaces every newline-only match, each keeping its own kind', () => {
     // replace_all over a bare newline: the same span shape at every position,
     // so each one has to resolve its own ending rather than inherit the first

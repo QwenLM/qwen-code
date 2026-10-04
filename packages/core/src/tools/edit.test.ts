@@ -790,6 +790,24 @@ describe('EditTool', () => {
       );
     });
 
+    it('preserves a bare CR at the start of a matched span', async () => {
+      const original = 'a\r\nb\rc\nd\n';
+      fs.writeFileSync(filePath, original, 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: '\rc',
+        new_string: '\rC\nD',
+      };
+
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nb\rC\nD\nd\n');
+    });
+
     // The no-change gate compares `currentContent` with `newContent`, and both
     // of those are the LF-normalized view. The bytes that reach disk are
     // `contentForWrite`, and a mixed-ending file can make the two disagree about

@@ -706,15 +706,9 @@ export function applyReplacementPreservingLineEndings(
     // A line break the edit matched is replaced by one of the same kind: when
     // the span starts on a break, that break belonged to the line in front of
     // it, so the inserted text's first break keeps the ending of the line it
-    // terminates. The guard above has already pulled a dropped `\r` into the
-    // span, so its first character says which kind it was.
-    const matchedLeadingEnding = rawContent[rawStart] === '\r' ? '\r\n' : '\n';
-    // When the span starts on a break, the inserted text continues the line that
-    // break terminated, so every break it adds takes the same kind. Decided first,
-    // because in that case the span's own region is never consulted and the lookups
-    // below would be performed only to be discarded.
-    const spanStartsWithBreak =
-      rawContent[rawStart] === '\n' || rawContent[rawStart] === '\r';
+    // terminates. `lineEndingAfter` also keeps a bare `\r` from being mistaken
+    // for half of a CRLF break.
+    const matchedLeadingEnding = lineEndingAfter(rawContent, rawStart);
     const spansWholeFile =
       copiedUpTo === 0 && rawStart === 0 && rawEnd === rawContent.length;
     // A full-file replacement has no untouched bytes to splice around. Keep the
@@ -722,7 +716,7 @@ export function applyReplacementPreservingLineEndings(
     // can submit the whole normalized file as one replacement span.
     const ending = spansWholeFile
       ? '\r\n'
-      : spanStartsWithBreak
+      : matchedLeadingEnding !== null
         ? matchedLeadingEnding
         : (spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
           lineEndingAfter(rawContent, rawEnd) ??
