@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 class SessionEventHubTest {
@@ -38,6 +39,30 @@ class SessionEventHubTest {
 
             assertThat(delivery.overflowed()).isTrue();
             assertThat(delivery.events()).isEmpty();
+        }
+    }
+
+    @Test
+    void awaitPropagatesInterruptionLikeObjectWait() throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        try (SessionEventHub.Subscription subscription = hub.subscribe(
+                "tenant", "session")) {
+            AtomicBoolean interrupted = new AtomicBoolean();
+            Thread waiter = Thread.ofVirtual().start(() -> {
+                try {
+                    subscription.await(0, Duration.ofMinutes(5));
+                } catch (InterruptedException expected) {
+                    interrupted.set(true);
+                    Thread.currentThread().interrupt();
+                }
+            });
+            // Let the waiter park inside await before interrupting it.
+            Thread.sleep(500);
+            waiter.interrupt();
+            waiter.join(10_000);
+
+            assertThat(waiter.isAlive()).isFalse();
+            assertThat(interrupted).isTrue();
         }
     }
 
