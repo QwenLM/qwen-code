@@ -198,8 +198,7 @@ class ManagedAgentMySqlIT {
                                 "managed_session_writer_conflict"));
 
         String genesisRecords =
-                "{\"subtype\":\"session_execution_engine\",\"sessionId\":\""
-                        + sessionId + "\"}\n" + headerRecord(storeTenant,
+                ManagedSessionHeaderFixture.genesisLines(storeTenant,
                         workspaceId, sessionId);
         byte[] resourceBytes = "mysql-resource"
                 .getBytes(StandardCharsets.UTF_8);
@@ -1255,24 +1254,6 @@ class ManagedAgentMySqlIT {
     private static <T> T inTransaction(TransactionTemplate transactions,
             Supplier<T> operation) {
         return transactions.execute(status -> operation.get());
-    }
-
-    /** The Managed header record of a genesis transaction. */
-    private static String headerRecord(String tenant, String workspace,
-            String session) {
-        return "{\"subtype\":\"managed_session_header_v1\",\"sessionId\":\""
-                + session + "\",\"managedSession\":{\"formatVersion\":1,"
-                + "\"minimumReader\":\"managed-session/1\",\"sessionKey\":"
-                + "{\"tenantId\":\"" + tenant + "\",\"workspaceId\":\""
-                + workspace + "\",\"sessionId\":\"" + session + "\"},"
-                + "\"engine\":\"managed\",\"definitionRef\":{"
-                + "\"resourceId\":\"definition-1\",\"kind\":"
-                + "\"managed-session-definition\",\"schemaVersion\":1,"
-                + "\"byteLength\":10,\"digest\":\"" + sha256("definition")
-                + "\"},\"rootSnapshotRef\":{\"resourceId\":\"root-1\","
-                + "\"kind\":\"managed-session-root-snapshot\","
-                + "\"schemaVersion\":1,\"byteLength\":4,\"digest\":\""
-                + sha256("root") + "\"},\"createdBy\":\"test\"}}\n";
     }
 
     private static String sha256(String value) {

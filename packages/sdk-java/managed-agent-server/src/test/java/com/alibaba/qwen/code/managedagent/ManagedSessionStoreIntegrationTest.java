@@ -601,19 +601,8 @@ class ManagedSessionStoreIntegrationTest {
 
     /** The Managed header record, with the body the authority writes. */
     private static String headerLine() {
-        return "{\"subtype\":\"managed_session_header_v1\",\"sessionId\":\""
-                + SESSION + "\",\"managedSession\":{\"formatVersion\":1,"
-                + "\"minimumReader\":\"managed-session/1\",\"sessionKey\":"
-                + "{\"tenantId\":\"" + TENANT + "\",\"workspaceId\":\""
-                + WORKSPACE + "\",\"sessionId\":\"" + SESSION + "\"},"
-                + "\"engine\":\"managed\",\"definitionRef\":{"
-                + "\"resourceId\":\"definition-1\",\"kind\":"
-                + "\"managed-session-definition\",\"schemaVersion\":1,"
-                + "\"byteLength\":10,\"digest\":\"" + sha256("definition")
-                + "\"},\"rootSnapshotRef\":{\"resourceId\":\"root-1\","
-                + "\"kind\":\"managed-session-root-snapshot\","
-                + "\"schemaVersion\":1,\"byteLength\":4,\"digest\":\""
-                + sha256("root") + "\"},\"createdBy\":\"test\"}}\n";
+        return ManagedSessionHeaderFixture.headerRecord(TENANT, WORKSPACE,
+                SESSION);
     }
 
     private ObjectNode genesisRequest(String records, byte[] resourceBytes) {

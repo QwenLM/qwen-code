@@ -151,22 +151,8 @@ public final class ManagedSessionStoreProcessFixtureMain {
     }
 
     private static CommitTransactionRequest genesis() {
-        String records = "{\"subtype\":\"session_execution_engine\","
-                + "\"sessionId\":\"" + SESSION + "\"}\n"
-                + "{\"subtype\":\"managed_session_header_v1\","
-                + "\"sessionId\":\"" + SESSION
-                + "\",\"managedSession\":{\"formatVersion\":1,"
-                + "\"minimumReader\":\"managed-session/1\",\"sessionKey\":"
-                + "{\"tenantId\":\"" + TENANT + "\",\"workspaceId\":\""
-                + WORKSPACE + "\",\"sessionId\":\"" + SESSION + "\"},"
-                + "\"engine\":\"managed\",\"definitionRef\":{"
-                + "\"resourceId\":\"definition-1\",\"kind\":"
-                + "\"managed-session-definition\",\"schemaVersion\":1,"
-                + "\"byteLength\":10,\"digest\":\"" + sha256("definition")
-                + "\"},\"rootSnapshotRef\":{\"resourceId\":\"root-1\","
-                + "\"kind\":\"managed-session-root-snapshot\","
-                + "\"schemaVersion\":1,\"byteLength\":4,\"digest\":\""
-                + sha256("root") + "\"},\"createdBy\":\"test\"}}\n";
+        String records = ManagedSessionHeaderFixture.genesisLines(TENANT,
+                WORKSPACE, SESSION);
         return new CommitTransactionRequest(WORKSPACE, WRITER_A, 1, 0, 0,
                 "mysql-process-genesis-transaction", "session.create",
                 "mysql-process-genesis-command", sha256(records), 0, 0, 0,
