@@ -26,6 +26,7 @@ import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
@@ -186,6 +187,37 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Issue #13320: a load refused with a machine-readable code (e.g. a
+    // journal newer than the Harness reader in a mixed fleet) still retries
+    // — a compatible Harness may take over — but the refusal code, not
+    // hosted_harness_unavailable, is what the terminal failure records once
+    // the pre-admission budget runs out.
+    @Test
+    void retriesANamedLoadRefusalBeforeTheBudgetRunsOut() {
+        HarnessSessionRefusedException refusal = mock(
+                HarnessSessionRefusedException.class);
+        when(refusal.getCode()).thenReturn("managed_session_open_failed");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
+                false, 0);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void recordsTheLoadRefusalCodeWhenRetriesRunOut() {
+        HarnessSessionRefusedException refusal = mock(
+                HarnessSessionRefusedException.class);
+        when(refusal.getCode()).thenReturn("managed_session_open_failed");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
+                false, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_session_open_failed"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     private AgentStateStore dispatchWithCreateOrLoadFailure(
