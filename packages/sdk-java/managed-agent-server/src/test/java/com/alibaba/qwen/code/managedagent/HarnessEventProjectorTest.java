@@ -64,4 +64,19 @@ class HarnessEventProjectorTest {
         assertThat(event.errorCode()).isEqualTo("hosted_harness_error");
         assertThat(event.type()).isEqualTo("turn.failed");
     }
+
+    @Test
+    void projectsDeadlineExpiryAsAClassifiedFailure() {
+        ProjectedEvent event = projector.project(new SourceEvent(4L,
+                "turn_error", Map.of("code", "hosted_turn_deadline_exceeded",
+                        "message",
+                        "The Hosted Harness Turn exceeded its deadline."),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.type()).isEqualTo("turn.failed");
+        assertThat(event.terminal()).isTrue();
+        assertThat(event.terminalStatus()).isEqualTo("FAILED");
+        assertThat(event.errorCode())
+                .isEqualTo("hosted_turn_deadline_exceeded");
+    }
 }
