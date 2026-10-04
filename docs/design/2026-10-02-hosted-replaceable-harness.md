@@ -193,9 +193,11 @@ parks the same journal state instead), `batch_not_durable` (parked before
 no longer parses back to a runnable state), `unresolved_after_settle` (the
 checkpoint names another Turn, or the state after settling is still not
 runnable), `turn_settled` (settled in the journal with the terminal record
-not yet projected — rebind-and-keep-reading is Step 3's row, so in this
-slice the durable verdict declines with a typed reason rather than driving
-the plain-load settlement tail).
+not yet projected — rebind-and-keep-reading is Step 3's row; in the
+meantime the route answers the plain attach for BOTH load shapes,
+because a Turn written turn_settled completed and must never be stamped
+a terminal failure — the daemon's own projection writes the terminal
+record once the plain attach is admitted).
 
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store

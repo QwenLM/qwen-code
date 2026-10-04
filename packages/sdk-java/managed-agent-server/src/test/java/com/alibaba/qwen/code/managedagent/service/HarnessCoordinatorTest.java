@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.after;
@@ -554,6 +555,55 @@ class HarnessCoordinatorTest {
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(),
                 eq("hosted_harness_generation_mismatch"));
+    }
+
+    // An epoch-posted Turn landing on a plain attach has nothing to rebind
+    // through — and bindHarness provably refuses that shape. Moving the
+    // Session's generation first with its own CAS is the only adoption
+    // that does not false-terminal the Turn (R8-1).
+    @Test
+    void plainAttachAfterAdoptionRebindsBeforeItSubmits() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                "epoch-old", 3, "RUNNING", true, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        SessionRecord bound = new SessionRecord("tenant", "session",
+                "qwen-code", null, "ACTIVE", "boot-old", null, 0, 0, 1, 1,
+                null, 1);
+        when(store.requireSession("tenant", "session")).thenReturn(bound);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, 3L,
+                        "epoch-old"));
+        when(store.bindRecoveredHarness(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("boot-old"), eq("boot-new")))
+                .thenReturn(true);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(harness.stream("tenant", "session", 3, "epoch-old"))
+                .thenReturn(cancelledStream("prompt"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).bindRecoveredHarness(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("boot-old"), eq("boot-new"));
+        verify(store, atLeast(2)).requireSession("tenant", "session");
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(),
+                eq("hosted_harness_generation_mismatch"));
+        verify(harness, never()).cancel(anyString(), anyString());
     }
 
     // The withdrawal is a CAS: losing it (the mark is gone, or the lease

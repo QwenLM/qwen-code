@@ -1980,11 +1980,18 @@ export function registerHostedHarnessSessionRoutes(
           return;
         }
       }
+      // A takeover that answered inapplicable still has its Turn payable:
+      // park the persistent latch on genuinely unsettled work here
+      // (recovery not produced and the request was a real takeover), but
+      // NOT when the kernel told us nothing is owed — otherwise every
+      // settlement route (resolve/continue/cancel/rewind/prompt) would
+      // 409 on a Session the caller was just told attached (R5-2's latch).
       if (
         hasUnsettledInput(session, restore.throughSequence) &&
         !resume &&
         !settlePromptId &&
-        !recovery
+        !recovery &&
+        !inapplicableAnswer
       )
         session.blocked = true;
       await settleCancelledHookTurn(session);

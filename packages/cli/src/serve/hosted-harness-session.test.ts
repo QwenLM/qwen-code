@@ -7464,6 +7464,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(
       passive.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
     ).toBeUndefined();
+    // An inapplicable attach must NOT latch the blocked flag, or the
+    // 200 answer would refuse every later settlement route verbatim
+    // (R5-2's latch regression — nothing clears the latch on a
+    // non-hooks Session outside settleCancelledHookTurn).
+    expect(passive.body.recoveryRequired).toBeUndefined();
   });
 
   it('replays the snapshot only to a request re-proving its store identity', async () => {

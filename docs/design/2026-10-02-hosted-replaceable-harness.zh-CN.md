@@ -171,8 +171,9 @@ load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批�
 `await_runtime` 之前且参数不耐久）、`checkpoint_blocked`（checkpoint
 已无法解析回可运行状态）、`unresolved_after_settle`（checkpoint 指向
 另一个 Turn，或结算后仍不可运行）、`turn_settled`（journal 中已结算
-但终态记录尚未投影——换绑续读归 Step 3，本切片让该耐久判定带类型化
-reason decline，而不是驱动普通 load 的结算尾巴）。
+但终态记录尚未投影——换绑续读归 Step 3；其间路由对两种 load 形态都
+按普通 attach 作答：写了 turn_settled 的 Turn 已完成，绝不能被盖成
+终态失败——普通 attach 被接纳后，daemon 自己的投影会补写终态记录）。
 
 `checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
 `invalid_state`、`identity_mismatch`）。被 authorization 层抹平成

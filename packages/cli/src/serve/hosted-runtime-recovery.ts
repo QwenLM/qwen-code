@@ -433,10 +433,13 @@ export async function recoverHostedRuntimeTurn(input: {
     )
       return inapplicable();
     // Settled in the journal with the terminal record still unprojected:
-    // rebind-and-keep-reading is Step 3's row, so in this slice the same
-    // durable verdict declines with its own typed reason instead.
-    if (checkpoint.continuation.phase === 'turn_settled')
-      return passive ? inapplicable() : declined('turn_settled');
+    // it completed and must never be recorded as a failure — answering the
+    // plain attach lets the daemon's own journal projection write the
+    // terminal record below, instead of a decline the coordinator would
+    // stamp as a false terminal (R8-2). The rebind-and-keep-reading
+    // rationale stays Step 3's explicit row; the route ignores this phase
+    // on both load shapes now.
+    if (checkpoint.continuation.phase === 'turn_settled') return inapplicable();
     if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase))
       return passive ? inapplicable() : declined('model_start');
     // A phase outside the model-start vocabulary is not one a takeover

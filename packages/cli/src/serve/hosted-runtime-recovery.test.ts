@@ -523,11 +523,12 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('declines a turn_settled checkpoint with its own typed reason', async () => {
-    // Settled in the journal with the terminal record still unprojected:
-    // rebind-and-keep-reading is Step 3's row, so this slice declines the
-    // verdict with a typed reason instead of fabricating a settlement
-    // tail on phase alone.
+  it('answers a settled Turn as inapplicable on both load shapes', async () => {
+    // A Turn written turn_settled completed: a decline would be recorded
+    // as a false terminal the coordinator stamps failed (R8-2). The
+    // journal is what it is — on both load shapes the kernel answers
+    // inapplicable so the plain attach re-attaches and the daemon's own
+    // projection writes the terminal record below.
     await parkAtAwaitRuntime();
     const replacement = await open('boot-2', false);
     vi.spyOn(
@@ -551,18 +552,17 @@ describe('recoverHostedRuntimeTurn', () => {
       },
     } as never);
     try {
-      const outcome = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
-      expect(outcome).toEqual({
-        kind: 'declined',
-        reason: 'turn_settled',
-      });
+      for (const passive of [false, true]) {
+        const outcome = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        expect(outcome.kind).toBe('inapplicable');
+      }
     } finally {
       await replacement.close();
     }

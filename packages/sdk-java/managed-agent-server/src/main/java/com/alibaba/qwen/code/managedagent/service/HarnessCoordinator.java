@@ -408,7 +408,28 @@ public class HarnessCoordinator {
             current = claimed;
             cancelledOnAttach = true;
         } else {
-            boolean bound = store.bindHarness(session.tenantId(),
+            boolean bound;
+            if (claimed.submissionAttempted()
+                    && claimed.harnessEventEpoch() != null
+                    && session.harnessBootId() != null
+                    && !attachment.bootId().equals(session.harnessBootId())) {
+                // A plain attach after adoption: bindHarness provably
+                // refuses this shape because the Turn already posted an
+                // epoch, so the generation must move on its own store CAS
+                // first — owner, live lease, expected = the row's boot id.
+                // Losing that CAS means someone else adopted meanwhile,
+                // and no host may keep the Turn through here (R8-1).
+                if (!store.bindRecoveredHarness(session.tenantId(),
+                        session.sessionId(), claimed.turnId(), owner,
+                        session.harnessBootId(), attachment.bootId())) {
+                    return fail(claimed,
+                            "hosted_harness_recovery_generation_mismatch",
+                            "Hosted Harness recovery generation changed.");
+                }
+                session = store.requireSession(session.tenantId(),
+                        session.sessionId());
+            }
+            bound = store.bindHarness(session.tenantId(),
                     session.sessionId(), claimed.turnId(), owner,
                     attachment.bootId());
             if (!bound && claimed.submissionAttempted()
