@@ -1957,8 +1957,12 @@ public class ManagedAgentStore implements AgentStateStore {
                 || "DELETED".equals(session.get().status())) {
             return;
         }
-        // The lock above serializes the writers of this outbox, so the next
-        // sequence is the one after the highest committed.
+        // A plain read: every writer of this outbox runs inside the Session
+        // store's commit, which locks the journal head before its first
+        // plain read, so this snapshot already sees every committed row. A
+        // locking read here would next-key-lock the gap an empty outbox
+        // range shares with other Sessions and deadlock their first
+        // announcements.
         Long current = jdbc.queryForObject("SELECT MAX(sequence_id) FROM"
                         + " managed_agent_task_event WHERE tenant_id = ?"
                         + " AND session_id = ?",

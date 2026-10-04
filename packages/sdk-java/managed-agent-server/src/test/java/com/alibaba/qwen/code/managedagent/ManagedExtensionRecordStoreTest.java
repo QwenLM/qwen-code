@@ -210,11 +210,15 @@ class ManagedExtensionRecordStoreTest {
                 + " JSON object the Session authority can read", trailing,
                 event -> {
                 }, records -> records);
-        refuse("no commit marker", "has the unknown subtype"
-                + " managed_session_note after the Managed header", start,
-                event -> {
+        refuse("an unknown subtype in the marker's place", "has the"
+                + " unknown subtype managed_session_note after the Managed"
+                + " header", start, event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
+        refuse("no commit marker", "holds only its events, then its commit"
+                + " marker", start, event -> {
+                }, records -> records.substring(0, records.indexOf('\n')
+                        + 1) + "{\"subtype\":\"managed_session_header_v1\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         assertRefused("a line among the events that is not one", sessionId,
@@ -282,6 +286,11 @@ class ManagedExtensionRecordStoreTest {
                 .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
         event.put("kind", kind).put("occurredAt", 1_000);
         event.putObject("payload");
+        return eventRecordLine(sessionId, event);
+    }
+
+    /** The record line the authority writes around one event. */
+    private static String eventRecordLine(String sessionId, ObjectNode event) {
         ObjectNode record = JsonNodeFactory.instance.objectNode()
                 .put("uuid", UUID.randomUUID().toString())
                 .putNull("parentUuid").put("sessionId", sessionId)
@@ -348,6 +357,16 @@ class ManagedExtensionRecordStoreTest {
                         + " entry", goal, "event.payload.domain must be one"
                         + " of", event -> {
                 }, records -> records, 0, "not_a_domain", 0);
+        refuseOrdinary("a domain.committed whose domain is not text", goal,
+                "event.payload.domain must be one of",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("domain", 42),
+                records -> records, 0);
+        refuseOrdinary("a domain.committed without a domain", goal,
+                "event.payload must be an object with exactly",
+                event -> ((ObjectNode) event.get("payload"))
+                        .remove("domain"),
+                records -> records, 0);
         refuseOrdinary("a body-less domain.committed whose event id is not"
                         + " NFC-normalized", goal,
                 "event.eventId must use NFC normalization",
@@ -387,6 +406,36 @@ class ManagedExtensionRecordStoreTest {
                             return first + "\n" + second + records.substring(
                                     records.indexOf('\n'));
                         }, 1)));
+    }
+
+    /**
+     * The hosted text-delta stream writes message.retracted when a
+     * restarted model attempt replaces a prefix it already published
+     * (#13351); the commit-time vocabulary must accept that line.
+     */
+    @Test
+    void commitsAMessageRetraction() throws Exception {
+        ObjectNode goal = JsonNodeFactory.instance.objectNode()
+                .put("goal", "live");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        long firstSequence = journal.committedSequence() + 1;
+        ObjectNode retraction = JsonNodeFactory.instance.objectNode()
+                .put("v", 1).put("sequence", firstSequence + 1)
+                .put("eventId", "assistant-retract:turn-1:message-1");
+        retraction.putObject("sessionKey").put("tenantId", TENANT)
+                .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
+        retraction.put("kind", "message.retracted").put("occurredAt", 1_000);
+        retraction.putObject("subject").put("type", "activation")
+                .put("scopeId", "activation-1")
+                .put("activationId", "activation-1").put("epoch", 1);
+        retraction.putObject("payload").put("messageId", "message-1")
+                .put("turnId", "turn-1").put("fromSequence", firstSequence);
+        String line = eventRecordLine(sessionId, retraction);
+        assertThat(journal.commit(journal.requestOrdinary("retract",
+                "goal_state", goal, event -> {
+                }, records -> records.replaceFirst("\n", "\n" + line), 1))
+                .lastSequence()).isEqualTo(firstSequence + 1);
     }
 
     /** A refused ordinary body-less domain commit. The {@code inject} of 5

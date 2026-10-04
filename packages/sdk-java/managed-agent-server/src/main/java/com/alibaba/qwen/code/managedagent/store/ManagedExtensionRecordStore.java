@@ -216,24 +216,25 @@ public class ManagedExtensionRecordStore {
                             + " after the Managed header.");
                 }
                 shaped &= index >= eventCount;
-                requireLineBytes(lines[index], index,
-                        COMMIT_SUBTYPE.equals(subtype)
-                                ? ManagedSessionStoreModels
-                                        .MAX_COMMIT_MARKER_BYTES
-                                : ManagedSessionStoreModels.MAX_EVENT_BYTES);
+                // Every line is already within MAX_EVENT_BYTES, which
+                // validateUtf8JsonLines enforces before this runs; only a
+                // commit marker has a tighter cap.
+                if (COMMIT_SUBTYPE.equals(subtype)) {
+                    requireLineBytes(lines[index], index,
+                            ManagedSessionStoreModels.MAX_COMMIT_MARKER_BYTES);
+                }
                 continue;
             }
             managed = true;
-            requireLineBytes(lines[index], index,
-                    ManagedSessionStoreModels.MAX_EVENT_BYTES);
             require(index < eventCount, "The event of record line "
                     + (index + 1) + " is not one of the transaction's"
                     + " events.");
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
             String kind = event.path("kind").textValue();
-            String domain = "domain.committed".equals(kind)
-                    ? payload.path("domain").textValue() : null;
+            boolean committed = "domain.committed".equals(kind);
+            String domain = committed ? payload.path("domain").textValue()
+                    : null;
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
             long occurredAt = requireEvent(event, tenantId, workspaceId,
@@ -247,10 +248,10 @@ public class ManagedExtensionRecordStore {
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
-            if (domain == null) {
+            if (!committed) {
                 continue;
             }
-            requireDomainCommitted(payload, domain, body != null);
+            requireDomainCommitted(payload, body != null);
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"
                         + " Stage H record.");
@@ -365,11 +366,12 @@ public class ManagedExtensionRecordStore {
      * has a record body here.
      */
     private static void requireDomainCommitted(JsonNode payload,
-            String domain, boolean stageH) {
+            boolean stageH) {
+        String domain;
         try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
                     "event.payload");
-            ManagedExtensionRecords.oneOf(payload.get("domain"),
+            domain = ManagedExtensionRecords.oneOf(payload.get("domain"),
                     ManagedExtensionRecords.DOMAINS, "event.payload.domain");
             ManagedExtensionRecords.count(payload.get("version"), 1, 1,
                     "event.payload.version");

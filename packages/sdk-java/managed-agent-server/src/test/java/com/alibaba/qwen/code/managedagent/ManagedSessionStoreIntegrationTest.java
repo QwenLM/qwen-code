@@ -434,7 +434,12 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_not_found"));
 
-        ObjectNode oversized = transactionRequest(turnBytes, WRITER_B, 2)
+        // Its own bytes hold the event at sequence 2, so only the oversized
+        // resource can refuse this commit.
+        String oversizedBytes = turnBytes.replace("\"sequence\":1,",
+                "\"sequence\":2,").replace("turn-1:accepted",
+                        "turn-2:accepted");
+        ObjectNode oversized = transactionRequest(oversizedBytes, WRITER_B, 2)
                 .put("transactionId", "transaction-oversized")
                 .put("commandId", "command-oversized")
                 .put("expectedJournalRevision", 2)
