@@ -449,6 +449,64 @@ Test
       );
     });
 
+    it.each([false, true])(
+      'renders a delimiter-shaped first body row (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| Left | Right |',
+          '| :--- | ---: |',
+          '| --- | --- |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toMatch(/│\s*---\s*│\s*---\s*│/);
+      },
+    );
+
+    it.each([false, true])(
+      'preserves delimiter-shaped body rows and each table alignment (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          '| :---: | ---: |',
+          '| --- | --- |',
+          '',
+          '| First | Second |',
+          '| ---: | :---: |',
+          '| c | d |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('│ :---: │   ---: │');
+        expect(output).toContain('│ ---   │    --- │');
+        expect(output).toContain('│     c │   d    │');
+      },
+    );
+
+    it.each([false, true])(
+      'holds back an incomplete delimiter-shaped body row only while pending (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          '| :---: |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output.includes(':---:')).toBe(!isPending);
+      },
+    );
+
     it('handles a table at the end of the input', () => {
       const text = `
 Some text before.

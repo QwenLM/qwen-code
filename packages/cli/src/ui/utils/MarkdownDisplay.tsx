@@ -401,6 +401,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let tableRows: string[][] = [];
   let tableHeaders: string[] = [];
   let tableAligns: ColumnAlign[] = [];
+  let tableSeparatorIndex = -1;
 
   function addContentBlock(block: React.ReactNode) {
     if (block) {
@@ -473,7 +474,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     const hrMatch = line.match(hrRegex);
     const blockquoteMatch = line.match(blockquoteRegex);
     const tableRowMatch = line.match(tableRowRegex);
-    const tableSeparatorMatch = line.match(tableSeparatorRegex);
 
     if (codeFenceMatch) {
       inCodeBlock = true;
@@ -510,6 +510,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         inTable = true;
         tableHeaders = potentialHeaders;
         tableRows = [];
+        tableSeparatorIndex = index + 1;
       } else {
         // Not a table, treat as regular text
         addContentBlock(
@@ -524,7 +525,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           </Box>,
         );
       }
-    } else if (inTable && tableSeparatorMatch) {
+    } else if (inTable && index === tableSeparatorIndex) {
       // Parse alignment from separator line
       tableAligns = parseTableAligns(line);
     } else if (
