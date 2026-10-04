@@ -526,10 +526,11 @@ describe('model catalog', () => {
   });
 
   it('stamps the committed snapshot with the current projection version', () => {
-    // loadModelCatalog and the ETag reuse in model-catalog-refresh.ts both
-    // gate on MODEL_CATALOG_PROJECTION_VERSION, so a snapshot committed at an
-    // older projection is silently rejected in favour of whatever a user has
-    // cached — and nothing else in CI pins the file's freshness.
+    // Nothing at runtime reads this stamp: loadModelCatalog compares only the
+    // *cache*'s projection and picks between cache and bundle on fetchedAt, and
+    // the ETag reuse in model-catalog-refresh.ts reads only the cache file. So
+    // a snapshot committed at an older projection is served as-is, with no
+    // runtime signal — this test is the only thing pinning the file's version.
     expect(bundled.projection).toBe(MODEL_CATALOG_PROJECTION_VERSION);
   });
 
