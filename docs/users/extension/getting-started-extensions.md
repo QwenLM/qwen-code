@@ -354,7 +354,7 @@ symbolic-link root fails with a configuration error, and the accepted root is pi
 to its canonical path once at startup. The managed root must be disjoint from
 Qwen’s writable extension and extension-store directories, including symlink
 and filesystem case aliases. Without this option, only the existing user extension source is discovered.
-Continue supplying the option to management commands. Unchanged skill bodies remain deduplicated during refresh.
+Continue supplying the option to management commands. A returning user copy with retained managed ownership cannot accept activation changes until the configured source proves withdrawal; commands without that source report a conflict instead of accepting a change that hand-back would undo. Unchanged skill bodies remain deduplicated during refresh.
 
 Docker/Podman sandboxes mount the managed root read-only, including aliases exposed by their settings, runtime, and other generated mounts. Settings and runtime state outside the managed root remain writable. Keep the writable workspace and explicit writable mount sources outside the managed root; overlapping sources or conflicting mount destinations cause sandbox startup to fail. A managed subdirectory of a writable parent, such as `<QWEN_HOME>/prepared`, is supported through a read-only submount. Advanced `SANDBOX_FLAGS` overrides are operator-controlled and are not covered by this mount guard.
 
@@ -383,7 +383,7 @@ its install-URL meaning for user packages. Settings, preferences, and caches sta
 in writable user state. Qwen never writes managed installation metadata or copies
 packages to `QWEN_HOME`. Update, uninstall, and replacement are refused by core
 operations; update-all reports and skips managed entries while processing user
-extensions. The deployment owner supplies new package versions. After the owner removes a managed package, an explicit same-name user installation can inherit its saved activation and resource preferences if no user package is already installed. A still-present managed package remains protected from replacement. An empty settings directory or one containing only the regular user `.env` file can be adopted without discarding saved values; values explicitly supplied during installation take precedence. Other existing files, symlinks and secret-selector metadata are retained and reported as conflicts instead of being overwritten.
+extensions. The deployment owner supplies new package versions. A direct-child directory without a governing manifest makes withdrawal uncertain, including an asset or staging directory, so retained managed ownership and credentials are not released until that directory is removed or completed. Stage deployment changes outside the managed collection and publish complete packages; an entirely empty collection still counts as withdrawal. After the owner removes a managed package, an explicit same-name user installation can inherit its saved activation and resource preferences if no user package is already installed. A still-present managed package remains protected from replacement. An empty settings directory or one containing only the regular user `.env` file can be adopted without discarding saved values; values explicitly supplied during installation take precedence. Other existing files, symlinks and secret-selector metadata are retained and reported as conflicts instead of being overwritten.
 
 Skills, hooks, MCP, context, and commands use the normal extension runtime.
 `${CLAUDE_PLUGIN_ROOT}` and `${extensionPath}` resolve at load time to the actual
