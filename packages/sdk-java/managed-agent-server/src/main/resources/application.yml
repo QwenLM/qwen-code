@@ -51,6 +51,7 @@ qwen:
       connect-timeout: '5s'
       request-timeout: '30s'
       heartbeat-interval: '30s'
+      turn-deadline: '${QWEN_MANAGED_AGENT_HARNESS_TURN_DEADLINE:30m}'
     dispatch:
       scan-delay: '1s'
       lease-duration: '60s'

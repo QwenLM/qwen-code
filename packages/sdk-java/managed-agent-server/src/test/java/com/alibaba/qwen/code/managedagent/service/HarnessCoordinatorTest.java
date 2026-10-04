@@ -26,6 +26,7 @@ import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
@@ -63,7 +64,7 @@ class HarnessCoordinatorTest {
                 "storage-a", ".", "config-a", 1);
         SessionRecord session = new SessionRecord(tenantId, sessionId,
                 "qwen-code", null, null, "ACTIVE", null, null, 0,
-                0, 0, 1, 1, null, 1, binding);
+                0, 0, 1, 1, null, 1, binding, "hosted-workspace-files/1");
         for (String status : List.of("ACCEPTED", "CANCELLING")) {
             AgentStateStore store = mock(AgentStateStore.class);
             HarnessConnector harness = mock(HarnessConnector.class);
@@ -188,6 +189,37 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // Issue #13320: a load refused with a machine-readable code (e.g. a
+    // journal newer than the Harness reader in a mixed fleet) still retries
+    // — a compatible Harness may take over — but the refusal code, not
+    // hosted_harness_unavailable, is what the terminal failure records once
+    // the pre-admission budget runs out.
+    @Test
+    void retriesANamedLoadRefusalBeforeTheBudgetRunsOut() {
+        HarnessSessionRefusedException refusal = mock(
+                HarnessSessionRefusedException.class);
+        when(refusal.getCode()).thenReturn("managed_session_open_failed");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
+                false, 0);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void recordsTheLoadRefusalCodeWhenRetriesRunOut() {
+        HarnessSessionRefusedException refusal = mock(
+                HarnessSessionRefusedException.class);
+        when(refusal.getCode()).thenReturn("managed_session_open_failed");
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
+                false, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_session_open_failed"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
     private AgentStateStore dispatchWithCreateOrLoadFailure(
             RuntimeException failure, boolean submitted, int retryCount) {
         AgentStateStore store = mock(AgentStateStore.class);
@@ -201,7 +233,7 @@ class HarnessCoordinatorTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1)));
+                                "storage-a", ".", "config-a", 1), "hosted-workspace-files/1"));
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(harness.createOrLoad("tenant", "session", false))
                 .thenThrow(failure);
@@ -356,7 +388,7 @@ class HarnessCoordinatorTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1)));
+                                "storage-a", ".", "config-a", 1), "hosted-workspace-files/1"));
         return store;
     }
 
@@ -924,6 +956,197 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
         verify(harness, never()).submit(anyString(), anyString(), anyString(),
                 any(), anyString());
+    }
+
+    // A restarted model attempt retracts the prefix it published (#13319):
+    // the deltas it covers are flushed before the store blanks their range,
+    // and the cursor passes the retraction event itself.
+    @Test
+    void retractsInBandRetryOutputBeforeRecordingTheReplay() {
+        String tenantId = "tenant-inband-retract";
+        String sessionId = "session-inband-retract";
+        String turnId = "turn-inband-retract";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-new", "epoch-new", 2,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-new", 2);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", null, 2L, "epoch-new"));
+        when(store.bindHarness(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn(tenantId, sessionId, turnId))
+                .thenReturn(Optional.of(claimed));
+        List<SourceEvent> frames = List.of(
+                new SourceEvent(3L, "session_update", Map.of("update",
+                        Map.of("sessionUpdate", "agent_message_chunk",
+                                "content", Map.of("type", "text",
+                                        "text", "orphaned "))),
+                        promptId, Map.of()),
+                // A second delta stays batched (it is not the first visible
+                // text), so only a correct flush-before-retract records it
+                // ahead of the retraction.
+                new SourceEvent(4L, "session_update", Map.of("update",
+                        Map.of("sessionUpdate", "agent_message_chunk",
+                                "content", Map.of("type", "text",
+                                        "text", "prefix"))),
+                        promptId, Map.of()),
+                new SourceEvent(5L, "message_retracted",
+                        Map.of("turnId", turnId, "messageId", "message-1",
+                                "fromSequence", 3),
+                        promptId, Map.of()),
+                new SourceEvent(6L, "session_update", Map.of("update",
+                        Map.of("sessionUpdate", "agent_message_chunk",
+                                "content", Map.of("type", "text",
+                                        "text", "recovered"))),
+                        promptId, Map.of()),
+                new SourceEvent(7L, "turn_complete",
+                        Map.of("stopReason", "end_turn"), promptId,
+                        Map.of()));
+        when(harness.stream(tenantId, sessionId, 2, "epoch-new"))
+                .thenReturn(new SourceStream() {
+                    private int index;
+
+                    @Override
+                    public String eventEpoch() {
+                        return "epoch-new";
+                    }
+
+                    @Override
+                    public SourceEvent next() {
+                        return index < frames.size() ? frames.get(index++)
+                                : null;
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        InOrder order = inOrder(store);
+        // The orphaned deltas are recorded before the retraction they fall
+        // under: the first as the first visible text, the second by the
+        // branch's flush. The replay's delta is recorded after it.
+        order.verify(store).recordHarnessEvents(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("epoch-new"),
+                argThat(events -> events.size() == 1
+                        && events.get(0).sourceId() == 3L));
+        order.verify(store).recordHarnessEvents(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("epoch-new"),
+                argThat(events -> events.size() == 1
+                        && events.get(0).sourceId() == 4L));
+        order.verify(store).retractHarnessTurnOutput(eq(tenantId),
+                eq(sessionId), eq(turnId), anyString(), eq("epoch-new"),
+                eq(3L), eq(5L));
+        order.verify(store).recordHarnessEvents(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("epoch-new"),
+                argThat(events -> events.size() == 1
+                        && events.get(0).sourceId() == 6L));
+        order.verify(store).recordHarnessEvents(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("epoch-new"),
+                argThat(events -> events.size() == 1
+                        && "turn.completed".equals(
+                                events.get(0).projection().type())));
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+    }
+
+    // A retraction without a usable fromSequence fails closed: the Turn is
+    // retried, never silently completed over a prefix that stays published.
+    @Test
+    void refusesAMalformedRetractionEvent() {
+        String tenantId = "tenant-inband-retract-bad";
+        String sessionId = "session-inband-retract-bad";
+        String turnId = "turn-inband-retract-bad";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-new", "epoch-new", 2,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-new", 2);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", null, 2L, "epoch-new"));
+        when(store.bindHarness(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn(tenantId, sessionId, turnId))
+                .thenReturn(Optional.of(claimed));
+        when(harness.stream(tenantId, sessionId, 2, "epoch-new"))
+                .thenReturn(new SourceStream() {
+                    private boolean emitted;
+
+                    @Override
+                    public String eventEpoch() {
+                        return "epoch-new";
+                    }
+
+                    @Override
+                    public SourceEvent next() {
+                        if (emitted) {
+                            return null;
+                        }
+                        emitted = true;
+                        return new SourceEvent(3L, "message_retracted",
+                                Map.of("turnId", turnId, "messageId",
+                                        "message-1"),
+                                promptId, Map.of());
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store, never()).retractHarnessTurnOutput(anyString(),
+                anyString(), anyString(), anyString(), anyString(), anyLong(),
+                anyLong());
+        verify(store, never()).recordHarnessEvents(anyString(), anyString(),
+                anyString(), anyString(), anyString(),
+                argThat(events -> events.stream().anyMatch(
+                        event -> event.projection() != null
+                                && event.projection().terminal())));
+        verify(store).scheduleTurnRetry(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
     }
 
     private static TurnRecord turn(String tenantId, String sessionId,
