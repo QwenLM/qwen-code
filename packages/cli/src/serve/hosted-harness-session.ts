@@ -1445,12 +1445,11 @@ export function registerHostedHarnessSessionRoutes(
             promptId: parked,
             brokerOptions,
             passive: true,
+            onPassiveRuntimeAcquired: (runtimeSessionId) => {
+              resident.runtimeLeaseHeld = runtimeSessionId;
+            },
           });
           recovery = recovered?.report;
-          if (recovered?.acquiredRuntime)
-            resident.runtimeLeaseHeld =
-              recovered.report.executions[0]?.runtimeSessionId ??
-              recovered.promptId;
           if (
             !resident.active &&
             unsettledPromptId(resident) &&
@@ -1461,6 +1460,7 @@ export function registerHostedHarnessSessionRoutes(
               recovery.activationId !==
                 resident.managed.activation.activationId)
           ) {
+            noteOwedAdoption(resident, sessionId);
             error(res, 409, 'hosted_turn_recovery_required');
             return;
           }
@@ -1473,6 +1473,7 @@ export function registerHostedHarnessSessionRoutes(
           error(res, 409, 'hosted_session_closing');
           return;
         }
+        refusedAdoptions.delete(sessionId);
         sendAttachment(
           res,
           sessionId,
@@ -1482,6 +1483,7 @@ export function registerHostedHarnessSessionRoutes(
             : recovery,
         );
       } catch {
+        noteOwedAdoption(resident, sessionId);
         error(res, 409, 'hosted_turn_recovery_required');
       }
       return;
@@ -1731,8 +1733,12 @@ export function registerHostedHarnessSessionRoutes(
             promptId: unsettled,
             brokerOptions,
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
+            onPassiveRuntimeAcquired: (runtimeSessionId) => {
+              session.runtimeLeaseHeld = runtimeSessionId;
+            },
           });
           if (recovered === undefined) {
+            noteOwedAdoption(session, sessionId);
             await managed.close();
             error(res, 409, 'hosted_turn_recovery_required');
             return;
@@ -1743,6 +1749,7 @@ export function registerHostedHarnessSessionRoutes(
               recovered.report.executions[0]?.runtimeSessionId ??
               recovered.promptId;
         } catch (cause) {
+          noteOwedAdoption(session, sessionId);
           await managed.close();
           writeStderrLineSafe(
             `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,

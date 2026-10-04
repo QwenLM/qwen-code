@@ -6488,7 +6488,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
    * execute hangs until the owner is "crashed" via cancel, leaving the turn
    * unsettled in the journal.
    */
-  async function parkToolTurn() {
+  async function parkToolTurn(retainOwner = false) {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     acquireSpy = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
@@ -6561,13 +6561,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
-    const closed = await headers(
-      supertest(server).delete(`/session/${SESSION_ID}`),
-    );
-    expect(closed.status).toBe(204);
+    if (!retainOwner) {
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+      expect(closed.status).toBe(204);
+    }
     // Only the parked owner's own acquires are behind us; a takeover's
     // acquire must be visible to the asserting test.
     acquireSpy.mockClear();
+    return { server, clientId: created.body.clientId as string };
   }
 
   async function loadReplacement(passive = false) {
@@ -6790,6 +6793,127 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
   });
+
+  function failFinalAuthorization(failure: 'blocked' | 'exception') {
+    const original =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    const acquisitionsBefore = acquireSpy.mock.calls.length;
+    let failed = false;
+    return vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        if (acquireSpy.mock.calls.length > acquisitionsBefore && !failed) {
+          failed = true;
+          if (failure === 'exception') throw new Error('store hiccup');
+          return { status: 'blocked', reason: 'missing_state' } as never;
+        }
+        return original.call(this);
+      });
+  }
+
+  it.each(
+    (['blocked', 'exception'] as const).flatMap((failure) =>
+      [false, true].map((retry) => ({ failure, retry })),
+    ),
+  )(
+    'releases a resident passive adoption after $failure, retry=$retry',
+    async ({ failure, retry }) => {
+      const { server, clientId } = await parkToolTurn(true);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      release.mockClear();
+      const stderr = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => undefined);
+      const owedLines = () =>
+        stderr.mock.calls.filter(
+          ([line]) => line.includes('stays owed') && line.includes(PROMPT_ID),
+        );
+      const passiveLoad = () =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+          managedSessionStore: store(),
+          toolProfile: FILE_PROFILE,
+          passiveManagedRuntimeRecovery: true,
+        });
+      const authorization = failFinalAuthorization(failure);
+      const refused = await passiveLoad();
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      expect(acquireSpy).toHaveBeenCalledOnce();
+      expect(authorization).toHaveBeenCalledTimes(2);
+      expect(release).not.toHaveBeenCalled();
+      const firstRefusalDiagnostics = owedLines().length;
+      let repeatedRefusalDiagnostics: number | undefined;
+      authorization.mockRestore();
+      if (retry) {
+        const loaded = await passiveLoad();
+        expect(loaded.status).toBe(200);
+        expect(loaded.body.clientId).toBe(clientId);
+        expect(acquireSpy).toHaveBeenCalledTimes(2);
+        expect(release).not.toHaveBeenCalled();
+        // Successful attachment drains the refusal's diagnostic record.
+        const failedAgain = failFinalAuthorization(failure);
+        expect((await passiveLoad()).status).toBe(409);
+        repeatedRefusalDiagnostics = owedLines().length;
+        failedAgain.mockRestore();
+      }
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+      expect(closed.status).toBe(204);
+      expect(release).toHaveBeenCalledOnce();
+      expect(
+        (release.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+      ).toBe(PROMPT_ID);
+      expect(firstRefusalDiagnostics).toBe(1);
+      if (retry) expect(repeatedRefusalDiagnostics).toBe(2);
+    },
+  );
+
+  it.each(['blocked', 'exception'] as const)(
+    'records a cold passive adoption after final authorization is %s',
+    async (failure) => {
+      await parkToolTurn();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      release.mockClear();
+      const stderr = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => undefined);
+      const authorization = failFinalAuthorization(failure);
+      const { server, loaded } = await loadReplacement(true);
+      expect(loaded.status).toBe(409);
+      expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+      expect(acquireSpy).toHaveBeenCalledOnce();
+      expect(release).not.toHaveBeenCalled();
+      expect(
+        stderr.mock.calls.some(
+          ([line]) => line.includes('stays owed') && line.includes(PROMPT_ID),
+        ),
+      ).toBe(true);
+      authorization.mockRestore();
+      const reloaded = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: FILE_PROFILE,
+        passiveManagedRuntimeRecovery: true,
+      });
+      expect(reloaded.status).toBe(200);
+      expect(release).not.toHaveBeenCalled();
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
+      expect(release).toHaveBeenCalledOnce();
+      expect(
+        (release.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+      ).toBe(PROMPT_ID);
+    },
+  );
 
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
