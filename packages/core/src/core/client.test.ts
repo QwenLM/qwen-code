@@ -6017,6 +6017,102 @@ Other open files:
       );
     });
 
+    it('delivers a selector-skipped recall as the fast phase, not a refined one (#13003)', async () => {
+      // The recall settles at once because the selector was skipped, so the
+      // settled branch would otherwise report its only document as refined.
+      const skipped = {
+        prompt: '## Relevant memory\n\nUnique strong hit.',
+        selectedDocs: [fastDoc('/m/unique.md', '- unique')],
+        strategy: 'heuristic' as const,
+      };
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.(skipped);
+        return Promise.resolve({ ...skipped, selectorSkipped: true as const });
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await collect(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-selector-skipped',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      const initialRequest = mockTurnRunFn.mock.calls[0]?.[1] as unknown[];
+      expect(initialRequest).toEqual(
+        expect.arrayContaining([expect.stringContaining('Unique strong hit.')]),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: 'heuristic',
+        }),
+      );
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'initial',
+        }),
+      );
+    });
+
+    it('delivers a late selector-skipped recall as fast at ToolResult', async () => {
+      vi.useFakeTimers();
+      const skipped = heuristicResult('Unique strong hit.', [
+        fastDoc('/m/unique.md', '- unique'),
+      ]);
+      mockMemoryManager.recall.mockImplementation(
+        (_root, _query, options) =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              options.onFastResult?.(skipped);
+              resolve({ ...skipped, selectorSkipped: true as const });
+            }, 150);
+          }),
+      );
+
+      await toolCallUserTurn('prompt-id-late-selector-skipped');
+      expect(JSON.stringify(mockTurnRunFn.mock.calls[0]?.[1])).not.toContain(
+        'Unique strong hit.',
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      mockTurnRunFn.mockReturnValue(textTurn('tool result turn'));
+      await run([fnResponse('foo', { ok: true })], 'prompt-id-late-tool', {
+        type: SendMessageType.ToolResult,
+      });
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(expect.stringContaining('Unique strong hit.')),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'tool_result',
+          strategy: 'heuristic',
+          docs_selected: 1,
+        }),
+      );
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ phase: 'refined' }),
+      );
+    });
+
     it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
       vi.useFakeTimers();
       const settle = fastThenPending();
