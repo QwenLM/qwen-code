@@ -115,7 +115,9 @@ export async function loadChannelsFromExtensions(
 ): Promise<number> {
   let loaded = 0;
   try {
-    const extensionManager = await getExtensionManager(managedExtensionsDir);
+    const extensionManager = await getExtensionManager(managedExtensionsDir, {
+      allowManagedHandBack: false,
+    });
     const extensions = extensionManager
       .getLoadedExtensions()
       .filter((e) => e.isActive && e.channels);

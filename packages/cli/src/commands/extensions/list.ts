@@ -17,7 +17,9 @@ export async function handleList(managedExtensions?: string) {
     await initializeI18n(
       resolveLanguageSetting(settings.merged.general?.language as string),
     );
-    const extensionManager = await getExtensionManager(managedExtensions);
+    const extensionManager = await getExtensionManager(managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const extensions = extensionManager.getLoadedExtensions();
 
     if (!extensions || extensions.length === 0) {

@@ -49,7 +49,9 @@ describe('extensions list command', () => {
         .command(listCommand)
         .exitProcess(false);
       await parser.parseAsync(args);
-      expect(getExtensionManager).toHaveBeenLastCalledWith(resolve('.'));
+      expect(getExtensionManager).toHaveBeenLastCalledWith(resolve('.'), {
+        allowManagedHandBack: false,
+      });
     },
   );
 

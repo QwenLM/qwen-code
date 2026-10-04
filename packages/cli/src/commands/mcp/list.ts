@@ -47,7 +47,7 @@ async function getMcpServersFromConfig(
     telemetrySettings: settings.merged.telemetry,
     locale: getCurrentLanguage(),
   });
-  await extensionManager.refreshCache();
+  await extensionManager.refreshCache({ allowManagedHandBack: false });
   const extensions = extensionManager.getLoadedExtensions();
   // Assemble settings + project `.mcp.json` in precedence order (#4615);
   // loading is a pure read — never connects. Extensions fill remaining gaps

@@ -27,6 +27,7 @@ import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 export async function getExtensionManager(
   managedExtensionsDir?: string,
+  options?: { allowManagedHandBack?: boolean },
 ): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
   const settings = loadSettings(workspaceDir).merged;
@@ -45,7 +46,7 @@ export async function getExtensionManager(
     ),
     proxy: resolveExtensionTelemetryProxy(settings.proxy),
   });
-  await extensionManager.refreshCache();
+  await extensionManager.refreshCache(options);
   return extensionManager;
 }
 

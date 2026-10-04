@@ -16,7 +16,9 @@ export async function handleSourcesAdd(args: {
   managedExtensions?: string;
 }) {
   try {
-    const extensionManager = await getExtensionManager(args.managedExtensions);
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const entry = await extensionManager.addSource(args.source);
     writeStdoutLine(t('Added marketplace "{{name}}".', { name: entry.name }));
   } catch (error) {
@@ -30,7 +32,9 @@ export async function handleSourcesRemove(args: {
   managedExtensions?: string;
 }) {
   try {
-    const extensionManager = await getExtensionManager(args.managedExtensions);
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     if (!extensionManager.removeSource(args.name)) {
       writeStderrLine(
         t('Marketplace "{{name}}" not found.', { name: args.name }),
@@ -47,7 +51,9 @@ export async function handleSourcesRemove(args: {
 
 export async function handleSourcesList(managedExtensions?: string) {
   try {
-    const extensionManager = await getExtensionManager(managedExtensions);
+    const extensionManager = await getExtensionManager(managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const sources = extensionManager.getSources();
     if (sources.length === 0) {
       writeStdoutLine(t('No marketplace sources added yet.'));
@@ -77,7 +83,9 @@ export async function handleSourcesUpdate(args: {
   managedExtensions?: string;
 }) {
   try {
-    const extensionManager = await getExtensionManager(args.managedExtensions);
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const entry = extensionManager
       .getSources()
       .find((source) => source.name === args.name);

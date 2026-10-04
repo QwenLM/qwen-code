@@ -15082,6 +15082,7 @@ class QwenAgent implements Agent {
         skipHooks: true,
         skipSkillManager: true,
         skipFileCheckpointing: true,
+        allowManagedHandBack: false,
         // Read-only replay: tolerate tools that cannot construct without the
         // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
         // registry is only consulted for optional tool_call metadata during

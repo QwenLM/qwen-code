@@ -2194,6 +2194,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
 export interface ConfigInitializeOptions {
   /** Cancels request-scoped initialization without becoming a session signal. */
   signal?: AbortSignal;
+  /** Read-only command initialization must retain managed ownership and secrets. */
+  allowManagedHandBack?: boolean;
   /**
    * Callback for sending MCP messages to SDK servers via control plane.
    * Required for SDK MCP server support in SDK mode.
@@ -4104,7 +4106,9 @@ export class Config {
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.extensionManager.refreshCache({
+        allowManagedHandBack: options?.allowManagedHandBack,
+      });
     } else if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
@@ -4113,6 +4117,7 @@ export class Config {
     ) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
+        allowManagedHandBack: options?.allowManagedHandBack,
       });
     }
     recordStartupEvent('config_initialize_extensions_initial_end');
@@ -4560,7 +4565,9 @@ export class Config {
       !this.getBareMode() &&
       !this.isSafeMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.extensionManager.refreshCache({
+        allowManagedHandBack: options?.allowManagedHandBack,
+      });
     }
     recordStartupEvent('config_initialize_extensions_final_end');
     options?.signal?.throwIfAborted();

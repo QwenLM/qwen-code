@@ -21609,6 +21609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       skipHooks: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      allowManagedHandBack: false,
       lenientToolWarmup: true,
     });
 

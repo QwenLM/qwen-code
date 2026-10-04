@@ -46,7 +46,9 @@ const setCommand: CommandModule<object, SetArgs> = {
       }),
   handler: async (args) => {
     const { name, setting, scope } = args;
-    const extensionManager = await getExtensionManager(args.managedExtensions);
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     if (!extensionManager) return;
     const extensions = extensionManager.getLoadedExtensions();
     if (!extensions || extensions.length === 0) return;
@@ -82,7 +84,9 @@ const listCommand: CommandModule<object, ListArgs> = {
     }),
   handler: async (args) => {
     const { name } = args;
-    const extensionManager = await getExtensionManager(args.managedExtensions);
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     if (!extensionManager) return;
     const extensions = extensionManager.getLoadedExtensions();
     if (!extensions || extensions.length === 0) return;

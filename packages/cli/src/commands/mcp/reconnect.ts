@@ -37,7 +37,7 @@ async function getMcpServersFromConfig(
     });
 
   if (!extensionManager) {
-    await extManager.refreshCache();
+    await extManager.refreshCache({ allowManagedHandBack: false });
   }
   const extensions = extManager.getLoadedExtensions();
   const mcpServers: Record<string, MCPServerConfig> = assembleMcpServers(
@@ -137,7 +137,10 @@ async function createMinimalConfig(
   // pass `initialize()` would otherwise start. Skipping it removes the race
   // where that background pass re-arms health-check timers after
   // `config.shutdown()` and leaves the process hanging (issue #9944).
-  await config.initialize({ skipMcpDiscovery: true });
+  await config.initialize({
+    skipMcpDiscovery: true,
+    allowManagedHandBack: false,
+  });
 
   return config;
 }
@@ -309,7 +312,7 @@ async function reconnectAllMcpServers(
     telemetrySettings: settings.merged.telemetry,
     locale: getCurrentLanguage(),
   });
-  await extensionManager.refreshCache();
+  await extensionManager.refreshCache({ allowManagedHandBack: false });
 
   const mcpServers = await getMcpServersFromConfig(extensionManager);
   const serverNames = Object.keys(mcpServers);
