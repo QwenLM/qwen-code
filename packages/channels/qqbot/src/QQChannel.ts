@@ -19,8 +19,10 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  singleScopeRoutingKey,
   truncateCodePoints,
   truncateUtf16Units,
+  unwrapMessageRoutingKey,
 } from '@qwen-code/channel-base';
 import type {
   Attachment,
@@ -114,8 +116,10 @@ type SendBlock = 'transient' | 'permanent';
 
 /**
  * A persisted route as the session router reports it. `target` stays optional
- * because the purge scans whatever router object it was given, and an entry
- * without one has to be skipped rather than abort the scan.
+ * because the purge scans whatever router object it was given: `getAll()` is
+ * duck-typed and a route without one is still purgeable when its key matches
+ * (ownership falls back to the key, see `ownsEntry`), never a reason to abort
+ * the scan.
  */
 interface RouterRoute {
   key: string;
@@ -1457,9 +1461,16 @@ export class QQChannel extends ChannelBase {
     // Report every divert-cap episode's cumulative total before dropping the
     // map: disconnect is the last release point for these sessions, so an
     // episode that accumulated drops after its first overflow line would
-    // otherwise lose its `capDropped - capLogged` total silently.
+    // otherwise lose its `capDropped - capLogged` total silently. The held
+    // text itself is discarded here too, so each entry's loss is logged the
+    // same way the other teardown sites log theirs.
     for (const [sessionId, held] of this.streamOrphanBuffer) {
       this.reportOrphanStashCap(sessionId, held);
+      if (held.text) {
+        process.stderr.write(
+          `[QQ:${this.name}] dropping ${held.text.length} chars of turn ${held.turn} stash on disconnect for ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+      }
     }
     this.streamOrphanBuffer.clear();
     this.completedTurns.clear();
@@ -1568,7 +1579,17 @@ export class QQChannel extends ChannelBase {
     ) {
       this.reportOrphanStashCap(sessionId, parkedStash);
       this.streamOrphanBuffer.delete(sessionId);
-      void this.deliverCancelledStash(chatId, sessionId, parkedStash.text);
+      // Pass the stash's own label: by the time this delivery runs the
+      // session's active prompt may already belong to a successor, and the
+      // fallback lookup would then attribute this text to that turn.
+      void this.deliverCancelledStash(
+        chatId,
+        sessionId,
+        parkedStash.text,
+        undefined,
+        undefined,
+        parkedStash.sourceLabel,
+      );
     }
     if (this.pendingStreamDelete.has(sessionId)) {
       // Deferred completion (or a cancelled turn's flush below) owns the
@@ -1707,6 +1728,7 @@ export class QQChannel extends ChannelBase {
     text: string,
     anchor?: string | null,
     anchorTimestamp?: number,
+    sourceLabel?: string,
   ): Promise<void> {
     // Capture the anchor once, before the first attempt: a successor turn can
     // overwrite sessionReplyMsgId while a re-attempt is pending, and this
@@ -1729,10 +1751,14 @@ export class QQChannel extends ChannelBase {
     // the successor turn replaces (activePrompts, and the reply context map via
     // getResponseMessageId), so both are captured for the same reason as the
     // anchor: a re-attempt must not describe this text as the successor's turn.
+    // A caller that knows the text's own label (the stash / sealed-head sites,
+    // which carry it from the turn that wrote the text) passes it explicitly;
+    // the lookup is only the fallback for a caller with no such record.
     // An explicit `null` forbids the reply context too — it resolves through
     // that same successor-owned state, so using it would anchor the send to the
     // successor's msg_id, the one thing `null` rules out.
-    const sourceLabel = this.getResponseSourceLabel(sessionId);
+    const attributionLabel =
+      sourceLabel ?? this.getResponseSourceLabel(sessionId);
     const replyContext =
       anchor === null ? undefined : this.resolveResponseReplyContext(sessionId);
     // Hold the msg_seq counter for the whole delivery, backoff sleeps included:
@@ -1755,7 +1781,7 @@ export class QQChannel extends ChannelBase {
               chatId,
               text,
               undefined,
-              sourceLabel,
+              attributionLabel,
               captured,
               capturedTimestamp,
             );
@@ -1767,7 +1793,7 @@ export class QQChannel extends ChannelBase {
               chatId,
               text,
               replyContext,
-              sourceLabel,
+              attributionLabel,
             );
           }
           if (blocked === 'transient') {
@@ -1899,12 +1925,14 @@ export class QQChannel extends ChannelBase {
           stashed.text = truncateUtf16Units(stashed.text, limit);
           const droppedText = before - stashed.text.length;
           // `pre` is a prefix of `text` and is what onResponseComplete
-          // prepends, so trimming the tail must trim it too — and that trim is
-          // its own loss, counted separately so the log reports what was
-          // actually discarded rather than only the buffer trim.
-          let droppedPre = 0;
+          // prepends, so trimming the tail must trim it too. Those characters
+          // are the ones `droppedText` already counts (the prefix trim is a
+          // subset of the text trim), so the trim is reported but never added
+          // to the loss again — counting both would report characters that
+          // were never in the stash a second time.
+          let preTrimmed = false;
           if (stashed.pre && stashed.pre.length > stashed.text.length) {
-            droppedPre = stashed.pre.length - stashed.text.length;
+            preTrimmed = true;
             stashed.pre = stashed.text;
           }
           // One line per episode, not per chunk: the divert window can stay
@@ -1912,15 +1940,12 @@ export class QQChannel extends ChannelBase {
           // loss immediately and every later chunk only accumulates. The
           // cumulative total is reported once when the stash leaves the buffer
           // (reportOrphanStashCap).
-          stashed.capDropped =
-            (stashed.capDropped ?? 0) + droppedText + droppedPre;
+          stashed.capDropped = (stashed.capDropped ?? 0) + droppedText;
           if ((stashed.capLogged ?? 0) === 0) {
             stashed.capLogged = stashed.capDropped;
             process.stderr.write(
               `[QQ:${this.name}] dropping ${droppedText} chars of diverted turn ${currentTurn} stash` +
-                (droppedPre > 0
-                  ? ` and ${droppedPre} chars of its sealed pre`
-                  : '') +
+                (preTrimmed ? ` and its sealed pre` : '') +
                 ` over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
             );
           }
@@ -3062,7 +3087,8 @@ export class QQChannel extends ChannelBase {
    * overflow line. See the cap branch in onResponseChunk: the first drop is
    * logged immediately so the loss is visible, later chunks only count, and
    * this emits the cumulative total once per episode when the stash leaves
-   * the side buffer.
+   * the side buffer. `capDropped` counts characters, not fields: the sealed
+   * pre's own trim is a subset of the text trim and is not charged again.
    */
   private reportOrphanStashCap(sessionId: string, held: QQOrphanStash): void {
     const total = held.capDropped ?? 0;
@@ -3245,12 +3271,15 @@ export class QQChannel extends ChannelBase {
     if (noSuccessorCanConsume || completionAlreadyRan) {
       // The sealed text belongs to this state's turn, so anchor it there: a
       // successor may already own the session anchor by the time this runs.
+      // Its attribution label is passed for the same reason — the fallback
+      // lookup resolves against a possibly-successor active prompt.
       void this.deliverCancelledStash(
         state.chatId,
         sessionId,
         sealed,
         state.msgId ?? null,
         state.msgIdTimestamp,
+        state.sourceLabel,
       );
       return;
     }
@@ -3850,28 +3879,11 @@ export class QQChannel extends ChannelBase {
         typeof routerPersistPath === 'string' && routerPersistPath.length > 0
           ? routerPersistPath
           : this.globalSessionsPath;
-      // A message route persists its key as JSON.stringify([baseKey, routeKey])
-      // (SessionRouter.routingKey), so an entry's base key has to be unwrapped
-      // before the orphan predicates can match it.
-      const baseRoutingKey = (key: string): string | undefined => {
-        if (!key.startsWith('[')) return key;
-        try {
-          const parsed: unknown = JSON.parse(key);
-          if (
-            Array.isArray(parsed) &&
-            parsed.length === 2 &&
-            typeof parsed[0] === 'string'
-          ) {
-            return parsed[0];
-          }
-        } catch {
-          // A channel name may legitimately start with '[', so an unparsable
-          // or non-wrapper '[' string is treated as the base key itself rather
-          // than dropped: failing closed here silently stops purging
-          // `[QQ]:__single__`.
-        }
-        return key;
-      };
+      // A message route persists its key as a fixed wrapper around its
+      // chat-level key (SessionRouter.routingKey), so an entry's base key has
+      // to be unwrapped before the orphan predicates can match it. The unwrap
+      // lives next to the wrap in channels/base, so the two cannot drift apart
+      // and leave this purge matching a shape the router no longer writes.
       type PersistedRouteMeta = {
         cwd?: string;
         isolation?: 'worktree';
@@ -3927,8 +3939,8 @@ export class QQChannel extends ChannelBase {
       > = [];
       for (const entry of all) {
         // Match only this channel's own keys, on the entry's base key (a
-        // message route wraps it as JSON.stringify([base, routeKey]), see
-        // baseRoutingKey above): in daemon mode the router is shared across
+        // message route wraps it, see unwrapMessageRoutingKey):
+        // in daemon mode the router is shared across
         // channels, so a suffix match on ':__single__' would also hit sibling
         // channels' live single-scope routing state and silently reset their
         // sessions. Orphan keys from the single-scope era are
@@ -3954,13 +3966,13 @@ export class QQChannel extends ChannelBase {
         // router builds for 'user' scope rather than being split on ':' — the
         // channel name is unrestricted user config and may itself contain
         // colons, so the part count does not identify the scope.
-        const baseKey = baseRoutingKey(entry.key);
+        const baseKey = unwrapMessageRoutingKey(entry.key);
         const ownsEntry =
           entry.target === undefined || entry.target.channelName === this.name;
         const isSingleOrphan =
           knownScope &&
           !singleScope &&
-          baseKey === `${this.name}:__single__` &&
+          baseKey === singleScopeRoutingKey(this.name) &&
           ownsEntry;
         const isOwnLegacyUserKey =
           knownScope &&

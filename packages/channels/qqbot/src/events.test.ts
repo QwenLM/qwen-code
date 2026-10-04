@@ -73,7 +73,19 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
+// The purge's routing-key shape helpers are pure: keep the shipped
+// implementations in the double below rather than mirrors, so the mock cannot
+// diverge from what the router writes. The mirrored pieces (the sanitizers and
+// truncateUtf16Units) are pinned to the real module by the test double suite
+// at the bottom of this file.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
+
 vi.mock('@qwen-code/channel-base', () => ({
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
+  wrapMessageRoutingKey: realChannelBase.wrapMessageRoutingKey,
   ChannelBase: class {
     protected config: Record<string, unknown> = {};
     protected bridge: Record<string, unknown> = {};

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
+import {
+  SessionRouter,
+  singleScopeRoutingKey,
+  unwrapMessageRoutingKey,
+  wrapMessageRoutingKey,
+} from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
@@ -97,6 +103,9 @@ vi.mock('@qwen-code/channel-base', async () => {
     '@qwen-code/channel-base',
   );
   return {
+    // The purge's key-shape coupling test drives the real SessionRouter;
+    // everything below overrides only what a test needs stubbed.
+    ...real,
     ChannelBase: class {
       protected config: Record<string, unknown> = {};
       protected bridge: Record<string, unknown> = {};
@@ -142,8 +151,11 @@ vi.mock('@qwen-code/channel-base', async () => {
       }
       protected onTaskLifecycle(_event: unknown): void {}
     },
-    SessionRouter: class {
-      restoreSessions(): Promise<void> {
+    // The real class with only the restart path stubbed: the purge's
+    // key-shape coupling test drives the real routingKey, and every other
+    // test either supplies its own duck-typed router or builds no session.
+    SessionRouter: class extends real.SessionRouter {
+      override restoreSessions(): Promise<void> {
         return Promise.resolve();
       }
     },
@@ -367,6 +379,12 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     vi.restoreAllMocks();
   });
 
+  // The verdict these rows assert (`ch.config.sessionScope`) is a protected
+  // ChannelBase field, read here because the channel under test IS the
+  // adapter's own construction: the constructor's decision is the subject, and
+  // no public accessor exposes the resolved scope. The warning text the same
+  // decision writes is asserted alongside, so the outcome is observable even
+  // where the field is not public.
   it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
@@ -653,6 +671,129 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledTimes(2);
     expect(removeSessionId).toHaveBeenCalledWith('bracket-bare');
     expect(removeSessionId).toHaveBeenCalledWith('bracket-routed');
+  });
+
+  it('keeps the purge predicates coupled to the router key shapes', () => {
+    // The orphan predicates compare persisted keys by value, so a change to
+    // SessionRouter's key templates or to the message-route wrapper must
+    // redden here rather than silently leave the purge matching a shape the
+    // router no longer writes.
+    const routerKey = (scope: string, ...args: [string, string, string?]) =>
+      (
+        SessionRouter.prototype as unknown as {
+          routingKey: (
+            channelName: string,
+            senderId: string,
+            chatId: string,
+            threadId?: string,
+            routeKey?: string,
+          ) => string;
+        }
+      ).routingKey.call(
+        new SessionRouter({} as never, '/tmp', scope as never),
+        'test-bot',
+        ...args,
+      );
+
+    // The single-scope key the purge looks for is exactly the router's, bare
+    // and as the base of a wrapped message route.
+    expect(routerKey('single', 'u1', 'c1')).toBe(
+      singleScopeRoutingKey('test-bot'),
+    );
+    expect(routerKey('single', 'u1', 'c1', undefined, '/review')).toBe(
+      wrapMessageRoutingKey(singleScopeRoutingKey('test-bot'), '/review'),
+    );
+    expect(
+      unwrapMessageRoutingKey(
+        routerKey('single', 'u1', 'c1', undefined, '/review'),
+      ),
+    ).toBe(singleScopeRoutingKey('test-bot'));
+    // The user-scope key the purge rebuilds from the entry target.
+    expect(routerKey('user', 'u1', 'c1')).toBe('test-bot:u1:c1');
+    expect(unwrapMessageRoutingKey(routerKey('user', 'u1', 'c1'))).toBe(
+      'test-bot:u1:c1',
+    );
+  });
+
+  it('purges keys the real router wrote, and only those', () => {
+    // End-to-end over the writer: the entries are built by SessionRouter's own
+    // routingKey (single-scope, user-scope, and the message-route wrapper), so
+    // a key-template or wrapper change reddens here instead of leaving the
+    // purge predicates matching a shape the router no longer writes.
+    const realRouterKey = (
+      scope: string,
+      senderId: string,
+      chatId: string,
+      routeKey?: string,
+    ) =>
+      (
+        SessionRouter.prototype as unknown as {
+          routingKey: (
+            c: string,
+            s: string,
+            h: string,
+            t?: string,
+            r?: string,
+          ) => string;
+        }
+      ).routingKey.call(
+        new SessionRouter({} as never, '/tmp', scope as never),
+        'test-bot',
+        senderId,
+        chatId,
+        undefined,
+        routeKey,
+      );
+
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      restoreSessions: vi.fn().mockResolvedValue(undefined),
+      setChannelRotation: vi.fn(),
+      setRotationActivityChecker: vi.fn(),
+      setRotationListener: vi.fn(),
+      getAll: () => [
+        // This channel's single-era key, exactly as the router built it.
+        {
+          key: realRouterKey('single', 'u1', 'c1'),
+          sessionId: 'single-era',
+          target: { channelName: 'test-bot' },
+        },
+        // Its user-era key under a non-user scope, wrapped as a message route.
+        {
+          key: realRouterKey('user', 'u1', 'c1', '/review'),
+          sessionId: 'user-era',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // A target-less single-era route still matches on the key.
+        {
+          key: wrapMessageRoutingKey(
+            singleScopeRoutingKey('test-bot'),
+            '/review',
+          ),
+          sessionId: 'single-era-targetless',
+        },
+        // A live thread-scope key of this channel: never purged.
+        {
+          key: realRouterKey('thread', 'u1', 'g1'),
+          sessionId: 'live-thread',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+        // A sibling channel's single-scope key: never purged.
+        {
+          key: singleScopeRoutingKey('other-bot'),
+          sessionId: 'sibling',
+          target: { channelName: 'other-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    expect(removeSessionId.mock.calls.map((c) => c[0])).toEqual([
+      'single-era',
+      'user-era',
+      'single-era-targetless',
+    ]);
   });
 
   it('logs instead of silently skipping when the sessionScope is unrecognized', () => {
@@ -4457,6 +4598,14 @@ describe('replyMsgId cleanup timer', () => {
       vi.useRealTimers();
     });
 
+    // These rows assert against the private maps `flushAndTrack` owns
+    // (streamState, sessionReplyMsgId, msgSeqMap, inFlightMsgSeqSends) and spy
+    // on its send point, rather than driving a full protocol turn: the
+    // behaviours under test are the tear-down/keep decisions that method makes
+    // on them, and a public-path fixture would assert the same maps through
+    // more indirection without adding coverage. The loss logs and the wire
+    // contents are asserted as text alongside, so each row pins an observable
+    // outcome as well as the internal bookkeeping that produces it.
     describe('flushAndTrack permanent errors', () => {
       type PermFailureState = {
         chatId: string;

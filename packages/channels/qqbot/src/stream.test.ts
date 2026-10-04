@@ -16,6 +16,12 @@ const { mockSendQQMessage, mockFetchAccessToken, responseMessageIdRef } =
     responseMessageIdRef: { current: undefined as string | undefined },
   }));
 
+// The mocked ChannelBase's getResponseSourceLabel answer. Mutable so a test can
+// model the per-turn state a successor overwrites: the stash/sealed-head
+// delivery must take its label from the turn that wrote the text, not from this
+// lookup.
+const responseSourceLabelRef = { current: undefined as string | undefined };
+
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
   readFileSync: vi.fn(),
@@ -79,8 +85,8 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
       protected getResponseMessageId(_sessionId: string): string | undefined {
         return responseMessageIdRef.current;
       }
-      protected getResponseSourceLabel(_sessionId: string): undefined {
-        return undefined;
+      protected getResponseSourceLabel(_sessionId: string): string | undefined {
+        return responseSourceLabelRef.current;
       }
       protected formatMarkdownAttributedText(
         text: string,
@@ -1654,6 +1660,8 @@ describe('onResponseComplete', () => {
       string,
       { msgId: string; timestamp: number }
     >;
+    const inFlight = chp['inFlightMsgSeqSends'] as Map<string, number>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
 
     // Turn 1 streams and its deferred flush chain still owns the entry, so
     // turn 2's chunks are all dropped by the stale guard and turn 2 completes
@@ -1681,6 +1689,15 @@ describe('onResponseComplete', () => {
     // releases only its own expectedMsgId, so an unreleased msg-B would veto
     // every reclaim of its msg_seq counter until the sweeper TTL.
     expect(sessionAnchors.has('sess-1')).toBe(false);
+    // The paired in-flight marker must be cleared by the same finally: left
+    // behind it would veto the counter's reclaim forever, exactly like the
+    // anchor the assertion above pins.
+    expect(inFlight.has('msg-B')).toBe(false);
+    // Observably: the released anchor's counter is reclaimable again, so the
+    // sweeper drops it now instead of retaining a msgId nothing names.
+    seqMap.set('msg-B', 3);
+    (chp['reclaimOrphanMsgSeqCounters'] as () => boolean).call(ch);
+    expect(seqMap.has('msg-B')).toBe(false);
     onPromptEnd(ch, 'test-chat', 'sess-1');
     expect(sessionAnchors.has('sess-1')).toBe(false);
     stderrSpy.mockRestore();
@@ -2649,11 +2666,18 @@ describe('buffer limit flush (#11)', () => {
 
     // disconnect() is the only end for this episode — it drops the map with no
     // report site after it, so the pending total must be flushed first.
+    const heldChars = orphanBuffer.get('s1')!.text.length;
     ch.disconnect();
     expect(orphanBuffer.size).toBe(0);
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain('stash capped:');
     expect(logged).toContain(`(${droppedTotal} total)`);
+    // The text still in the buffer is discarded here with no later delivery
+    // site, so its loss is logged like every other drop rather than only the
+    // cap total.
+    expect(logged).toContain(
+      `dropping ${heldChars} chars of turn 2 stash on disconnect for s1`,
+    );
 
     stderrSpy.mockRestore();
     resolveSend(mockResponse(true));
@@ -2697,6 +2721,65 @@ describe('buffer limit flush (#11)', () => {
     expect(after.text.startsWith(after.pre!)).toBe(true);
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain('dropping 29 chars');
+    // The trim of `pre` is the same characters the text trim already counted,
+    // so it is reported but not charged again: the loss is measured from what
+    // the stash held before the chunk, not text + pre.
+    expect(logged).toContain('and its sealed pre');
+    expect(after.capDropped).toBe(29);
+
+    stderrSpy.mockRestore();
+    resolveSend(mockResponse(true));
+    await drain();
+  });
+
+  it('counts a capped stash loss once per character, not once per field', async () => {
+    // A limit of 20 against a stash that opens with the 8-char 'T2-HEAD '
+    // prefix: the cap crosses the sealed pre on several chunks, not just the
+    // first, so the pre trim repeats and its double count would accumulate.
+    const ch = makeChannel({ bufferFlushLength: 20 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      {
+        turn: number;
+        text: string;
+        pre?: string;
+        capDropped?: number;
+        capLogged?: number;
+      }
+    >;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // `pre` is sealed to the 8-char head, which is a strict prefix of every
+    // later stash, so each cap needs to trim pre too. The loss must be
+    // measured in characters the stash actually held: 7 + 10 + 10 + 10 = 37,
+    // where counting the pre trim again would report 7+11, 10+12, 10+10 ...
+    // and inflate both the line and the cumulative total.
+    onResponseChunk(ch, 'test-chat', 'A'.repeat(19), 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    for (let i = 0; i < 3; i++) {
+      onResponseChunk(ch, 'test-chat', 'B'.repeat(10), 's1');
+    }
+
+    const stashed = orphanBuffer.get('s1')!;
+    expect(stashed.text.length).toBe(20);
+    // The cap keeps the head, so later chunks are trimmed away entirely.
+    expect(stashed.text).toBe('T2-HEAD ' + 'A'.repeat(12));
+    expect(stashed.pre).toBe(stashed.text);
+    expect(stashed.capDropped).toBe(37);
+    const firstLine = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((line) => line.includes('over the buffer limit'));
+    expect(firstLine).toContain('dropping 7 chars');
+
+    // The cumulative summary reports only the drops the first line did not.
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('30 further chars dropped (37 total)');
+    expect(logged).not.toContain('(74 total)');
 
     stderrSpy.mockRestore();
     resolveSend(mockResponse(true));
@@ -2736,12 +2819,19 @@ describe('buffer limit flush (#11)', () => {
     await drain();
   });
 
-  it('caps the handed-off stash merge while keeping the sealed head', async () => {
-    const ch = makeChannel({ bufferFlushLength: 40 });
+  /**
+   * Arrange the handoff-cap scenario both of its assertions need: turn 1's
+   * sealed head is in flight when a boundary clears it, completion parks the
+   * turn, turn 2 diverts a long chunk into the side buffer and seals it, and
+   * turn 1's permanent failure then hands its head off in front of that
+   * stash. The caller sets `state.sourceLabel` (the limit knob), rejects with
+   * `rejectSend`, and asserts what the merge kept and logged.
+   */
+  async function arrangeHandoffCap(ch: QQChannelClass) {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; sourceLabel?: string }
     >;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
       string,
@@ -2776,17 +2866,24 @@ describe('buffer limit flush (#11)', () => {
     onResponseChunk(ch, 'test-chat', long, 's1');
     onResponseBoundary(ch, 'test-chat', 's1');
     expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: long, pre: long });
+
     const state = stateMap.get('s1')!;
+    const limitOf = () =>
+      (chp['streamBufferLimit'] as (s: unknown) => number).call(ch, state);
+    return { chp, orphanBuffer, stderrSpy, rejectSend, limitOf, long };
+  }
+
+  it('caps the handed-off stash merge while keeping the sealed head', async () => {
+    const ch = makeChannel({ bufferFlushLength: 40 });
+    const { orphanBuffer, stderrSpy, rejectSend, limitOf, long } =
+      await arrangeHandoffCap(ch);
 
     // Turn 1's permanent failure hands its sealed head off in front of that
     // 38-char stash: 4 + 38 = 42 exceeds the 40-char limit.
     rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
     await drain();
 
-    const limit = (chp['streamBufferLimit'] as (s: unknown) => number).call(
-      ch,
-      state,
-    );
+    const limit = limitOf();
     expect(limit).toBe(40);
     const stashed = orphanBuffer.get('s1')!;
     expect(stashed.turn).toBe(2);
@@ -2808,52 +2905,19 @@ describe('buffer limit flush (#11)', () => {
 
   it('keeps the sealed head whole when the limit is smaller than the head', async () => {
     const ch = makeChannel({ bufferFlushLength: 40 });
-    const chp = ch as unknown as Record<string, unknown>;
-    const stateMap = chp['streamState'] as Map<
-      string,
-      { sealedPre?: string; sourceLabel?: string }
-    >;
-    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
-      string,
-      { turn: number; text: string; pre?: string }
-    >;
-    const stderrSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
-    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    const { chp, orphanBuffer, stderrSpy, rejectSend, limitOf, long } =
+      await arrangeHandoffCap(ch);
 
-    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
-    onResponseBoundary(ch, 'test-chat', 's1');
-    let rejectSend!: (e: unknown) => void;
-    mockSendQQMessage.mockReturnValueOnce(
-      new Promise<MockResponse>((_resolve, reject) => {
-        rejectSend = reject;
-      }),
-    );
-    vi.advanceTimersByTime(2000);
-    await drain();
-
-    onResponseChunk(ch, 'test-chat', 'Q', 's1');
-    await onResponseComplete(ch, 'test-chat', 'HEAD', 's1');
-    setReplyMsgId(ch, 'test-chat', 'msg-B');
-    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
-    const long = 'X'.repeat(38);
-    onResponseChunk(ch, 'test-chat', long, 's1');
-    onResponseBoundary(ch, 'test-chat', 's1');
-    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: long, pre: long });
-    const state = stateMap.get('s1')!;
     // A very long rendered source label shrinks this state's limit below the
     // sealed head's own length: the head must still survive whole.
-    state.sourceLabel = 'L'.repeat(36); // limit 3
+    (chp['streamState'] as Map<string, { sourceLabel?: string }>).get(
+      's1',
+    )!.sourceLabel = 'L'.repeat(36); // limit 3
 
     rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
     await drain();
 
-    const limit = (chp['streamBufferLimit'] as (s: unknown) => number).call(
-      ch,
-      state,
-    );
+    const limit = limitOf();
     expect(limit).toBe(3);
     const stashed = orphanBuffer.get('s1')!;
     expect(stashed.turn).toBe(2);
@@ -4529,10 +4593,12 @@ describe('stash ownership regressions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    responseSourceLabelRef.current = undefined;
     vi.useFakeTimers();
   });
 
   afterEach(() => {
+    responseSourceLabelRef.current = undefined;
     vi.useRealTimers();
   });
 
@@ -7536,6 +7602,63 @@ describe('round-1 robustness pins', () => {
     // The label was captured when the chunks were diverted; the merged flush
     // must not go out unattributed.
     expect(streamState(ch).get('s1')!.sourceLabel).toBe('SUB-1');
+  });
+
+  it("sends a cancelled turn's stash under its own attribution label", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // State a cancelled turn leaves: its head diverted to the side buffer
+    // while the predecessor's chain still owns the stream entry.
+    stash(ch, {
+      turn: 1,
+      text: 'LABELLED-HEAD ',
+      sourceLabel: 'SUB-1',
+    });
+    (chp['pendingStreamDelete'] as Set<string>).add('s1');
+    // The successor turn now owns the per-turn state the label lookup reads.
+    responseSourceLabelRef.current = 'SUB-2';
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+
+    // onPromptEnd deletes the stash and delivers its text directly, so the
+    // label cannot come from the lookup — that one describes the successor.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(sentContents().at(-1)).toBe('SUB\\-1\nLABELLED-HEAD ');
+  });
+
+  it('labels a sealed head delivered for a turn that has no successor', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // A labelled chunk streams, the boundary seals it, and the idle flush
+    // takes it with the send still unresolved.
+    onResponseChunk(ch, 'test-chat', 'SEALED-HEAD ', 's1', undefined, 'SUB-1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // No prompt is active for the session, so no successor completion can
+    // consume a re-stash: handOffSealedPre must deliver the sealed head
+    // directly. The lookup would now resolve to the successor's label.
+    (chp['activePromptSessions'] as Set<string>).delete('s1');
+    responseSourceLabelRef.current = 'SUB-2';
+    const before = mockSendQQMessage.mock.calls.length;
+    rejectSend(new DeliveryError('FALLBACK_FAILED', 'permanent failure'));
+    await drain();
+
+    expect(streamState(ch).get('s1')?.sealedPre).toBeUndefined();
+    expect(mockSendQQMessage.mock.calls.length).toBe(before + 1);
+    // Delivered under the sealed turn's own label, not the successor's.
+    expect(sentContents().at(-1)).toBe('SUB\\-1\nSEALED-HEAD ');
   });
 
   it('does not re-arm a live idle timer on a response boundary', () => {
