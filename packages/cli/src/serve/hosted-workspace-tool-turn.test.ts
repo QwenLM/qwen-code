@@ -1825,13 +1825,19 @@ function actionIds(): string[] {
 
 async function requested(count = 1): Promise<string> {
   let requestId = '';
-  await vi.waitFor(async () => {
-    const ids = actionIds();
-    expect(ids).toHaveLength(count);
-    requestId = ids.at(-1)!;
-    expect(session.authority.action(requestId)?.state).toBe('requested');
-    expect((await checkpoint()).continuation.phase).toBe('await_action');
-  });
+  // The Turn performs several sequential fsynced durable writes before the
+  // Action request surfaces; the hard-coded 1s vi.waitFor default races them
+  // on the coverage-enabled, shared post-merge CI runners.
+  await vi.waitFor(
+    async () => {
+      const ids = actionIds();
+      expect(ids).toHaveLength(count);
+      requestId = ids.at(-1)!;
+      expect(session.authority.action(requestId)?.state).toBe('requested');
+      expect((await checkpoint()).continuation.phase).toBe('await_action');
+    },
+    { timeout: 10_000 },
+  );
   return requestId;
 }
 
