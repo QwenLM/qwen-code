@@ -47,12 +47,15 @@ export function managedEventsToMessages(
     | Extract<Message, { role: 'assistant' | 'thinking' }>
     | undefined;
   let currentTurnId: string | undefined;
-  const settle = () => {
+  const stopStreaming = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
         message.isStreaming = false;
       }
     }
+  };
+  const settle = () => {
+    stopStreaming();
     textMessage = undefined;
   };
   for (const event of events) {
@@ -108,7 +111,12 @@ export function managedEventsToMessages(
         messages.push(message);
         textMessage = message;
       }
-      if (textMessage) textMessage.content += text;
+      if (textMessage) {
+        textMessage.content += text;
+        // A runtime_failed only stopped the spinner: a Turn that keeps
+        // streaming after it must show as live again.
+        textMessage.isStreaming = true;
+      }
     } else if (event.type === 'agent_started') {
       settle();
     } else if (
@@ -241,7 +249,11 @@ export function managedEventsToMessages(
       // the live one.
       (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
-      settle();
+      // environment.failed is a non-fatal diagnostic and the Turn keeps
+      // streaming: dropping the continuation handle would split one answer
+      // into two bubbles, so only stop the spinner (and fail pending tools).
+      if (event.type === 'runtime_failed') stopStreaming();
+      else settle();
       for (const tool of tools.values()) {
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';

@@ -335,6 +335,19 @@ describe('createJavaManagedAgentProvider', () => {
     expect(createBody).not.toHaveProperty('environmentId');
   });
 
+  it('scopes the storageKey by environmentId when no productScope is given', () => {
+    const a = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      environmentId: 'env-a',
+    });
+    const b = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      environmentId: 'env-b',
+    });
+    expect(a.storageKey).not.toBe(b.storageKey);
+    expect(a.storageKey).toContain('env-a');
+  });
+
   it('uses lastEventId only as the Java public sequence cursor', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

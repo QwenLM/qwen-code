@@ -141,6 +141,8 @@ function ManagedSessionsContent({
     readPending(pendingKey),
   );
   const pendingRef = useRef(pending);
+  const focusComposer = useRef(false);
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const listLifetime = useRef<AbortController | undefined>(undefined);
   const listBusy = useRef(false);
@@ -186,6 +188,15 @@ function ManagedSessionsContent({
     setBusy(false);
     return () => abort.abort();
   }, [pendingKey]);
+
+  // The Discard button unmounts itself, dropping focus to <body>: land it on
+  // the composer that just got the draft back. The move must wait for the
+  // clear to commit — the textarea is disabled while pending is set.
+  useEffect(() => {
+    if (!focusComposer.current || pending) return;
+    focusComposer.current = false;
+    composerFormRef.current?.querySelector('textarea')?.focus();
+  }, [pending]);
 
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
@@ -542,7 +553,17 @@ function ManagedSessionsContent({
                   pendingRef.current = undefined;
                   setPending(undefined);
                   persistPending(pendingKey, undefined);
-                  setText(pending.text);
+                  // The pending record is client-scoped but the draft
+                  // belongs to the session it was written for: restore it
+                  // only there.
+                  if (pending.sessionId === sessionId) setText(pending.text);
+                  setError(undefined);
+                  // A create that committed server-side before an
+                  // unconfirmed failure is otherwise invisible until the
+                  // user happens to press Refresh.
+                  if (pending.sessionId === undefined)
+                    setListRevision((current) => current + 1);
+                  focusComposer.current = true;
                 }}
               >
                 {t('managed.discard')}
@@ -630,6 +651,7 @@ function ManagedSessionsContent({
           {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <form
+              ref={composerFormRef}
               className="flex shrink-0 flex-col gap-2"
               onSubmit={(event) => {
                 event.preventDefault();

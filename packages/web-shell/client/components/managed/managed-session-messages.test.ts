@@ -330,6 +330,25 @@ describe('Managed transcript projection', () => {
     expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
   });
 
+  it('does not split the streamed answer when the active Turn reports a Runtime failure', () => {
+    // environment.failed is a non-fatal diagnostic; the Turn keeps streaming.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Go' }] }),
+        event(2, 'assistant_delta', { text: 'A' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'assistant_delta', { text: 'B' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'AB',
+      isStreaming: true,
+    });
+  });
+
   it('renders the failed event message as an error bubble', () => {
     const messages = managedEventsToMessages(
       [

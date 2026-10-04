@@ -159,6 +159,13 @@ export function useManagedSession(
       }
       return transcript.lastEventId;
     };
+    // The stream loop, the summary poll and loadOlder share the error
+    // field; a success may only clear what its own writer raised. stallError
+    // tracks the resync loop's stall alert so the poll can restore it (a
+    // hung stream has no pass in which to re-assert it); pollError tracks
+    // the poll's own failure.
+    let stallError: string | undefined;
+    let pollError: string | undefined;
     void (async () => {
       let lastEventId: number | undefined;
       while (!abort.signal.aborted && lastEventId === undefined) {
@@ -187,6 +194,7 @@ export function useManagedSession(
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
             gapStalls = 0;
+            stallError = undefined;
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
@@ -198,6 +206,7 @@ export function useManagedSession(
             if (head > lastEventId) {
               lastEventId = head;
               gapStalls = 0;
+              stallError = undefined;
               retryDelayMs = 0;
             } else {
               // A resync that cannot advance the cursor replays its trigger
@@ -208,20 +217,29 @@ export function useManagedSession(
               // transient error once resyncs succeed again.
               gapStalls += 1;
               retryDelayMs = 3000;
-              if (gapStalls >= 3)
-                fail(
-                  new Error(
-                    'Managed Agent event stream is not advancing; retrying',
-                  ),
-                );
+              if (gapStalls >= 3) {
+                stallError =
+                  'Managed Agent event stream is not advancing; retrying';
+                fail(new Error(stallError));
+              }
             }
-          } else if (!abort.signal.aborted)
+          } else if (!abort.signal.aborted) {
             // Every success path must clear a previous transient failure,
-            // or an idle session keeps the stale alert forever.
-            update({
-              summary: await provider.getSession(sessionId, opts),
-              error: undefined,
-            });
+            // or an idle session keeps the stale alert forever — but only
+            // what this loop or the paging path raised: the poll's own error
+            // belongs to the poll, and a still-current stall alert belongs
+            // to the resync loop.
+            const summary = await provider.getSession(sessionId, opts);
+            if (!abort.signal.aborted)
+              setState((current) => ({
+                ...current,
+                summary,
+                error:
+                  current.error === pollError || current.error === stallError
+                    ? current.error
+                    : undefined,
+              }));
+          }
         } catch (error) {
           fail(error);
         }
@@ -229,23 +247,25 @@ export function useManagedSession(
       }
     })();
     void (async () => {
-      // The poll shares the error field with the stream machinery, so it
-      // may only clear what it raised itself: clearing on every success
-      // would flicker a re-asserted stream-stall alert every poll pass.
-      let pollFailed = false;
       while (!abort.signal.aborted) {
         await pause(abort.signal, 3000);
         if (abort.signal.aborted) return;
         try {
           const summary = await provider.getSession(sessionId, opts);
-          if (pollFailed) {
-            pollFailed = false;
-            update({ summary, error: undefined });
-          } else {
+          if (pollError === undefined) {
             update({ summary });
+          } else {
+            const raised = pollError;
+            pollError = undefined;
+            if (!abort.signal.aborted)
+              setState((current) => ({
+                ...current,
+                summary,
+                error: current.error === raised ? stallError : current.error,
+              }));
           }
         } catch (error) {
-          pollFailed = true;
+          pollError = error instanceof Error ? error.message : String(error);
           fail(error);
         }
       }

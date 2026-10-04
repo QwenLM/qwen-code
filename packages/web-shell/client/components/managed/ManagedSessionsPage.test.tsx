@@ -936,21 +936,88 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).toContain('request outcome is unconfirmed');
     const textarea = () => container.querySelector('textarea');
     expect(textarea()?.disabled).toBe(true);
+    expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(1);
 
     // Without an escape the composer stays wedged on the retry loop forever.
-    await click('Discard this request');
+    const discard = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Discard this request',
+    );
+    expect(discard).toBeDefined();
+    discard!.focus();
+    await act(async () => {
+      discard!.click();
+      await flush();
+    });
     expect(container.textContent).not.toContain(
       'request outcome is unconfirmed',
     );
     expect(textarea()?.disabled).toBe(false);
     expect(textarea()?.value).toBe('Do the work');
     expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    // The failed attempt's own alert is dismissed with it...
+    expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(0);
+    // ...a create that committed server-side before the unconfirmed failure
+    // re-surfaces in the session list...
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    // ...and focus lands on the composer now holding the restored draft.
+    expect(document.activeElement).toBe(textarea());
 
-    // The persisted pending prompt is gone too: a remount does not return it.
+    // The persisted pending prompt is gone too: a real remount does not
+    // return it.
+    await act(async () => root.unmount());
+    root = createRoot(container);
     await render();
     expect(container.textContent).not.toContain(
       'request outcome is unconfirmed',
     );
+  });
+
+  it('sends the edited draft under a fresh idempotency key after a discard', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+    const originalKey =
+      mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
+
+    await click('Discard this request');
+    await input('Do the other work');
+    await click('Send');
+
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
+    expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
+      text: 'Do the other work',
+      workspaceCwd: undefined,
+    });
+    expect(
+      mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
+    ).not.toBe(originalKey);
+  });
+
+  it('does not restore the discarded draft into a different session', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValue(
+      new TypeError('Network failed'),
+    );
+    await render('s1');
+    await input('For session A only');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await click('Task s2Completed');
+    await render('s2');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+
+    await click('Discard this request');
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(container.querySelector('textarea')?.value).toBe('');
   });
 
   it('does not refetch the list when a dropped workspace path changes', async () => {

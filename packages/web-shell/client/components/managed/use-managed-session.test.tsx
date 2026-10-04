@@ -2027,9 +2027,17 @@ describe('useManagedSession', () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let streamHangs = false;
+    let blipNextSummary = false;
     const fetchImpl = vi.fn<typeof fetch>(async (url) => {
       const path = String(url);
       if (path.endsWith('/sessions/get')) {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          return new Response(
+            JSON.stringify({ error: { code: 'boom', message: 'boom-blip' } }),
+            { status: 500, headers: { 'content-type': 'application/json' } },
+          );
+        }
         return new Response(javaSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -2096,6 +2104,18 @@ describe('useManagedSession', () => {
       streamHangs = true;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+      // The stream is parked for good now, so every summary fetch is the
+      // poll's. A blip occupies the field for one cadence; the next success
+      // may only clear that — the still-current stall alert comes back.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
       });
       expect(latest?.error).toMatch(/not advancing/);
     } finally {
@@ -2331,46 +2351,52 @@ describe('useManagedSession', () => {
     expect(streamBodies[0]?.['afterSequence']).toBe(2);
   });
 
-  it(
-    'clears a transient error on the next successful poll',
-    {
-      timeout: 30000,
-    },
-    async () => {
-      let summaryCalls = 0;
-      const provider = {
-        getSession: vi.fn(async () => {
-          summaryCalls += 1;
-          if (summaryCalls === 2) throw new Error('boom-blip');
-          return { sessionId: 'session-1' };
-        }),
-        getTranscript: vi
-          .fn<ManagedAgentProvider['getTranscript']>()
-          .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
-        async *subscribeEvents() {
-          await new Promise(() => {});
-          yield* [];
-        },
-      } as unknown as ManagedAgentProvider;
-      let latest: ReturnType<typeof useManagedSession> | undefined;
-      function Probe() {
-        latest = useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      const container = document.createElement('div');
-      root = createRoot(container);
-      act(() => root!.render(<Probe />));
+  it('clears a transient error on the next successful poll', async () => {
+    vi.useFakeTimers();
+    let summaryCalls = 0;
+    const provider = {
+      getSession: vi.fn(async () => {
+        summaryCalls += 1;
+        if (summaryCalls === 2) throw new Error('boom-blip');
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi
+        .fn<ManagedAgentProvider['getTranscript']>()
+        .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
+      async *subscribeEvents() {
+        await new Promise(() => {});
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
 
-      // Snapshot summary (call 1) is fine, the first poll (call 2) blips.
-      await vi.waitFor(() => expect(latest?.error).toBe('boom-blip'), {
-        timeout: 10000,
+    try {
+      // Settle the initial snapshot (call 1) so the blip lands on the first
+      // poll, then step the hard-coded 3s poll cadence.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
       });
+      // Snapshot summary (call 1) is fine, the first poll (call 2) blips.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
       // The next poll (call 3) succeeds: the fresh summary must not carry a
       // stale alert beside it.
-      await vi.waitFor(() => expect(latest?.error).toBeUndefined(), {
-        timeout: 10000,
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
       });
+      expect(latest?.error).toBeUndefined();
       expect(latest?.summary).toEqual({ sessionId: 'session-1' });
-    },
-  );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

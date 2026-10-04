@@ -1,11 +1,5 @@
 import './styles/globals.css';
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
+import { useMemo, useRef, useState, type CSSProperties } from 'react';
 import { BrandProvider, type WebShellBrand } from './brandContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
@@ -59,11 +53,11 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const resolvedLanguage = normalizeLanguage(language);
   // Function props may be inline closures: route them through a ref so the
   // provider (and its caches, fetches and SSE) is rebuilt only when a real
-  // connection input changes, not on every parent render.
+  // connection input changes, not on every parent render. Assigned during
+  // render: React flushes child passive effects before the parent's, so an
+  // effect would let a child of this same commit read the stale callbacks.
   const callbacksRef = useRef({ fetchImpl, getHeaders, saveArtifact });
-  useEffect(() => {
-    callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
-  }, [fetchImpl, getHeaders, saveArtifact]);
+  callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
   const hasFetch = fetchImpl !== undefined;
   const hasGetHeaders = getHeaders !== undefined;
   const hasSaveArtifact = saveArtifact !== undefined;
@@ -105,18 +99,20 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     externalSessionId: sessionId,
     selectedSessionId: sessionId,
   }));
-  // With both sessionId and onSessionChange the host owns the selection.
+  // With both sessionId and onSessionChange the host owns the selection:
+  // onSelectSession suppresses the internal write, but the echoed value
+  // still passes through the same state machine — otherwise a host can never
+  // return to "no selection" and a scope switch forwards the carried-over id.
   const controlled = sessionId !== undefined && onSessionChange !== undefined;
   let selectedSessionId: string | undefined;
-  if (controlled) {
-    selectedSessionId = sessionId;
-  } else if (
+  if (
     selection.storageKey !== provider.storageKey ||
     selection.externalSessionId !== sessionId
   ) {
     // Adjust during render (React's adjusting-state-when-props-change
     // pattern): an external switch is visible on this commit — an effect
-    // would paint one stale frame first.
+    // would paint one stale frame first. Only an id carried over from the
+    // previous identity is dropped, never an explicit new selection.
     selectedSessionId =
       selection.storageKey !== provider.storageKey &&
       sessionId === selection.externalSessionId
