@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { appendFile, mkdir, readFile, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, stat, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -540,10 +540,20 @@ export class FileManagedActivationStore {
       // A failed append may have torn the tail. The open() loader repairs
       // exactly that by truncating to the last complete line, so do the same
       // here: if the journal is back at the last byte this store synced, the
-      // write provably never happened and the failure is transient. Only a
-      // failed repair leaves the journal's state unknown — that is fatal.
+      // write provably never happened and the failure is transient. The
+      // length is observed, not assumed: truncate() extends a shorter file
+      // with NUL bytes and reports success, so on its own it cannot tell a
+      // torn tail apart from a journal that lost synced bytes out of band —
+      // that is consistency damage, and consistency damage is fatal.
       const failure = error instanceof Error ? error : new Error(String(error));
       try {
+        const { size } = await stat(this.filePath);
+        if (size < this.syncedBytes) {
+          throw new Error(
+            `Managed activation journal holds ${size} bytes, short of` +
+              ` the ${this.syncedBytes} already synced.`,
+          );
+        }
         await truncate(this.filePath, this.syncedBytes);
       } catch (repairError) {
         if (

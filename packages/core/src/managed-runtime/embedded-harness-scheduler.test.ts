@@ -638,11 +638,12 @@ describe('EmbeddedHarnessScheduler', () => {
     fsFault.failAppends = 1;
     gate.resolve();
     await waitUntil(() => releaseSpy.mock.calls.length === 1);
-    // Let the failed release's repair chain finish and the retry sleep arm,
-    // so the disposal below lands inside the sleep rather than before it.
-    for (let i = 0; i < 20; i++) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    // The retry sleep must provably be armed before the disposal lands
+    // inside it: while execute() awaits the sleep it is the only pending
+    // timer, and consuming 100 of its 250 ms proves it started and has not
+    // finished.
+    await waitUntil(() => vi.getTimerCount() === 1);
+    await vi.advanceTimersByTimeAsync(100);
     scheduler.dispose();
     for (let i = 0; i < 3; i++) {
       await vi.advanceTimersByTimeAsync(250);
@@ -694,8 +695,10 @@ describe('EmbeddedHarnessScheduler', () => {
     await advanceTimersUntil(() => releaseSpy.mock.calls.length === 4, 250);
 
     // Four absorbed failures exceed the activation's budget (3): the run is
-    // abandoned and the scheduler records the completed outcome itself.
-    await waitUntil(() => store.get(item)?.status === 'released');
+    // abandoned and the scheduler records the completed outcome itself. The
+    // terminal write commits after a yielded turn, so the wait advances the
+    // clock.
+    await advanceTimersUntil(() => store.get(item)?.status === 'released', 250);
     expect(releaseSpy.mock.calls.length).toBe(5);
     expect(runs).toBe(1);
     expect(store.get(item)?.outcome).toBe('completed');
@@ -739,13 +742,14 @@ describe('EmbeddedHarnessScheduler', () => {
     gate.resolve();
     await waitUntil(() => releaseSpy.mock.calls.length === 1);
     await advanceTimersUntil(() => releaseSpy.mock.calls.length === 4, 250);
-    // The terminal outcome write (the fifth call) fires without a timer once
-    // the budget is found to be spent.
-    await waitUntil(
+    // The terminal outcome write (the fifth call) fires once the budget is
+    // found to be spent, after a yielded commit turn.
+    await advanceTimersUntil(
       () =>
         releaseSpy.mock.calls.length === 5 &&
         scheduler.activeSlotCount === 0 &&
         store.get(item)?.status === 'assigned',
+      250,
     );
     expect(scheduler.haltedError).toBeUndefined();
 
@@ -898,8 +902,9 @@ describe('EmbeddedHarnessScheduler', () => {
   // The per-activation bound: renewals that keep failing across re-runs
   // spend the activation's transient-failure budget; once spent, the
   // scheduler records the terminal outcome itself instead of re-queuing the
-  // activation forever.
-  it('converges to a terminal failed release when renewals keep failing across re-runs', async () => {
+  // activation forever. The recorded outcome is the handler's own — this
+  // handler returns after honoring the abort, so its outcome is 'completed'.
+  it('converges to a terminal release when renewals keep failing across re-runs', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;
     const store = await FileManagedActivationStore.open(filePath, {
@@ -951,9 +956,9 @@ describe('EmbeddedHarnessScheduler', () => {
     await vi.advanceTimersByTimeAsync(30);
     now = 260;
     await vi.advanceTimersByTimeAsync(30);
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
     expect(runs).toBe(2);
-    expect(store.get(item)?.outcome).toBe('failed');
+    expect(store.get(item)?.outcome).toBe('completed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -969,14 +974,13 @@ describe('EmbeddedHarnessScheduler', () => {
     });
     let runs = 0;
     const item = activation('a1');
-    // Every run's first renewal tick fails transiently. On runs 1-3 the
-    // retry reaches the real store after the lease expired and answers
-    // stale; on run 4 the retry also fails transiently, inside the lease.
+    // Every run's first renewal tick fails transiently; the retry reaches
+    // the real store after the lease expired and answers stale.
     const originalRenew = store.renew.bind(store);
     let renewCalls = 0;
     vi.spyOn(store, 'renew').mockImplementation(async (...args) => {
       renewCalls++;
-      if (renewCalls % 2 === 1 || renewCalls === 8) {
+      if (renewCalls % 2 === 1) {
         throw new Error('disk busy');
       }
       return originalRenew(...args);
@@ -1004,14 +1008,14 @@ describe('EmbeddedHarnessScheduler', () => {
     await scheduler.start();
     await waitUntil(() => runs === 1);
 
-    // Runs 1-3: the renewal tick fails, and its retry lands after the lease
+    // Runs 1-2: the renewal tick fails, and its retry lands after the lease
     // expired — the store's stale answer must still merge the absorbed
     // failures into the activation's budget. One timer per step
     // (nextTimer), so the renewal cadence and the recovery wake never share
     // an advance.
     let renewals = 0;
     let claimedAt = 100;
-    for (let run = 1; run <= 3; run++) {
+    for (let run = 1; run <= 2; run++) {
       now = claimedAt + 30;
       await vi.advanceTimersToNextTimerAsync();
       await waitUntil(() => renewCalls === ++renewals);
@@ -1024,32 +1028,55 @@ describe('EmbeddedHarnessScheduler', () => {
       await waitUntil(() => runs === run + 1);
     }
 
-    // Run 4: the budget (3) plus this run's absorbed failures is spent, so
-    // the abandon records the terminal outcome instead of re-queuing again.
+    // Run 3: the budget (2) plus this run's absorbed failure is spent, so
+    // once the handler settles after the abort the scheduler records the
+    // terminal outcome instead of re-queuing again — the handler's own
+    // outcome ('completed': it returns when aborted), written with a fresh
+    // claim because the remembered lease has expired.
     now = claimedAt + 30;
     await vi.advanceTimersToNextTimerAsync();
     await waitUntil(() => renewCalls === ++renewals);
-    now = claimedAt + 60;
+    now = claimedAt + 95;
     await vi.advanceTimersToNextTimerAsync();
-    await waitUntil(() => store.get(item)?.status === 'released');
-    expect(store.get(item)?.outcome).toBe('failed');
-    expect(runs).toBe(4);
+    await waitUntil(() => renewCalls === ++renewals);
+    await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
+    expect(store.get(item)?.outcome).toBe('completed');
+    expect(runs).toBe(3);
     expect(scheduler.haltedError).toBeUndefined();
   });
 
   // getCurrentTime() is a validating accessor: a clock that starts returning
   // garbage must not escape the renewal/release error paths as an unhandled
   // rejection or a leaked active slot — the run cleans up and the worker
-  // escalates to a loud halt through the consecutive-failure streak.
+  // escalates to a loud halt. The abort reason pins the path: the renewal's
+  // transient failure abandons the run first (storeNow() treats the
+  // unreadable clock as no headroom), so the handler is aborted with the
+  // renewal's error; a clock throw escaping renew() would halt the worker
+  // directly and abort the run with the clock error instead.
   it('halts loudly when the injected store clock starts failing', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const now = 100;
+    let now = 100;
     let clockBroken = false;
     const store = await FileManagedActivationStore.open(filePath, {
       clock: () => (clockBroken ? -1 : now),
     });
     let runs = 0;
+    let abortReason: unknown;
     const item = activation('a1');
+    // The renewal's journal write fails transiently while the injected
+    // clock still reads fine (advancing, so the renewal extends and
+    // persists); the clock breaks before the scheduler reads it for the
+    // headroom decision.
+    const originalRenew = store.renew.bind(store);
+    vi.spyOn(store, 'renew').mockImplementation(async (...args) => {
+      now += 30;
+      fsFault.failAppends = 1;
+      const pending = originalRenew(...args);
+      pending.catch(() => {
+        clockBroken = true;
+      });
+      return pending;
+    });
     const scheduler = new EmbeddedHarnessScheduler({
       store,
       workerId: 'worker-a',
@@ -1062,9 +1089,14 @@ describe('EmbeddedHarnessScheduler', () => {
         runs++;
         if (context.signal.aborted) return;
         await new Promise<void>((resolve) => {
-          context.signal.addEventListener('abort', () => resolve(), {
-            once: true,
-          });
+          context.signal.addEventListener(
+            'abort',
+            () => {
+              abortReason = context.signal.reason;
+              resolve();
+            },
+            { once: true },
+          );
         });
       },
     });
@@ -1073,11 +1105,12 @@ describe('EmbeddedHarnessScheduler', () => {
     await scheduler.start();
     await waitUntil(() => runs === 1);
 
-    clockBroken = true;
     await advanceTimersUntil(() => scheduler.haltedError !== undefined, 1_000);
 
     expect(scheduler.activeSlotCount).toBe(0);
     expect(scheduler.haltedError?.message).toContain('clock');
+    expect(abortReason).toBeInstanceOf(Error);
+    expect((abortReason as Error).message).toBe('disk busy');
   });
 
   // A disposal racing an in-flight transient claim failure must not arm the
@@ -1237,5 +1270,300 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => handled.mock.calls.length > 0);
     expect(listSpy.mock.calls.length).toBeGreaterThan(1);
     await waitUntil(() => store.get(item)?.status === 'released');
+  });
+
+  // The onActivationError hook is the only channel that carries the
+  // handler's error object: an activation whose release retries exhaust the
+  // transient budget is terminally recorded by the scheduler itself, and
+  // that scheduler-side record must not suppress the report.
+  it('reports the handler error when the terminal outcome is recorded', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const onActivationError = vi.fn();
+    const gate = deferred();
+    let runs = 0;
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        runs++;
+        await gate.promise;
+        throw new Error('handler failed');
+      },
+      onActivationError,
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+    await waitUntil(() => runs === 1);
+
+    // The initial release and all three retries fail transiently; the fault
+    // clears just before the scheduler's own terminal write.
+    fsFault.failAppends = 4;
+    gate.resolve();
+    await advanceTimersUntil(() => store.get(item)?.status === 'released', 250);
+    expect(runs).toBe(1);
+    expect(store.get(item)?.outcome).toBe('failed');
+    expect(onActivationError).toHaveBeenCalledWith(
+      expect.objectContaining({ activationId: 'a1' }),
+      expect.objectContaining({ message: 'handler failed' }),
+    );
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
+  // The terminal write follows the same cancellation policy as the retry
+  // loop: a dispose() landing before the write commits must stop it — a
+  // stopped worker recording a terminal outcome would make a retryable
+  // failure permanent.
+  it('cancels the terminal outcome write when disposal races its commit turn', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const item = activation('a1');
+    const releaseSpy = vi.spyOn(store, 'release');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+
+    // The initial release and all three retries fail transiently, spending
+    // the budget; the scheduler's own terminal write then waits on its
+    // yielded commit turn — the only armed timer while execute() awaits it.
+    fsFault.failAppends = 4;
+    gate.resolve();
+    await waitUntil(() => releaseSpy.mock.calls.length === 1);
+    await advanceTimersUntil(() => releaseSpy.mock.calls.length === 4, 250);
+    await waitUntil(() => vi.getTimerCount() === 1);
+    scheduler.dispose();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(releaseSpy.mock.calls.length).toBe(4);
+    expect(store.get(item)?.status).toBe('assigned');
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
+  // The terminal write's failure handling follows the same liveness policy
+  // as every other store continuation: on a disposed worker, a store-halting
+  // rejection must not plant a bogus fatal error on the clean shutdown.
+  it('does not halt a disposed worker when the terminal write fails', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const terminalWriteInFlight = deferred();
+    let releaseCalls = 0;
+    const originalRelease = store.release.bind(store);
+    vi.spyOn(store, 'release').mockImplementation(async (...args) => {
+      releaseCalls++;
+      if (releaseCalls === 5) await terminalWriteInFlight.promise;
+      return originalRelease(...args);
+    });
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+
+    // The initial release and the three retries fail transiently; the
+    // terminal write is held in flight, the worker is disposed, and only
+    // then does the write fail with consistency damage (its journal repair
+    // fails too).
+    fsFault.failAppends = 5;
+    gate.resolve();
+    await waitUntil(() => releaseCalls === 1);
+    await advanceTimersUntil(() => releaseCalls === 4, 250);
+    await waitUntil(() => vi.getTimerCount() === 1);
+    await vi.advanceTimersByTimeAsync(1);
+    await waitUntil(() => releaseCalls === 5);
+    scheduler.dispose();
+    fsFault.failTruncates = 1;
+    terminalWriteInFlight.resolve();
+    await waitUntil(() => scheduler.activeSlotCount === 0);
+
+    expect(scheduler.haltedError).toBeUndefined();
+    expect(store.haltedError?.message).toBe('disk busy');
+    await expect(scheduler.submit(activation('a2'))).rejects.toThrow(
+      "Harness Worker 'worker-a' is disposed.",
+    );
+  });
+
+  // A run can end stale with zero absorbed transient failures — a slow store
+  // call that resolves past the lease boundary — so the dropped run itself
+  // must count against the budget, or the activation re-runs without bound.
+  it('bounds re-runs of an activation whose runs all end on a stale lease', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    let runs = 0;
+    const item = activation('a1');
+    // Every renewal tick resolves after the lease boundary, so the store
+    // answers stale and the run ends having absorbed no transient failure.
+    const originalRenew = store.renew.bind(store);
+    vi.spyOn(store, 'renew').mockImplementation(async (...args) => {
+      now = Math.max(now, args[0].expiresAt + 1);
+      return originalRenew(...args);
+    });
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (_activation, context) => {
+        runs++;
+        if (context.signal.aborted) return;
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+    await waitUntil(() => runs === 1);
+
+    await advanceTimersUntil(() => store.get(item)?.status === 'released', 100);
+
+    // Each stale-ended run costs one budget unit; the third spends it and
+    // the scheduler records the handler's own outcome with a fresh claim.
+    expect(runs).toBe(3);
+    expect(store.get(item)?.outcome).toBe('completed');
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
+  // A budget-spending abandon while the handler is still in flight must not
+  // record a hardcoded outcome: the terminal write awaits the handler and
+  // records the handler's own — and the Session FIFO fence holds until then.
+  it("records the handler's own outcome when the budget runs out mid-handler", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    let runs = 0;
+    let inFlightDone = false;
+    let a2Started = false;
+    let a2StartedEarly = false;
+    const a1 = activation('a1', { sessionId: 'session-a' });
+    const a2 = activation('a2', { sessionId: 'session-a' });
+    // Every renewal fails transiently, so each run abandons at the tick
+    // that leaves no headroom for another.
+    vi.spyOn(store, 'renew').mockRejectedValue(new Error('disk busy'));
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 2,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (item, context) => {
+        if (item.activationId === 'a2') {
+          a2Started = true;
+          a2StartedEarly = !inFlightDone;
+          return;
+        }
+        runs++;
+        if (runs === 1) {
+          if (context.signal.aborted) return;
+          await new Promise<void>((resolve) => {
+            context.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+          return;
+        }
+        // Run 2 keeps working through the abort: it finishes real work a
+        // few turns after the abort fires, so the abandon lands strictly
+        // mid-handler and the terminal write must wait for it.
+        if (!context.signal.aborted) {
+          await new Promise<void>((resolve) => {
+            context.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        }
+        for (let i = 0; i < 3; i++) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        inFlightDone = true;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(a1);
+    await scheduler.submit(a2);
+    await scheduler.start();
+    await waitUntil(() => runs === 1);
+
+    // Run 1 absorbs two renewal failures and abandons (budget 2); run 2's
+    // two failures spend it (4 >= 3) while run 2's handler is in flight.
+    now = 130;
+    await vi.advanceTimersByTimeAsync(30);
+    now = 160;
+    await vi.advanceTimersByTimeAsync(30);
+    await waitUntil(() => scheduler.activeSlotCount === 0);
+    expect(store.get(a1)?.status).toBe('assigned');
+    now = 200;
+    await advanceTimersUntil(() => runs === 2, 60);
+    now = 230;
+    await vi.advanceTimersByTimeAsync(30);
+    now = 260;
+    await vi.advanceTimersByTimeAsync(30);
+
+    await advanceTimersUntil(() => store.get(a1)?.status === 'released', 30);
+    // The recorded outcome is the handler's own, recorded only after the
+    // in-flight handler finished.
+    expect(inFlightDone).toBe(true);
+    expect(store.get(a1)?.outcome).toBe('completed');
+    expect(runs).toBe(2);
+
+    // The FIFO fence held: the same-Session a2 starts only after the
+    // abandoned handler finished and its outcome was recorded.
+    await waitUntil(() => store.get(a2)?.status === 'released');
+    expect(a2Started).toBe(true);
+    expect(a2StartedEarly).toBe(false);
+    expect(scheduler.haltedError).toBeUndefined();
   });
 });

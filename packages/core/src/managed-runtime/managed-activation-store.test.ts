@@ -220,6 +220,29 @@ describe('FileManagedActivationStore', () => {
     expect((store.haltedError?.cause as Error).message).toBe('gone');
   });
 
+  // The fifth cell of the fault matrix: the journal is shorter than the
+  // byte count already synced (a backup/restore or an operator truncation
+  // dropped the tail out of band). truncate() would "repair" it by extending
+  // it with NUL bytes and report success, so the repair observes the length
+  // first: a shorter journal is consistency damage — fatal, never transient.
+  it('halts when the journal is shorter than the synced byte count', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    await writeFile(filePath, '');
+
+    fsFault.failAppends = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError?.message).toBe('disk busy');
+    expect((store.haltedError?.cause as Error).message).toContain('short of');
+
+    // The truncated history on disk is itself loadable; the halted store
+    // refuses to keep writing over it.
+    const reopened = await openStore();
+    expect(reopened.listPending()).toEqual([]);
+  });
+
   it('fails closed on malformed committed history', async () => {
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, '{"v":1,"sequence":1}\n');

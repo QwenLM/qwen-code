@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -274,6 +275,56 @@ class HostedHarnessClientTest {
                     client.submitTurn(attached).getPromptId());
         }
 
+        assertEquals(2, promptCalls.get());
+    }
+
+    @Test
+    void releasesAnOutcomeUnknownPromptOnlyOnceTheHarnessReportsItIdle() {
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        AtomicBoolean harnessActive = new AtomicBoolean(true);
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    if (promptCalls.incrementAndGet() == 1) {
+                        sendSessionJson(exchange, 503,
+                                "{\"code\":\"temporarily_unavailable\"}");
+                        return;
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + SECOND_PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":"
+                                + harnessActive.get() + "}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            SubmitHarnessTurn next = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(SECOND_PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build();
+            // The Harness may still run the earlier prompt: refused.
+            assertThrows(DaemonException.class,
+                    () -> client.submitTurn(next));
+            assertEquals(1, promptCalls.get());
+            // Once the Harness reports nothing running, the stale entry no
+            // longer pins the Session.
+            harnessActive.set(false);
+            assertEquals(SECOND_PROMPT_ID,
+                    client.submitTurn(next).getPromptId());
+        }
         assertEquals(2, promptCalls.get());
     }
 

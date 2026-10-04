@@ -228,12 +228,18 @@ public final class HostedHarnessClient implements AutoCloseable {
                 request.getPayloadDigest());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
-        if (existing != null
-                && (!existing.promptId.equals(candidate.promptId)
-                        || !existing.payloadDigest.equals(
-                                candidate.payloadDigest))) {
-            throw new DaemonException(
-                    "Hosted Harness session already has a running turn");
+        if (existing != null && !existing.matches(candidate)) {
+            // A prompt whose admission outcome was never learned (an
+            // ambiguous answer, then a terminal coordinator failure) must
+            // not pin the Session for every later Turn: ask the Harness,
+            // which drops the entry when nothing is running there.
+            getStatus(session);
+            existing = activePrompts.putIfAbsent(
+                    session.getHarnessSessionId(), candidate);
+            if (existing != null && !existing.matches(candidate)) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
         }
         boolean ownsActivePrompt = existing == null;
         HttpResponse<HttpSupport.Body> raw;
@@ -1243,6 +1249,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         ActivePrompt(String promptId, String payloadDigest) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
+        }
+
+        boolean matches(ActivePrompt other) {
+            return promptId.equals(other.promptId)
+                    && payloadDigest.equals(other.payloadDigest);
         }
     }
 

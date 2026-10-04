@@ -142,6 +142,71 @@ class ManagedActionStoreTest {
                         .isEqualTo("op-action"));
     }
 
+    // A replay whose Action has expired must not resurrect the delivery
+    // either: a fresh admission would refuse it 409 action_expired, and a
+    // resurrected PENDING row could never complete — counted as an open
+    // operation, it would wedge every later lifecycle command on the
+    // Session (review round 3, R3-5).
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedOnceTheActionExpired()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        // The Action is still 'requested' but past its expiry: the expiry
+        // sweep has not marked it yet (hasDecidableAction gates on
+        // now < expiresAt the same way).
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":500}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().state()).isEqualTo("FAILED");
+        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+
+        // The terminal row must not wedge lifecycle admission: a CLOSE on
+        // this Session is admitted. While the replay resurrects the row to
+        // PENDING, requireNoOpenOperation counts it and refuses with 409
+        // session_operation_active.
+        var close = agents.beginOperation(TENANT, sessionId,
+                OperationKind.CLOSE, "digest", "close-key", "digest");
+        assertThat(close.replayed()).isFalse();
+        assertThat(close.operation().kind()).isEqualTo(OperationKind.CLOSE);
+    }
+
     // The same replay against an Action that already ended must not re-open
     // the delivery: the recorded decision is final.
     @Test

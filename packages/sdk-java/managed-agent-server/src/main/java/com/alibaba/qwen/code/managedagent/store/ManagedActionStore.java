@@ -365,14 +365,14 @@ public class ManagedActionStore {
                 // definitive 400 invalid_action_response, or an ended
                 // Action) keeps replaying its recorded terminal row, since
                 // re-sending the identical body would only repeat a refusal
-                // the Harness already made. Unlike a fresh admission this
-                // does not re-check the Action's expiry: the vote was cast
-                // while the Action was live, and the retry only re-drives
-                // its delivery (the Harness still refuses a decided answer
-                // on an ended Action). The Session gate does apply: on a
-                // Session that no longer accepts responses the replay keeps
-                // returning the recorded failure instead of re-admitting
-                // deliveries that can never land.
+                // the Harness already made. The Session gate does apply:
+                // on a Session that no longer accepts responses the replay
+                // keeps returning the recorded failure instead of
+                // re-admitting deliveries that can never land. The Action's
+                // expiry applies too: a fresh admission would refuse it
+                // 409 action_expired, and a resurrected PENDING row for an
+                // expired Action could never complete — it would only wedge
+                // lifecycle admission, which counts any open operation.
                 String failedAction = jdbc.queryForObject(
                         "SELECT action_id FROM managed_agent_operation WHERE"
                                 + " tenant_id = ? AND session_id = ? AND"
@@ -388,6 +388,8 @@ public class ManagedActionStore {
                         String.class, tenantId, sessionId);
                 if (action.isPresent()
                         && "requested".equals(action.get().state())
+                        && now < action.get().options().path("expiresAt")
+                                .asLong()
                         && "ACTIVE".equals(replaySessionStatus)) {
                     jdbc.update("UPDATE managed_agent_operation SET state ="
                                     + " 'PENDING', delivery_state ="

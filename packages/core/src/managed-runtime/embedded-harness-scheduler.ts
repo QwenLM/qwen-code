@@ -98,8 +98,9 @@ const RECHECK_INTERVAL_MS = 1_000;
 const MAX_TRANSIENT_STORE_FAILURES = 10;
 
 /**
- * Transient failures one activation absorbs across re-runs before it is
- * released as failed instead of being re-queued once more.
+ * Transient failures one activation absorbs across re-runs before the
+ * scheduler records the handler's own outcome as terminal instead of
+ * re-queuing the activation once more.
  */
 const MAX_ACTIVATION_TRANSIENT_FAILURES = 3;
 
@@ -348,7 +349,7 @@ export class EmbeddedHarnessScheduler {
           );
         } catch (error) {
           if (error instanceof ManagedActivationStaleLeaseError) {
-            this.noteAbandonedFailures(run);
+            this.noteAbandonedFailures(run, 1);
             run.abandoned = true;
             run.controller.abort(error);
           } else {
@@ -368,7 +369,7 @@ export class EmbeddedHarnessScheduler {
                   outcome,
                 );
                 if (settled === 'stale') {
-                  this.noteAbandonedFailures(run);
+                  this.noteAbandonedFailures(run, 1);
                   run.abandoned = true;
                   run.controller.abort(error);
                 } else if (
@@ -381,7 +382,7 @@ export class EmbeddedHarnessScheduler {
                       ` abandoned after a release failure:` +
                       ` ${toError(error).message}`,
                   );
-                  this.abandonAfterTransientFailures(run, outcome, error);
+                  this.abandonAfterTransientFailures(run, error);
                 }
               }
             }
@@ -389,7 +390,31 @@ export class EmbeddedHarnessScheduler {
         }
       }
 
-      if (handlerError !== undefined && !run.abandoned && !this.disposed) {
+      // Every abandon path converges here, after the handler settled: with
+      // the activation's transient-failure budget spent, the scheduler
+      // records the handler's own outcome as the terminal one instead of
+      // re-queuing the activation forever. The write happens only here so
+      // it never certifies a still-running handler, and settleTerminalOutcome
+      // re-checks liveness so a stopped worker never records one either.
+      let terminalRecorded = false;
+      if (run.abandoned && !this.disposed && !this.fatalError) {
+        const key = activationKey(run.activation);
+        if (
+          (this.activationTransientFailures.get(key) ?? 0) >=
+          MAX_ACTIVATION_TRANSIENT_FAILURES
+        ) {
+          terminalRecorded = await this.settleTerminalOutcome(run, outcome);
+        }
+      }
+
+      // The hook is the only channel that carries the handler's error
+      // object, so a terminally recorded activation must still report it;
+      // an abandoned run that only re-queues must not.
+      if (
+        handlerError !== undefined &&
+        (!run.abandoned || terminalRecorded) &&
+        !this.disposed
+      ) {
         try {
           this.options.onActivationError?.(run.activation, handlerError);
         } catch (error) {
@@ -440,9 +465,11 @@ export class EmbeddedHarnessScheduler {
     } catch (error) {
       if (error instanceof ManagedActivationStaleLeaseError) {
         // The lease is provably no longer ours; another worker owns the
-        // activation's outcome now. The transient failures this run absorbed
-        // still count against its budget.
-        this.noteAbandonedFailures(run);
+        // activation's outcome now. The dropped run itself is an absorbed
+        // failure even when it recorded no transient one — without counting
+        // it, a store call that resolves past the lease edge on every run
+        // would re-queue and re-execute the activation without bound.
+        this.noteAbandonedFailures(run, 1);
         run.abandoned = true;
         run.controller.abort(error);
         return;
@@ -477,14 +504,16 @@ export class EmbeddedHarnessScheduler {
         this.scheduleRenewal(run);
         return;
       }
-      // No headroom left for another tick: the lease lapses and the recovery
-      // wake re-queues the activation, unless its transient-failure budget is
-      // spent.
+      // No headroom left for another tick: the lease lapses and the
+      // recovery wake re-queues the activation. The handler may still be in
+      // flight, so the terminal decision belongs to execute() — it awaits
+      // the handler and records the handler's own outcome once the
+      // activation's transient-failure budget is spent.
       debugLogger.warn(
         `Managed activation '${run.lease.activationId}' abandoned` +
           ` after a renewal failure: ${toError(error).message}`,
       );
-      this.abandonAfterTransientFailures(run, 'failed', error);
+      this.abandonAfterTransientFailures(run, error);
     }
   }
 
@@ -580,57 +609,118 @@ export class EmbeddedHarnessScheduler {
    * activation's cross-run budget. Every abandon path must call it: in the
    * single-owner store a stale lease is an expired one, so the activation
    * re-queues here — dropping the count would let a persistently failing
-   * activation re-run forever.
+   * activation re-run forever. A stale-ended run passes a minimum of one:
+   * the dropped run is itself an absorbed failure even when it recorded no
+   * transient one.
    */
-  private noteAbandonedFailures(run: ActiveRun): void {
-    if (run.transientFailures === 0) return;
+  private noteAbandonedFailures(run: ActiveRun, minimum = 0): void {
+    const absorbed = Math.max(run.transientFailures, minimum);
+    if (absorbed === 0) return;
     const key = activationKey(run.activation);
     this.activationTransientFailures.set(
       key,
-      (this.activationTransientFailures.get(key) ?? 0) + run.transientFailures,
+      (this.activationTransientFailures.get(key) ?? 0) + absorbed,
     );
   }
 
   /**
-   * Abandons a run after transient store failures: the lease is left to
-   * expire and the recovery wake re-queues the activation. The activation's
-   * transient-failure budget accumulates across re-runs; once spent, the
-   * scheduler records the terminal outcome itself (best-effort) so a
-   * persistently failing activation converges instead of re-running forever.
+   * Abandons a run after transient store failures: the handler is aborted,
+   * the lease is left to expire and the recovery wake re-queues the
+   * activation. The terminal decision is not made here: the handler may
+   * still be in flight, so execute() records the handler's own outcome once
+   * the run settles and the activation's transient-failure budget is spent.
    */
-  private abandonAfterTransientFailures(
-    run: ActiveRun,
-    outcome: 'completed' | 'failed',
-    error: unknown,
-  ): void {
+  private abandonAfterTransientFailures(run: ActiveRun, error: unknown): void {
     run.abandoned = true;
     run.controller.abort(error);
-    const key = activationKey(run.activation);
     this.noteAbandonedFailures(run);
-    const failures = this.activationTransientFailures.get(key) ?? 0;
-    if (failures < MAX_ACTIVATION_TRANSIENT_FAILURES) return;
-    void this.store.release(run.lease, outcome).then(
-      () => {
-        this.noteStoreOutcome();
-        this.activationTransientFailures.delete(key);
-      },
-      (releaseError: unknown) => {
-        if (releaseError instanceof ManagedActivationStaleLeaseError) {
-          // The lease expired or another worker claimed the activation. Keep
-          // the spent budget either way: on a bare expiry the activation
-          // re-queues here, and a fresh budget would let it re-run forever.
-          return;
+  }
+
+  /**
+   * Records the terminal outcome for an activation whose transient-failure
+   * budget is spent. Called only from execute() after the handler settled,
+   * so the recorded outcome is the handler's own and the write never
+   * certifies a still-running handler. A lease that lapsed while the run
+   * was abandoning is re-claimed first: release() fences on the remembered
+   * lease and would reject it as stale, so the terminal write needs the
+   * fresh claim's lease. Returns true once the outcome is durably recorded.
+   */
+  private async settleTerminalOutcome(
+    run: ActiveRun,
+    outcome: 'completed' | 'failed',
+  ): Promise<boolean> {
+    // Yield one scheduler turn before committing: a dispose() or halt()
+    // racing the abandon decision must land before the write is issued,
+    // because a terminal record from a stopped worker would make a
+    // retryable failure permanent.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 0);
+      timer.unref();
+    });
+    if (this.disposed || this.fatalError || this.store.haltedError) {
+      return false;
+    }
+    try {
+      await this.store.release(run.lease, outcome);
+    } catch (error) {
+      if (!(error instanceof ManagedActivationStaleLeaseError)) {
+        return this.noteTerminalWriteFailure(error);
+      }
+      // The remembered lease is stale — in the single-owner store that is
+      // an expired one. Re-claim so the terminal write fences on a live
+      // lease; a live foreign claim means another worker owns the outcome.
+      if (this.disposed || this.fatalError) return false;
+      let fresh: ManagedActivationLease | undefined;
+      try {
+        fresh = await this.store.claim(
+          run.activation,
+          this.options.workerId,
+          this.options.leaseDurationMs,
+        );
+      } catch (claimError) {
+        return this.noteTerminalWriteFailure(claimError);
+      }
+      if (!fresh) return false;
+      // A dispose or halt that landed during the claim must stop the write:
+      // the fresh lease is left to lapse so a successor re-queues the
+      // activation.
+      if (this.disposed || this.fatalError || this.store.haltedError) {
+        return false;
+      }
+      try {
+        await this.store.release(fresh, outcome);
+      } catch (secondError) {
+        if (secondError instanceof ManagedActivationStaleLeaseError) {
+          // Lost the fresh lease too; keep the spent budget and leave the
+          // activation to its new owner.
+          return false;
         }
-        const storeHalted = this.store.haltedError;
-        if (storeHalted) {
-          this.halt(storeHalted);
-          return;
-        }
-        // The terminal write failed too; the lease expiry re-queues the
-        // activation and its next abandon re-attempts the terminal release.
-        this.noteStoreOutcome(releaseError);
-      },
-    );
+        return this.noteTerminalWriteFailure(secondError);
+      }
+    }
+    this.noteStoreOutcome();
+    this.activationTransientFailures.delete(activationKey(run.activation));
+    return true;
+  }
+
+  /**
+   * Classifies a terminal-write failure the way every other store
+   * continuation does: a halted store (consistency damage) halts the worker
+   * loudly, a transient one keeps the spent budget so the re-run re-attempts
+   * the write. On a disposed or halted scheduler neither happens — a bogus
+   * 'is disposed' halt must not overwrite a clean shutdown.
+   */
+  private noteTerminalWriteFailure(error: unknown): false {
+    if (this.disposed || this.fatalError) return false;
+    const storeHalted = this.store.haltedError;
+    if (storeHalted) {
+      this.halt(storeHalted);
+      return false;
+    }
+    // The terminal write failed transiently; the lease expiry re-queues the
+    // activation and its next abandon re-attempts the terminal release.
+    this.noteStoreOutcome(error);
+    return false;
   }
 
   private scheduleMemoryWake(): void {
