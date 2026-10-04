@@ -557,10 +557,17 @@ export class ManagedSessionRuntimeWorker {
 
   /** Stops `worker` and lets the next call start a new one in its place. */
   private forget(worker: StartedWorker): void {
-    void worker.tracked
-      .terminate()
-      .catch(() => undefined)
-      .then(() => this.sweepAfterExit(worker));
+    // Replaced at once, not after the termination window: a replacement may
+    // already be queued behind a call that met this worker hung. The exit
+    // hook owns the ledger sweep alone — the same single-sweep rule as on
+    // every witnessed exit.
+    void this.starting?.then(
+      (current) => {
+        if (current === worker && !this.closed) this.starting = undefined;
+      },
+      () => undefined,
+    );
+    void worker.tracked.terminate().catch(() => undefined);
   }
 
   private async launchWorker(): Promise<StartedWorker> {
@@ -615,6 +622,7 @@ export class ManagedSessionRuntimeWorker {
       });
     } catch (error) {
       reservation.cancel();
+      if (ledgerPath !== undefined) launchedLedgerPaths.delete(ledgerPath);
       throw error;
     }
     const tracked = reservation.attach(child, { ownsProcessTree: true });
@@ -669,6 +677,15 @@ export class ManagedSessionRuntimeWorker {
       return worker;
     } catch (error) {
       await tracked.terminate().catch(() => undefined);
+      if (ledgerPath !== undefined) {
+        // The failed worker may have written its ledger already; with the
+        // skip-set entry it would stay invisible to every future sweep.
+        launchedLedgerPaths.delete(ledgerPath);
+        void sweepWorkerLedger(ledgerPath, { exitWitnessed: true }).catch(
+          (sweepError: unknown) =>
+            this.reportUnproven(ledgerPath, toRuntimeError(sweepError)),
+        );
+      }
       throw error;
     }
   }
@@ -958,8 +975,10 @@ export function createManagedRuntimeEnvironment(
     lift: (reason) => config.clearManagedEngineQuarantine(reason),
   };
   // The stale ledgers an earlier child left behind are swept in the
-  // background at every environment creation; a stop the sweep cannot prove
-  // quarantines the engine before the next admission.
+  // background at every environment creation. One sweep cannot gate the
+  // admission it runs with: a stop it cannot prove quarantines the engine
+  // for every admission AFTER the report — a session just admitted has its
+  // own ledger and its own close-time sweep, so it is never untracked work.
   sweepStaleRuntimeLedgers(ledgerDir, quarantine);
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),

@@ -1076,6 +1076,22 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'managed_engine_quarantined') {
+        // A temporary refusal while a Runtime worker's stop is unproven:
+        // the reason travels in the message, and 503 says "retry later",
+        // never the resume-conflict 409 the engine selector's errors take.
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
+        res.status(503).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'session_execution_engine_unavailable') {
         recordExpectedBridgeError(
           err instanceof Error ? err : new Error(errorMessage(err)),

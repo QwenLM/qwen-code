@@ -30,8 +30,11 @@ import {
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import {
+  CLOSE_SWEEP_TIMEOUT_MS,
   GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
   type ManagedRuntimeLedger,
+  type ProcessLiveness,
+  signalProcessGroup,
 } from './managed-runtime-ledger.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type {
@@ -789,17 +792,27 @@ export class ManagedToolExecutor {
     if (this.options.ledger) {
       // Leave nothing behind: what a call's own cancellation did not stop,
       // SIGKILL does, and only a proven-empty ledger is deleted. An unproven
-      // group keeps the ledger truth on disk for the host's sweep to judge.
-      const remaining = await this.options.ledger.killOutstanding();
-      if (remaining.length === 0) {
-        this.options.ledger.complete();
-      } else {
+      // group keeps the ledger truth on disk for the host's sweep to judge —
+      // and a bookkeeping filesystem failure keeps it too, contained, never
+      // a reason to make the shutdown itself reject.
+      try {
+        const remaining = await this.options.ledger.killOutstanding();
+        if (remaining.length === 0) {
+          this.options.ledger.complete();
+        } else {
+          debugLogger.warn(
+            `Managed Runtime worker could not prove ${
+              remaining.length
+            } Shell process group(s) stopped: ${remaining
+              .map((group) => group.pgid)
+              .join(', ')}`,
+          );
+        }
+      } catch (error) {
         debugLogger.warn(
-          `Managed Runtime worker could not prove ${
-            remaining.length
-          } Shell process group(s) stopped: ${remaining
-            .map((group) => group.pgid)
-            .join(', ')}`,
+          `Managed Runtime worker could not sweep its ledger on close: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
       }
     }
@@ -870,11 +883,21 @@ export class ManagedToolExecutor {
                 // Before any settle step of this call can run, the group is
                 // durable for the host's sweeps: the pid leads the group.
                 shellPgid = pid;
-                ledger.addGroup({
-                  pgid: pid,
-                  callId: entry.reference.callId,
-                  startedAt: Date.now(),
-                });
+                try {
+                  ledger.addGroup({
+                    pgid: pid,
+                    callId: entry.reference.callId,
+                    startedAt: Date.now(),
+                  });
+                } catch (error) {
+                  // A group that could not get into the ledger must not
+                  // outlive the failure: stop it first, then let the call
+                  // fail loudly instead of settling an outcome nothing
+                  // recorded.
+                  signalProcessGroup(pid, 'SIGKILL');
+                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+                  throw error;
+                }
               },
             );
           }
@@ -934,11 +957,22 @@ export class ManagedToolExecutor {
       // A settled cancel carries the group's exit evidence: the call is
       // journaled settled only once no member of the Shell's process group
       // answers. A group that outlives the budget makes the outcome unknown:
-      // the session blocks and the ledger entry keeps naming the group.
-      const state = await this.options.ledger.waitForGroupExit(
-        shellPgid,
-        this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
-      );
+      // the session blocks and the ledger entry keeps naming the group. The
+      // ledger's own filesystem failure can never un-prove the stop either:
+      // unknown is the only honest next state.
+      let state: ProcessLiveness = 'denied';
+      try {
+        state = await this.options.ledger.waitForGroupExit(
+          shellPgid,
+          this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Managed Runtime group-exit evidence failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
       if (state !== 'gone') {
         entry.state = 'unknown';
         entry.lastSequence++;

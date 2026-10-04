@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, utimesSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -131,10 +131,20 @@ describe('Managed Runtime ledger', () => {
       ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
       // A synchronous write: the truth is on disk before the next step runs.
       const updated = JSON.parse(await readFile(workFile, 'utf8')) as {
-        groups: Array<{ pgid: number; callId: string; startedAt: number }>;
+        groups: Array<{
+          pgid: number;
+          callId: string;
+          startedAt: number;
+          uptimeMs: number;
+        }>;
       };
       expect(updated.groups).toEqual([
-        { pgid: 4242, callId: 'c1', startedAt: 123 },
+        {
+          pgid: 4242,
+          callId: 'c1',
+          startedAt: 123,
+          uptimeMs: expect.any(Number),
+        },
       ]);
       expect(ledger.outstandingGroups()).toHaveLength(1);
     });
@@ -288,6 +298,63 @@ describe('Managed Runtime ledger', () => {
         expect(killSpy).not.toHaveBeenCalledWith(-younger, 'SIGKILL');
         expect(processGroupLiveness(younger)).toBe('alive');
         expect(ledger.complete()).toBe(true);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'waitForGroupExit does not settle while a SIGTERM-ignoring member outlives the leader',
+      async () => {
+        // The M5a witness shape in front of a present ledger: the leader is
+        // gone, but a member that ignores SIGTERM keeps the id alive — a
+        // leader-only probe would mis-read the group as 'gone'.
+        const workFile = path.join(root, 'ledger.json');
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        const child = spawn(
+          'bash',
+          [
+            '-c',
+            `"${process.execPath}" -e 'process.on("SIGTERM",()=>{});setInterval(()=>{},500)' & wait`,
+          ],
+          { detached: true, stdio: 'ignore' },
+        );
+        child.unref();
+        child.on('exit', () => undefined);
+        if (!child.pid) throw new Error('spawn failed');
+        strays.add(child);
+        const pgid = child.pid;
+        ledger.addGroup({ pgid, callId: 'c1', startedAt: Date.now() });
+
+        // TERM only once the table shows the member running: the leader's
+        // early window (before it backgrounds the member) would otherwise
+        // make the whole probe racy.
+        await waitFor(() => {
+          const table = queryProcessTable();
+          const member = [...table.values()].find(
+            (row) => row.pgid === pgid && row.args.includes('SIGTERM'),
+          );
+          return member === undefined ? undefined : true;
+        });
+        // TERM the group: the bash leader dies, the member ignores it.
+        process.kill(-pgid, 'SIGTERM');
+        await expect(ledger.waitForGroupExit(pgid, 800)).resolves.toBe('alive');
+        expect(ledger.outstandingGroups().map((group) => group.pgid)).toContain(
+          pgid,
+        );
+
+        process.kill(-pgid, 'SIGKILL');
+        strays.delete(child);
+        await expect(ledger.waitForGroupExit(pgid, 5_000)).resolves.toBe(
+          'gone',
+        );
+        expect(ledger.outstandingGroups()).toHaveLength(0);
       },
     );
 
@@ -445,14 +512,26 @@ describe('Managed Runtime ledger', () => {
         expect(processGroupLiveness(oursPid)).toBe('gone');
         expect(existsSync(ourFile)).toBe(false);
 
-        // "Not ours": this very test process — alive, but its command line
-        // names no Runtime worker. It stays untouched and the file resolves.
+        // "Not ours": a live process GROUP leader this sweep did not start —
+        // alive, leading its own group, but its command line names no
+        // Runtime worker. The identity branch must decide this, not the
+        // first liveness probe: a pid that leads no group would be 'gone'
+        // there and the branch never runs (a vitest fork leads no group).
+        const foreignScript = path.join(root, 'someone-else-fixture.js');
+        await writeFile(foreignScript, 'setInterval(() => {}, 1000);', 'utf8');
+        const foreign = spawn(process.execPath, [foreignScript], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        foreign.unref();
+        foreign.on('exit', () => undefined);
+        if (!foreign.pid) throw new Error('spawn failed');
+        strays.add(foreign);
+        const foreignPid = foreign.pid;
         const foreignFile = path.join(root, 'foreign.json');
-        makeLedgerFile(foreignFile, { pid: process.pid });
+        makeLedgerFile(foreignFile, { pid: foreignPid });
         await sweepWorkerLedger(foreignFile, {});
-        // The group probe above is meaningless for a pid that leads no group;
-        // the assertion is that the pid itself was never signalled.
-        expect(() => process.kill(process.pid, 0)).not.toThrow();
+        expect(() => process.kill(foreignPid, 0)).not.toThrow();
         expect(existsSync(foreignFile)).toBe(false);
       },
     );
@@ -594,6 +673,7 @@ describe('Managed Runtime ledger', () => {
       const signal = vi.fn(() => 'sent' as const);
       await sweepWorkerLedger(workFile, {
         sys: {
+          platform: 'linux',
           liveness: (id) => (id === 202 ? 'alive' : 'gone'),
           signal,
           table: () =>
@@ -628,6 +708,7 @@ describe('Managed Runtime ledger', () => {
         sweepWorkerLedger(workFile, {
           proofTimeoutMs: 300,
           sys: {
+            platform: 'linux',
             liveness: (id) => (id === 202 ? 'alive' : 'gone'),
             signal,
             table: () =>
@@ -650,6 +731,102 @@ describe('Managed Runtime ledger', () => {
       expect(existsSync(workFile)).toBe(true);
       const kept = testInternals.readLedgerDocument(workFile);
       expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
+    });
+
+    it('keeps an old-enough survivor accountable when the leader is a young impostor', async () => {
+      // The leader died, its pid went to a new group leader — but a SIGTERM-
+      // ignoring survivor of the recorded group still runs: the group is
+      // still the recorded one, resolved by kill-and-prove, never silently
+      // dropped as recycled.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  // The impostor leader: born under the record.
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 90_000,
+                    args: 'node someone-else.js',
+                  },
+                ],
+                [
+                  // The survivor: old enough to have been there at the write.
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 147_000,
+                    args: 'node our-shell-child.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('judges uptime-stamped records in the boot clock, immune to wall steps', async () => {
+      // A fresh record beside a fresh group; the sweep's clock then steps
+      // sixty seconds forward. Wall-domain age misreads the group's own
+      // leader as a recycled impostor; the boot-domain age keeps them.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 42424246,
+          pgid: 42424246,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now(),
+        },
+        [
+          {
+            pgid: 202,
+            callId: 'call-1',
+            startedAt: Date.now(),
+            uptimeMs: os.uptime() * 1000,
+          },
+        ],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          now: () => Date.now() + 60_000,
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 5_000,
+                    args: 'node our-shell.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
     });
 
     it('proves a slow exit within the budget', async () => {
@@ -686,6 +863,7 @@ describe('Managed Runtime ledger', () => {
         sweepWorkerLedger(workFile, {
           proofTimeoutMs: 300,
           sys: {
+            platform: 'linux',
             liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
             signal,
             table: () => undefined,
@@ -693,6 +871,47 @@ describe('Managed Runtime ledger', () => {
         }),
       ).rejects.toMatchObject({ remaining: [101, 202, 303] });
       expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('holds a stale group whose liveness is denied, proof or not', async () => {
+      // 'denied' is only ever "not proven gone": a sweep must never turn it
+      // into 'gone', whether the group needs a witness or was just
+      // signalled.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 200,
+          sys: {
+            platform: 'linux',
+            liveness: () => 'denied',
+            signal,
+            table: () => undefined,
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101, 202] });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('keeps the truth when a witnessed kill cannot be proven (denied)', async () => {
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          exitWitnessed: true,
+          proofTimeoutMs: 200,
+          sys: { liveness: () => 'denied', signal },
+        }),
+      ).rejects.toMatchObject({ remaining: [101, 202] });
+      expect(signal).toHaveBeenCalledTimes(2);
       expect(existsSync(workFile)).toBe(true);
     });
 
@@ -786,8 +1005,10 @@ describe('Managed Runtime ledger', () => {
       const signal = vi.fn(() => 'sent' as const);
       await sweepWorkerLedger(workFile, {
         sys: {
+          platform: 'linux',
           liveness: (id) =>
             id === 202 || id === 101 || id === 105 ? 'alive' : 'gone',
+          alive: (id) => id === 202,
           signal,
           table: () =>
             new Map([
@@ -826,8 +1047,10 @@ describe('Managed Runtime ledger', () => {
       await sweepWorkerLedger(workFile, {
         proofTimeoutMs: 300,
         sys: {
+          platform: 'linux',
           liveness: (id) =>
             id === 101 ? 'alive' : id === 202 ? 'alive' : 'gone',
+          alive: (id) => id === 202,
           signal,
           table: () =>
             new Map([
@@ -973,12 +1196,21 @@ describe('Managed Runtime ledger', () => {
           { pgid: live, startedAt: Date.now() },
         ]);
         // Their writer crashed between write and rename; only their own
-        // lifecycle may clean either.
-        await writeFile(path.join(directory, 'own.json.tmp'), 'x', 'utf8');
+        // lifecycle may clean either — even debris old enough to sweep.
+        const ownDebris = path.join(directory, 'own.json.tmp');
+        await writeFile(ownDebris, 'x', 'utf8');
+        utimesSync(
+          ownDebris,
+          new Date(Date.now() - 120_000),
+          new Date(Date.now() - 120_000),
+        );
         await sweepStaleLedgers(directory, { skip: new Set([workFile]) });
         expect(processGroupLiveness(live)).toBe('alive');
         expect(existsSync(workFile)).toBe(true);
-        expect(existsSync(path.join(directory, 'own.json.tmp'))).toBe(true);
+        expect(existsSync(ownDebris)).toBe(true);
+        // Without the skip entry the same aged debris is swept out.
+        await sweepStaleLedgers(directory);
+        expect(existsSync(ownDebris)).toBe(false);
         killGroup(live);
         strays.delete(proc);
       },

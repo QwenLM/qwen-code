@@ -4848,7 +4848,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ).rejects.toMatchObject({
           code: -32024,
           message: expect.stringContaining('quarantined'),
-          data: { errorKind: 'session_execution_engine_unavailable' },
+          data: { errorKind: 'managed_engine_quarantined' },
         });
         // A second reason piles on: admission stays refused.
         const second = new Error('another ledger survived');

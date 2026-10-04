@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { readdir } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
@@ -35,7 +36,7 @@ export const GROUP_EXIT_EVIDENCE_TIMEOUT_MS = 10_000;
 /** How long one sweep waits for a signalled group to die. */
 const SWEEP_PROOF_TIMEOUT_MS = 5_000;
 /** The worker closes with at most this much extra time for its own sweep. */
-const CLOSE_SWEEP_TIMEOUT_MS = 5_000;
+export const CLOSE_SWEEP_TIMEOUT_MS = 5_000;
 /** How often the worker prunes dead groups and a failed sweep retries. */
 const LEDGER_WATCH_INTERVAL_MS = 1_000;
 /** How often an exit proof re-checks the group's liveness. */
@@ -50,6 +51,8 @@ const RECORD_LEAD_SKEW_MS = 5_000;
 /** A live process table older than this would refuse nothing. */
 const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const PROCESS_QUERY_MAX_BUFFER = 8 * 1024 * 1024;
+/** How old trash from a crashed writer gets to be before it is deleted. */
+const TMP_DEBRIS_AGE_MS = 60_000;
 const POSIX_PS = '/bin/ps';
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
@@ -66,6 +69,13 @@ export interface ManagedRuntimeLedgerWorkerRecord {
   readonly hostPid?: number;
   readonly incarnation: string;
   readonly startedAt: number;
+  /**
+   * Boot-clock milliseconds (`os.uptime() * 1000`) at `startedAt`, so
+   * identity can be judged against ps's boot-derived elapsed column inside
+   * one clock domain. Absent on records written before this field existed;
+   * those fall back to the wall clock.
+   */
+  readonly uptimeMs?: number;
 }
 
 export interface ManagedRuntimeLedgerGroupRecord {
@@ -73,6 +83,8 @@ export interface ManagedRuntimeLedgerGroupRecord {
   readonly pgid: number;
   readonly callId: string;
   readonly startedAt: number;
+  /** Boot-clock milliseconds at `startedAt`; see the worker record. */
+  readonly uptimeMs?: number;
 }
 
 interface ManagedRuntimeLedgerDocument {
@@ -188,7 +200,9 @@ function parseProcessTable(
 
 /**
  * The live process table, pid-indexed. Empty on Windows, whose sweeps then
- * fall back to liveness-only checks and never guess at identity.
+ * get no identity: a witnessed sweep still signals leaders through
+ * taskkill, but an unwitnessed one holds everything — signals nothing —
+ * until a witness closes it or an operator proves it.
  */
 export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
   if (process.platform === 'win32') return new Map();
@@ -207,6 +221,29 @@ export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
 }
 
 /**
+ * The record's age in the judge's clock domain. ps's `etime` is
+ * boot-derived on Linux — it does not move with a wall-clock step (chrony
+ * `makestep`, a VM snapshot restore, a container clock correction) — while
+ * `now() - startedAt` moves with every one, so a one-sided comparison that
+ * mixes the domains misreads a group's own live leader as a recycled
+ * impostor after a step forward, and anything as a match after a step
+ * backward. Both ages therefore come from the uptime domain on Linux;
+ * macOS's realtime-derived `etime` (and Windows, which never reaches
+ * process-table judgement) compares on the wall clock. Records without
+ * `uptimeMs` keep the wall-clock fallback everywhere.
+ */
+function recordAgeMs(
+  record: { readonly startedAt: number; readonly uptimeMs?: number },
+  now: number,
+  platform: NodeJS.Platform = process.platform,
+): number {
+  if (record.uptimeMs !== undefined && platform === 'linux') {
+    return os.uptime() * 1000 - record.uptimeMs;
+  }
+  return now - record.startedAt;
+}
+
+/**
  * Whether `row` is the worker `record` names: the worker command and a
  * process at least as old as the record. The command carries no incarnation
  * (the boot document arrives on stdin), and only age excludes a recycled
@@ -217,9 +254,12 @@ function isLedgerWorker(
   row: ProcessTableRow,
   record: ManagedRuntimeLedgerWorkerRecord,
   now: number,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (!row.args.includes('managed-runtime-worker')) return false;
-  return row.runningMs >= now - record.startedAt - RECORD_LEAD_SKEW_MS;
+  return (
+    row.runningMs >= recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
+  );
 }
 
 /**
@@ -231,8 +271,9 @@ function groupMatchesRecord(
   members: readonly ProcessTableRow[],
   record: ManagedRuntimeLedgerGroupRecord,
   now: number,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
-  const recordedAge = now - record.startedAt;
+  const recordedAge = recordAgeMs(record, now, platform);
   return members.some(
     (member) => member.runningMs >= recordedAge - RECORD_LEAD_SKEW_MS,
   );
@@ -243,34 +284,36 @@ type GroupIdentity = 'gone' | 'ours' | 'recycled' | 'unknown';
 
 /**
  * Judges the group `record` holds against a live table. `gone`: no member
- * left. `ours`: the group's leader, or any member old enough to have been
- * there at the record's write, still runs. `recycled`: the leader's pid
- * answers for a group born after the recorded one — pids are assigned at
- * birth, so a young leader can only follow the recorded group's death and
- * proves it where a bare liveness probe cannot. `unknown`: the leader is
- * gone and every survivor is younger than the record — the id may be
- * recycled, or the group may live on in children backgrounded late enough
- * to hold no datable member, the same shape as the accepted setsid
- * residual; it provokes neither a signal nor a silent drop. undefined
- * without a witness (a failed query): liveness stays the only evidence and
- * nothing is resolved.
+ * left. `ours`: some member old enough to have been there at the record's
+ * write still runs — judged first, so a SIGTERM-ignoring survivor keeps
+ * the group accountable even where its dead leader's pid has been recycled
+ * to a younger leader. `recycled`: with no old-enough member, a live young
+ * leader on the id proves it — pids are assigned at birth, so its holder
+ * was born after the recorded group died, where a bare liveness probe
+ * cannot tell. `unknown`: the leader is gone and every survivor is younger
+ * than the record — the id may be recycled, or the group may live on in
+ * children backgrounded late enough to hold no datable member, the same
+ * shape as the accepted setsid residual; it provokes neither a signal nor
+ * a silent drop. undefined without a witness (a failed query): liveness
+ * stays the only evidence and nothing is resolved.
  */
 function judgeGroupIdentity(
   record: ManagedRuntimeLedgerGroupRecord,
   table: ReadonlyMap<number, ProcessTableRow> | undefined,
   now: number,
+  platform: NodeJS.Platform = process.platform,
 ): GroupIdentity | undefined {
   if (table === undefined) return undefined;
   const members = [...table.values()].filter((row) => row.pgid === record.pgid);
   if (members.length === 0) return 'gone';
+  if (groupMatchesRecord(members, record, now, platform)) return 'ours';
   const leader = members.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
-    leader.runningMs < now - record.startedAt - RECORD_LEAD_SKEW_MS
+    leader.runningMs < recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
   ) {
     return 'recycled';
   }
-  if (groupMatchesRecord(members, record, now)) return 'ours';
   return 'unknown';
 }
 
@@ -299,6 +342,8 @@ function readLedgerDocument(
       (!Number.isSafeInteger(worker?.hostPid) || worker.hostPid <= 1)) ||
     typeof worker?.incarnation !== 'string' ||
     !isFiniteNumber(worker?.startedAt) ||
+    (worker?.uptimeMs !== undefined &&
+      (!isFiniteNumber(worker?.uptimeMs) || worker.uptimeMs < 0)) ||
     !Array.isArray(document?.groups)
   ) {
     return undefined;
@@ -309,7 +354,9 @@ function readLedgerDocument(
       !Number.isSafeInteger(group?.pgid) ||
       group.pgid <= 1 ||
       typeof group?.callId !== 'string' ||
-      !isFiniteNumber(group?.startedAt)
+      !isFiniteNumber(group?.startedAt) ||
+      (group?.uptimeMs !== undefined &&
+        (!isFiniteNumber(group?.uptimeMs) || group.uptimeMs < 0))
     ) {
       return undefined;
     }
@@ -363,7 +410,10 @@ export class ManagedRuntimeLedger {
 
   /** Records a Shell's group before its invocation can settle. */
   addGroup(record: ManagedRuntimeLedgerGroupRecord): void {
-    this.groups.set(record.pgid, record);
+    this.groups.set(record.pgid, {
+      ...record,
+      uptimeMs: record.uptimeMs ?? os.uptime() * 1000,
+    });
     this.rewrite();
   }
 
@@ -373,16 +423,35 @@ export class ManagedRuntimeLedger {
   }
 
   /**
-   * Drops every group provably gone. Liveness alone says the id answers,
-   * not who answers: a live id whose leader reads younger than the record
-   * proves the recorded group gone the same way and must never be settled
-   * against or signalled. A group the table cannot date — leader gone, all
-   * survivors young — keeps its entry: that shape cannot be told from work
-   * this session itself started. Without a process table (Windows, or an
-   * unreadable one) liveness stays the only evidence and a live id keeps
-   * its entry too.
+   * A rewrite whose target cannot be written must not unmake the judgement
+   * it records: the truth on disk — if any — stays for the host's sweeps,
+   * and the failure is named in the log instead of escaping as a settled
+   * call, a cancelled close, or a crashed watchdog.
    */
-  prune(): void {
+  private safeRewrite(): void {
+    try {
+      this.rewrite();
+    } catch (error) {
+      debugLogger.warn(
+        `Managed Runtime ledger ${this.workFile} could not be rewritten: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Drops every group provably gone. By default liveness is the only
+   * evidence — the cheap shape the 1 Hz watchdog needs, since asking the
+   * whole process table every second while any group is outstanding would
+   * fork a blocking `ps` past the loop that pumps PTY output and answers
+   * status polls. With `identity: true` a live id whose leader reads
+   * younger than the record proves the recorded group gone the same way
+   * and must never be settled against or signalled; a group the table
+   * cannot date keeps its entry. Without a process table (Windows, or an
+   * unreadable one) liveness stays the only evidence either way.
+   */
+  prune(identity: boolean = false): void {
     let changed = false;
     let table: ReadonlyMap<number, ProcessTableRow> | undefined;
     let tableRead = false;
@@ -392,18 +461,18 @@ export class ManagedRuntimeLedger {
         changed = true;
         continue;
       }
-      if (process.platform === 'win32') continue;
+      if (!identity || process.platform === 'win32') continue;
       if (!tableRead) {
         table = queryTableQuietly();
         tableRead = true;
       }
-      const identity = judgeGroupIdentity(record, table, Date.now());
-      if (identity === 'gone' || identity === 'recycled') {
+      const judged = judgeGroupIdentity(record, table, Date.now());
+      if (judged === 'gone' || judged === 'recycled') {
         this.groups.delete(record.pgid);
         changed = true;
       }
     }
-    if (changed) this.rewrite();
+    if (changed) this.safeRewrite();
   }
 
   /**
@@ -445,7 +514,7 @@ export class ManagedRuntimeLedger {
       );
       state = processGroupLiveness(pgid);
     }
-    if (state === 'gone' && this.groups.delete(pgid)) this.rewrite();
+    if (state === 'gone' && this.groups.delete(pgid)) this.safeRewrite();
     return state;
   }
 
@@ -479,7 +548,7 @@ export class ManagedRuntimeLedger {
     }
     // Dead groups come out of the ledger before any signal goes out, so a
     // recycled id never gets to look like a survivor worth signalling.
-    this.prune();
+    this.prune(true);
     const deadline = Date.now() + budgetMs;
     const waiting: Array<Promise<ProcessLiveness>> = [];
     for (const pgid of this.groups.keys()) {
@@ -498,7 +567,7 @@ export class ManagedRuntimeLedger {
    */
   complete(): boolean {
     try {
-      this.prune();
+      this.prune(true);
     } catch {
       // A prune failure means an unproven group may exist; keep the file.
     }
@@ -555,6 +624,8 @@ export interface LedgerSweepOptions {
     /** The live table, or explicit undefined where the query itself failed. */
     table?: () => ReadonlyMap<number, ProcessTableRow> | undefined;
     platform?: NodeJS.Platform;
+    /** Single-process probe for the hostPid hold; EPERM counts as alive. */
+    alive?: (pid: number) => boolean;
   };
 }
 
@@ -583,6 +654,23 @@ export async function sweepWorkerLedger(
       if (errnoCode(error) === 'ENOENT') exists = false;
     }
     if (!exists) return;
+    // A ledger nobody can read is an operator's evidence, not a retryable
+    // stop: a reaper would re-read the same immutable bytes forever and
+    // the quarantine could never lift. Once it outlives the debris age —
+    // a crash window, never a live write — it is set aside where the
+    // directory sweep no longer judges it, and named in the log.
+    if (isOlderThan(workFile, TMP_DEBRIS_AGE_MS)) {
+      const aside = `${workFile.slice(0, -'.json'.length)}.unreadable`;
+      try {
+        renameSync(workFile, aside);
+        debugLogger.warn(
+          `The Managed Runtime ledger ${workFile} cannot be read; moved aside to ${aside}.`,
+        );
+        return;
+      } catch {
+        // Could not move it either: fall through to the unproven report.
+      }
+    }
     throw new LedgerSweepUnprovenError(
       workFile,
       [],
@@ -594,12 +682,14 @@ export async function sweepWorkerLedger(
     document.groups.map((group) => [group.pgid, group]),
   );
   const unproven: number[] = [];
-  const deadline = now() + proofTimeoutMs;
 
+  // One proof budget per process, spent at its own start: a slow exit must
+  // not eat the budget owed to everything behind it.
   const prove = async (pgid: number): Promise<boolean> => {
     // Only ESRCH (or the caller's idea of 'gone') proves an exit; a transient
     // EPERM during teardown must not end the wait, and a permanent one ends
     // it unproven at the deadline.
+    const deadline = now() + proofTimeoutMs;
     for (;;) {
       if (liveness(pgid) === 'gone') return true;
       const budget = deadline - now();
@@ -620,9 +710,7 @@ export async function sweepWorkerLedger(
   // The worker itself. An orphaned worker that survived its child still runs
   // its Shells, so it must die too; a pid that answers for another process
   // means the worker is gone and its id recycled. Windows offers no identity
-  // here, so a live pid neither dies nor resolves without a witness. The
-  // stale-mode snapshot is read AFTER the worker's own proof wait, so no
-  // identity it grants can be older than a proof budget.
+  // here, so a live pid neither dies nor resolves without a witness.
   let table: ReadonlyMap<number, ProcessTableRow> | undefined;
   let workerProven = liveness(worker.pgid) === 'gone';
   if (!workerProven && options.exitWitnessed === true) {
@@ -630,13 +718,14 @@ export async function sweepWorkerLedger(
     workerProven = await prove(worker.pgid);
   } else if (!workerProven && platform !== 'win32') {
     table = readTable();
-    if (holdsForLiveHost(worker, table, liveness)) {
+    const alive = options.sys?.alive ?? pidAlive;
+    if (holdsForLiveHost(worker, table, now(), alive)) {
       // The ledger's own child still runs an ACP host on its recorded pid:
       // the ledger is that child's to sweep, never a sibling sweep's.
       return;
     }
     const row = table?.get(worker.pid);
-    if (row && isLedgerWorker(row, worker, now())) {
+    if (row && isLedgerWorker(row, worker, now(), platform)) {
       signal(worker.pgid, 'SIGKILL');
       workerProven = await prove(worker.pgid);
     } else if (row !== undefined) {
@@ -645,10 +734,16 @@ export async function sweepWorkerLedger(
     }
   }
   if (options.exitWitnessed !== true && platform !== 'win32') {
-    if (table === undefined) table = readTable();
+    // The identity a group is judged with is never older than the proof
+    // waits it may have outlasted: re-read the snapshot after them.
+    table = readTable();
   }
   if (!workerProven) unproven.push(worker.pgid);
 
+  const kills: Array<{
+    readonly group: ManagedRuntimeLedgerGroupRecord;
+    readonly proven: Promise<boolean>;
+  }> = [];
   for (const group of document.groups) {
     if (options.exitWitnessed !== true && table === undefined) {
       // The no-witness rule, on every platform: what cannot be named is
@@ -658,7 +753,7 @@ export async function sweepWorkerLedger(
       continue;
     }
     if (table !== undefined) {
-      const identity = judgeGroupIdentity(group, table, now());
+      const identity = judgeGroupIdentity(group, table, now(), platform);
       if (identity === 'gone' || identity === 'recycled') {
         // Empty, or the id provably outlived the group: needs no signal and
         // owns no truth.
@@ -675,7 +770,12 @@ export async function sweepWorkerLedger(
       }
     }
     if (liveness(group.pgid) !== 'gone') signal(group.pgid, 'SIGKILL');
-    if (await prove(group.pgid)) remaining.delete(group.pgid);
+    kills.push({ group, proven: prove(group.pgid) });
+  }
+  // The signalled groups prove concurrently and each spends its own budget:
+  // a slow exit no longer consumes the budget owed to everything behind it.
+  for (const { group, proven } of kills) {
+    if (await proven) remaining.delete(group.pgid);
     else unproven.push(group.pgid);
   }
 
@@ -712,23 +812,24 @@ function queryTableQuietly(): ReadonlyMap<number, ProcessTableRow> | undefined {
 
 /**
  * Whether the ledger belongs to a Managed child that provably still runs:
- * its `hostPid` answers a liveness probe AND — whenever the live table is
- * available — its argv holds an ACP host's marker AND the process is old
- * enough to have spawned the worker it is recorded as parenting; any weaker
- * reading holds, because the kill error would land on a live sibling's
- * workers (or sweep a recycled id's host), never on debris nobody owns.
+ * its `hostPid` answers a process liveness probe AND — whenever the live
+ * table is available — its argv holds an ACP host's marker AND the process
+ * is old enough to have spawned the worker it is recorded as parenting;
+ * any weaker reading holds, because the kill error would land on a live
+ * sibling's workers (or sweep a recycled id's host), never on debris
+ * nobody owns.
  */
 function holdsForLiveHost(
   worker: ManagedRuntimeLedgerWorkerRecord,
   table: ReadonlyMap<number, ProcessTableRow> | undefined,
-  liveness: (pgid: number) => ProcessLiveness,
+  now: number,
+  alive: (pid: number) => boolean,
 ): boolean {
   if (worker.hostPid === undefined) return false;
-  const hostLive =
-    process.platform === 'win32'
-      ? pidAlive(worker.hostPid)
-      : liveness(worker.hostPid) === 'alive';
-  if (!hostLive) return false;
+  // A process probe on the pid itself: the child may lead no group, and an
+  // EPERM answer is another uid's process — both are "not ours to judge",
+  // never "dead", since only ESRCH ever proves an exit.
+  if (!alive(worker.hostPid)) return false;
   if (table === undefined) return true;
   const host = table.get(worker.hostPid);
   if (host === undefined) return false;
@@ -740,7 +841,7 @@ function holdsForLiveHost(
   }
   // A process younger than the worker it is named as parenting is an
   // impostor: the recorded child's id was recycled by some other ACP host.
-  return host.runningMs >= Date.now() - worker.startedAt - RECORD_LEAD_SKEW_MS;
+  return host.runningMs >= recordAgeMs(worker, now) - RECORD_LEAD_SKEW_MS;
 }
 
 function pidAlive(pid: number): boolean {
@@ -786,7 +887,14 @@ export async function sweepStaleLedgers(
         !options.skip?.has(workFile.slice(0, -'.tmp'.length)) &&
         isOlderThan(workFile, TMP_DEBRIS_AGE_MS)
       ) {
-        rmSync(workFile, { force: true });
+        // Same containment as a ledger file: one unlink that fails — root-
+        // owned debris in a bind mount, an EROFS mount, an open handle on
+        // Windows — must not abort the sweep for everything behind it.
+        try {
+          rmSync(workFile, { force: true });
+        } catch (error) {
+          failures.push(error as Error);
+        }
       }
       continue;
     }
@@ -816,9 +924,6 @@ export async function sweepStaleLedgers(
   }
 }
 
-/** How old trash from a crashed writer gets to be before it is deleted. */
-const TMP_DEBRIS_AGE_MS = 60_000;
-
 function isOlderThan(file: string, ageMs: number): boolean {
   try {
     return Date.now() - statSync(file).mtimeMs > ageMs;
@@ -831,24 +936,30 @@ function isOlderThan(file: string, ageMs: number): boolean {
 /**
  * Retries a failed sweep until it proves its remainders gone, then calls
  * `onProven` once. Each retry begins only after the previous one settled: a
- * slow proof never piles retries on top of itself. The timer is unref'd: a
- * dying process is not kept alive by the truth another process's startup
- * sweep owns.
+ * slow proof never piles retries on top of itself, and a remainder that
+ * keeps answering the same way backs off to a bounded cadence — retries
+ * that cannot change anything must not cost a `ps` and a signal every
+ * second for the lifetime of a quarantine. The timer is unref'd: a dying
+ * process is not kept alive by the truth another process's startup sweep
+ * owns.
  */
 export function startLedgerReaper(
   sweep: () => Promise<void>,
   onProven: () => void,
   intervalMs: number = LEDGER_WATCH_INTERVAL_MS,
+  maxIntervalMs: number = 30_000,
 ): { stop(): void } {
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
+  let interval = intervalMs;
   const tick = async () => {
     let proven = false;
     try {
       await sweep();
       proven = true;
     } catch {
-      // Retry at the next tick.
+      // Retry at the next tick, doubling the wait up to the cap.
+      interval = Math.min(interval * 2, maxIntervalMs);
     }
     if (stopped) return;
     if (proven) {
@@ -856,10 +967,10 @@ export function startLedgerReaper(
       onProven();
       return;
     }
-    timer = setTimeout(() => void tick(), intervalMs);
+    timer = setTimeout(() => void tick(), interval);
     timer.unref();
   };
-  timer = setTimeout(() => void tick(), intervalMs);
+  timer = setTimeout(() => void tick(), interval);
   timer.unref();
   return {
     stop() {
@@ -879,6 +990,9 @@ export function managedRuntimeLedgerFromEnvironment(
 ): ManagedRuntimeLedger | undefined {
   const workFile = process.env[MANAGED_RUNTIME_LEDGER_ENV];
   if (!workFile) return undefined;
+  // The path is for the worker alone: no Shell command it spawns gets to
+  // read the name of the file that accounts for it.
+  delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
   return ManagedRuntimeLedger.create({
     workFile,
     worker: {
@@ -887,6 +1001,7 @@ export function managedRuntimeLedgerFromEnvironment(
       hostPid: process.ppid,
       incarnation,
       startedAt: Date.now(),
+      uptimeMs: os.uptime() * 1000,
     },
   });
 }

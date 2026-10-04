@@ -693,8 +693,11 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect(restarted.stopReason).toBe('end_turn');
     // The debris is gone — its groups were swept by the new child's sweep
     // of its stale ledgers, and the live restarted worker's own ledger is
-    // allowed to exist while its session stays open.
-    expect(await managedRuntimeLedgerFiles()).not.toContain(workFile);
+    // allowed to exist while its session stays open. The sweep is
+    // fire-and-forget, so both postconditions are polled, not sampled once.
+    await waitFor(async () =>
+      (await managedRuntimeLedgerFiles()).includes(workFile) ? undefined : true,
+    );
     await waitFor(() => (!isAlive(orphan.pid!) ? true : undefined));
     await bridge!.closeSession(restartedSessionId);
     expect(await managedRuntimeLedgerFiles()).toEqual([]);

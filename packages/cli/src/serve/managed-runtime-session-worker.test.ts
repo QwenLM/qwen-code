@@ -850,10 +850,15 @@ describe.skipIf(process.platform === 'win32')(
     let logFile: string;
     let config: Config;
     let environment: ReturnType<typeof createManagedRuntimeEnvironment>;
+    let previousRuntimeDir: string | undefined;
     const signal = new AbortController().signal;
 
     beforeEach(async () => {
       root = await mkdtemp(path.join(os.tmpdir(), 'qwen-m5-env-'));
+      // Pin the runtime temp root: the worker launch creates the ledger
+      // directory by sha256 of cwd, which `rm(root)` can never reach.
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
       script = path.join(root, 'fake-worker.mjs');
       logFile = path.join(root, 'log.jsonl');
       await writeFile(script, FAKE_WORKER);
@@ -872,6 +877,11 @@ describe.skipIf(process.platform === 'win32')(
 
     afterEach(async () => {
       await environment?.dispose();
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
       await rm(root, { recursive: true, force: true });
     });
 
@@ -1150,6 +1160,65 @@ describe.skipIf(process.platform === 'win32')(
       expect(() => process.kill(pid!, 0)).toThrow();
     });
 
+    it('reports and retries an unprovable startup sweep until the truth heals', async () => {
+      const previous = process.env['QWEN_RUNTIME_DIR'];
+      process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
+      try {
+        const sweeperConfig = new Config({
+          sessionId: '11111111-2222-3333-4444-555555555555',
+          targetDir: root,
+          cwd: root,
+          debugMode: false,
+          model: 'test-model',
+          usageStatisticsEnabled: false,
+          telemetry: { enabled: false },
+          deferTelemetryInitialization: true,
+        });
+        const reportSpy = vi.spyOn(
+          sweeperConfig,
+          'reportManagedEngineQuarantine',
+        );
+        const clearSpy = vi.spyOn(
+          sweeperConfig,
+          'clearManagedEngineQuarantine',
+        );
+        const ledgerDir = path.join(
+          sweeperConfig.storage.getProjectTempDir(),
+          'managed-runtime',
+        );
+        await mkdir(ledgerDir, { recursive: true });
+        // A FRESH unreadable ledger: old enough to judge, too young to
+        // retire, so the sweep fails the same way on every retry until an
+        // operator — here the test — removes the blocker.
+        const ghost = path.join(ledgerDir, 'ghost.json');
+        await writeFile(ghost, '{not a ledger', 'utf8');
+
+        environment = createManagedRuntimeEnvironment(sweeperConfig, () => ({
+          command: process.execPath,
+          args: [script],
+          env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+        }));
+        await vi.waitFor(() => {
+          expect(reportSpy).toHaveBeenCalled();
+        });
+        expect(clearSpy).not.toHaveBeenCalled();
+
+        await rm(ghost);
+        await vi.waitFor(() => {
+          expect(clearSpy).toHaveBeenCalled();
+        });
+        // The reaper reports proven once and stops.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(clearSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previous === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = previous;
+        }
+      }
+    });
+
     it('sweeps the stale worker ledgers of an earlier child when it starts', async () => {
       const previous = process.env['QWEN_RUNTIME_DIR'];
       process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
@@ -1245,22 +1314,29 @@ describe.skipIf(process.platform === 'win32')(
             args: [script],
             env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
           }));
-          const laterSettled = () =>
-            processGroupLiveness(laterPid) === 'gone' && !existsSync(laterFile);
-          while (!laterSettled()) {
-            if (Date.now() > deadline) {
-              throw new Error('no sweep ran for a ledger created mid-life');
-            }
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
-          expect(existsSync(laterFile)).toBe(false);
+          // Phase 2 earns its own budget: what phase 1 spent is not owed to
+          // it, and a failed wait must still kill the sleeper below.
+          const laterDeadline = Date.now() + 15_000;
           try {
-            process.kill(-laterPid, 'SIGKILL');
-          } catch {
+            const laterSettled = () =>
+              processGroupLiveness(laterPid) === 'gone' &&
+              !existsSync(laterFile);
+            while (!laterSettled()) {
+              if (Date.now() > laterDeadline) {
+                throw new Error('no sweep ran for a ledger created mid-life');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            expect(existsSync(laterFile)).toBe(false);
+          } finally {
             try {
-              process.kill(laterPid, 'SIGKILL');
+              process.kill(-laterPid, 'SIGKILL');
             } catch {
-              // gone already
+              try {
+                process.kill(laterPid, 'SIGKILL');
+              } catch {
+                // gone already
+              }
             }
           }
         } finally {
@@ -1327,24 +1403,6 @@ describe('toToolResult', () => {
       error: { message: 'exited 1' },
     });
   });
-
-  it.each([
-    ['error', { message: 'boom' }, 'boom'],
-    ['error', undefined, 'The tool call failed.'],
-    ['not_started', { message: 'refused' }, 'refused'],
-    ['cancelled', undefined, 'The tool call was cancelled.'],
-  ] as const)(
-    'reports a %s call as an error',
-    (executionStatus, error, message) => {
-      expect(
-        toToolResult({ executionStatus, responseParts: [], error }),
-      ).toEqual({
-        llmContent: message,
-        returnDisplay: message,
-        error: { message },
-      });
-    },
-  );
 
   it.each([
     ['error', { message: 'boom' }, 'boom'],

@@ -4067,7 +4067,7 @@ class QwenAgent implements Agent {
       throw new RequestError(
         -32024,
         `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${quarantine.message}).`,
-        { errorKind: 'session_execution_engine_unavailable' },
+        { errorKind: 'managed_engine_quarantined' },
       );
     }
   }

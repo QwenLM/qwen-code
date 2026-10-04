@@ -160,6 +160,25 @@ describe('paired Bridge rejections', () => {
       },
     });
   });
+
+  it('maps a Managed engine quarantine to a temporary refusal, never the resume-conflict shape', () => {
+    expect(
+      toRpcError({
+        code: -32024,
+        message:
+          "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+        data: { errorKind: 'managed_engine_quarantined' },
+      }),
+    ).toEqual({
+      code: -32024,
+      message:
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      data: {
+        httpStatus: 503,
+        errorKind: 'managed_engine_quarantined',
+      },
+    });
+  });
 });
 
 describe('transcript snapshot rejections', () => {

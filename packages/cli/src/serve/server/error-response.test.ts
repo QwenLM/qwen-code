@@ -629,6 +629,25 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps a Managed engine quarantine to HTTP 503 with the reason kept', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(
+      -32024,
+      "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      { errorKind: 'managed_engine_quarantined' },
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+    });
+  });
+
   it('logs why an execution engine rejection happened', () => {
     const daemonLog = { warn: vi.fn() } as unknown as DaemonLogger;
     const ctx = { route: 'POST /session/:id/load', sessionId: 'session-1' };
