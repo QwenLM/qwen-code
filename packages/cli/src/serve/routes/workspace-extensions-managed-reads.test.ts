@@ -15,6 +15,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
+import type { Response } from 'express';
 import { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
@@ -28,6 +30,10 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { createWorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
 import { createExtensionsController } from './workspace-extensions-controller.js';
+import { createServeApp } from '../server.js';
+import { createWorkspaceRegistry } from '../workspace-registry.js';
+import { createWorkspaceFileSystemFactory } from '../fs/index.js';
+import { ClientMcpSenderRegistry } from '../acp-http/client-mcp-sender-registry.js';
 
 async function createManagedEpisode(
   root: string,
@@ -293,6 +299,177 @@ describe('workspace managed extension reads', () => {
       }
     },
   );
+
+  it.each(['/workspace/extensions/check-updates', '/extensions/check-updates'])(
+    'preserves managed credentials and policy during HTTP %s',
+    async (route) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), 'qwen-managed-update-check-')),
+      );
+      let app: ReturnType<typeof createServeApp> | undefined;
+      try {
+        const {
+          managedExtensionsDir,
+          workspace,
+          managed,
+          diskPolicy,
+          manager,
+        } = await createManagedEpisode(root);
+        const before = await diskPolicy();
+        const bridge = {
+          permissionPolicy: 'first-responder',
+          knownClientIds: () => new Set<string>(['client-1']),
+          publishWorkspaceEvent: vi.fn(),
+          broadcastExtensionsChanged: vi.fn(),
+          listWorkspaceSessions: vi.fn(() => []),
+          sessionCount: 0,
+          activePromptCount: 0,
+          pendingPromptTotal: 0,
+          lastActivityAt: null,
+        } as unknown as AcpSessionBridge;
+        const refreshSessions = vi.fn(async () => ({
+          refreshed: 0,
+          failed: 0,
+        }));
+        const workspaceService = {
+          invalidateWorkspaceSkillsStatus: vi.fn(),
+          refreshExtensionsForAllSessions: refreshSessions,
+        } as unknown as DaemonWorkspaceService;
+        const registry = createWorkspaceRegistry([
+          {
+            workspaceId: 'primary-id',
+            workspaceCwd: workspace,
+            sessionRuntimeBaseDir: join(workspace, '.runtime'),
+            primary: true,
+            trusted: true,
+            env: { mode: 'parent-process', overlayKeys: [] },
+            bridge,
+            workspaceService,
+            routeFileSystemFactory: createWorkspaceFileSystemFactory({
+              boundWorkspaces: [workspace],
+              trusted: true,
+              emit: () => {},
+            }),
+            clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+          },
+        ]);
+        app = createServeApp(
+          {
+            hostname: '127.0.0.1',
+            port: 4198,
+            mode: 'http-bridge',
+            token: 'test-secret',
+            workspace,
+            managedExtensions: managedExtensionsDir,
+          },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+        const auth = (pending: request.Test) =>
+          pending
+            .set('Host', '127.0.0.1:4198')
+            .set('Authorization', 'Bearer test-secret')
+            .set('X-Qwen-Client-Id', 'client-1');
+        const response = await auth(request(app).post(route));
+        if (route === '/extensions/check-updates') {
+          expect(response.status).toBe(202);
+          await vi.waitFor(async () => {
+            const operation = await auth(
+              request(app!).get(
+                `/extensions/operations/${response.body.operationId}`,
+              ),
+            );
+            expect(operation.status).toBe(200);
+            expect(operation.body).toMatchObject({
+              status: 'succeeded',
+              result: {
+                status: 'checked',
+                states: { [managed.name]: 'not updatable' },
+              },
+            });
+          });
+        } else {
+          expect(response.status).toBe(200);
+          expect(response.body.states).toEqual({
+            [managed.name]: 'not updatable',
+          });
+        }
+        expect
+          .soft(await hasStoredExtensionSecrets(managed.name, managed.id))
+          .toBe(true);
+        expect.soft(await diskPolicy()).toEqual(before);
+        expect(refreshSessions).not.toHaveBeenCalled();
+        await manager.refreshCache();
+        expect(await hasStoredExtensionSecrets(managed.name, managed.id)).toBe(
+          false,
+        );
+        expect(await diskPolicy()).toMatchObject({
+          defaultActivation: 'disabled',
+        });
+        expect(await diskPolicy()).not.toHaveProperty('managed');
+      } finally {
+        (
+          app?.locals as
+            | { stopExtensionGenerationReconciler?: () => void }
+            | undefined
+        )?.stopExtensionGenerationReconciler?.();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('allows queued activation to hand back even when runtime refresh is skipped', async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'qwen-managed-queued-activation-')),
+    );
+    try {
+      const { controller, managed, diskPolicy } =
+        await createManagedEpisode(root);
+      const responseBody = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json: responseBody,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        'activation',
+        { name: managed.name },
+        response,
+        async (manager) => {
+          expect(manager.getLoadedExtensions()).toEqual([
+            expect.objectContaining({ name: managed.name, source: 'user' }),
+          ]);
+          expect(
+            await hasStoredExtensionSecrets(managed.name, managed.id),
+          ).toBe(false);
+          expect(await diskPolicy()).not.toHaveProperty('managed');
+          await manager.setExtensionDefaultActivation(
+            manager.getLoadedExtensions()[0]!.id,
+            'enabled',
+          );
+          return { status: 'enabled', name: managed.name };
+        },
+        { skipRefresh: true },
+      );
+      const operationId = responseBody.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)).toMatchObject({
+          status: 'succeeded',
+          result: { status: 'enabled', name: managed.name },
+        }),
+      );
+      expect(await hasStoredExtensionSecrets(managed.name, managed.id)).toBe(
+        false,
+      );
+      expect(await diskPolicy()).toMatchObject({
+        defaultActivation: 'enabled',
+      });
+      expect(await diskPolicy()).not.toHaveProperty('managed');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it.each([
     { user: false, managed: true, expected: false },

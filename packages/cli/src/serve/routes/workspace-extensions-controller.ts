@@ -774,7 +774,11 @@ export function createExtensionsController(
             return result;
           },
         };
-        await extensionManager.refreshCache();
+        await extensionManager.refreshCache(
+          operation === 'check-updates'
+            ? { allowManagedHandBack: false }
+            : undefined,
+        );
         const event = await run(
           extensionManager,
           deadlineController.signal,
