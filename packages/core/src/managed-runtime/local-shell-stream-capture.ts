@@ -165,7 +165,8 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     if (state.ended) return;
     state.ended = true;
     try {
-      if (!this.broken && state.used > 0) await this.publishSegment(state);
+      if (!this.broken && state.used > 0)
+        await this.publishSegment(state, true);
       if (!this.broken && complete) {
         const sealed = await this.store.seal({
           captureId: this.identity.captureId,
@@ -176,6 +177,11 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
         });
         if (sealed.status !== 'ok') throw new Error(sealed.code);
         state.sealed = true;
+      }
+      // The revision of an ended stream publishes only after its seal
+      // decision: a sealed-or-incomplete descriptor may never change again.
+      if (!this.broken && state.pendingSegments.length > 0) {
+        await this.publishPage(state);
       }
     } catch (cause) {
       this.fail(cause);
@@ -197,7 +203,10 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     };
   }
 
-  private async publishSegment(state: StreamState): Promise<void> {
+  private async publishSegment(
+    state: StreamState,
+    deferPageClose = false,
+  ): Promise<void> {
     await this.assertWritable();
     if (state.ordinal > MANAGED_TOOL_RESULT_LIMITS.maxOrdinal) {
       throw new Error('size_limit');
@@ -218,7 +227,10 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     });
     state.ordinal++;
     state.used = 0;
-    if (state.pendingSegments.length === this.options.segmentsPerPage) {
+    if (
+      state.pendingSegments.length === this.options.segmentsPerPage &&
+      !deferPageClose
+    ) {
       await this.publishPage(state);
     }
   }
@@ -304,9 +316,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       };
     });
     const broken = this.broken;
-    const captureStatus = broken
-      ? captureStatusFor(contents, true)
-      : captureStatusFor(contents, false);
+    const captureStatus = captureStatusFor(contents);
     const manifest = parseToolResultManifest({
       toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
       type: 'manifest',
@@ -369,39 +379,58 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     }
     // The last revision contracts the unfinished tail to the boundary of
     // the sealed, retained prefix; anything lost mid-write is a gap, not
-    // admitted bytes.
-    const ref = await this.publish(
-      executionStatus,
-      settled.exitCode,
-      settled.signalName,
-    );
-    const contents = parseToolResultManifestBytes(
-      await this.resources.read(ref),
-    );
-    const captureStatus: Exclude<
-      (typeof contents)['captureStatus'],
-      'pending'
-    > =
-      contents.captureStatus === 'pending' ? 'partial' : contents.captureStatus;
-    this.finalEnvelope = {
-      executionStatus,
-      responseParts,
-      ...(error ? { error } : {}),
-      capture: {
-        captureStatus,
-        captureReason: contents.captureReason,
-        manifest: ref,
-        previewTruncated: false,
-        deliveryStatus: 'pending',
-      },
-    };
+    // admitted bytes. A writability failure at settle time must not escape:
+    // the last published revision stands (the cap rule for a dying worker),
+    // and the envelope degrades to unavailable with the named reason.
+    try {
+      const ref = await this.publish(
+        executionStatus,
+        settled.exitCode,
+        settled.signalName,
+      );
+      const contents = parseToolResultManifestBytes(
+        await this.resources.read(ref),
+      );
+      const captureStatus: Exclude<
+        (typeof contents)['captureStatus'],
+        'pending'
+      > =
+        contents.captureStatus === 'pending'
+          ? 'partial'
+          : contents.captureStatus;
+      this.finalEnvelope = {
+        executionStatus,
+        responseParts,
+        ...(error ? { error } : {}),
+        capture: {
+          captureStatus,
+          captureReason: contents.captureReason,
+          manifest: ref,
+          previewTruncated: false,
+          deliveryStatus: 'pending',
+        },
+      };
+    } catch (cause) {
+      this.fail(cause);
+      this.finalEnvelope = {
+        executionStatus,
+        responseParts,
+        ...(error ? { error } : {}),
+        capture: {
+          captureStatus: 'unavailable',
+          captureReason: this.broken?.reason ?? 'storage_failed',
+          manifest: null,
+          previewTruncated: false,
+          deliveryStatus: 'pending',
+        },
+      };
+    }
     return this.finalEnvelope;
   }
 }
 
 function captureStatusFor(
   contents: readonly ToolResultContentDescriptor[],
-  _broken: boolean,
 ): 'pending' | 'complete' | 'partial' | 'unavailable' {
   if (contents.some((entry) => entry.state === 'open')) return 'pending';
   if (contents.every((entry) => entry.state === 'sealed')) return 'complete';

@@ -29,6 +29,8 @@ import {
   registerSessionProjectDir,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import { getShellContextEnvVars } from '@qwen-code/qwen-code-core/services/shellContextEnv.js';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -128,6 +130,9 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
 ]);
+
+/** Live background Shells one Session may hold, by the H3 design contract. */
+const MANAGED_BACKGROUND_MAX_SHELLS = 8;
 
 interface JournalEntry {
   readonly version: 2 | 3;
@@ -612,6 +617,9 @@ export class ManagedToolExecutor {
     normalized: Record<string, unknown>,
   ): Promise<ManagedToolV3View> {
     const { reference, capture, input } = request;
+    // The dispatch journal leads every effect: a repeat of this callId joins
+    // it exactly like the foreground path, before any process exists.
+    if (this.entries.has(reference.callId)) return this.executeV3(request);
     const entry: JournalEntry = {
       version: 3,
       reference,
@@ -623,6 +631,7 @@ export class ManagedToolExecutor {
       lastSequence: 0,
       controller: new AbortController(),
     };
+    this.entries.set(reference.callId, entry);
     const settle = (result: ToolResultEnvelope): ManagedToolV3View => {
       entry.v3Result = result;
       entry.state = 'settled';
@@ -676,6 +685,19 @@ export class ManagedToolExecutor {
         error: { message: 'Hosted Shell requires a nonempty command.' },
       });
     }
+    if (
+      this.backgroundRegistry.countBySession(reference.sessionId) >=
+      MANAGED_BACKGROUND_MAX_SHELLS
+    ) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Session already runs ${MANAGED_BACKGROUND_MAX_SHELLS} background Shells.`,
+        },
+      });
+    }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher!.prepare({ reference, capture });
@@ -684,15 +706,21 @@ export class ManagedToolExecutor {
         cause instanceof Error ? cause.message : String(cause),
       );
     }
+    if (this.closing || tools.isActive?.() === false) {
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime worker is no longer active.',
+      );
+    }
     const sink = prepared.sink;
     const publisher = prepared.publisher ?? this.capturePublisher!;
     const unitName = `qwen-bg-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    const shellConfig = getShellConfiguration();
     let process: ManagedChildRunProcess;
     try {
-      process = this.backgroundSupervisor.start({
+      process = await this.backgroundSupervisor.start({
         unitName,
-        executable: '/bin/sh',
-        args: ['-c', command],
+        executable: shellConfig.executable,
+        args: [...shellConfig.argsPrefix, command],
         env: backgroundEnv(),
         cwd: directory,
         onOutput: (stream, chunk) => sink.write(stream, chunk),
@@ -1122,7 +1150,11 @@ export class ManagedToolExecutor {
 }
 
 function backgroundEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
+  const env: NodeJS.ProcessEnv = {
+    // The session context every managed command in this Runtime receives,
+    // resolved by context like the Hook command environment does.
+    ...getShellContextEnvVars(),
+  };
   for (const key of [
     'PATH',
     'HOME',

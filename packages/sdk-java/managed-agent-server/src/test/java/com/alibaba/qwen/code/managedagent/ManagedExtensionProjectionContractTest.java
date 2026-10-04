@@ -124,7 +124,8 @@ class ManagedExtensionProjectionContractTest {
                         : ManagedExtensionRecords.isRunSuccessor(previousRun,
                                 run), id(fixture));
                 previous = ManagedExtensionProjection.project(previous, run,
-                        revision.required("occurredAt").longValue());
+                        revision.required("occurredAt").longValue(),
+                        revision.path("stopRequested").asBoolean(false));
                 assertEquals(view(revision.required("view")), previous,
                         id(fixture));
                 assertEquals(revision.required("deliveryPending")

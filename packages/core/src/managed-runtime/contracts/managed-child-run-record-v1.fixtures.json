@@ -71,6 +71,7 @@
       "domain": "child_run",
       "patch": { "kind": "child_agent" },
       "valid": false,
+      "error": "must be 'shell' in schema version 1",
       "start": false
     },
     {
@@ -78,6 +79,7 @@
       "domain": "child_run",
       "patch": { "extra": true },
       "valid": false,
+      "error": "exactly",
       "start": false
     },
     {
@@ -93,6 +95,7 @@
         }
       },
       "valid": false,
+      "error": "needs a start receipt",
       "start": false
     },
     {
@@ -105,6 +108,7 @@
         }
       },
       "valid": false,
+      "error": "must be set once the process started",
       "start": false
     },
     {
@@ -120,6 +124,7 @@
         }
       },
       "valid": false,
+      "error": "must be null before the process starts",
       "start": false
     },
     {
@@ -136,6 +141,7 @@
         "run": { "execution": "running_attached" }
       },
       "valid": false,
+      "error": "needs the Runtime binding",
       "start": false
     },
     {
@@ -170,6 +176,7 @@
         }
       },
       "valid": false,
+      "error": "needs a start receipt",
       "start": false
     },
     {
@@ -222,6 +229,7 @@
         }
       },
       "valid": false,
+      "error": "must reference managed-tool-result-manifest version 1",
       "start": false
     },
     {
@@ -310,6 +318,7 @@
         "stopReason": "exited"
       },
       "valid": false,
+      "error": "is proven exactly when it exits",
       "start": false
     },
     {
@@ -332,6 +341,7 @@
         "exitCode": 0
       },
       "valid": false,
+      "error": "execution proven to have ended",
       "start": false
     },
     {
@@ -343,6 +353,7 @@
         "exitCode": 0
       },
       "valid": false,
+      "error": "must be set once the process started",
       "start": false
     },
     {
@@ -376,6 +387,7 @@
         "stopReason": "start_failed"
       },
       "valid": false,
+      "error": "must be null before the process starts",
       "start": false
     },
     {
@@ -410,16 +422,78 @@
         "stopReason": "process_failed"
       },
       "valid": false,
+      "error": "needs a process that started",
       "start": false
     },
     {
       "id": "quota",
       "domain": "child_run",
       "patch": {
-        "run": { "state": "failed", "reason": "rate_limit", "execution": null },
+        "run": {
+          "state": "failed",
+          "reason": "rate_limit",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stopReason": "quota_exceeded"
       },
       "valid": true,
+      "start": false
+    },
+    {
+      "id": "settled-null-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": { "state": "settled", "execution": null },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "settled needs its settled execution",
+      "start": false
+    },
+    {
+      "id": "start-failed-with-settled-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "start_failed"
+      },
+      "valid": false,
+      "error": "needs a process that never started",
+      "start": false
+    },
+    {
+      "id": "quota-unsettled-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "reason": "rate_limit",
+          "execution": "not_started_proven"
+        },
+        "stopReason": "quota_exceeded"
+      },
+      "valid": false,
+      "error": "process failure needs its settled execution",
       "start": false
     },
     {
@@ -442,16 +516,29 @@
         "stopReason": "process_failed"
       },
       "valid": false,
+      "error": "is quota_exceeded exactly for a quota reason",
       "start": false
     },
     {
       "id": "nonquota-mismatch",
       "domain": "child_run",
       "patch": {
-        "run": { "state": "failed", "execution": null },
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
         "stopReason": "quota_exceeded"
       },
       "valid": false,
+      "error": "is quota_exceeded exactly for a quota reason",
       "start": false
     },
     {
@@ -495,6 +582,7 @@
         "stopReason": "stop_requested"
       },
       "valid": false,
+      "error": "needs its stop request",
       "start": false
     },
     {
@@ -509,6 +597,7 @@
       "domain": "child_run",
       "patch": { "stopRequested": "yes" },
       "valid": false,
+      "error": "must be boolean",
       "start": false
     },
     {
@@ -531,6 +620,7 @@
         "exitCode": 0
       },
       "valid": false,
+      "error": "is set exactly when the run ends",
       "start": false
     },
     {
@@ -553,6 +643,7 @@
         "exitCode": 0
       },
       "valid": false,
+      "error": "does not fit the failed state",
       "start": false
     },
     {
@@ -575,6 +666,7 @@
         "exitCode": 143
       },
       "valid": false,
+      "error": "needs its stop request",
       "start": false
     },
     {
@@ -596,6 +688,7 @@
         "exitCode": 0
       },
       "valid": false,
+      "error": "is proven exactly when it exits",
       "start": false
     },
     {
@@ -618,6 +711,7 @@
         "exitCode": 256
       },
       "valid": false,
+      "error": "must be an integer from 0 to 255",
       "start": false
     },
     {
@@ -640,6 +734,7 @@
         "exitCode": -1
       },
       "valid": false,
+      "error": "must be an integer from 0 to 255",
       "start": false
     },
     {
@@ -662,6 +757,7 @@
         "exitCode": 1.5
       },
       "valid": false,
+      "error": "must be an integer from 0 to 255",
       "start": false
     },
     {
@@ -688,6 +784,7 @@
         }
       },
       "valid": false,
+      "error": "must reference managed-tool-result-manifest version 1",
       "start": false
     },
     {
@@ -710,6 +807,7 @@
         "exitSignal": "sigterm"
       },
       "valid": false,
+      "error": "must be an uppercase signal name",
       "start": false
     },
     {
@@ -732,6 +830,7 @@
         "exitSignal": 9
       },
       "valid": false,
+      "error": "must be an uppercase signal name",
       "start": false
     },
     {
@@ -775,6 +874,7 @@
         "run": { "delivery": { "target": "session", "state": "planned" } }
       },
       "valid": false,
+      "error": "must name its start call and nothing else",
       "start": false
     },
     {
@@ -782,6 +882,7 @@
       "domain": "child_run",
       "patch": { "run": { "effectId": "effect-1" } },
       "valid": false,
+      "error": "names one physical identity at most",
       "start": false
     },
     {
@@ -797,6 +898,7 @@
         }
       },
       "valid": false,
+      "error": "must name its start call and nothing else",
       "start": false
     },
     {
@@ -804,6 +906,7 @@
       "domain": "child_run",
       "patch": { "run": { "executionCallId": null } },
       "valid": false,
+      "error": "needs an executionCallId or an effectId",
       "start": false
     },
     {
@@ -824,6 +927,7 @@
         }
       },
       "valid": false,
+      "error": "is set exactly when the run ends",
       "start": false
     }
   ],

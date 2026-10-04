@@ -11,11 +11,10 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   isToolResultManifestSuccessor,
+  isToolResultPageAt,
   MANAGED_TOOL_RESULT_KINDS,
-} from './managed-tool-result.js';
-import type {
-  ToolResultSegmentReceipt,
-  ToolResultStoreOutcome,
+  type ToolResultSegmentReceipt,
+  type ToolResultStoreOutcome,
 } from './managed-tool-result.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
@@ -38,7 +37,7 @@ afterEach(async () => {
 });
 
 interface Rig {
-  readonly captured: LocalShellStreamCapture;
+  captured: LocalShellStreamCapture;
   readonly segments: Array<{
     ordinal: number;
     streamId: string;
@@ -48,6 +47,8 @@ interface Rig {
   readonly pages: Buffer[];
   readonly manifests: Array<Record<string, unknown>>;
   readonly resources: LocalManagedSessionResourceStore;
+  failManifestPublishesAfter: number;
+  refuseSegments: boolean;
 }
 
 const IDENTITY = {
@@ -62,12 +63,7 @@ const IDENTITY = {
   revision: 1,
 } as const;
 
-async function rig(
-  options: {
-    segmentsPerPage?: number;
-    store?: Partial<ToolResultSegmentStore>;
-  } = {},
-): Promise<Rig> {
+async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-shell-stream-'));
   temporaryDirectories.add(root);
   const real = LocalManagedSessionResourceStore.create({
@@ -76,68 +72,117 @@ async function rig(
   });
   const pages: Buffer[] = [];
   const manifests: Array<Record<string, unknown>> = [];
-  const resources = {
-    publish: async (kind: string, bytes: Buffer) => {
-      const ref = await real.publish(kind, bytes);
-      if (kind === MANAGED_TOOL_RESULT_KINDS.page) pages.push(bytes);
-      if (kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
-        manifests.push(JSON.parse(bytes.toString()) as Record<string, unknown>);
-      }
-      return ref;
-    },
-    read: (ref: ManagedSessionDurableRef) => real.read(ref),
-  } as unknown as ManagedSessionResourceStore;
-  const segments: Rig['segments'] = [];
-  const sealed: Rig['sealed'] = [];
-  const store = {
-    async publish(request: {
-      streamId: string;
-      ordinal: number;
-      bytes: Buffer;
-    }) {
-      segments.push({
-        ordinal: request.ordinal,
-        streamId: request.streamId,
-        bytes: request.bytes,
-      });
-      return {
-        status: 'ok' as const,
-        result: {
-          byteLength: request.bytes.byteLength,
-          digest: createHash('sha256').update(request.bytes).digest('hex'),
-        },
-      };
-    },
-    async seal(request: { streamId: string; segmentCount: number }) {
-      sealed.push({
-        streamId: request.streamId,
-        segmentCount: request.segmentCount,
-      });
-      return { status: 'ok' as const, result: { sealed: true } };
-    },
-    async prefix() {
-      return { status: 'ok' as const, result: { byteLength: 0 } };
-    },
-    async readRange() {
-      return { status: 'ok' as const, result: Buffer.alloc(0) };
-    },
-    async close() {},
-    ...options.store,
-  } as unknown as ToolResultSegmentStore;
-  return {
-    captured: new LocalShellStreamCapture(
-      store,
-      resources,
-      IDENTITY,
-      async () => {},
-      { segmentsPerPage: options.segmentsPerPage ?? 512 },
-    ),
-    segments,
-    sealed,
+  const rigState: Rig = {
+    captured: null as unknown as LocalShellStreamCapture,
+    segments: [],
+    sealed: [],
     pages,
     manifests,
     resources: real,
+    failManifestPublishesAfter: Number.POSITIVE_INFINITY,
+    refuseSegments: false,
   };
+  let manifestPublishes = 0;
+  const resources: ManagedSessionResourceStore = {
+    publish: (kind: string, bytes: Buffer) => {
+      if (
+        kind === MANAGED_TOOL_RESULT_KINDS.manifest &&
+        ++manifestPublishes > rigState.failManifestPublishesAfter
+      ) {
+        return Promise.reject(new Error('writable store is gone'));
+      }
+      return real.publish(kind, bytes).then((ref) => {
+        if (kind === MANAGED_TOOL_RESULT_KINDS.page) pages.push(bytes);
+        if (kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+          manifests.push(
+            JSON.parse(bytes.toString()) as Record<string, unknown>,
+          );
+        }
+        return ref;
+      });
+    },
+    read: (ref: ManagedSessionDurableRef) => real.read(ref),
+  };
+  const store: ToolResultSegmentStore = {
+    publish: (request: unknown) => {
+      const typed = request as {
+        captureId: string;
+        streamId: 'stdout' | 'stderr';
+        ordinal: number;
+        bytes: Buffer;
+      };
+      if (rigState.refuseSegments) {
+        return Promise.resolve<
+          ToolResultStoreOutcome<ToolResultSegmentReceipt>
+        >({ status: 'refused', code: 'managed_tool_result_conflict' });
+      }
+      rigState.segments.push({
+        ordinal: typed.ordinal,
+        streamId: typed.streamId,
+        // The class hands a subarray view of its reused buffer; a real store
+        // persists bytes, so the double copies before remembering.
+        bytes: Buffer.from(typed.bytes),
+      });
+      return Promise.resolve<ToolResultStoreOutcome<ToolResultSegmentReceipt>>({
+        status: 'ok',
+        result: {
+          ordinal: typed.ordinal,
+          byteLength: typed.bytes.byteLength,
+          digest: createHash('sha256').update(typed.bytes).digest('hex'),
+        },
+      });
+    },
+    seal: (request: unknown) => {
+      const typed = request as {
+        streamId: 'stdout' | 'stderr';
+        segmentCount: number;
+        byteLength: number;
+        digest: string;
+      };
+      if (rigState.refuseSegments) {
+        return Promise.resolve({
+          status: 'refused' as const,
+          code: 'managed_tool_result_conflict' as const,
+        });
+      }
+      rigState.sealed.push({
+        streamId: typed.streamId,
+        segmentCount: typed.segmentCount,
+      });
+      return Promise.resolve({
+        status: 'ok' as const,
+        result: {
+          segmentCount: typed.segmentCount,
+          byteLength: typed.byteLength,
+          digest: typed.digest,
+        },
+      });
+    },
+    prefix: () =>
+      Promise.resolve({
+        status: 'ok' as const,
+        result: {
+          segmentCount: 0,
+          byteLength: 0,
+          digest: '0'.repeat(64),
+          sealed: false,
+        },
+      }),
+    readRange: () =>
+      Promise.resolve({
+        status: 'ok' as const,
+        result: Buffer.alloc(0),
+      }),
+    close: () => Promise.resolve(),
+  };
+  rigState.captured = new LocalShellStreamCapture(
+    store,
+    resources,
+    IDENTITY,
+    async () => {},
+    { segmentsPerPage: options.segmentsPerPage ?? 512 },
+  );
+  return rigState;
 }
 
 describe('LocalShellStreamCapture', () => {
@@ -205,16 +250,157 @@ describe('LocalShellStreamCapture', () => {
     ).toBe(2 * 1024 * 1024);
   });
 
-  it('latches a storage failure and never admits the lost bytes', async () => {
-    const r = await rig({
-      store: {
-        publish: async (): Promise<
-          ToolResultStoreOutcome<ToolResultSegmentReceipt>
-        > => ({ status: 'refused', code: 'managed_tool_result_conflict' }),
-      },
-    });
+  it('seals the tail page before publishing its revision', async () => {
+    // A tail flush that closes the page at end time must publish the sealed
+    // descriptor: the descriptor of an ended stream may never change again.
+    const r = await rig({ segmentsPerPage: 2 });
+    await r.captured.open();
     r.captured.setStarted(1);
-    await r.captured.write('stdout', Buffer.alloc(1_100_000, 1));
+    await r.captured.write('stdout', Buffer.alloc(1024 * 1024 + 16, 3));
+    await r.captured.finish('stdout', true);
+    const atEnd = r.manifests.at(-1)!;
+    const stdout = (atEnd['contents'] as Array<Record<string, unknown>>)[0]!;
+    expect(stdout['state']).toBe('sealed');
+    expect(stdout['missingRanges']).toEqual([]);
+    await r.captured.finish('stderr', true);
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture).toMatchObject({ captureStatus: 'complete' });
+    for (let index = 1; index < r.manifests.length; index++) {
+      expect(
+        isToolResultManifestSuccessor(
+          r.manifests[index - 1],
+          r.manifests[index],
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('continues the page cursor and links every page to its manifest slot', async () => {
+    const r = await rig({ segmentsPerPage: 2 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    await r.captured.write('stdout', Buffer.alloc(5 * 1024 * 1024, 9));
+    await r.captured.finish('stdout', true);
+    await r.captured.finish('stderr', true);
+    await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(r.pages).toHaveLength(3);
+    const parsed = r.pages.map(
+      (bytes) =>
+        JSON.parse(bytes.toString()) as {
+          firstOrdinal: number;
+          offset: number;
+          segments: Array<{ byteLength: number }>;
+        },
+    );
+    expect(parsed.map((page) => page.firstOrdinal)).toEqual([0, 2, 4]);
+    expect(parsed.map((page) => page.offset)).toEqual([
+      0,
+      2 * 1024 * 1024,
+      4 * 1024 * 1024,
+    ]);
+    const finalManifest = r.manifests.at(-1)!;
+    r.pages.forEach((bytes, index) => {
+      expect(
+        isToolResultPageAt(
+          finalManifest,
+          0,
+          index,
+          JSON.parse(bytes.toString()),
+        ),
+      ).toBe(true);
+    });
+    // The same cursor space answers continuity: no gap, no overlap.
+    const ordinals = parsed.flatMap((page) =>
+      page.segments.map((segment, index) => ({
+        ordinal: page.firstOrdinal + index,
+        byteLength: segment.byteLength,
+      })),
+    );
+    expect(ordinals.map((entry) => entry.ordinal)).toEqual([0, 1, 2, 3, 4]);
+    expect(
+      ordinals.reduce((length, entry) => length + entry.byteLength, 0),
+    ).toBe(5 * 1024 * 1024);
+  });
+
+  it('succeeds the pending chain after a late storage failure', async () => {
+    const r = await rig({ segmentsPerPage: 2 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    await r.captured.write('stdout', Buffer.alloc(4 * 1024 * 1024, 5));
+    expect(r.pages).toHaveLength(2);
+    const pendingLast = r.manifests.at(-1)!;
+    expect(pendingLast['captureStatus']).toBe('pending');
+    r.refuseSegments = true;
+    const lost = Buffer.alloc(1024 * 1024, 6);
+    await r.captured.write('stdout', lost);
+    const final = await r.captured.finalize(
+      'error',
+      [],
+      { message: 'gone.' },
+      {
+        exitCode: null,
+        signalName: 'SIGKILL',
+      },
+    );
+    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    expect(final.capture).toMatchObject({
+      captureStatus: 'partial',
+      captureReason: 'storage_failed',
+    });
+    const settled = r.manifests.at(-1)!;
+    expect(settled['executionStatus']).toBe('error');
+    expect(settled['signal']).toBe('SIGKILL');
+    expect(isToolResultManifestSuccessor(pendingLast, settled)).toBe(true);
+    // Byte-level: the lost tail never entered any published page or segment.
+    const lostDigest = createHash('sha256').update(lost).digest('hex');
+    expect(
+      r.segments.some(
+        (segment) =>
+          createHash('sha256').update(segment.bytes).digest('hex') ===
+          lostDigest,
+      ),
+    ).toBe(false);
+    expect(
+      JSON.stringify(r.pages.map((bytes) => bytes.toString())),
+    ).not.toContain(lostDigest);
+  });
+
+  it('degrades the settle envelope when its revision cannot be written', async () => {
+    const r = await rig();
+    await r.captured.open();
+    r.captured.setStarted(1);
+    await r.captured.write('stderr', Buffer.from('boom'));
+    const lastPublished = r.manifests.at(-1)!;
+    r.failManifestPublishesAfter = r.manifests.length;
+    const final = await r.captured.finalize('error', [], undefined, {
+      exitCode: 7,
+      signalName: null,
+    });
+    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    expect(final.capture).toMatchObject({
+      captureStatus: 'unavailable',
+      captureReason: 'storage_failed',
+      manifest: null,
+    });
+    // The last published revision stands — nothing rewinds and nothing fake
+    // terminal was committed.
+    expect(r.manifests.at(-1)).toEqual(lastPublished);
+    expect(lastPublished['captureStatus']).toBe('pending');
+  });
+
+  it('latches a storage failure and never admits the lost bytes', async () => {
+    const r = await rig();
+    await r.captured.open();
+    r.refuseSegments = true;
+    r.captured.setStarted(1);
+    const lost = Buffer.alloc(1_100_000, 1);
+    await r.captured.write('stdout', lost);
     const final = await r.captured.finalize(
       'error',
       [],
@@ -222,11 +408,23 @@ describe('LocalShellStreamCapture', () => {
       { exitCode: null, signalName: 'SIGKILL' },
     );
     expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
-    expect(['partial', 'unavailable']).toContain(final.capture?.captureStatus);
+    // Nothing was ever stored: both streams are incomplete at zero bytes,
+    // which the contract calls unavailable, never partial.
+    expect(final.capture?.captureStatus).toBe('unavailable');
     const last = r.manifests.at(-1)!;
     expect(last['executionStatus']).toBe('error');
     expect(last['signal']).toBe('SIGKILL');
     expect(last['captureReason']).toBe('storage_failed');
+    expect(last['captureStatus']).toBe('unavailable');
+    expect(r.segments).toHaveLength(0);
+    expect(
+      JSON.stringify(r.pages.map((bytes) => bytes.toString())),
+    ).not.toContain(createHash('sha256').update(lost).digest('hex'));
+    expect(
+      (last['contents'] as Array<Record<string, unknown>>).map(
+        (entry) => entry['byteLength'],
+      ),
+    ).toEqual([0, 0]);
   });
 
   it('settles exit evidence set through the process result', async () => {

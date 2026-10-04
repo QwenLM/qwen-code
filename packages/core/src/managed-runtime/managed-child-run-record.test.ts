@@ -20,6 +20,8 @@ interface Fixture {
   patch: Record<string, unknown>;
   valid: boolean;
   start: boolean;
+  /** The clause substring both validators must report on an invalid case. */
+  error?: string;
 }
 const fixtures = JSON.parse(
   readFileSync(
@@ -119,7 +121,9 @@ describe('managed-child-run-record/1 shared contract', () => {
         }
       }
     } else {
-      expect(() => body.parse(record)).toThrow();
+      // Every invalid case names the clause that must refuse it, so a
+      // masked guard can never slip a fixture green.
+      expect(() => body.parse(record)).toThrow(fixture.error as string);
     }
     expect(body.isStart(record)).toBe(fixture.start);
   });

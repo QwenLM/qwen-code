@@ -74,6 +74,14 @@ export class HookCommandCgroup {
     let directory: string | undefined;
     let created = false;
     try {
+      // A caller-supplied name must stay one unit: the same containment
+      // rule attach() applies before it joins the name into the root.
+      if (
+        unitName !== undefined &&
+        (unitName.includes('/') || unitName.includes(''))
+      ) {
+        throw new HookCommandIsolationUnavailableError();
+      }
       const resolved = HookCommandCgroup.resolveRoot(root);
       directory = join(resolved, unitName ?? `qwen-hook-${randomUUID()}`);
       mkdirSync(directory, { mode: 0o700 });

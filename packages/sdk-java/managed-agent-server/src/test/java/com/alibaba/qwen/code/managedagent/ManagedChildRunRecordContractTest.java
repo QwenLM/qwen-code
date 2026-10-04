@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
@@ -52,7 +53,12 @@ class ManagedChildRunRecordContractTest {
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
             } else {
-                assertThrows(InvalidRecordException.class, () -> body.require().accept(record), id);
+                InvalidRecordException refused = assertThrows(InvalidRecordException.class,
+                        () -> body.require().accept(record), id);
+                // Every invalid case names the clause that must refuse it,
+                // so a masked guard can never slip a fixture green.
+                assertTrue(refused.getMessage().contains(fixture.get("error").textValue()),
+                        id + ": " + refused.getMessage());
             }
             assertEquals(fixture.get("start").booleanValue(), body.isStart().test(record), id);
         }

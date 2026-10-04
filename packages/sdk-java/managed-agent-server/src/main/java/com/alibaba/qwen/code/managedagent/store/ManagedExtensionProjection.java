@@ -121,9 +121,11 @@ public final class ManagedExtensionProjection {
     }
 
     /**
-     * The same projection with the record's stop request: a record that
-     * carries one and has not settled projects its Runtime as
-     * {@code draining} (H3's {@code child_run}; every earlier record
+     * The same projection with the record's stop request: a stop-requested
+     * record whose run is attached ({@code running_attached}) or still
+     * provisioning ({@code intent}/{@code dispatch_started}) projects its
+     * Runtime as {@code draining}; a lost, terminal or unbound row keeps
+     * its own Runtime state (H3's {@code child_run}; every earlier record
      * passes false).
      */
     public static TaskProjection project(TaskProjection previous,

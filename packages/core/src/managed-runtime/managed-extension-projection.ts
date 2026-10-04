@@ -245,9 +245,10 @@ function runtimeState(
  * time its `domain.committed` event occurred. The times come from the
  * journal, so a rebuild yields the same view; a writer's clock may run
  * behind the one before it, so a time never precedes an earlier one. A
- * record that carries a stop request and has not settled projects its
- * Runtime as `draining` (H3's `child_run`; every earlier record passes
- * false).
+ * stop-requested record whose run is attached (`running_attached`) or
+ * still provisioning (`intent`/`dispatch_started`) projects its Runtime as
+ * `draining`; a lost, terminal or unbound row keeps its own Runtime state
+ * (H3's `child_run`; every earlier record passes false).
  */
 export function projectManagedTask(
   previous: ManagedTaskProjection | null,

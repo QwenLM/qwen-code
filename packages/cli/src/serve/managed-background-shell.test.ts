@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChildProcess } from 'node:child_process';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type {
@@ -20,6 +21,7 @@ import type {
   ManagedChildRunSupervisor,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { HookCommandIsolationUnavailableError } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
 import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
@@ -173,7 +175,12 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
     },
   };
   const supervisor = {
-    start: vi.fn(() => process),
+    start: vi.fn(
+      (spec: { readonly unitName: string; readonly onOutput: unknown }) =>
+        spec.unitName === 'qwen-bg-call-1'
+          ? process
+          : fakeProcess(spec.unitName),
+    ),
   };
   const tool = { validateToolParams: () => null };
   const tools: ManagedToolSet = {
@@ -216,10 +223,15 @@ const CAPTURE = {
   capturePolicy: 'complete_required' as const,
 };
 
-function execute(ctx: Rig, input: Record<string, unknown> = INPUT) {
+function execute(
+  ctx: Rig,
+  input: Record<string, unknown> = INPUT,
+  callId = 'call-1',
+) {
   return ctx.executor.executeV3({
     reference: {
       ...REFERENCE,
+      callId,
       argsDigest: `sha256:${managedToolDigest(input)}`,
     },
     capture: CAPTURE,
@@ -242,14 +254,25 @@ describe('managed v3 background Shell', () => {
     expect(ctx.supervisor.start).toHaveBeenCalledWith(
       expect.objectContaining({
         unitName: 'qwen-bg-call-1',
-        executable: '/bin/sh',
-        args: ['-c', 'echo hi'],
+        executable: getShellConfiguration().executable,
+        args: [...getShellConfiguration().argsPrefix, 'echo hi'],
         cwd: directory,
       }),
     );
     expect(ctx.publisher.prepares).toBe(1);
     expect(ctx.sink.pid).toBe(4242);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+
+    // Every pipe chunk lands in the bounded capture sink.
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    spec.onOutput('stdout', Buffer.from('hello bytes'));
+    spec.onOutput('stderr', Buffer.from('warn'));
+    expect(ctx.sink.writes).toEqual([
+      ['stdout', 'hello bytes'],
+      ['stderr', 'warn'],
+    ]);
 
     (ctx.process.child as unknown as ReturnType<typeof fakeChild>).emitExit(
       0,
@@ -331,6 +354,35 @@ describe('managed v3 background Shell', () => {
     expect(ctx.supervisor.start).not.toHaveBeenCalled();
   });
 
+  it('refuses the ninth live background Shell as a committed quota refusal', async () => {
+    const ctx = rig();
+    for (let index = 0; index < 8; index++) {
+      const view = await execute(ctx, INPUT, `call-bg-${index}`);
+      expect(view.state).toBe('settled');
+    }
+    expect(ctx.publisher.prepares).toBe(8);
+    const ninth = await execute(ctx, INPUT, 'call-bg-9');
+    expect(ninth).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: { message: 'Session already runs 8 background Shells.' },
+      },
+    });
+    expect(ctx.publisher.prepares).toBe(8);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+  });
+
+  it('joins a repeated start call without a second process', async () => {
+    const ctx = rig();
+    const first = await execute(ctx);
+    const again = await execute(ctx);
+    expect(again.result).toEqual(first.result);
+    expect(ctx.supervisor.start).toHaveBeenCalledTimes(1);
+    expect(ctx.publisher.prepares).toBe(1);
+  });
+
   it('acknowledges the start handle exactly with a null manifest', async () => {
     const ctx = rig();
     await execute(ctx);
@@ -357,6 +409,30 @@ describe('managed v3 background Shell', () => {
     ).toThrow(/conflicts/);
   });
 
+  it('drains a spawn-time process error instead of holding forever', async () => {
+    const ctx = rig();
+    await execute(ctx);
+    const child = ctx.process.child as unknown as ReturnType<typeof fakeChild>;
+    (child.stdout as unknown as PassThrough).end();
+    (child.stderr as unknown as PassThrough).end();
+    child.emit('error', new Error('spawn refused'));
+    const receipt = await (
+      ctx.executor as unknown as {
+        backgroundRegistry: {
+          receipt: (unitName: string) => Promise<{
+            evidence: ChildRunExitEvidence | null;
+            captureError: string | null;
+          }>;
+        };
+      }
+    ).backgroundRegistry.receipt('qwen-bg-call-1')!;
+    expect(receipt).toMatchObject({
+      evidence: null,
+      captureError: 'spawn refused',
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
   it('drains the registry on close and releases the hold', async () => {
     const ctx = rig();
     await execute(ctx);
@@ -369,5 +445,34 @@ describe('managed v3 background Shell', () => {
     });
     expect(ctx.publisher.finished).toHaveLength(1);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('caps a pipe that a surviving descendant keeps open', async () => {
+    // Evidence exists, but the pipes never end — inherited by a daemon.
+    const process = fakeProcess('qwen-bg-capped');
+    (process.child as unknown as EventEmitter).emit('exit', 0, null);
+    const sink = fakeSink();
+    const publisher = {
+      finished: [] as ToolResultEnvelope[],
+      async finish(_identity: unknown, envelope: ToolResultEnvelope) {
+        publisher.finished.push(envelope);
+      },
+    };
+    const registry = new ManagedBackgroundShellRegistry(25);
+    const receipt = await registry.register({
+      unitName: 'qwen-bg-capped',
+      sessionId: 'rs-1',
+      process,
+      sink,
+      publisher: publisher as unknown as ManagedShellCapturePublisher,
+      identity: IDENTITY,
+    });
+    expect(receipt.evidence).toEqual({ exitCode: 0, exitSignal: null });
+    expect(sink.finishes).toEqual([
+      ['stdout', false],
+      ['stderr', false],
+    ]);
+    expect(publisher.finished).toHaveLength(1);
+    expect(registry.hasHolds('rs-1')).toBe(false);
   });
 });

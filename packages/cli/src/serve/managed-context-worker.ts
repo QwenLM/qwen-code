@@ -244,12 +244,12 @@ export function registerManagedContextRoutes(
   );
   registerManagedHookRoutes(app, boot, hooks);
   // H3 background Shells share the delegation the Hook commands already use;
-  // without a delegated root the executor keeps its committed refusal.
+  // unset or empty both mean no delegation, and the executor keeps its
+  // committed refusal then.
   const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
-  const backgroundSupervisor =
-    cgroupRoot !== undefined
-      ? ManagedChildRunSupervisor.create({ cgroupRoot })
-      : undefined;
+  const backgroundSupervisor = cgroupRoot
+    ? ManagedChildRunSupervisor.create({ cgroupRoot })
+    : undefined;
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>

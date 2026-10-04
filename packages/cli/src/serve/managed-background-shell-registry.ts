@@ -5,6 +5,7 @@
  */
 
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import type {
   ManagedChildRunProcess,
   ChildRunExitEvidence,
@@ -46,18 +47,23 @@ interface Entry {
 export class ManagedBackgroundShellRegistry {
   private readonly entries = new Map<string, Entry>();
 
+  constructor(private readonly eofGraceMs = 5_000) {}
+
   get size(): number {
     return this.entries.size;
   }
 
-  /** Read-only: an attached or running process is a Runtime hold. */
-  hasHolds(sessionId?: string): boolean {
+  /** Read-only: an attached or running process holds its Session's Runtime. */
+  hasHolds(sessionId: string): boolean {
+    return this.countBySession(sessionId) > 0;
+  }
+
+  countBySession(sessionId: string): number {
+    let count = 0;
     for (const entry of this.entries.values()) {
-      if (sessionId === undefined || entry.sessionId === sessionId) {
-        return true;
-      }
+      if (entry.sessionId === sessionId) count++;
     }
-    return false;
+    return count;
   }
 
   /**
@@ -118,25 +124,38 @@ export class ManagedBackgroundShellRegistry {
       const ended =
         process.exited && process.evidence !== null
           ? Promise.resolve(process.evidence)
-          : new Promise<ChildRunExitEvidence | null>((resolve) => {
+          : // A spawn-time 'error' emits no 'exit'; drain either way, or the
+            // entry — and its Runtime hold — would outlive the worker.
+            new Promise<ChildRunExitEvidence | null>((resolve) => {
               process.child.once('exit', () => resolve(process.evidence));
+              process.child.once('error', (cause: unknown) => {
+                captureError ??=
+                  cause instanceof Error ? cause.message : String(cause);
+                resolve(null);
+              });
             });
       evidence = await ended;
       // A stream seals only after its pipe EOF actually arrived; the exit
-      // event may lead it, so wait for each end first.
+      // event may lead it, so wait for each end first. A descendant that
+      // inherited the pipes keeps them open past the process's end, so the
+      // wait is bounded: past the grace the stream is capped, like a worker
+      // cut, never a hang.
       const eof = { stdout: false, stderr: false };
-      await Promise.allSettled([
-        process.child.stdout && process.child.stdout.readableEnded
-          ? Promise.resolve((eof.stdout = true))
-          : once(process.child.stdout!, 'end').then(() => {
-              eof.stdout = true;
+      await Promise.all(
+        (['stdout', 'stderr'] as const).map(async (name) => {
+          const stream = process.child[name];
+          if (!stream || stream.readableEnded) {
+            eof[name] = true;
+            return;
+          }
+          await Promise.race([
+            once(stream, 'end').then(() => {
+              eof[name] = true;
             }),
-        process.child.stderr && process.child.stderr.readableEnded
-          ? Promise.resolve((eof.stderr = true))
-          : once(process.child.stderr!, 'end').then(() => {
-              eof.stderr = true;
-            }),
-      ]);
+            delay(this.eofGraceMs),
+          ]);
+        }),
+      );
       sink.setStarted(process.child.pid ?? 0);
       sink.setProcessResult({
         rawOutput: Buffer.alloc(0),
@@ -145,7 +164,9 @@ export class ManagedBackgroundShellRegistry {
         signal: signalNumber(evidence?.exitSignal ?? null),
         error: null,
         aborted: false,
-      } as Parameters<ManagedShellCaptureSink['setProcessResult']>[0]);
+        pid: process.child.pid,
+        executionMethod: 'child_process',
+      });
       await sink.finish('stdout', eof.stdout && evidence !== null);
       await sink.finish('stderr', eof.stderr && evidence !== null);
       const envelope = await sink.finalize(

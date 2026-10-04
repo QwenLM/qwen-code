@@ -701,17 +701,32 @@ public final class ManagedExtensionRecords {
         require(stopReason == null
                 || CHILD_STOP_REASONS.get(state).contains(stopReason),
                 "childRun.stopReason does not fit the " + state + " state");
-        // A 'settled' run needs no clause of its own: the shared run block
-        // only proves a settled execution, and the receipt rules above pin
-        // both that the process was running and that nothing proves a stop
-        // without one.
+        // Every terminal run names the ending execution line: a natural
+        // exit is proven only by an observed settled execution under its
+        // receipt, a pre-start failure lands on not_started_proven, and an
+        // honored stop or a later failure settles the execution that the
+        // receipt proves started.
+        require(!"settled".equals(state) || "settled".equals(execution),
+                "childRun settled needs its settled execution");
+        require(!"cancelled".equals(state) || "settled".equals(execution),
+                "childRun cancelled needs its settled execution");
+        require(!"failed".equals(state)
+                || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "childRun failed needs settled or not_started_proven "
+                        + "execution");
         require(!"start_failed".equals(stopReason)
-                || startReceipt.isNull() && execution != null,
+                || startReceipt.isNull() && "not_started_proven".equals(execution),
                 "childRun.stopReason start_failed needs a process that "
                         + "never started");
         require(!"process_failed".equals(stopReason) || !startReceipt.isNull(),
                 "childRun.stopReason process_failed needs a process that "
                         + "started");
+        require(!("process_failed".equals(stopReason)
+                        || "quota_exceeded".equals(stopReason))
+                || "settled".equals(execution),
+                "childRun.stopReason process failure needs its settled "
+                        + "execution");
         require("quota_exceeded".equals(stopReason)
                 == (reason != null && QUOTA_REASONS.contains(reason)),
                 "childRun.stopReason is quota_exceeded exactly for a "
@@ -849,7 +864,7 @@ public final class ManagedExtensionRecords {
                 && value.compareTo(BigDecimal.valueOf(min)) >= 0
                 && value.compareTo(BigDecimal.valueOf(Math.min(max,
                         MAX_COUNT))) <= 0,
-                label + " is out of range");
+                label + " must be an integer from " + min + " to " + max);
         return value.longValueExact();
     }
 

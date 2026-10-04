@@ -249,17 +249,37 @@ export function parseChildRun(value: unknown): ChildRun {
       );
     }
   }
-  // A 'settled' run needs no clause of its own: the shared run block only
-  // proves a settled execution, and the receipt rules above pin both that
-  // the process was running and that nothing proves a stop without one.
+  // Every terminal run names the ending execution line: a natural exit is
+  // proven only by an observed settled execution under its receipt, a
+  // pre-start failure lands on not_started_proven, and an honored stop or a
+  // later failure settles the execution that the receipt proves started.
+  if (run.state === 'settled' && execution !== 'settled') {
+    fail('Child run settled needs its settled execution.');
+  }
+  if (run.state === 'cancelled' && execution !== 'settled') {
+    fail('Child run cancelled needs its settled execution.');
+  }
+  if (
+    run.state === 'failed' &&
+    execution !== 'settled' &&
+    execution !== 'not_started_proven'
+  ) {
+    fail('Child run failed needs settled or not_started_proven execution.');
+  }
   if (
     stopReason === 'start_failed' &&
-    (startReceiptRef !== null || execution === null)
+    (startReceiptRef !== null || execution !== 'not_started_proven')
   ) {
     fail('Child run start_failed needs a process that never started.');
   }
   if (stopReason === 'process_failed' && startReceiptRef === null) {
     fail('Child run process_failed needs a process that started.');
+  }
+  if (
+    (stopReason === 'process_failed' || stopReason === 'quota_exceeded') &&
+    execution !== 'settled'
+  ) {
+    fail('Child run process failure needs its settled execution.');
   }
   const quota =
     run.reason !== null &&

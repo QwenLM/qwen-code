@@ -126,7 +126,7 @@ class ManagedExtensionRecordStoreTest {
         journal.commit(tx2);
         journal.committed(tx2);
         ObjectNode rev3 = childRun("waiting", "running_attached", "binding-1", argsResource);
-        rev3.set("startReceiptRef", ref(receiptResource));
+        rev3.set("startReceiptRef", hookRef(receiptResource));
         var tx3 = journal.requestDomain("child-3", "child_run", rev3,
                 List.of(receiptResource), 3_000);
         journal.commit(tx3);
@@ -157,7 +157,7 @@ class ManagedExtensionRecordStoreTest {
         broken.committed(bx2);
         ObjectNode badAttach = childRun("waiting", "running_attached",
                 "binding-1", argsResource);
-        badAttach.set("startReceiptRef", ref(receiptResource));
+        badAttach.set("startReceiptRef", hookRef(receiptResource));
         assertRefused("child_run names a resource the closure lacks", other,
                 ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
                 () -> broken.commit(broken.requestDomain("broken-3",
@@ -169,23 +169,13 @@ class ManagedExtensionRecordStoreTest {
                                 "child_run", "shell-x")));
     }
 
-    private static ObjectNode ref(CommitResource resource) {
-        ObjectNode ref = JsonNodeFactory.instance.objectNode();
-        ref.put("resourceId", resource.resourceId());
-        ref.put("kind", resource.kind());
-        ref.put("schemaVersion", resource.schemaVersion());
-        ref.put("byteLength", resource.byteLength());
-        ref.put("digest", resource.digest());
-        return ref;
-    }
-
     private static ObjectNode childRun(String state, String execution,
             String runtimeBinding, CommitResource argsResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         body.put("kind", "shell");
         body.put("shellId", "shell-x");
         body.put("ownerScopeId", "scope-x");
-        body.set("commandRef", ref(argsResource));
+        body.set("commandRef", hookRef(argsResource));
         body.putNull("startReceiptRef");
         body.putNull("outputRef");
         body.putNull("stopReason");
@@ -271,16 +261,16 @@ class ManagedExtensionRecordStoreTest {
                         event -> ((ObjectNode) event.get("sessionKey"))
                                 .put("extra", true))),
                 Map.entry("a schema version as text", new Refusal(
-                        "recordRef.schemaVersion is out of range",
+                        "recordRef.schemaVersion must be an integer from 0 to 9007199254740990",
                         event -> ((ObjectNode) event.at(
                                 "/payload/recordRef")).put("schemaVersion",
                                         "1"))),
                 Map.entry("a record version 2", new Refusal(
-                        "event.payload.version is out of range",
+                        "event.payload.version must be an integer from 1 to 1",
                         event -> ((ObjectNode) event.get("payload"))
                                 .put("version", 2))),
                 Map.entry("an event version 2", new Refusal(
-                        "event.v is out of range", event -> event.put("v",
+                        "event.v must be an integer from 1 to 1", event -> event.put("v",
                                 2))),
                 Map.entry("an extra payload field", new Refusal(
                         "event.payload must be an object with exactly",
@@ -291,7 +281,7 @@ class ManagedExtensionRecordStoreTest {
                         event -> event.putObject("subject")
                                 .put("type", "turn").put("id", "turn-1"))),
                 Map.entry("a sequence past its place", new Refusal(
-                        "event.sequence is out of range",
+                        "event.sequence must be an integer from",
                         event -> event.put("sequence", event.get("sequence")
                                 .longValue() + 1))),
                 Map.entry("a digest of another body", new Refusal(
@@ -306,10 +296,10 @@ class ManagedExtensionRecordStoreTest {
                                 "/payload/recordRef")).put("byteLength",
                                         start.length + 1))),
                 Map.entry("a time between two milliseconds", new Refusal(
-                        "event.occurredAt is out of range",
+                        "event.occurredAt must be an integer from 0 to 8640000000000000",
                         event -> event.put("occurredAt", 1_000.5))),
                 Map.entry("a time past the contract's range", new Refusal(
-                        "event.occurredAt is out of range",
+                        "event.occurredAt must be an integer from 0 to 8640000000000000",
                         event -> event.put("occurredAt",
                                 8_640_000_000_000_001L))),
                 Map.entry("a reference of another domain", new Refusal(

@@ -5,6 +5,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   HookCommandCgroup,
   HookCommandIsolationUnavailableError,
@@ -101,8 +103,22 @@ export class ManagedChildRunSupervisor {
     return this.processes.get(unitName);
   }
 
-  /** Starts a new process under a fresh unit named after the execution. */
-  start(spec: ChildRunSpawnSpec): ManagedChildRunProcess {
+  /**
+   * Starts a new process under a fresh unit named after the execution, and
+   * resolves only once the launcher's cgroup membership is proven — reading
+   * `cgroup.procs`, never assuming a quiet fd 3 means success. A membership
+   * that cannot be proven is an isolation failure: the child goes, the unit
+   * goes, and the caller records a start that never happened.
+   */
+  async start(
+    spec: ChildRunSpawnSpec,
+    membership?: {
+      readonly prove?: (
+        child: ChildProcess,
+        unit: HookCommandCgroup,
+      ) => Promise<boolean>;
+    },
+  ): Promise<ManagedChildRunProcess> {
     const unit = HookCommandCgroup.create(this.cgroupRoot, spec.unitName);
     // The launcher joins the unit before the command exists, so no
     // deployment-provided executable or environment is read outside it.
@@ -110,10 +126,42 @@ export class ManagedChildRunSupervisor {
     const child = spawn(launch.executable, launch.args, {
       cwd: spec.cwd,
       env: launch.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     });
     child.stdout?.on('data', (chunk: Buffer) => spec.onOutput('stdout', chunk));
     child.stderr?.on('data', (chunk: Buffer) => spec.onOutput('stderr', chunk));
+    let status = '';
+    child.stdio[3]?.on('data', (data: Buffer) => {
+      status += data.toString();
+    });
+    const prove =
+      membership?.prove ??
+      (async (launched: ChildProcess, inUnit: HookCommandCgroup) => {
+        for (let attempt = 0; attempt < 40; attempt++) {
+          if (status.includes('unavailable\n')) return false;
+          try {
+            const members = readFileSync(
+              join(inUnit.directory, 'cgroup.procs'),
+              'utf8',
+            );
+            if (
+              launched.pid !== undefined &&
+              members.split('\n').includes(String(launched.pid))
+            ) {
+              return true;
+            }
+          } catch {
+            // The unit's membership file is not readable yet.
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return false;
+      });
+    if (!(await prove(child, unit))) {
+      child.kill('SIGKILL');
+      unit.remove();
+      throw new HookCommandIsolationUnavailableError();
+    }
     const process_ = new ManagedChildRunProcess(spec.unitName, unit, child);
     this.processes.set(spec.unitName, process_);
     return process_;

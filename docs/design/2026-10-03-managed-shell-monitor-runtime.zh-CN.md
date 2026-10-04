@@ -63,9 +63,9 @@ Monitor watch 形状相同：一条 execution 贯穿 watch 的生命周期并持
 
 ### 监督：Linux cgroup v2，沿用 H2
 
-Managed Shell 与 Monitor 进程运行在每进程一个的专用 cgroup v2 unit 下，unit 在 spawn 前创建，使用 H2 的同一个委派根（`QWEN_MANAGED_HOOK_CGROUP_ROOT` 增加同类开关或泛化），复用 `hook-command-cgroup.ts`。unit 名派生自执行身份，因此它就是跨 worker 替换的稳定进程身份：membership 在 `setsid` 与 detached 后代之后仍然保留，`cgroup.events` 报告 unit 内是否仍有进程（`populated`），`cgroup.kill` 是唯一被接受的停止手段；仅根进程退出绝不是证据。stop 先排空输出，在排空时限内先 TERM 再升级为 `cgroup.kill`，等待 `cgroup.events` 报告为空，然后结算；无法证明为空的 stop 继续持有。仅进程组绝不被接受为证据——与 H2 的决定一致。
+Managed Shell 与 Monitor 进程运行在每进程一个的专用 cgroup v2 unit 下，unit 在 spawn 前创建，使用 H2 的同一个委派根与变量：`QWEN_MANAGED_HOOK_CGROUP_ROOT` 在此承担 Runtime 进程隔离的部署开关而不再只是 Hook 特性的开关，原样复用 `hook-command-cgroup.ts` 及其启动证明 launcher。unit 名派生自执行身份，因此它就是跨 worker 替换的稳定进程身份：membership 在 `setsid` 与 detached 后代之后仍然保留，`cgroup.events` 报告 unit 内是否仍有进程（`populated`），`cgroup.kill` 是唯一被接受的停止手段；仅根进程退出绝不是证据。stop 先排空输出，在排空时限内先 TERM 再升级为 `cgroup.kill`，等待 `cgroup.events` 报告为空，然后结算；无法证明为空的 stop 继续持有。仅进程组绝不被接受为证据——与 H2 的决定一致。
 
-在没有委派 cgroup v2 的平台上，Managed 后台 Shell 与 Monitor 准入在任何副作用发生之前准确拒绝（`…_isolation_unavailable`，与 `managed_hook_command_isolation_unavailable` 同类）；记录以 start_failed 落在被证明从未启动的执行上（`not_started_proven`，无 start receipt，无 stop 请求）。恢复设计中较弱的 macOS 进程组 profile 留作另行决定，本文不主张。
+在没有委派 cgroup v2 的平台上，Managed 后台 Shell 与 Monitor 准入在任何副作用发生之前准确拒绝——v3 结果以 `not_started` 结算并点名错误，即被证明未启动执行既有的持久形状；记录以 start_failed 落在被证明从未启动的执行上（`not_started_proven`，无 start receipt，无 stop 请求）。恢复设计中较弱的 macOS 进程组 profile 留作另行决定，本文不主张。
 
 ### 日志：有界捕获，每个任务一个 Artifact
 
@@ -86,7 +86,7 @@ Java 侧，增长中的 manifest 在其仍 open 期间保持为私有 Session �
 
 ### Session 关闭：先 terminate，再 drain，按序执行
 
-分布式的关闭序列补上缺失的一步。Session 关闭时，在关闭 Harness activation 之前，Session authority 先封新准入，对该 Session 每个活跃的 Shell 与 Monitor 发出 stop 操作，并在有界的排空窗口内等待每个进程排空（cgroup 为空、输出封存、终态 revision 已提交）。之后关闭才继续到 activation 关闭，Broker 侧的 `drainClaimedBinding` 也查不到活跃 execution。stop 在窗口内无法证明 cgroup 为空时，一无所报：close 操作以既有的终态 `workspace_close_execution_unsettled` 结束，持有持续，Session 保持可重开。Runtime 已丢失的 Session 无法排空：进程保持未证明，close 操作按今天对未决 execution 的口径报告 `workspace_close_execution_unsettled`，记录保持其受阻持有。没有 detach 路径：关闭绝不在身后留下活进程。
+分布式的关闭序列补上缺失的一步。Session 关闭时，在关闭 Harness activation 之前，Session authority 先封新准入，对该 Session 每个活跃的 Shell 与 Monitor 发出 stop 操作，并在有界的排空窗口内等待每个进程排空（cgroup 为空、输出封存、终态 revision 已提交）。之后关闭才继续到 activation 关闭，Broker 侧的 `drainClaimedBinding` 也查不到活跃 execution。stop 在窗口内无法证明 cgroup 为空时，绝不报成已停止——close 操作以既有的终态 `workspace_close_execution_unsettled` 结束，持有持续，Session 保持可重开。Runtime 已丢失的 Session 无法排空：进程保持未证明，close 操作按今天对未决 execution 的口径报告 `workspace_close_execution_unsettled`，记录保持其受阻持有。没有 detach 路径：关闭绝不在身后留下活进程。
 
 ## 任务投影与事件
 
@@ -105,7 +105,7 @@ Java 侧，增长中的 manifest 在其仍 open 期间保持为私有 Session �
 
 存储：SQL 中按任务有界的事件账（新 Flyway 表，今天 main 上为 V35+；合入前对照 #13210/#13217 重编号），与产生该事件的提交在同一事务中写入——任务的一页日志持久时写入 output 块事件，每条记录 revision 写入 `state_changed` 事件，输出 Artifact 首次可见时写入 `artifact` 事件。floor 只推进到其完整文本已可在任务 Artifact 中持久读取、且经任务视图的 `artifact_refs` 可发现的事件之后（契约的可见性屏障）；归档失败绝不把 floor 推过未归档输出，积压上界就是上述按任务页预算加持有的事件行，生产者背压保证其有限。
 
-`cursor_expired` 之后拼接所用的输出分段：一个输出事件的游标区间是（`captureId`、`streamId`、`firstOrdinal`、`firstSegmentOrdinal`）到同结构四元组（不含尾端）——正是 `managed-tool-result/1` 已命名的字段（`captureId`、`streamId`、页 `firstOrdinal`、分段 `ordinal`）——因此从 floor 恢复的客户端对更早内容读 Artifact、对更新内容读事件流，既不重叠也无缺口。这收齐 H0a 的后续项「H3 定义稳定的输出分段」。
+`cursor_expired` 之后拼接所用的输出分段：一个输出事件的游标区间运行在 `managed-tool-result/1` 已命名的单一流内分段序号空间：（`captureId`、`streamId`、首个 `ordinal`）到同构三元组（不含尾端），并由页的 `firstOrdinal` 与 `segments[]` 逐字对应同一空间——因此从 floor 恢复的客户端对更早内容读 Artifact、对更新内容读事件流，既不重叠也无缺口。这收齐 H0a 的后续项「H3 定义稳定的输出分段」。
 
 路由翻转之前，§6.1 演示清单作为契约测试流量跑通：含空保留集在内的 floor 过期、游标后不可见、重启与重建后游标身份不变、Artifact 投影延迟与归档失败不丢输出、100 引用上界、`capabilities.artifacts` 准入门、分段拼接无重复。#12847 C15/C16 的 `PlannedTaskContractTest` 缺口在同一变更中补齐，因为事件 schema 此时才真正承重。
 
@@ -118,7 +118,7 @@ Monitor 的每个被接受观测提交其 revision；到通知时机时，在同
 恢复按恢复操作设计的分类，逐情形处理：
 
 - **同 boot 的 worker 替换**（Broker 存活）：存活下来的 worker 由 durable provisioner 按今天的方式重新 adopt，无需任何新机制。真正死掉的 worker 才会被替换；替换后的 worker 按进程的 cgroup unit 重新 attach——unit 存在、记录的命令 digest 与 start receipt 相符、`cgroup.events` 显示有成员——监督其终结，并把捕获封顶在 manifest 的最后已发布 revision。unit 为空但无退出证据，或证据无法核验，是 `outcome_unknown`：记录进入 `recovery_blocked`/`runtime_lost`，execution 继续持有，什么都不重跑。被证明为空的 unit、输出已封存且有退出证据的，按 `exited` 结算。
-- **主机重启**（#13211 起 trusted reboot recovery 默认开启）：旧 boot 的每个进程都已物理消失，但重启前的结局不可知。durable provisioning 的证据（`JOURNAL_LOST`/`WRITERS_STOPPED`，同一信任模型）驱动 binding 进入 LOST；H3 仍活跃的后台 execution 与其他未决 execution 一样挡住盲目清理（#12670 的卡住）。只有主机级的丢失证据（有证明的 boot 边界，如 `JOURNAL_LOST`/`WRITERS_STOPPED`）才允许既有的 `abandonByBinding` 回收路径随后释放账本行——被放弃的行清除 Runtime 持有，但那是账本结局、不是物理结局：H3 记录保持 `recovery_blocked`/`outcome_unknown`，因为进程是否在重启前退出不可知，放弃绝不投影为 settled。同 boot 的 worker 丢失是另一种证据，绝不放弃 H3 execution——它的持有持续，下一个 worker 按第一条的描述重新 attach；若现有回收路径今天不能区分这两类证据，就先扩展再启用，而不是让错误的情形按默认胜出。H3 不主张跨 boot attach。仍欠付的 W0e-3 精确 head 物理重启验收也必须按此形态覆盖 H3 的 execution；本文声明该义务，不虚构证明。
+- **主机重启**（#13211 起 trusted reboot recovery 默认开启）：旧 boot 的每个进程都已物理消失，但重启前的结局不可知。durable provisioning 的证据（`JOURNAL_LOST`/`WRITERS_STOPPED`，同一信任模型）驱动 binding 进入 LOST；H3 仍活跃的后台 execution 与其他未决 execution 一样挡住盲目清理（#12670 的卡住）。只有主机级的丢失证据（有证明的 boot 边界，如 `JOURNAL_LOST`/`WRITERS_STOPPED`）才允许既有的 `abandonByBinding` 回收路径随后释放账本行——被放弃的行清除 Runtime 持有，但那是账本结局、不是物理结局：H3 记录保持 `recovery_blocked`/`outcome_unknown`，因为进程是否在重启前退出不可知，放弃绝不投影为 settled。同 boot 的 worker 丢失是另一种证据，绝不放弃 H3 execution——它的持有持续，下一个 worker 按第一条的描述重新 attach；而今天的封闭两值丢失证据枚举只由 trusted 重启观测产生，因此回收路径本来就只能按主机级证据放弃——构造上此处不欠任何扩展。H3 不主张跨 boot attach。仍欠付的 W0e-3 精确 head 物理重启验收也必须按此形态覆盖 H3 的 execution；本文声明该义务，不虚构证明。
 - **Broker 重启/对账**：机制不变；活跃 execution 继续持有其 Session 与 binding，对账按今天的口径按 generation 重授 claim。
 - **不确定期间控制台发出的 stop/kill**：stop 请求是持久的（已提交的 revision）；迟到 generation 的答复对照记录对账，绝不当作新效果。
 
