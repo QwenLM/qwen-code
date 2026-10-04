@@ -46,6 +46,13 @@ interface Entry {
 
 export class ManagedBackgroundShellRegistry {
   private readonly entries = new Map<string, Entry>();
+  // A completed entry's receipt stays until the worker ends: the Broker can
+  // only ever know the Shell exited from here, and a repeated exited answer
+  // is idempotent, so nothing is consumed on read.
+  private readonly finished = new Map<
+    string,
+    { readonly sessionId: string; readonly receipt: BackgroundShellReceipt }
+  >();
 
   constructor(private readonly eofGraceMs = 5_000) {}
 
@@ -70,6 +77,16 @@ export class ManagedBackgroundShellRegistry {
   describe(unitName: string): { readonly sessionId: string } | undefined {
     const entry = this.entries.get(unitName);
     return entry ? { sessionId: entry.sessionId } : undefined;
+  }
+
+  /** The retained receipt of one unit that ended on this worker. */
+  describeFinished(unitName: string):
+    | {
+        readonly sessionId: string;
+        readonly receipt: BackgroundShellReceipt;
+      }
+    | undefined {
+    return this.finished.get(unitName);
   }
 
   /**
@@ -212,7 +229,14 @@ export class ManagedBackgroundShellRegistry {
     } finally {
       this.entries.delete(unitName);
     }
-    return { unitName, evidence, captureError };
+    const receipt = { unitName, evidence, captureError };
+    // The hold drops here; the receipt itself stays answerable for the
+    // maintenance route until the worker ends.
+    this.finished.set(params.unitName, {
+      sessionId: params.sessionId,
+      receipt,
+    });
+    return receipt;
   }
 }
 

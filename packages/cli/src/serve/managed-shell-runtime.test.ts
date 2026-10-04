@@ -209,4 +209,73 @@ describe('ManagedShellRuntime', () => {
     // An unproven terminate refuses to settle: the hold is still there.
     expect(registry.hasHolds(SESSION)).toBe(true);
   });
+
+  it('answers exited from the retained receipt after a natural end', async () => {
+    const registry = new ManagedBackgroundShellRegistry();
+    const process = fakeProcess({ exitCode: 3, exitSignal: null });
+    const stored = doubles();
+    const completion = registry.register({
+      unitName: UNIT,
+      sessionId: SESSION,
+      process,
+      sink: stored.sink as ManagedShellCaptureSink,
+      publisher: stored.publisher,
+      identity: stored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+    const receipt = await completion;
+    expect(receipt.evidence).toEqual({ exitCode: 3, exitSignal: null });
+    // The hold dropped with the end; the receipt stays answerable anyway.
+    expect(registry.hasHolds(SESSION)).toBe(false);
+
+    const runtime = new ManagedShellRuntime(registry);
+    const exited = {
+      operationId: 'abc.def-ghi',
+      state: 'exited',
+      unitName: UNIT,
+      evidence: { exitCode: 3, exitSignal: null },
+    };
+    expect(await runtime.control(SESSION, operation('shell-status'))).toEqual(
+      exited,
+    );
+    expect(
+      await runtime.control(SESSION, operation('shell-terminate')),
+    ).toEqual(exited);
+    expect(
+      await runtime.control('another-session', operation('shell-status')),
+    ).toEqual({ operationId: 'abc.def-ghi', state: 'unknown' });
+  });
+
+  it('stays unknown when the end carried no evidence it could keep', async () => {
+    const registry = new ManagedBackgroundShellRegistry();
+    const child = fakeChild();
+    const stored = doubles();
+    const completion = registry.register({
+      unitName: UNIT,
+      sessionId: SESSION,
+      process: {
+        unitName: UNIT,
+        child,
+        exited: false,
+        evidence: null,
+        terminate: async () => null,
+      } as unknown as ManagedChildRunProcess,
+      sink: stored.sink as ManagedShellCaptureSink,
+      publisher: stored.publisher,
+      identity: stored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+    child.emit('exit');
+    const receipt = await completion;
+    expect(receipt.evidence).toBeNull();
+
+    const runtime = new ManagedShellRuntime(registry);
+    expect(await runtime.control(SESSION, operation('shell-status'))).toEqual({
+      operationId: 'abc.def-ghi',
+      state: 'unknown',
+    });
+    expect(registry.hasHolds(SESSION)).toBe(false);
+  });
 });

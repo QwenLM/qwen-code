@@ -13,9 +13,9 @@ import type { ManagedBackgroundShellRegistry } from './managed-background-shell-
 
 // H3 of #12827: the worker-side answerer of the shell maintenance route.
 // It is deliberately narrow: status reports what the registry itself
-// physically knows (running or nothing), and terminate drains with the
-// same evidence rules as the supervisor — an end it cannot prove is
-// `unknown`, never a claimed exit.
+// physically knows (running, or what it retained after a proven end),
+// and terminate drains with the same evidence rules as the supervisor —
+// an end it cannot prove is `unknown`, never a claimed exit.
 
 export class ManagedShellError extends Error {
   constructor(
@@ -94,26 +94,41 @@ export class ManagedShellRuntime {
     const operation = parseOperation(value);
     const unitName = shellUnitNameOf(operation.targetOperationId);
     const registered = this.registry.describe(unitName);
-    if (!registered || registered.sessionId !== runtimeSessionId) {
-      return { operationId: operation.targetOperationId, state: 'unknown' };
-    }
-    if (operation.kind === 'shell-status') {
+    if (registered && registered.sessionId === runtimeSessionId) {
+      if (operation.kind === 'shell-status') {
+        return {
+          operationId: operation.targetOperationId,
+          state: 'running',
+          unitName,
+        };
+      }
+      const receipt = await this.registry.terminate(unitName, 5_000);
+      if (!receipt || receipt.evidence === null) {
+        return { operationId: operation.targetOperationId, state: 'unknown' };
+      }
       return {
         operationId: operation.targetOperationId,
-        state: 'running',
+        state: 'exited',
         unitName,
+        evidence: receipt.evidence,
       };
     }
-    const receipt = await this.registry.terminate(unitName, 5_000);
-    if (!receipt || receipt.evidence === null) {
-      return { operationId: operation.targetOperationId, state: 'unknown' };
+    const finished = this.registry.describeFinished(unitName);
+    if (
+      finished &&
+      finished.sessionId === runtimeSessionId &&
+      finished.receipt.evidence !== null
+    ) {
+      // A Shell that ended on this worker answers from its retained
+      // receipt, for status and terminate alike: both are idempotent.
+      return {
+        operationId: operation.targetOperationId,
+        state: 'exited',
+        unitName,
+        evidence: finished.receipt.evidence,
+      };
     }
-    return {
-      operationId: operation.targetOperationId,
-      state: 'exited',
-      unitName,
-      evidence: receipt.evidence,
-    };
+    return { operationId: operation.targetOperationId, state: 'unknown' };
   }
 }
 
