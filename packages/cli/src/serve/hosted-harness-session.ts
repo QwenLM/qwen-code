@@ -128,6 +128,29 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-message-chunks',
 ]);
 
+/**
+ * The prompt deadline timer and the cancel route abort the same controller,
+ * so the deadline aborts with a distinguishing reason; settlement reads it
+ * back to keep an expiry from being recorded as a user cancellation.
+ */
+const HOSTED_TURN_DEADLINE = new Error(
+  'The Hosted Harness Turn deadline expired.',
+);
+
+/**
+ * The terminal classification of a turn whose runner threw. A deadline
+ * expiry is an attributable failure, never a cancellation.
+ */
+function settledTurnOutcome(abort: AbortController): {
+  state: 'cancelled' | 'error';
+  stopReason: string;
+} {
+  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
+  return abort.signal.reason === HOSTED_TURN_DEADLINE
+    ? { state: 'error', stopReason: 'deadline_exceeded' }
+    : { state: 'cancelled', stopReason: 'cancelled' };
+}
+
 interface HostedSession {
   managed: ManagedSession;
   clientId: string;
@@ -1066,30 +1089,37 @@ async function eventEnvelope(
   if (event.kind === 'turn.settled') {
     const promptId = event.payload['turnId'] as string;
     const outcome = event.payload['outcome'];
-    return outcome === 'completed' || outcome === 'cancelled'
-      ? {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_complete',
+    if (outcome === 'completed' || outcome === 'cancelled') {
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'turn_complete',
+        promptId,
+        data: {
+          sessionId,
           promptId,
-          data: {
-            sessionId,
-            promptId,
-            stopReason: event.payload['stopReason'] ?? 'end_turn',
-          },
-        }
-      : {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_error',
-          promptId,
-          data: {
-            sessionId,
-            promptId,
-            code: 'hosted_turn_failed',
-            message: 'Hosted Harness turn failed.',
-          },
-        };
+          stopReason: event.payload['stopReason'] ?? 'end_turn',
+        },
+      };
+    }
+    // A deadline expiry keeps its own error code so the coordinator's
+    // projection stays distinguishable from both a cancellation and an
+    // unattributed failure.
+    const expired = event.payload['stopReason'] === 'deadline_exceeded';
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'turn_error',
+      promptId,
+      data: {
+        sessionId,
+        promptId,
+        code: expired ? 'hosted_turn_deadline_exceeded' : 'hosted_turn_failed',
+        message: expired
+          ? 'The Hosted Harness Turn exceeded its deadline.'
+          : 'Hosted Harness turn failed.',
+      },
+    };
   }
   return {
     v: 1,
@@ -1236,14 +1266,19 @@ async function executeHostedTurn(
             cause instanceof HostedHookRecoveryRequiredError
           )
             throw cause;
-          state = abort.signal.aborted ? 'cancelled' : 'error';
-          stopReason = state;
+          const outcome = settledTurnOutcome(abort);
+          state = outcome.state;
+          stopReason = outcome.stopReason;
           if (state === 'error') {
+            // The model layer surfaces any abort as a cancellation, so a
+            // deadline expiry names the deadline, not the thrown cause.
             writeStderrLineSafe(
-              'qwen serve: Hosted Harness turn ' +
-                promptId +
-                ' failed: ' +
-                String(cause),
+              stopReason === 'deadline_exceeded'
+                ? `qwen serve: Hosted Harness turn ${promptId} exceeded its deadline.`
+                : 'qwen serve: Hosted Harness turn ' +
+                    promptId +
+                    ' failed: ' +
+                    String(cause),
             );
           }
         }
@@ -1975,7 +2010,10 @@ export function registerHostedHarnessSessionRoutes(
     const timer =
       deadlineMs === undefined
         ? undefined
-        : setTimeout(() => abort.abort(), deadlineMs as number);
+        : setTimeout(
+            () => abort.abort(HOSTED_TURN_DEADLINE),
+            deadlineMs as number,
+          );
     timer?.unref();
     session.active = { promptId, digest, abort };
     void (async () => {
@@ -2058,9 +2096,9 @@ export function registerHostedHarnessSessionRoutes(
             `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
           );
           try {
-            const state = abort.signal.aborted ? 'cancelled' : 'error';
+            const outcome = settledTurnOutcome(abort);
             await session.managed.sink.write(
-              turnResult ?? turnResultRecord(state, state),
+              turnResult ?? turnResultRecord(outcome.state, outcome.stopReason),
             );
           } catch (settleCause) {
             session.blocked = true;

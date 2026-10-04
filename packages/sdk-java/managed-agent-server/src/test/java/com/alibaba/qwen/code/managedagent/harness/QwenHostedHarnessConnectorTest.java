@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -20,6 +21,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
+import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
@@ -405,6 +407,108 @@ class QwenHostedHarnessConnectorTest {
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .doesNotContainKey("driveRuntimeRecovery");
+    }
+
+    @Test
+    void submitPassesTheConfiguredTurnDeadline() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        PromptReceipt receipt = mock(PromptReceipt.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(client.submitTurn(any())).thenReturn(receipt);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setTurnDeadline(Duration.ofSeconds(45));
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties, sessions(), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+        java.util.List<Map<String, Object>> input = java.util.List.of(
+                Map.of("type", "text", "text", "hello"));
+
+        connector.submit("tenant-a", SESSION_ID,
+                "44444444-4444-4444-8444-444444444444", input,
+                SubmitHarnessTurn.computePayloadDigest(input));
+
+        ArgumentCaptor<SubmitHarnessTurn> submitted =
+                ArgumentCaptor.forClass(SubmitHarnessTurn.class);
+        verify(client).submitTurn(submitted.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                submitted.getValue(), "toJson"))
+                .containsEntry("deadlineMs", 45_000L);
+    }
+
+    @Test
+    void submitPassesTheDefaultTurnDeadline() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        PromptReceipt receipt = mock(PromptReceipt.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(client.submitTurn(any())).thenReturn(receipt);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+        java.util.List<Map<String, Object>> input = java.util.List.of(
+                Map.of("type", "text", "text", "hello"));
+
+        connector.submit("tenant-a", SESSION_ID,
+                "44444444-4444-4444-8444-444444444444", input,
+                SubmitHarnessTurn.computePayloadDigest(input));
+
+        ArgumentCaptor<SubmitHarnessTurn> submitted =
+                ArgumentCaptor.forClass(SubmitHarnessTurn.class);
+        verify(client).submitTurn(submitted.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                submitted.getValue(), "toJson"))
+                .containsEntry("deadlineMs", Duration.ofMinutes(30).toMillis());
+    }
+
+    @Test
+    void rejectsAnInvalidTurnDeadline() {
+        ManagedAgentProperties zero = properties();
+        zero.getHarness().setTurnDeadline(Duration.ZERO);
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(zero,
+                sessions(), mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("turn deadline");
+        ManagedAgentProperties negative = properties();
+        negative.getHarness().setTurnDeadline(Duration.ofSeconds(-1));
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(negative,
+                sessions(), mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("turn deadline");
+        // A positive sub-millisecond deadline rounds to 0 ms on the wire.
+        ManagedAgentProperties subMillis = properties();
+        subMillis.getHarness().setTurnDeadline(Duration.ofNanos(999_999));
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(subMillis,
+                sessions(), mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("turn deadline");
+        ManagedAgentProperties overflowing = properties();
+        overflowing.getHarness().setTurnDeadline(
+                Duration.ofMillis(Integer.MAX_VALUE).plusMillis(1));
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(overflowing,
+                sessions(), mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("turn deadline");
+    }
+
+    @Test
+    void acceptsTheMaximumTurnDeadline() {
+        ManagedAgentProperties atMax = properties();
+        atMax.getHarness().setTurnDeadline(
+                Duration.ofMillis(Integer.MAX_VALUE));
+        assertThatCode(() -> new QwenHostedHarnessConnector(atMax,
+                sessions(), mock(WorkspaceExecutionStore.class)))
+                .doesNotThrowAnyException();
     }
 
     private static QwenHostedHarnessConnector connector(
