@@ -18,10 +18,12 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -741,6 +743,24 @@ class HostedHarnessClientTest {
                 List.of(insertionOrdered)));
         assertEquals(digest, SubmitHarnessTurn.computePayloadDigest(
                 List.of(reverseOrdered)));
+
+        // The hosted route re-derives the digest from the received `prompt`
+        // member's bytes, so the wire form and the hashed form must be one
+        // value. addText is the deterministic arm: its block arrives type-
+        // first, while the canonical wire form (and the digest) is text-
+        // first — the two assertions are only simultaneously satisfiable
+        // when toJson() emits exactly what was hashed.
+        SubmitHarnessTurn turn = SubmitHarnessTurn.builder()
+                .session(new HarnessSessionRef(SESSION_ID, CLIENT_ID,
+                        BOOT_ID, "/workspace", null, null, null))
+                .promptId(PROMPT_ID)
+                .addText("hello")
+                .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                        List.of(Map.of("text", "hello", "type", "text"))))
+                .build();
+        assertEquals("[{\"text\":\"hello\",\"type\":\"text\"}]",
+                JsonSupport.encode(turn.toJson().get("prompt")));
+        assertEquals(digest, turn.getPayloadDigest());
     }
 
     @Test
@@ -754,7 +774,7 @@ class HostedHarnessClientTest {
                 exchange -> {
                     if (promptCalls.incrementAndGet() == 1) {
                         sendSessionJson(exchange, 409,
-                                "{\"code\":\"prompt_already_active\"}");
+                                "{\"code\":\"hosted_turn_active\"}");
                         return;
                     }
                     sendSessionJson(exchange, 202,
@@ -1048,6 +1068,7 @@ class HostedHarnessClientTest {
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
             client.closeSession(session);
             Thread.sleep(100);
             int first = heartbeats.get();
@@ -1087,6 +1108,7 @@ class HostedHarnessClientTest {
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
             client.detachSession(session);
             Thread.sleep(100);
             int first = heartbeats.get();
@@ -1178,6 +1200,63 @@ class HostedHarnessClientTest {
 
         assertEquals("7", lastEventId.get());
         assertEquals(EVENT_EPOCH, epochHeader.get());
+    }
+
+    @Test
+    void anExplicitResumePairWinsOverTheRefsWatermark() {
+        // The fallback half is only half the contract: an explicitly
+        // supplied cursor/epoch must beat the ref's watermark, or the
+        // coordinator's advancing per-turn cursor is silently discarded.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithResultsReadyRuntimeRecovery()
+                                .replace("\"lastEventId\":0",
+                                        "\"lastEventId\":7")));
+        AtomicReference<String> lastEventId = new AtomicReference<>();
+        AtomicReference<String> epochHeader = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    lastEventId.set(exchange.getRequestHeaders().getFirst(
+                            "Last-Event-ID"));
+                    epochHeader.set(exchange.getRequestHeaders().getFirst(
+                            HostedHarnessClient.EVENT_EPOCH_HEADER));
+                    sendSse(exchange, terminalEvent(5, PROMPT_ID),
+                            "override-epoch", BOOT_ID);
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            try (HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .lastEventId(4)
+                            .eventEpoch("override-epoch")
+                            .build())) {
+                assertEquals("turn_complete", stream.next().getType());
+                assertNull(stream.next());
+            }
+        }
+
+        assertEquals("4", lastEventId.get());
+        assertEquals("override-epoch", epochHeader.get());
+    }
+
+    @Test
+    void aDefinitiveBootHeaderlessDeleteKeepsItsStatus() {
+        // The private closeSession channel has its own wrap site; a
+        // definitive unfenced refusal keeps its status there too.
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID,
+                exchange -> sendJson(exchange, 413,
+                        "Request body too large", false));
+
+        try (HostedHarnessClient client = newClient()) {
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.closeSession(SESSION_ID));
+            assertEquals(413, failure.getStatusCode());
+        }
     }
 
     @Test
@@ -1330,6 +1409,388 @@ class HostedHarnessClientTest {
         assertTrue(failure.getMessage().contains("saturated"),
                 failure.getMessage());
         assertEquals(0, deletes.get());
+    }
+
+    @Test
+    void anIdleAbortBetweenNextCallsReportsTheIdleTimeout() throws Exception {
+        // The consumer is NOT parked in next() when the budget expires;
+        // the abort must still surface inside the DaemonException family,
+        // as the sseIdleTimeout javadoc promises.
+        createSessionRoute();
+        CountDownLatch release = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/event-stream");
+                    exchange.getResponseHeaders().set("Content-Encoding",
+                            "identity");
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.EVENT_EPOCH_HEADER,
+                            EVENT_EPOCH);
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    exchange.sendResponseHeaders(200, 0);
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    try {
+                        release.await(15, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    exchange.close();
+                });
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                .sseIdleTimeout(Duration.ofMillis(400))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            try (HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build())) {
+                assertEquals("turn_complete", stream.next().getType());
+                Thread.sleep(1200);
+                DaemonTransportException failure = assertThrows(
+                        DaemonTransportException.class, stream::next);
+                assertTrue(failure.getMessage().contains("idle timeout"),
+                        failure.getMessage());
+            }
+        } finally {
+            release.countDown();
+            client.close();
+        }
+    }
+
+    @Test
+    void aKeepaliveOnlyPeerStaysUsablePastTheIdleBudget() throws Exception {
+        // A peer that stays alive through keepalive comments must not trip
+        // the watchdog: the hosted events route emits these during
+        // legitimately silent phases (long tool calls, approval waits).
+        createSessionRoute();
+        CountDownLatch stopKeepalives = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/event-stream");
+                    exchange.getResponseHeaders().set("Content-Encoding",
+                            "identity");
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.EVENT_EPOCH_HEADER,
+                            EVENT_EPOCH);
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    exchange.sendResponseHeaders(200, 0);
+                    exchange.getResponseBody().flush();
+                    try {
+                        // The handler thread must own the keepalive loop:
+                        // returning from the handler closes the exchange.
+                        // 120ms cadence against the 500ms budget below keeps
+                        // >4x margin against scheduler jitter.
+                        while (!stopKeepalives.await(120,
+                                TimeUnit.MILLISECONDS)) {
+                            exchange.getResponseBody().write(
+                                    ": keepalive\n\n".getBytes(
+                                            StandardCharsets.UTF_8));
+                            exchange.getResponseBody().flush();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    exchange.close();
+                });
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                .sseIdleTimeout(Duration.ofMillis(500))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            try (HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build())) {
+                // Consumer parked in read for three idle budgets while the
+                // peer proves liveness only with keepalive comments: the
+                // refills stamp the budget, so the stream must survive.
+                ExecutorService consumer = Executors.newSingleThreadExecutor();
+                try {
+                    Future<DaemonEvent> event = consumer.submit(
+                            () -> assertTimeoutPreemptively(
+                                    Duration.ofSeconds(8), stream::next));
+                    Thread.sleep(1300);
+                    stopKeepalives.countDown();
+                    assertEquals("turn_complete",
+                            event.get(10, TimeUnit.SECONDS).getType());
+                } finally {
+                    consumer.shutdownNow();
+                }
+                assertNull(stream.next());
+            }
+        } finally {
+            stopKeepalives.countDown();
+            client.close();
+        }
+    }
+
+    @Test
+    void aQueuedReaderSeesTheClosedSignal() throws Exception {
+        // A caller already queued on cursorLock when the stream closes must
+        // get the closed-stream signal, not a transport error from reading
+        // a torn-down stream.
+        createSessionRoute();
+        CountDownLatch headersSent = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/event-stream");
+                    exchange.getResponseHeaders().set("Content-Encoding",
+                            "identity");
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.EVENT_EPOCH_HEADER,
+                            EVENT_EPOCH);
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    exchange.sendResponseHeaders(200, 0);
+                    exchange.getResponseBody().flush();
+                    headersSent.countDown();
+                    try {
+                        release.await(15, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    exchange.close();
+                });
+
+        HostedHarnessClient client = newClient();
+        try {
+            HarnessSessionRef session = createSession(client);
+            HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build());
+            ExecutorService readers = Executors.newFixedThreadPool(2);
+            try {
+                Future<Throwable> first = readers.submit(
+                        () -> captureNext(stream));
+                assertTrue(headersSent.await(5, TimeUnit.SECONDS));
+                Thread.sleep(150);
+                Future<Throwable> second = readers.submit(
+                        () -> captureNext(stream));
+                Thread.sleep(150);
+                stream.close();
+                assertTrue(first.get(5, TimeUnit.SECONDS)
+                        instanceof DaemonTransportException);
+                assertTrue(second.get(5, TimeUnit.SECONDS)
+                        instanceof IllegalStateException);
+            } finally {
+                readers.shutdownNow();
+            }
+        } finally {
+            release.countDown();
+            client.close();
+        }
+    }
+
+    @Test
+    void aMidFlightRejectionKeepsAdmissionUnknown() throws Exception {
+        // A rejection surfacing while delivering a response the server
+        // already accepted cannot prove non-dispatch: it must stay
+        // outcome-unknown and keep the active-prompt marker. JDK 11 parks
+        // such sends instead of surfacing the rejection (probed on
+        // 11/17/21), so the deterministic arm runs on 17+ only.
+        Assumptions.assumeTrue(Runtime.version().feature() >= 17);
+        createSessionRoute();
+        CountDownLatch sawPrompt = new CountDownLatch(1);
+        CountDownLatch answerPrompt = new CountDownLatch(1);
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sawPrompt.countDown();
+                    try {
+                        answerPrompt.await(15, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L,
+                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "http-r1-5");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                .httpExecutorOverride(executor)
+                .build();
+        CountDownLatch parkerRelease = new CountDownLatch(1);
+        try {
+            HarnessSessionRef session = createSession(client);
+            Map<String, Object> block = Map.of(
+                    "type", "text", "text", "mid-flight");
+            String digest = SubmitHarnessTurn.computePayloadDigest(
+                    List.of(block));
+            ExecutorService caller = Executors.newSingleThreadExecutor();
+            try {
+                Future<Throwable> submission = caller.submit(() -> {
+                    try {
+                        client.submitTurn(SubmitHarnessTurn.builder()
+                                .session(session)
+                                .promptId(PROMPT_ID)
+                                .addContent(block)
+                                .payloadDigest(digest)
+                                .build());
+                        return null;
+                    } catch (Throwable failure) {
+                        return failure;
+                    }
+                });
+                assertTrue(sawPrompt.await(5, TimeUnit.SECONDS));
+                // Park the only worker and fill its queue, so the response
+                // delivery task is rejected after the server answered.
+                CountDownLatch parkerEntered = new CountDownLatch(1);
+                executor.execute(() -> {
+                    parkerEntered.countDown();
+                    try {
+                        assertTrue(parkerRelease.await(15,
+                                TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+                assertTrue(parkerEntered.await(5, TimeUnit.SECONDS));
+                executor.execute(() -> {
+                });
+                executor.execute(() -> {
+                });
+                answerPrompt.countDown();
+                Throwable outcome = submission.get(10, TimeUnit.SECONDS);
+                assertTrue(outcome
+                        instanceof PromptAdmissionUnknownException,
+                        "expected admission unknown, got " + outcome);
+                // Retained marker: a different identity is vetoed locally.
+                assertThrows(DaemonException.class,
+                        () -> client.submitTurn(SubmitHarnessTurn.builder()
+                                .session(session)
+                                .promptId(SECOND_PROMPT_ID)
+                                .addContent(block)
+                                .payloadDigest(digest)
+                                .build()));
+                assertEquals(1, promptCalls.get());
+            } finally {
+                parkerRelease.countDown();
+                caller.shutdownNow();
+            }
+        } finally {
+            answerPrompt.countDown();
+            client.close();
+        }
+    }
+
+    @Test
+    void aDefinitiveBootHeaderless4xxKeepsItsStatus() {
+        // An unfenced definitive refusal (server-side 4xx emitted before
+        // the fencing middleware) is not outcome-unknown: it is the
+        // server's own answer and must carry its status.
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> sendJson(exchange, 413,
+                        "Request body too large", false));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "big");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            assertEquals(413, failure.getStatusCode());
+        }
+    }
+
+    @Test
+    void aRefusedDetachStillTearsDownTheHeartbeat() throws Exception {
+        // Any definitive detach answer (here: 403 after an auth
+        // revocation) must still retire the local attachment; the
+        // ambiguous statuses are the only ones that keep it.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/detach",
+                exchange -> sendSessionJson(exchange, 403,
+                        "{\"code\":\"forbidden\"}"));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.detachSession(session));
+            assertEquals(403, failure.getStatusCode());
+            Thread.sleep(100);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertEquals(first, heartbeats.get());
+        } finally {
+            client.close();
+        }
+    }
+
+    private static Throwable captureNext(HarnessEventStream stream) {
+        try {
+            stream.next();
+            return null;
+        } catch (Throwable failure) {
+            return failure;
+        }
+    }
+
+    private static void awaitHeartbeat(AtomicInteger heartbeats)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (heartbeats.get() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(heartbeats.get() > 0, "heartbeat never fired");
     }
 
     private HostedHarnessClient newClient() {

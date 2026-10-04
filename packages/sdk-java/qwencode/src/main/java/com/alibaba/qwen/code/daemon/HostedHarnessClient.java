@@ -87,10 +87,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         this.sseIdleTimeout = builder.sseIdleTimeout;
         this.maximumSseFrameBytes = builder.maximumSseFrameBytes;
         long number = CLIENT_SEQUENCE.incrementAndGet();
-        this.httpExecutor = new ThreadPoolExecutor(4, 4, 0L,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256),
-                daemonThreadFactory(
-                        "qwencode-hosted-harness-" + number + "-http-"));
+        this.httpExecutor = builder.httpExecutorOverride != null
+                ? builder.httpExecutorOverride
+                : new ThreadPoolExecutor(4, 4, 0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(256),
+                        daemonThreadFactory(
+                                "qwencode-hosted-harness-" + number
+                                        + "-http-"));
         this.heartbeatExecutor = new ThreadPoolExecutor(4, 4, 0L,
                 TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256),
                 daemonThreadFactory(
@@ -139,9 +143,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
-            // A response that never passed the fencing middleware cannot
-            // prove the POST did not execute, so it is outcome-unknown.
-            throw new SessionCreationOutcomeUnknownException(e);
+            // Same rule as the other mutation paths: ambiguous is
+            // outcome-unknown, a definitive unfenced refusal keeps its
+            // status.
+            if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())) {
+                throw new SessionCreationOutcomeUnknownException(e);
+            }
+            throw new DaemonHttpException("POST /session",
+                    raw.statusCode(), e.getMessage());
         }
         HttpSupport.Response response;
         try {
@@ -254,9 +263,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
-            // A response that never passed the fencing middleware cannot
-            // prove the prompt was not admitted, so it is outcome-unknown.
-            throw new PromptAdmissionUnknownException(e);
+            // An unfenced 408/5xx (for example a gateway error page) cannot
+            // prove the prompt was not admitted, so it is outcome-unknown;
+            // a definitive unfenced 4xx is the server's own refusal.
+            if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())) {
+                throw new PromptAdmissionUnknownException(e);
+            }
+            throw new DaemonHttpException("POST /session/:id/prompt",
+                    raw.statusCode(), e.getMessage());
         }
         HttpSupport.Response response;
         try {
@@ -281,9 +295,11 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (response.getStatusCode() == 409) {
                 // The server definitively rejected this promptId, so no
                 // terminal event will ever reference it; retaining the
-                // marker here wedges the session client-side. A 409 for a
-                // same-identity retry instead confirms the original
-                // admission is the running turn, so its entry stays.
+                // marker here wedges the session client-side. On a
+                // same-identity retry the entry stays conservatively:
+                // several 409 reasons (the hook/mcp-busy codes above the
+                // route's promptId lookup) say nothing about whether the
+                // original admission reached the server at all.
                 if (ownsActivePrompt) {
                     activePrompts.remove(session.getHarnessSessionId(),
                             candidate);
@@ -570,16 +586,18 @@ public final class HostedHarnessClient implements AutoCloseable {
                 sessionPath(ref.getHarnessSessionId()) + "/detach",
                 Collections.emptyMap(), ref.getHarnessClientId(),
                 "POST /session/:id/detach");
-        // A definitive 404 means the server has already reclaimed the
-        // session, so the detach goal is reached; anything else ambiguous
-        // was already classified by sendMutation. Skipping the local cleanup
-        // here would leave the heartbeat timer beating against an absent
-        // session forever.
-        if (response.getStatusCode() != 404) {
-            requireMutationStatus(response, 204,
-                    "POST /session/:id/detach");
+        // sendMutation has already classified every ambiguous status, so
+        // anything here is definitive: the local attachment and its
+        // heartbeat timer are torn down no matter the server's answer,
+        // otherwise each failed detach leaks a timer until close().
+        try {
+            if (response.getStatusCode() != 404) {
+                requireMutationStatus(response, 204,
+                        "POST /session/:id/detach");
+            }
+        } finally {
+            removeAttachment(ref);
         }
-        removeAttachment(ref);
     }
 
     public void updateSessionTitle(HarnessSessionRef session, String title) {
@@ -640,7 +658,11 @@ public final class HostedHarnessClient implements AutoCloseable {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
             // Same classification as the shared mutation channel below.
-            throw new MutationOutcomeUnknownException(operation, e);
+            if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())) {
+                throw new MutationOutcomeUnknownException(operation, e);
+            }
+            throw new DaemonHttpException(operation, raw.statusCode(),
+                    e.getMessage());
         }
         HttpSupport.Response response;
         try {
@@ -988,8 +1010,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
             // A response that never passed the fencing middleware cannot
-            // prove the mutation did not reach the Harness.
-            throw new MutationOutcomeUnknownException(operation, e);
+            // prove the mutation did not reach the Harness when its status
+            // is ambiguous; a definitive unfenced refusal surfaces as-is.
+            if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())) {
+                throw new MutationOutcomeUnknownException(operation, e);
+            }
+            throw new DaemonHttpException(operation, raw.statusCode(),
+                    e.getMessage());
         }
         HttpSupport.Response response;
         try {
@@ -1025,13 +1052,18 @@ public final class HostedHarnessClient implements AutoCloseable {
             return httpClient.send(builder.build(),
                     HttpSupport.bodyHandler());
         } catch (RejectedExecutionException e) {
+            // A bare rejection surfaces at submit, so the request provably
+            // never left the JVM; its outcome is known, not unknown.
             throw new DaemonTransportException(
                     "Hosted Harness HTTP executor is saturated", e);
         } catch (IOException e) {
-            // java.net.http wraps a pool rejection into an IOException
-            // (java.net.http.HttpClientImpl); the request never left the
-            // JVM, so its outcome is known, not unknown.
-            if (isExecutorRejection(e)) {
+            // java.net.http wraps a pool rejection into an IOException, and
+            // the caller-supplied executor runs response delivery tasks too
+            // — so this shape alone cannot tell a rejection at dispatch
+            // from one after the request was already on the wire. Only the
+            // terminated-executor case proves non-dispatch; everything else
+            // keeps its mid-flight outcome-unknown classification.
+            if (httpExecutor.isShutdown() && isExecutorRejection(e)) {
                 throw new DaemonTransportException(
                         "Hosted Harness HTTP executor is saturated", e);
             }
@@ -1342,8 +1374,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         private Duration heartbeatInterval = Duration.ofMinutes(1);
         private Duration sseIdleTimeout = Duration.ofSeconds(45);
         private int maximumSseFrameBytes = 16 * 1024 * 1024;
+        private ExecutorService httpExecutorOverride;
 
         private Builder() {
+        }
+
+        // Test seam: lets the suite park the HTTP executor deterministically
+        // to stage dispatch- versus delivery-phase rejections.
+        Builder httpExecutorOverride(ExecutorService executor) {
+            this.httpExecutorOverride = executor;
+            return this;
         }
 
         public Builder baseUri(URI baseUri) {
@@ -1383,11 +1423,19 @@ public final class HostedHarnessClient implements AutoCloseable {
         /**
          * Bounds the silence an event stream tolerates before the client
          * force-closes it and {@code next()} fails with a
-         * {@link DaemonTransportException}. Matches the bound the stdio
-         * transport applies to the same reader.
+         * {@link DaemonTransportException}. {@link Duration#ZERO} disables
+         * the watchdog for callers that own the deadline themselves. The
+         * bound only works when the peer proves liveness during long silent
+         * phases, the way the hosted events route's keepalive comments do;
+         * against a peer that stays quiet, legitimate silence is treated
+         * as a dead connection.
          */
         public Builder sseIdleTimeout(Duration sseIdleTimeout) {
-            this.sseIdleTimeout = positive(sseIdleTimeout, "sseIdleTimeout");
+            if (sseIdleTimeout == null || sseIdleTimeout.isNegative()) {
+                throw new IllegalArgumentException(
+                        "sseIdleTimeout must be non-negative");
+            }
+            this.sseIdleTimeout = sseIdleTimeout;
             return this;
         }
 

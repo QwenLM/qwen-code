@@ -46,10 +46,14 @@ public final class HarnessEventStream implements AutoCloseable {
 
     public DaemonEvent next() {
         if (closed.get()) {
-            throw new IllegalStateException(
-                    "HarnessEventStream is closed");
+            throw closedFailure();
         }
         synchronized (cursorLock) {
+            // A queued caller re-checks inside the lock: the stream may
+            // have been closed (or idle-aborted) while it waited.
+            if (closed.get()) {
+                throw closedFailure();
+            }
             try {
                 SseReader.Frame frame = reader.next();
                 if (frame == null) {
@@ -115,7 +119,21 @@ public final class HarnessEventStream implements AutoCloseable {
         }
     }
 
+    private RuntimeException closedFailure() {
+        if (idleTimedOut.get()) {
+            return new DaemonTransportException(
+                    "Hosted Harness SSE idle timeout");
+        }
+        return new IllegalStateException(
+                "HarnessEventStream is closed");
+    }
+
     void startIdleWatchdog() {
+        if (client.sseIdleTimeout().isZero()) {
+            // Builder.sseIdleTimeout(Duration.ZERO): the caller owns the
+            // deadline, so no watchdog is scheduled.
+            return;
+        }
         long idleMillis = HostedHarnessClient.saturatedMillis(
                 client.sseIdleTimeout());
         long intervalMillis = Math.max(100L, idleMillis / 2L);

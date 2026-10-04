@@ -159,7 +159,7 @@ try (HostedHarnessClient harness = HostedHarnessClient.builder()
 }
 ```
 
-The client permits only one active prompt identity per Session while allowing different Sessions to run concurrently. A retry after `PromptAdmissionUnknownException` must reuse the same `promptId`, payload digest, prompt content, and deadline. SSE boot, epoch, or sequence changes fail closed for transcript/status reconciliation. `close()` releases local HTTP, heartbeat, timer, and stream resources only; it never destroys remote Sessions implicitly.
+The client permits only one active prompt identity per Session while allowing different Sessions to run concurrently. A retry after `PromptAdmissionUnknownException` must reuse the same `promptId`, payload digest, prompt content, and deadline. The payload digest is a cross-language contract: it is the SHA-256 of a canonical form of the prompt content (object keys sorted recursively, array order preserved), the client emits exactly that canonical form as the wire `prompt`, and the server re-derives the identical value — so the digest is reproducible across JVM processes and across SDK releases. SSE boot, epoch, or sequence changes fail closed for transcript/status reconciliation. `close()` releases local HTTP, heartbeat, timer, and stream resources only; it never destroys remote Sessions implicitly. Event streams are bounded by a 45-second idle watchdog (see `Builder.sseIdleTimeout`; `Duration.ZERO` disables it for callers that own the deadline), and the hosted events route emits keepalive comments every 15 seconds so legitimately silent phases — long tool calls, slow model phases, approval waits — do not trip it.
 
 ## Legacy stdio API
 

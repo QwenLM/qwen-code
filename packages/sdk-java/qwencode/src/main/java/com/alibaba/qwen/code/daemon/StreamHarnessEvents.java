@@ -56,6 +56,13 @@ public final class StreamHarnessEvents {
             return this;
         }
 
+        /**
+         * Resumes the stream after this event id. A non-zero cursor always
+         * wins; an omitted (or explicitly zero) cursor falls back to the
+         * session ref's watermark when it carries one, so the epoch fence
+         * stays on by default — there is currently no way to request a
+         * deliberate "replay from the beginning" against a watermarked ref.
+         */
         public Builder lastEventId(long lastEventId) {
             this.lastEventId = lastEventId;
             return this;
@@ -66,6 +73,12 @@ public final class StreamHarnessEvents {
             return this;
         }
 
+        /**
+         * Adds the snapshot query parameter to the stream request. The
+         * snapshot frame is produced only by the primary daemon transport;
+         * the hosted events route does not read this parameter, so the
+         * switch is parsed-compatibly ignored there.
+         */
         public Builder snapshot(boolean snapshot) {
             this.snapshot = snapshot;
             return this;
