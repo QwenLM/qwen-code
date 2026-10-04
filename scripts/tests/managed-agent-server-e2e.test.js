@@ -13,6 +13,7 @@ import {
   transpileModule,
 } from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
 
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
@@ -27,6 +28,44 @@ const namedScripts = (text) => [
     ),
   ),
 ];
+
+// A fenced launch block is shell: `#` comment lines, `KEY=value` (or
+// `export KEY=value`) assignment prefixes, line-continuation backslashes,
+// and the command itself. Return the assignments and the command words; a
+// shape outside that grammar leaves the command empty and the pin fails.
+const parseLaunchBlock = (block) => {
+  const env = {};
+  const argv = [];
+  for (const physicalLine of block.replace(/\\\n/g, ' ').split('\n')) {
+    const line = physicalLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const words = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+    let index = 0;
+    for (;;) {
+      if (words[index] === 'export') index += 1;
+      const assignment = words[index]?.match(
+        /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/,
+      );
+      if (!assignment) break;
+      env[assignment[1]] = assignment[2]
+        .replace(/^"([\s\S]*)"$/, '$1')
+        .replace(/^'([\s\S]*)'$/, '$1');
+      index += 1;
+    }
+    argv.push(...words.slice(index));
+  }
+  return { env, argv };
+};
+
+// A `$VAR` value defers to the credential pair the reader already exported
+// for Spring in Prerequisites; stand in a conforming value so the validator
+// judges the block's shape rather than the placeholder spelling.
+const expandReference = (value, kind) =>
+  /^\$\{?\w+\}?$/.test(value)
+    ? kind === 'digest'
+      ? `sha256:${'a'.repeat(64)}`
+      : 'documented-value'
+    : value;
 
 describe('managed-agent-server e2e runner', () => {
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
@@ -241,18 +280,68 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('pins every fenced hosted-harness launch block in the server README to a startable form', () => {
-    // validateHostedHarnessProfile rejects a bare
-    // `qwen serve --profile hosted-harness`: a fenced, presented-as-runnable
-    // block must carry --no-web plus a token source and a digest source.
+    // The oracle is the profile validator itself, not a copy of its rules:
+    // a fenced, presented-as-runnable block must supply everything
+    // validateHostedHarnessProfile rejects for missing, or the documented
+    // launch fails at startup while this pin stays green. The option mapping
+    // mirrors serve.ts and run-qwen-serve.ts: mode is always http-bridge,
+    // --no-web flips serveWebShell, the token resolves from --token then
+    // QWEN_SERVER_TOKEN, and the capability digest falls back to
+    // QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
-    const fencedBlocks = [...readme.matchAll(/```bash\n([\s\S]*?)```/g)]
+    const fencedBlocks = [
+      ...readme.matchAll(
+        /```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g,
+      ),
+    ]
       .map((match) => match[1])
-      .filter((block) => block.includes('--profile hosted-harness'));
+      .filter((block) => /--profile[=\s]+hosted-harness/.test(block));
     expect(fencedBlocks.length).toBeGreaterThan(0);
     for (const block of fencedBlocks) {
-      expect(block).toContain('--no-web');
-      expect(block).toContain('QWEN_SERVER_TOKEN');
-      expect(block).toContain('QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST');
+      const { env, argv } = parseLaunchBlock(block);
+      const flags = {};
+      for (let index = 0; index < argv.length; index++) {
+        const word = argv[index];
+        if (!word.startsWith('--')) continue;
+        const eq = word.indexOf('=');
+        if (eq !== -1) {
+          flags[word.slice(2, eq)] = word.slice(eq + 1);
+        } else if (word.startsWith('--no-')) {
+          flags[word.slice(5)] = false;
+        } else if (
+          index + 1 < argv.length &&
+          !argv[index + 1].startsWith('--')
+        ) {
+          flags[word.slice(2)] = argv[index + 1];
+          index += 1;
+        } else {
+          flags[word.slice(2)] = true;
+        }
+      }
+      expect(
+        flags['profile'],
+        'a fenced hosted-harness block must carry the profile flag itself',
+      ).toBe('hosted-harness');
+      const supplied = (flag, envName, kind) =>
+        flags[flag] !== undefined
+          ? expandReference(String(flags[flag]), kind)
+          : env[envName] !== undefined
+            ? expandReference(env[envName], kind)
+            : undefined;
+      const launch = {
+        profile: flags['profile'],
+        hostname: flags['hostname'] ?? '127.0.0.1',
+        port: Number(flags['port'] ?? 4170),
+        mode: 'http-bridge',
+        token: supplied('token', 'QWEN_SERVER_TOKEN', 'token'),
+        serveWebShell: flags['web'] ?? true,
+        hostedHarnessCapabilityDigest: supplied(
+          'hosted-harness-capability-digest',
+          'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST',
+          'digest',
+        ),
+      };
+      expect(() => validateHostedHarnessProfile(launch)).not.toThrow();
     }
   });
 
@@ -267,10 +356,38 @@ describe('managed-agent-server e2e runner', () => {
     );
     const end = readme.indexOf('## Embedded Runtime Broker');
     expect(start).toBeGreaterThan(-1);
-    const slice = readme.slice(start, end === -1 ? undefined : end);
+    expect(end).toBeGreaterThan(start);
+    const slice = readme.slice(start, end);
     expect(slice).toContain(
       "QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'",
     );
-    expect(slice).toMatch(/read once at JVM startup|restart/i);
+    // The caveat sentence is hard-wrapped in the README, so match across the
+    // line break; the fallback is the restart clause, not the bare word
+    // `restart` that any unrelated sentence in the slice could supply.
+    expect(slice.replace(/\s+/g, ' ')).toMatch(
+      /read once at JVM startup|restart it with the override/i,
+    );
+  });
+
+  it('pins the attach-time generation fence in the Harness attachment contract', () => {
+    // The attachment paragraph publishes which identities an attach does NOT
+    // compare. The Harness writer generation is the one identity that IS
+    // enforced — the contract middleware answers a stale boot id with 409
+    // hosted_harness_generation_mismatch and the attach handler rejects a
+    // store descriptor whose writerId differs before any coalescing — so the
+    // paragraph must name that rejection: an integrator reading "not
+    // rejected" for the generation omits the 409 path and every attach fails
+    // after a Harness restart with no documented way out.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const anchor = readme.indexOf('An in-memory Hosted attachment coalesces');
+    expect(anchor).toBeGreaterThan(-1);
+    const end = readme.indexOf('\n\n', anchor);
+    expect(end).toBeGreaterThan(anchor);
+    const paragraph = readme.slice(anchor, end).replace(/\s+/g, ' ');
+    expect(paragraph).toContain(
+      'coalesces on `(tenantId, sessionId)`, so another tenant cannot reuse',
+    );
+    expect(paragraph).toContain('409 hosted_harness_generation_mismatch');
+    expect(paragraph).toContain('managed_session_store_conflict');
   });
 });

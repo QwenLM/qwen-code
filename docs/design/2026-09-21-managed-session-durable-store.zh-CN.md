@@ -109,7 +109,7 @@ DELETE /v1/agents/sessions/{sessionId}
 
 归档会清除在线事件游标，但保留最后一代 Harness generation，作为私有权威已经存在的哨兵。取消归档后，下一次 Turn 会先冷加载该 Session，再绑定新的 generation。没有哨兵的 Session 也会先探测 load，只有明确收到 not-found 才执行 create，从而覆盖首次私有写入是元数据而不是 Turn 的 Session。私有 `create` 路径遇到已有权威时返回 `409`，而 `load` 在权威不存在时返回 `404`，不会顺手初始化空权威，从而避免重试恢复静默替换或凭空生成会话历史。
 
-当前切片中，在线 Hosted attachment 仅以 `(tenantId, sessionId)` 合并，因此其他租户无法复用内存中的 Session：热 attach、并发冷加载合并与 restore race 都不额外比较规范化 Store endpoint、workspace 或 Harness writer generation;`managed_session_store_conflict` 的 fail-closed 围栏属于集成切片的目标设计而非已交付行为。lease 时长变化不改变存储身份。
+当前切片中，在线 Hosted attachment 仅以 `(tenantId, sessionId)` 合并，因此其他租户无法复用内存中的 Session：热 attach、并发冷加载合并与 restore race 都不额外比较规范化 Store endpoint 或 workspace；但 Harness writer generation 会被检查——`writerId` 与 Harness 进程 boot ID 不一致的 attach 会以 `409 hosted_harness_generation_mismatch` fail closed；`managed_session_store_conflict` 的 fail-closed 围栏属于集成切片的目标设计而非已交付行为。lease 时长变化不改变存储身份。
 
 第一阶段删除有意只实现软 tombstone。`GET` 和列表 API 会隐藏 `DELETED` Session，而已连接客户端仍可重放已经提交的公共删除事件。私有 journal/resource 字节会继续保留，直到 writer seal、execution 对账、legal hold、保留期和垃圾回收全部实现。因此不能把当前能力宣称为物理擦除。
 

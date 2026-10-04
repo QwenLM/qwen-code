@@ -227,10 +227,13 @@ authority and never initializes one. The Java connector attempts strict create f
 conflict or uncertain creation outcome. A known existing binding only loads.
 An in-memory Hosted attachment coalesces on `(tenantId, sessionId)`, so another
 tenant cannot reuse the in-memory Session; this slice does not additionally
-compare a normalized Store endpoint, workspace, or Harness writer generation
-on attach, and an attach or cold-load race carrying a different such identity
-is not rejected. That `managed_session_store_conflict` fence is target design
-for the integration slice, not shipped behavior.
+compare a normalized Store endpoint or workspace on attach, and an attach or
+cold-load race carrying a different such identity is not rejected. A presented
+Harness writer generation _is_ checked: an attach whose `writerId` is not this
+process's boot ID fails closed with `409 hosted_harness_generation_mismatch` —
+the restart-generation failure described above. That
+`managed_session_store_conflict` fence is target design for the integration
+slice, not shipped behavior.
 
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
