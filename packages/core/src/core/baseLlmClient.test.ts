@@ -1416,6 +1416,30 @@ describe('BaseLlmClient', () => {
       expect(sentBudget()).toBe(32_768 - 3_000);
     });
 
+    it('measures the room on the slimmed payload, not the caller-supplied one', async () => {
+      // The budget runs after `slimCompactionInput`, and this target declares
+      // no `image` modality, so the request actually carries the 18-char
+      // `[image: image/png]` placeholder — 5 estimated tokens, not the 1_600
+      // the raw `inlineData` part is charged. Feeding the pre-slimming
+      // `contents` to the budget instead would emit 8_192 - 1_600 = 6_592.
+      useWindow('deepseek-r1', 8_192);
+      mockGenerateContent.mockResolvedValue(createMockTextResponse('ok'));
+
+      await client.generateText({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'aGk=' } }],
+          },
+        ],
+        model: 'deepseek-r1',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      expect(sentBudget()).toBe(8_187);
+    });
+
     it('budgets against the target window, not the session window', async () => {
       // Side queries default to the fast model, and a same-provider target
       // whose registry entry declares no window inherits the *session* model's
