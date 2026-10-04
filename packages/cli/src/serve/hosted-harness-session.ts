@@ -1544,6 +1544,9 @@ export function registerHostedHarnessSessionRoutes(
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
         await managed.close();
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: fileHistory.pendingTurn, pendingUndo: fileHistory.pendingUndo, unsettled: unsettled ?? null, takeover })}`,
+        );
         error(
           res,
           409,
@@ -1556,6 +1559,9 @@ export function registerHostedHarnessSessionRoutes(
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
         await managed.close();
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (restore_${restore.recoveryStatus}): basis=${String(restore.restoreBasis)} through=${restore.throughSequence}`,
+        );
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
@@ -1569,8 +1575,11 @@ export function registerHostedHarnessSessionRoutes(
             restore.throughSequence,
           );
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
           await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${String(cause)}`,
+          );
           error(res, 409, 'hosted_turn_recovery_required');
           return;
         }
@@ -1588,6 +1597,9 @@ export function registerHostedHarnessSessionRoutes(
         // cancellation) and answer with the recovery snapshot.
         if (toolProfile === undefined || !brokerOptions) {
           await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'}`,
+          );
           error(res, 409, 'hosted_turn_recovery_required');
           return;
         }
@@ -1602,6 +1614,9 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (recovered === undefined) {
             await managed.close();
+            writeStderrLineSafe(
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled}`,
+            );
             error(res, 409, 'hosted_turn_recovery_required');
             return;
           }
@@ -1730,16 +1745,22 @@ export function registerHostedHarnessSessionRoutes(
         // strand is silent until retirement.
         noteOwedAdoption(session, sessionId);
         await managed.close();
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${JSON.stringify({ incompletePublication, unsettled: [...unsettledInputsThrough(session, workspaceProfile ? restore.throughSequence : managed.authority.committedSequence)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: restore.throughSequence })}`,
+        );
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
       if (!create && workspaceProfile) {
         try {
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
           // Same owed-lease discipline as the refusal above.
           noteOwedAdoption(session, sessionId);
           await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${String(cause)}`,
+          );
           error(res, 409, 'hosted_turn_recovery_required');
           return;
         }

@@ -3402,11 +3402,20 @@ describe('Hosted Harness no-tool session', () => {
         ? Promise.reject(new Error('missing settled tool outcome'))
         : original.call(this, ref);
     });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const refused = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(
+      stderr.mock.calls.map(([chunk]) => String(chunk)).join(''),
+    ).toContain(
+      `load refused (workspace_verify): Error: missing settled tool outcome`,
+    );
+    stderr.mockRestore();
     expect(
       damaged.mock.calls.some(([ref]) => ref.kind === 'managed-tool-outcome'),
     ).toBe(true);

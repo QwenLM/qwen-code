@@ -6,6 +6,7 @@
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
   MANAGED_SESSION_EVENT_SUBTYPE,
@@ -53,6 +54,7 @@ const WRITER_TOKEN = new RegExp(
 );
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const debugLogger = createDebugLogger('MANAGED_SESSION_STORE');
 
 export interface HttpManagedSessionStoreOptions {
   readonly baseUrl: string;
@@ -95,7 +97,7 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
   }
 }
 
-class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
+export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
 
 export function createHttpManagedSessionStores(
   options: HttpManagedSessionStoreOptions,
@@ -970,41 +972,75 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     accept = 'application/json',
   ): Promise<Response> {
-    let response: Response;
-    try {
-      response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
-        method,
-        redirect: 'error',
-        headers: {
-          Accept: accept,
-          [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
-            this.sessionKey.tenantId,
-          [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
-            this.writerToken,
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
-      });
-    } catch (error) {
-      throw new ManagedSessionStoreTransportError(
-        `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
-      );
+    // Reads are idempotent and the lease renewal is fenced by generation, so
+    // a dropped connection or a transient 5xx there must not masquerade as
+    // missing history on a cold restore. Commits are deliberately not
+    // retried here; their callers handle the outcome themselves.
+    const retryable = method === 'GET' || path === '/writers:renew';
+    let attempt = 0;
+    for (;;) {
+      let response: Response;
+      try {
+        response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
+          method,
+          redirect: 'error',
+          headers: {
+            Accept: accept,
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+              this.sessionKey.tenantId,
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+              this.writerToken,
+            ...(body === undefined
+              ? {}
+              : { 'Content-Type': 'application/json' }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
+        });
+      } catch (error) {
+        attempt++;
+        if (!retryable || attempt >= 3) {
+          throw new ManagedSessionStoreTransportError(
+            `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
+          );
+        }
+        debugLogger.debug(
+          `Managed Session Store ${method} ${path} attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}; retrying.`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
+        );
+        continue;
+      }
+      if (!response.ok) {
+        const error = await readHttpError(response);
+        attempt++;
+        if (
+          !retryable ||
+          attempt >= 3 ||
+          ![500, 502, 503, 504].includes(response.status)
+        ) {
+          throw new ManagedSessionStoreHttpError(
+            response.status,
+            error.code,
+            error.message,
+          );
+        }
+        debugLogger.debug(
+          `Managed Session Store ${method} ${path} attempt ${attempt} answered ${response.status} (${error.code}); retrying.`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
+        );
+        continue;
+      }
+      if (response.headers.get('Cache-Control') !== 'no-store') {
+        throw corrupt(
+          'Managed Session Store response is missing Cache-Control: no-store.',
+        );
+      }
+      return response;
     }
-    if (!response.ok) {
-      const error = await readHttpError(response);
-      throw new ManagedSessionStoreHttpError(
-        response.status,
-        error.code,
-        error.message,
-      );
-    }
-    if (response.headers.get('Cache-Control') !== 'no-store') {
-      throw corrupt(
-        'Managed Session Store response is missing Cache-Control: no-store.',
-      );
-    }
-    return response;
   }
 
   private sessionUrl(): string {
