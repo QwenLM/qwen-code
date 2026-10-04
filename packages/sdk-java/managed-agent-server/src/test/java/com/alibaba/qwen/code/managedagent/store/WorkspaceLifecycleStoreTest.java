@@ -23,11 +23,13 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,32 +38,35 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 class WorkspaceLifecycleStoreTest {
     @ParameterizedTest
-    @ValueSource(strings = {"{", "[]", "null", "{\"n\":1e999}", "{\"a\":1,\"a\":2}"})
-    void lifecycleJournalValidationRejectsInvalidRecordsAndRollsBack(String line) throws Exception {
-        for (String mode : List.of("ordinary", "authority", "settlement")) {
-            var fixture = fixture();
-            var journal = new ManagedSessionStore(fixture.jdbc);
-            var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
-                    "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
-            var operation = "ordinary".equals(mode) ? null : fixture.admit(OperationKind.DELETE);
-            byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
-            var resource = new ManagedSessionStoreModels.CommitResource("candidate", "managed-message", 1, body.length,
-                    HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body)), Base64.getEncoder().encodeToString(body));
-            byte[] bytes = (line + "\n{}\n").getBytes(StandardCharsets.UTF_8);
-            var request = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
-                    0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
-                    Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
-                    List.of(resource));
-            assertThatThrownBy(() -> fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32),
-                    request, "authority".equals(mode) ? WorkspaceLifecycleStore.authority(operation) : null)))
-                    .isInstanceOfSatisfying(ApiException.class, error -> {
-                        assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
-                        assertThat(error.getCode()).isEqualTo(ManagedSessionStoreModels.ERROR_INVALID_REQUEST);
-                    });
-            assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class)).isZero();
-            assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isZero();
-            assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isZero();
-        }
+    @MethodSource("invalidJournalRecords")
+    void lifecycleJournalValidationRejectsInvalidRecordsAndRollsBack(String line, String mode) throws Exception {
+        var fixture = fixture();
+        var journal = new ManagedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        var operation = "ordinary".equals(mode) ? null : fixture.admit(OperationKind.DELETE);
+        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+        var resource = new ManagedSessionStoreModels.CommitResource("candidate", "managed-message", 1, body.length,
+                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body)), Base64.getEncoder().encodeToString(body));
+        byte[] bytes = (line + "\n{}\n").getBytes(StandardCharsets.UTF_8);
+        var request = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+                List.of(resource));
+        assertThatThrownBy(() -> fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32),
+                request, "authority".equals(mode) ? WorkspaceLifecycleStore.authority(operation) : null)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo(ManagedSessionStoreModels.ERROR_INVALID_REQUEST);
+                });
+        assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isZero();
+    }
+
+    static Stream<Arguments> invalidJournalRecords() {
+        return Stream.of("{", "[]", "null", "{\"n\":1e999}", "{\"a\":1,\"a\":2}")
+                .flatMap(line -> Stream.of("ordinary", "authority", "settlement").map(mode -> Arguments.of(line, mode)));
     }
 
     @Test

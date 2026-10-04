@@ -82,6 +82,7 @@ vi.mock(
         resourceStore,
         toolResultResources: resourceStore,
         assertWritable: state.assertWritable,
+        authorizeOrdinary: async () => undefined,
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
