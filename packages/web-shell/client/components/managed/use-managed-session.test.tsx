@@ -181,7 +181,7 @@ describe('useManagedSession', () => {
       });
       expect(latest?.stoppedReason).toBe('session gone');
       expect(latest?.stoppedLeg).toBe('session');
-      expect(latest?.error).toBe('session gone');
+      expect(latest?.error).toBeUndefined();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(6_000);
       });
@@ -293,7 +293,7 @@ describe('useManagedSession', () => {
       });
       expect(subscribeEvents).toHaveBeenCalledTimes(2);
       expect(latest?.stoppedReason).toBe('session gone');
-      expect(latest?.stoppedLeg).toBe('transcript');
+      expect(latest?.stoppedLeg).toBe('stream');
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
@@ -377,6 +377,43 @@ describe('useManagedSession', () => {
       expect(calls).toBe(1);
       expect(latest?.stoppedReason).toBeUndefined();
       expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives the session leg the bootstrap decision regardless of settle order', async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = {
+        getSession: vi.fn(
+          () =>
+            new Promise((_resolve, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    Object.assign(new Error('session gone'), { status: 404 }),
+                  ),
+                30,
+              ),
+            ),
+        ),
+        getTranscript: vi.fn(() =>
+          Promise.reject(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          ),
+        ),
+        subscribeEvents: vi.fn(),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(1);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('session');
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -467,7 +504,7 @@ describe('useManagedSession', () => {
       mountReact(<Probe provider={provider} />);
       await flushReact();
       expect(getSession).toHaveBeenCalledTimes(1);
-      expect(latest?.error).toBe('session gone');
+      expect(latest?.error).toBeUndefined();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
@@ -2725,6 +2762,73 @@ describe('useManagedSession', () => {
     expect(latest?.olderCursor).toBeUndefined();
   });
 
+  it('shows a failed older-page fetch and retires it on the next page', async () => {
+    let failPage!: (error: Error) => void;
+    const pageGate = new Promise<never>((_resolve, reject) => {
+      failPage = (error) => reject(error);
+    });
+    let pageAttempts = 0;
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before === 'cursor-5') {
+          pageAttempts += 1;
+          return pageAttempts === 1
+            ? pageGate
+            : Promise.resolve({ events: [event(3), event(4)], lastEventId: 6 });
+        }
+        return Promise.resolve({
+          events: [event(5), event(6)],
+          olderCursor: 'cursor-5',
+          lastEventId: 6,
+        });
+      },
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        // Older than the snapshot head: ignored, keeps require-yield happy.
+        yield event(1);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={provider} />);
+    await flushReact();
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    act(() => {
+      void latest!.loadOlder();
+    });
+    await act(async () => {
+      failPage(new Error('older page fetch failed (500)'));
+      await pageGate.catch(() => undefined);
+    });
+
+    // The failed click is a transcript-leg record: surfaced, not sticky.
+    await vi.waitFor(() => expect(latest?.loadingOlder).toBe(false));
+    expect(latest?.error).toBe('older page fetch failed (500)');
+    expect(latest?.stoppedReason).toBeUndefined();
+    expect(latest?.stoppedLeg).toBeUndefined();
+    expect(latest?.events.map((item) => item.id)).toEqual([5, 6]);
+    expect(latest?.olderCursor).toBe('cursor-5');
+
+    // The next successful page read retires its own leg's record.
+    await act(async () => {
+      void latest!.loadOlder();
+    });
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([3, 4, 5, 6]),
+    );
+    expect(latest?.error).toBeUndefined();
+  });
+
   it('recovers past a run of corrupt frames through the resync path', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const transcriptPayload = (lastSequence: number) =>
@@ -2870,6 +2974,62 @@ describe('useManagedSession', () => {
         await vi.advanceTimersByTimeAsync(6000);
       });
       expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the stall error once a resync advances the cursor', async () => {
+    vi.useFakeTimers();
+    let snapshotCalls = 0;
+    let subscribeCalls = 0;
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(() => {
+      snapshotCalls += 1;
+      // The fifth call is the fourth gap's resync: it finally advances.
+      return Promise.resolve(
+        snapshotCalls <= 4
+          ? { events: [event(1), event(2)], lastEventId: 2 }
+          : { events: [event(1), event(2), event(3)], lastEventId: 3 },
+      );
+    });
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls <= 4) {
+          yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={provider} />);
+    await flushReact();
+
+    try {
+      // Three consecutive stalls surface the error.
+      for (let round = 0; round < 8 && latest?.error === undefined; round++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+        });
+      }
+      expect(latest?.error).toMatch(/not advancing/);
+      expect(latest?.stoppedReason).toBeUndefined();
+
+      // An advancing resync retires the stream leg's own record.
+      for (let round = 0; round < 8 && latest?.error !== undefined; round++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+        });
+      }
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2, 3]);
     } finally {
       vi.useRealTimers();
     }

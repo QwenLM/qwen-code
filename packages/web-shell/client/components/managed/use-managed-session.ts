@@ -10,6 +10,31 @@ import {
 } from './managed-request-error';
 import { mergeManagedEvents } from './managed-session-messages';
 
+type SignalLeg = 'session' | 'transcript' | 'stream';
+
+interface SignalEntry {
+  readonly message: string;
+  readonly final: boolean;
+  readonly seq: number;
+  readonly leg: SignalLeg;
+}
+
+class SnapshotLegError extends Error {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(
+    readonly leg: 'session' | 'transcript',
+    readonly cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    const forwarded = cause as { status?: unknown; code?: unknown };
+    this.status =
+      typeof forwarded.status === 'number' ? forwarded.status : undefined;
+    this.code = typeof forwarded.code === 'string' ? forwarded.code : undefined;
+  }
+}
+
 const BASE_RETRY_DELAY_MS = 3_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 
@@ -43,14 +68,10 @@ interface ManagedSessionState {
   events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   loading: boolean;
-  error?: string;
-  // A terminal (non-retryable) stop, sticky across per-event updates that
-  // legitimately clear the transient `error` of the loop that owns it.
-  stoppedReason?: string;
-  // Which authority answered the stop: only a later success by that same
-  // leg retires it — a live stream cannot certify history, and a summary
-  // read cannot certify the event log.
-  stoppedLeg?: 'session' | 'transcript';
+  // One signal per answer authority. A failure writes into its own leg's
+  // slot; only a later success by that same leg clears it — a live stream
+  // cannot certify history and a summary read cannot certify the event log.
+  signals?: Partial<Record<SignalLeg, SignalEntry>>;
 }
 
 export function useManagedSession(
@@ -70,6 +91,7 @@ export function useManagedSession(
   // session-leg success re-arms the whole effect instead of leaving a
   // silent dead loop next to a live summary.
   const endedRef = useRef(false);
+  const seqRef = useRef(0);
   // Paging state: whether any older page was ever loaded, the highest id any
   // page returned (the paged region's top edge), and whether the user paged
   // all the way to the beginning.
@@ -85,6 +107,7 @@ export function useManagedSession(
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
     endedRef.current = false;
+    seqRef.current = 0;
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -93,41 +116,58 @@ export function useManagedSession(
       if (!abort.signal.aborted)
         setState((current) => ({ ...current, ...change }));
     };
-    const fail = (error: unknown) =>
-      update({
-        error: error instanceof Error ? error.message : String(error),
-        loading: false,
-      });
-    // A successful read retires its own leg's verdict (transient error and
-    // sticky reason), and a session-leg success also restarts loops that
-    // ended terminally.
-    const retire = (leg: 'session' | 'transcript' | 'both') => {
+    const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
+      const message = error instanceof Error ? error.message : String(error);
       setState((current) => ({
         ...current,
-        error: undefined,
-        ...(leg === 'both' || current.stoppedLeg === leg
-          ? { stoppedReason: undefined, stoppedLeg: undefined }
-          : {}),
+        signals: {
+          ...(current.signals ?? {}),
+          [leg]: { leg, message, final, seq: ++seqRef.current },
+        },
       }));
+    };
+    const fail = (leg: SignalLeg, error: unknown) => record(leg, error, false);
+    const stop = (leg: SignalLeg, error: unknown) => record(leg, error, true);
+    // A terminal (definite 4xx) answer: record it transiently, and as a
+    // final verdict when it is one — never terminal because a different
+    // endpoint also failed.
+    const failed = (error: unknown, leg: SignalLeg): boolean => {
+      fail(leg, error);
+      if (isAuthFailure(error) || !isNonRetryableClientError(error))
+        return false;
+      stop(leg, error);
+      return true;
+    };
+    // A successful read retires its own leg's records; a session-leg
+    // success also restarts loops that ended terminally.
+    const retire = (leg: SignalLeg) => {
+      if (abort.signal.aborted) return;
+      setState((current) => {
+        if (!current.signals?.[leg]) return current;
+        const signals = { ...current.signals };
+        delete signals[leg];
+        return { ...current, signals };
+      });
       if (leg === 'session' && endedRef.current) {
         endedRef.current = false;
         setRevision((value) => value + 1);
       }
     };
     const snapshot = async (preserveLoadedPages: boolean) => {
-      const [summary, transcript] = await Promise.all([
+      // Settle both legs first, then classify the session leg's own answer
+      // before the transcript leg's: whether the bootstrap terminates for a
+      // gone session is decided by the answer, not by response ordering.
+      const [sessionRead, transcriptRead] = await Promise.allSettled([
         provider.getSession(sessionId, opts),
-        // Mark the transcript leg so a caller can classify a definite
-        // answer by which read it belongs to: a pruned history says
-        // nothing about whether the session itself exists.
-        provider
-          .getTranscript(sessionId, { ...opts, limit: 100 })
-          .catch((error: unknown) => {
-            (error as Record<string, unknown>)['snapshotLeg'] = 'transcript';
-            throw error;
-          }),
+        provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
+      if (sessionRead.status === 'rejected')
+        throw new SnapshotLegError('session', sessionRead.reason);
+      if (transcriptRead.status === 'rejected')
+        throw new SnapshotLegError('transcript', transcriptRead.reason);
+      const summary = sessionRead.value;
+      const transcript = transcriptRead.value;
       if (abort.signal.aborted) return transcript.lastEventId;
       if (preserveLoadedPages) {
         // The stream never replays events at or below the snapshot head,
@@ -199,11 +239,10 @@ export function useManagedSession(
             events: mergeManagedEvents(kept, transcript.events),
             olderCursor: nextCursor,
             loading: false,
-            error: undefined,
-            stoppedReason: undefined,
-            stoppedLeg: undefined,
           };
         });
+        retire('session');
+        retire('transcript');
       } else {
         cursorRef.current = transcript.olderCursor;
         update({
@@ -211,30 +250,11 @@ export function useManagedSession(
           events: transcript.events,
           olderCursor: transcript.olderCursor,
           loading: false,
-          error: undefined,
-          stoppedReason: undefined,
-          stoppedLeg: undefined,
         });
+        retire('session');
+        retire('transcript');
       }
       return transcript.lastEventId;
-    };
-    const stop = (error: unknown, leg: 'session' | 'transcript' = 'session') =>
-      update({
-        stoppedReason: error instanceof Error ? error.message : String(error),
-        stoppedLeg: leg,
-      });
-    // A terminal (definite 4xx) answer: surface it transiently and stickily.
-    // Callers return from their loop when this holds, unless they own a
-    // retryable-in-principle retry that must outlive the classification.
-    const failed = (
-      error: unknown,
-      leg: 'session' | 'transcript' = 'session',
-    ): boolean => {
-      fail(error);
-      if (isAuthFailure(error) || !isNonRetryableClientError(error))
-        return false;
-      stop(error, leg);
-      return true;
     };
     void (async () => {
       let lastEventId: number | undefined;
@@ -247,13 +267,11 @@ export function useManagedSession(
           // The transcript leg being definitively gone says nothing about
           // the session: record it stickily but keep retrying so the
           // stream starts as soon as the read recovers.
-          if (
-            (error as { snapshotLeg?: string }).snapshotLeg === 'transcript'
-          ) {
-            fail(error);
+          if (error instanceof SnapshotLegError && error.leg === 'transcript') {
+            fail('transcript', error);
             if (!isAuthFailure(error) && isNonRetryableClientError(error))
-              stop(error, 'transcript');
-          } else if (failed(error)) {
+              stop('transcript', error);
+          } else if (failed(error, 'session')) {
             endedRef.current = true;
             return;
           }
@@ -288,7 +306,6 @@ export function useManagedSession(
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
-              error: undefined,
             }));
           }
           if (gap) {
@@ -298,18 +315,20 @@ export function useManagedSession(
               if (head > lastEventId) {
                 lastEventId = head;
                 gapStalls = 0;
+                retire('stream');
               } else {
                 // A resync that cannot advance the cursor replays its
                 // trigger identically: slow to the normal cadence, and
                 // after a few stalls surface an error instead of spinning.
-                // The resync's setState clears error each pass, so re-assert
-                // on every stall — that keeps the banner up for the whole
-                // stall and clears a transient error once resyncs succeed
-                // again.
+                // The stall record lives in the stream leg's own slot, so
+                // re-asserting on every stall keeps the banner up for the
+                // whole stall, and a resync that advances the cursor retires
+                // it.
                 gapStalls += 1;
                 delayMs = BASE_RETRY_DELAY_MS;
                 if (gapStalls >= 3)
                   fail(
+                    'stream',
                     new Error(
                       'Managed Agent event stream is not advancing; retrying',
                     ),
@@ -321,9 +340,7 @@ export function useManagedSession(
               // its own ladder.
               failed(
                 error,
-                (error as { snapshotLeg?: string }).snapshotLeg === 'transcript'
-                  ? 'transcript'
-                  : 'session',
+                error instanceof SnapshotLegError ? error.leg : 'session',
               );
               delayMs = failureRetryDelayMs(snapshotFailures++);
             }
@@ -336,16 +353,16 @@ export function useManagedSession(
               update({ summary: await provider.getSession(sessionId, opts) });
               retire('session');
             } catch (error) {
-              failed(error);
+              failed(error, 'session');
             }
             delayMs = BASE_RETRY_DELAY_MS;
           }
           failures = 0;
         } catch (error) {
-          // The event log's own answer is a transcript-leg verdict and is
+          // The event log's own answer is a stream-leg verdict and is
           // recorded rather than killing the loop outright: reconnects keep
-          // coming on the ladder.
-          failed(error, 'transcript');
+          // coming on the ladder, and an advancing resync retires it.
+          failed(error, 'stream');
           // Any delivered frame, or a connection that simply lived long
           // enough, proves the path healthy; only back-to-back failures
           // with nothing delivered should stretch the ladder.
@@ -370,7 +387,7 @@ export function useManagedSession(
           // keeps this loop alive on its ladder: the summary that froze a
           // genuinely dead session stays retired only while no read ever
           // succeeds again, and a daemon restart or proxy blip heals.
-          failed(error);
+          failed(error, 'session');
           failures++;
         }
       }
@@ -421,9 +438,14 @@ export function useManagedSession(
           ...current,
           events: mergeManagedEvents(current.events, page.events),
           olderCursor: page.olderCursor,
-          error: undefined,
-          ...(current.stoppedLeg === 'transcript'
-            ? { stoppedReason: undefined, stoppedLeg: undefined }
+          ...(current.signals?.transcript
+            ? {
+                signals: (() => {
+                  const rest = { ...current.signals };
+                  delete rest.transcript;
+                  return rest;
+                })(),
+              }
             : {}),
         }));
       } catch (error) {
@@ -435,9 +457,20 @@ export function useManagedSession(
           if (moved !== undefined && allowRetry) return fetchPage(moved, false);
           return;
         }
+        // A failed click is a transcript-leg read failing; record it there
+        // so the next successful page or resync retires it.
+        const message = error instanceof Error ? error.message : String(error);
         setState((current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          signals: {
+            ...(current.signals ?? {}),
+            transcript: {
+              leg: 'transcript',
+              message,
+              final: false,
+              seq: ++seqRef.current,
+            },
+          },
         }));
       }
     };
@@ -452,5 +485,18 @@ export function useManagedSession(
     state.sessionId === sessionId
       ? state
       : { events: [], loading: Boolean(sessionId) };
-  return { ...visible, loadingOlder, loadOlder, reload };
+  const entries = Object.values(visible.signals ?? {});
+  const newestFinal = entries
+    .filter((entry) => entry.final)
+    .sort((a, b) => b.seq - a.seq)[0];
+  const newest = entries.sort((a, b) => b.seq - a.seq)[0];
+  return {
+    ...visible,
+    stoppedReason: newestFinal?.message,
+    stoppedLeg: newestFinal?.leg,
+    error: newest?.final ? undefined : newest?.message,
+    loadingOlder,
+    loadOlder,
+    reload,
+  };
 }
