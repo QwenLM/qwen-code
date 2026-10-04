@@ -2292,10 +2292,13 @@ export class QQChannel extends ChannelBase {
           // re-stashed, so those characters are preserved, not dropped, and
           // counting them would report the payload as lost while the operator
           // still receives it. Only the in-flight text beyond the captured
-          // residual is genuinely lost in that branch.
+          // residual is genuinely lost in that branch. Gated on ownsSession
+          // like the handoff itself: an unowned entry's seal is dropped (and
+          // logged) by handOffSealedPre, so its whole payload is a real loss.
           const payloadFoldedIntoSeal =
             state.boundaryClearedInFlight !== undefined &&
-            this.ownsLiveTurn(sessionId, state);
+            this.ownsLiveTurn(sessionId, state) &&
+            this.ownsSession(sessionId, state);
           // The else arm of the handoff below preserves the seal this send
           // carried: the payload's own head when the drain folded the stash's
           // `pre` in front of its text (a boundary between a chunk and the idle

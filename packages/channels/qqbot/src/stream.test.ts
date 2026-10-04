@@ -7763,6 +7763,67 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
+  it('charges an unowned session the whole payload it cannot hand off', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // A chunk is sealed by a boundary and then sent by the idle flush, whose
+    // send is left in flight. A second boundary clears that payload from the
+    // bridge's collection while it is in the air, so the entry records the
+    // payload itself as cleared in flight.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    const deadTurn = (chp['streamState'] as Map<string, { turn: number }>).get(
+      's1',
+    )!.turn;
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    onResponseBoundary(ch, 'test-chat', 's1');
+
+    // The session dies while that send is in flight, and a fresh prompt
+    // restarts the turn counter at the same number — so the dead entry still
+    // passes the live-turn check while owning no session at all.
+    ch.onSessionDied('s1');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    expect((chp['turnCounter'] as Map<string, number>).get('s1')).toBe(
+      deadTurn,
+    );
+
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    const logged = calls.join('');
+    const failureLine = calls.find((line) =>
+      line.includes('delivery failed (RETRY_EXHAUSTED)'),
+    );
+    // Nothing can consume the seal an unowned session carries, so all 4 chars
+    // are a real loss. The accounting line must charge them and must not claim
+    // the handoff preserves them: the seal is dropped on the line after.
+    expect(failureLine).toMatch(/dropping 4 chars\n$/);
+    expect(failureLine).not.toContain('preserved in the handoff seal');
+    expect(logged).not.toContain('chars preserved in the handoff seal');
+    // The dead entry's buffer was empty, so the in-flight term stays zero: the
+    // same characters are not charged twice inside the line.
+    expect(failureLine).not.toContain('buffered in flight');
+    expect(logged).toContain(
+      'dropping 4 chars of sealed head for unowned session s1',
+    );
+
+    stderrSpy.mockRestore();
+  });
+
   it('does not re-arm a live idle timer on a response boundary', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
