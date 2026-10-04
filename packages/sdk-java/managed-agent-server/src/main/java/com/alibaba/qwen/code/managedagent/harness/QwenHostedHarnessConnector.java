@@ -25,6 +25,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
@@ -42,6 +43,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final Set<AttachmentKey> pendingRecovery =
             ConcurrentHashMap.newKeySet();
     private final Map<AttachmentKey, HarnessSessionRef> attachments =
+            new ConcurrentHashMap<>();
+    // Single flight for the first attachment of a Session. computeIfAbsent
+    // would run the blocking Harness call under the map bin monitor, which
+    // pins the caller virtual thread to its carrier on JDK 21.
+    private final Map<AttachmentKey, ReentrantLock> attachmentLocks =
             new ConcurrentHashMap<>();
 
     public QwenHostedHarnessConnector(ManagedAgentProperties properties,
@@ -131,10 +137,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attached = passiveManagedRuntimeRecovery
-                ? load(session, true)
-                : attachments.computeIfAbsent(key, ignored -> loadExisting
-                        ? load(session, false)
-                        : create(session));
+                ? load(session, true) : attachments.get(key);
+        if (attached == null) {
+            ReentrantLock lock = attachmentLocks.computeIfAbsent(key,
+                    ignored -> new ReentrantLock());
+            lock.lock();
+            try {
+                attached = attachments.get(key);
+                if (attached == null) {
+                    attached = loadExisting ? load(session, false)
+                            : create(session);
+                    attachments.put(key, attached);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
         if (session.workspace() != null
                 && !actions.approvalMode(tenantId, sessionId).equals(attached.getApprovalMode())) {
             attachments.remove(key);
