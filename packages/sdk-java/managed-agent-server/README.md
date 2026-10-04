@@ -604,14 +604,28 @@ The stock image contains the Java control plane only. Use the static Runtime
 provisioner, or provide a derived image/mount with Node.js and the Qwen worker
 artifacts, before enabling the local-process provisioner in a container.
 
-The image exports both listeners on `0.0.0.0` (`-p` DNATs to the container's
-bridge IP, so a loopback listener is unreachable), which makes the
-authentication consequence load-bearing: there is no HTTP authentication —
-tenancy is whatever `X-Qwen-Tenant-Id` says — so publishing a port with
-`docker run -p` exposes the tenant-scoped API to anything that can route to
-it. Map ports only inside your own network policy (or put the image behind a
-tenant-authenticating gateway); a plain `docker run -p 8080:8080` on a shared
-host is publishing that surface to every interface on it.
+The image keeps the application's `127.0.0.1` defaults, so a plain
+`docker run -p 8080:8080` publishes nothing: `-p` DNATs to the container's
+bridge IP, and a loopback listener is unreachable through it. Publishing is
+an explicit opt-in:
+
+```bash
+docker run -p 8080:8080 \
+  -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+  -e QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0 \
+  <image>
+```
+
+The opt-in makes the authentication consequence load-bearing: there is no
+HTTP authentication — tenancy is whatever `X-Qwen-Tenant-Id` says — so the
+tenant-scoped API is exposed to anything that can route to the listener.
+That exposure does not depend on publishing a port: on the default bridge
+network the API also answers on the container's own bridge address, so
+every process on the Docker host and every peer container on that bridge
+can reach it with no `-p` at all. Run a published deployment behind an
+ingress that authenticates the tenant before setting `X-Qwen-Tenant-Id`,
+map ports only inside your own network policy, and attach the container
+only to networks whose peers you trust.
 
 ## Managed Session Store verification
 

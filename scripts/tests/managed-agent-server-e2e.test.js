@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import {
   createSourceFile,
@@ -30,11 +30,35 @@ const namedScripts = (text) => [
 ];
 
 describe('managed-agent-server e2e runner', () => {
-  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
-    const { outputText } = transpileModule(
-      extracted(['freePort', 'startHeldExecutionStartProxy', 'allocatedPorts']),
-      { compilerOptions: { target: ScriptTarget.ES2022 } },
+  const extracted = (names) => {
+    const source = createSourceFile(
+      'runner.ts',
+      read('scripts/run-managed-agent-server-e2e.ts'),
+      ScriptTarget.Latest,
+      true,
     );
+    const text = source.statements
+      .filter(
+        (node) =>
+          (isFunctionDeclaration(node) && names.includes(node.name?.text)) ||
+          (isVariableStatement(node) &&
+            node.declarationList.declarations.some((declaration) =>
+              names.includes(declaration.name.getText(source)),
+            )),
+      )
+      .map((node) => node.getText(source))
+      .join('\n');
+    return transpileModule(text, {
+      compilerOptions: { target: ScriptTarget.ES2022 },
+    }).outputText;
+  };
+
+  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
+    const outputText = extracted([
+      'freePort',
+      'startHeldExecutionStartProxy',
+      'allocatedPorts',
+    ]);
     const sequence = [
       33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
       36417, 36418, 36419,
@@ -221,32 +245,9 @@ describe('managed-agent-server e2e runner', () => {
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
   });
 
-  const extracted = (names) => {
-    const source = createSourceFile(
-      'runner.ts',
-      read('scripts/run-managed-agent-server-e2e.ts'),
-      ScriptTarget.Latest,
-      true,
-    );
-    const text = source.statements
-      .filter(
-        (node) =>
-          (isFunctionDeclaration(node) && names.includes(node.name?.text)) ||
-          (isVariableStatement(node) &&
-            node.declarationList.declarations.some((declaration) =>
-              names.includes(declaration.name.getText(source)),
-            )),
-      )
-      .map((node) => node.getText(source))
-      .join('\n');
-    return transpileModule(text, {
-      compilerOptions: { target: ScriptTarget.ES2022 },
-    }).outputText;
-  };
-
   it('waitUntil surfaces the last predicate error', async () => {
     const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal'])}\nreturn { waitUntil };`,
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
     )();
     await expect(
       waitUntil(
@@ -259,13 +260,93 @@ describe('managed-agent-server e2e runner', () => {
 
   it('waitUntil bounds a stalled iteration by the deadline', async () => {
     const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal'])}\nreturn { waitUntil };`,
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
     )();
     const started = Date.now();
     await expect(
-      waitUntil('stalled', () => new Promise(() => {}), 300),
-    ).rejects.toThrow(/stalled|did not become ready/);
+      waitUntil('probe', () => new Promise(() => {}), 300),
+    ).rejects.toThrow(/predicate stalled/);
     // A hung predicate used to outlive timeoutMs several-fold.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  // waitUntil calls childExited, so every extraction of it must name the
+  // predicate: a free identifier in generated code resolves against the
+  // global scope, and the early-exit branch would die with a ReferenceError
+  // that points at the runner instead of at this harness's extraction list.
+  it('waitUntil reports a child that exited early', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
+    )();
+    await expect(
+      waitUntil('probe', () => new Promise(() => {}), 300, {
+        child: { exitCode: 1, signalCode: null },
+        log: () => '',
+      }),
+    ).rejects.toThrow(/exited early/);
+  });
+
+  // A rejecting-then-hanging predicate must surface the real error, not the
+  // synthetic stall metadata the race rejects with on later iterations.
+  it('waitUntil keeps a real predicate error when a later iteration stalls', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
+    )();
+    let calls = 0;
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        calls++ === 0
+          ? Promise.reject(
+              new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+            )
+          : new Promise(() => {}),
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain('ECONNREFUSED');
+    expect(failure.message).not.toContain('predicate stalled');
+  });
+
+  // The mirror: once the predicate answers falsy, a connectivity error from
+  // an earlier phase no longer describes the state the deadline found.
+  it('waitUntil drops an error that later answered iterations supersede', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
+    )();
+    let calls = 0;
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        calls++ === 0
+          ? Promise.reject(
+              new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+            )
+          : false,
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain('did not become ready');
+    expect(failure.message).not.toContain('ECONNREFUSED');
+  });
+
+  // spawnSync blocks the event loop, so the stall race cannot bound a
+  // synchronous predicate: the remaining budget is handed to the predicate
+  // for its own probe timeout, and wall time must stay near the budget
+  // rather than near budget + a site-local probe timeout.
+  it('waitUntil threads the remaining budget into a synchronous predicate', async () => {
+    const { waitUntil } = new Function(
+      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
+    )();
+    const started = Date.now();
+    await expect(
+      waitUntil(
+        'probe',
+        (remainingMs) =>
+          spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 5_000)'], {
+            timeout: remainingMs,
+          }).status === 0,
+        300,
+      ),
+    ).rejects.toThrow(/did not become ready/);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
@@ -300,6 +381,57 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.match(/--no-defaults/g)).toHaveLength(4);
   });
 
+  // A timed-out spawn sets error and leaves status null with empty stderr,
+  // so a status-only check throws "MySQL command failed: " and the one
+  // diagnostic a wedged durable-state dump exists to produce is lost.
+  it('runMysql surfaces the spawn-level reason on a timeout', () => {
+    const { runMysql } = new Function(
+      'spawnSync',
+      'mysql',
+      'mysqlClientHome',
+      `${extracted(['runMysql'])}\nreturn { runMysql };`,
+    )(
+      () => ({
+        status: null,
+        signal: 'SIGTERM',
+        stderr: '',
+        error: new Error('spawnSync mysql ETIMEDOUT'),
+      }),
+      'mysql',
+      '/tmp/mysql-client-home',
+    );
+    expect(() => runMysql(3306, 'SELECT 1')).toThrow(/ETIMEDOUT/);
+  });
+
+  // --no-defaults does not disable $HOME/.mylogin.cnf, so a developer's
+  // mysql_config_editor credential would still auth-connect to the scratch
+  // empty-password server. Both client invocations — the mysql client in
+  // runMysql and the mysqladmin readiness probe — run against an isolated
+  // empty HOME under the runner's one scratch root, so the finally reclaims
+  // it; the two mysqld server launches deliberately keep the real HOME.
+  it('isolates the MySQL client HOME under the runner scratch root', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain("path.join(temporary, 'mysql-client-home')");
+    expect(
+      source.match(/HOME: mysqlClientHome/g),
+      'the mysql client and the mysqladmin probe must both use the isolated HOME',
+    ).toHaveLength(2);
+  });
+
+  // spawnSync blocks the event loop, so waitUntil's race cannot bound a
+  // synchronous probe: the mysqladmin readiness probe carries its own
+  // timeout, and the two lease polls derive each call's timeout from the
+  // remaining waitUntil budget rather than a site-local constant that can
+  // overshoot the declared budget several-fold.
+  it('bounds every synchronous MySQL probe by the poll budget', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
+    expect(
+      source.match(/\(remainingMs\) =>\s*runMysql\(/g),
+      'both lease polls must derive the probe timeout from the waitUntil budget',
+    ).toHaveLength(2);
+  });
+
   it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
     expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
@@ -325,31 +457,62 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('resolves the project version from the real pom', () => {
-    // The regex and its throw execute end-to-end — not just as greps. A
-    // whitespace change between <artifactId> and <version> or a
-    // ${revision} indirection must surface here, not at the next local
-    // run of the script.
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml');
-    const match = pom.match(
-      /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>([^<]+)<\/version>/,
+    // The runner's own regex executes against the real pom — lifted from
+    // the runner source, not copied — so a whitespace change between
+    // <artifactId> and <version> or a ${revision} indirection surfaces
+    // here, not at the next local run of the script. A routine version
+    // bump must stay green: pin the shape the runner depends on (the match
+    // anchored at the module's own artifactId and a concrete, non-property
+    // version), never today's value.
+    const script = read('scripts/run-managed-agent-server-e2e.ts');
+    const patternSource = script.match(
+      /pomXml\.match\(\s*(\/(?:\\.|[^\\/])*\/)/,
+    )?.[1];
+    expect(patternSource).toBeTruthy();
+    const pattern = new Function(`return ${patternSource};`)();
+    const match = read('packages/sdk-java/managed-agent-server/pom.xml').match(
+      pattern,
     );
-    expect(match?.[1]).toBe('0.1.0-alpha');
+    expect(match?.[0]).toContain(
+      '<artifactId>qwen-managed-agent-server</artifactId>',
+    );
+    expect(match?.[1]).toBeTruthy();
+    expect(match?.[1]).not.toContain('${');
+    // The descriptive throw stays part of the lookup: a pom whose version
+    // the regex cannot read must fail there, not at the jar existsSync.
+    expect(script).toContain('Could not read the project <version>');
   });
 
-  it('keeps the published bind and jar guard explicit and loud', () => {
+  it('keeps the image on the loopback default and the jar guard loud', () => {
     const dockerfile = read(
       'packages/sdk-java/managed-agent-server/Dockerfile',
     );
-    // A loopback-only image makes \u0060docker run -p\u0060 a no-op; the shipped
-    // default must stay explicit — and the cardinality guard loud, so the
-    // image fails loudly rather than shipping a wrong or glob-stat jar.
-    expect(dockerfile).toContain('QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
-    expect(dockerfile).toContain(
-      'QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0',
+    // The module has no HTTP authentication, so the published image must
+    // not bind beyond loopback by default: publishing is the operator's
+    // explicit -e opt-in at docker run, documented in the README's
+    // container section. The cardinality guard stays loud, so the build
+    // fails rather than shipping a wrong or glob-stat jar.
+    expect(dockerfile).not.toMatch(/^ENV\s+QWEN_MANAGED_AGENT_SERVER_ADDRESS/m);
+    expect(dockerfile).not.toMatch(
+      /^ENV\s+QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST/m,
     );
     expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
     expect(dockerfile).toContain(
       'expected exactly one unclassified server jar',
     );
+    // Host Maven output must not ride the build context into the stage the
+    // guard inspects: a stale jar from a developer's target/ would trip the
+    // cardinality check with an artifact this build did not produce. Both
+    // spellings — a bare `target` is root-anchored under Docker's pattern
+    // syntax.
+    const dockerignore = read('.dockerignore');
+    expect(dockerignore).toMatch(/^target$/m);
+    expect(dockerignore).toMatch(/^\*\*\/target$/m);
+    // The container section must document the opt-in and name the
+    // default-bridge exposure, or an operator who skips -p concludes the
+    // surface is closed.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    expect(readme).toContain('-e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
+    expect(readme).toMatch(/with no `-p` at all/);
   });
 });

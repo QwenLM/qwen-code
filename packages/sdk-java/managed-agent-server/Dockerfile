@@ -44,12 +44,13 @@ WORKDIR /app
 COPY --from=build /tmp/qwen-managed-agent-server.jar \
   /app/qwen-managed-agent-server.jar
 
-# A published image must listen beyond loopback for -p to work; the
-# application.yml loopback defaults stay host-appropriate. The API has no
-# HTTP authentication — tenancy is whatever X-Qwen-Tenant-Id says — so map
-# -p only inside your own network policy (see README, container section).
-ENV QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
-    QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0
+# The image keeps the application.yml loopback defaults: the API has no
+# HTTP authentication — tenancy is whatever X-Qwen-Tenant-Id says — so a
+# plain `docker run -p 8080:8080` must not publish it. Publishing is an
+# explicit operator opt-in (see the README's container section):
+#   docker run -p 8080:8080 \
+#     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+#     -e QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0 <image>
 
 EXPOSE 8080 4182
 USER 10001

@@ -538,12 +538,15 @@ async function startHeldExecutionStartProxy(
 
 async function waitUntil(
   name: string,
-  predicate: () => Promise<boolean> | boolean,
+  predicate: (remainingMs: number) => Promise<boolean> | boolean,
   timeoutMs: number,
   child?: Child,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
+  // Identity, not text: matching the rendered message would let a reworded
+  // sentinel silently invert the error precedence in the catch below.
+  const stall = new Error(`${name} predicate stalled`);
   while (Date.now() < deadline) {
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     if (child && childExited(child.child)) {
@@ -554,31 +557,37 @@ async function waitUntil(
       // predicate must not outlive timeoutMs, and its last error must
       // surface instead of vanishing into "did not become ready". unref the
       // stall timer: a quick success must not keep the event loop (and this
-      // runner) alive until the discarded timeout fires.
+      // runner) alive until the discarded timeout fires. The race bounds
+      // only an asynchronous predicate — a synchronous one blocks the event
+      // loop, so the remaining budget is handed to the predicate for its
+      // own probe timeout.
       const ready = await Promise.race([
-        Promise.resolve().then(predicate),
+        Promise.resolve().then(() =>
+          predicate(Math.max(1, deadline - Date.now())),
+        ),
         new Promise<boolean>((_, reject) => {
           const stallTimer = setTimeout(
-            () => reject(new Error(`${name} predicate stalled`)),
+            () => reject(stall),
             Math.max(1, deadline - Date.now()),
           );
           stallTimer.unref();
         }),
       ]);
       if (ready) return;
+      // The predicate answered; an error from an earlier phase no longer
+      // describes the state the deadline found.
+      lastError = undefined;
     } catch (error) {
-      // The synthetic stall rejection is timing metadata, not a cause:
-      // never let it overwrite a real predicate error. Prefer the cause an
-      // undici fetch rejection carries (its own message is "fetch failed").
-      if (
-        !(
-          error instanceof Error && error.message.endsWith(' predicate stalled')
-        )
-      ) {
-        lastError =
-          error instanceof Error && error.cause instanceof Error
-            ? error.cause
-            : error;
+      // Prefer the cause an undici fetch rejection carries (its own message
+      // is "fetch failed"). A real predicate error wins over the synthetic
+      // stall, which is timing metadata recorded only when nothing better
+      // was seen.
+      if (error instanceof Error && error.cause instanceof Error) {
+        lastError = error.cause;
+      } else if (error !== stall) {
+        lastError = error;
+      } else if (lastError === undefined) {
+        lastError = error;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -593,12 +602,13 @@ async function waitUntil(
 // so a mysql_config_editor credential on a developer's machine would
 // silently auth-connect to the scratch empty-password server. Client
 // invocations run against an isolated empty HOME instead of inheriting
-// the real one.
-const mysqlClientHome = mkdtempSync(
-  path.join(tmpdir(), 'qwen-e2e-mysql-home-'),
-);
+// the real one. The directory hangs off the runner's one scratch root, so
+// the finally reclaims it and QWEN_MANAGED_E2E_KEEP_TMP=1 keeps it for
+// inspection.
+const mysqlClientHome = path.join(temporary, 'mysql-client-home');
+mkdirSync(mysqlClientHome, { recursive: true });
 
-function runMysql(port: number, sql: string): string {
+function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
   const result = spawnSync(
     mysql,
     [
@@ -617,9 +627,15 @@ function runMysql(port: number, sql: string): string {
     {
       encoding: 'utf8',
       env: { ...process.env, HOME: mysqlClientHome },
-      timeout: 10_000,
+      timeout: timeoutMs,
     },
   );
+  // A timed-out spawn sets error and leaves status null with empty stderr:
+  // surface the spawn-level reason, or a wedge reads as a bare
+  // "MySQL command failed: ".
+  if (result.error) {
+    throw new Error(`MySQL command failed: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     throw new Error(`MySQL command failed: ${result.stderr}`);
   }
@@ -1223,20 +1239,22 @@ try {
     rmSync(runtimeHome, { recursive: true, force: true });
     await waitUntil(
       'Managed Session writer lease expiry',
-      () =>
+      (remainingMs) =>
         runMysql(
           mysqlPort,
           `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+          remainingMs,
         ) === '1',
       10_000,
     );
     if (inflightFailover || continuationFailover) {
       await waitUntil(
         'Managed Turn dispatch lease expiry',
-        () =>
+        (remainingMs) =>
           runMysql(
             mysqlPort,
             `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.managed_agent_turn WHERE ${sessionFilter}`,
+            remainingMs,
           ) === '1',
         10_000,
       );
