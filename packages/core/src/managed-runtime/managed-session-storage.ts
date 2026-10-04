@@ -247,7 +247,7 @@ export function scanManagedSessionJournal(
         );
       }
       // The line kind is only known after the generic parse, so the
-      // stricter header cap the store contract pins applies here.
+      // record spec's stricter header cap applies here.
       if (
         Buffer.byteLength(line, 'utf8') > MANAGED_SESSION_LIMITS.maxHeaderBytes
       ) {

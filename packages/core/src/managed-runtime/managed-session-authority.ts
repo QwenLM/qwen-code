@@ -38,9 +38,12 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
+  assertManagedSessionStableId,
   assertManagedSessionTransaction,
+  boundedString,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
@@ -1319,6 +1322,7 @@ export class LocalManagedSessionAuthority {
     }
     return this.runSerial(async () => {
       assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
@@ -1393,6 +1397,7 @@ export class LocalManagedSessionAuthority {
       if (replayed !== undefined) return replayed;
       // Every refusal the caller decides runs before any body publishes.
       assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
       if (request.input !== undefined) {
         const preflight = inputEvents(
           command,
@@ -2666,6 +2671,21 @@ function assertExtensionActor(actorClass: ManagedSessionActorClass): void {
     { kind: 'domain.committed' } as ManagedSessionEvent,
     actorClass,
   );
+}
+
+/**
+ * The identity rules the commit marker will apply to the command, run
+ * before the body is published so a malformed command leaves no orphan
+ * behind. The labels name the command because it has no marker yet.
+ */
+function assertCommandIdentity(command: ManagedSessionCommand): void {
+  assertManagedSessionStableId(command.commandId, 'command.commandId');
+  boundedString(
+    command.operation,
+    'command.operation',
+    MANAGED_SESSION_LIMITS.maxTextBytes,
+  );
+  assertManagedSessionDigest(command.contentDigest, 'command.contentDigest');
 }
 
 /** Stage H revisions read ahead of the replay when a log is reopened. */

@@ -7103,7 +7103,7 @@
           "recovery_blocked"
         ],
         "x-qwen-implementation-status": "partial",
-        "description": "Logical run state. completed is terminal and is set only after the physical execution has settled; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
+        "description": "Logical run state. completed is terminal and is set when the run's own line ends settled, with or without a physical execution; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
       },
       "TaskRuntimeState": {
         "type": "string",

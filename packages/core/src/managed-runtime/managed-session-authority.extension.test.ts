@@ -590,6 +590,60 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
+  it('refuses a malformed command identity before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      // The commit marker refuses these identities too, but only after the
+      // body is published, so each retry would orphan one more body.
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:\u0001note'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      await expect(
+        authority.commitExtensionRecord(
+          command('a'.repeat(513)),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.commandId exceeds 512 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:op'), operation: 'x'.repeat(4097) },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.operation exceeds 4096 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:digest'), contentDigest: 'not-a-digest' },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.contentDigest must be a lowercase SHA-256 hex digest/,
+      );
+      await expect(
+        authority.commitDomainRecord(
+          command('rename:goal\u0001'),
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'goal' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
+    });
+  });
+
   it('refuses the actor or the input before publishing it', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -654,6 +708,37 @@ describe('managed session authority Stage H records', () => {
         TRUSTED,
       );
       expect(await publishedBodies(harness, 'managed-goal_state')).toBe(1);
+      // An accepted input commits its events once; the same input under a
+      // fresh command is refused by the preflight, before the body lands.
+      const input: ManagedSessionInputRequest = {
+        inputId: 'monitor-1:notify:1',
+        turnId: 'monitor-1:notify:1',
+        source: 'monitor',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"changed"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      };
+      await authority.commitExtensionRecord(
+        command('monitor-1:2'),
+        { domain: 'monitor_run', record: LIFE[1], input },
+        TRUSTED,
+      );
+      const bodiesAfterInput = await publishedBodies(harness);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:dup'),
+          { domain: 'monitor_run', record: LIFE[2], input },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/is already committed/);
+      expect(await publishedBodies(harness)).toBe(bodiesAfterInput);
     });
   });
 
@@ -851,7 +936,7 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/has no Stage H record body/);
-      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-schedule')).toBe(0);
       enablement.monitorRun = false;
       await expect(
         authority.commitExtensionRecord(

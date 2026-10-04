@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_EXTENSION_DELIVERY_TARGETS,
   MANAGED_EXTENSION_STATE_LINES,
@@ -29,7 +29,11 @@ import {
   type ManagedRuntimeExecutionView,
   type ManagedTaskProjection,
 } from './managed-extension-projection.js';
-import type { ManagedSessionDomain } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENABLED_DOMAINS,
+  MANAGED_SESSION_ENVELOPE_DOMAINS,
+  type ManagedSessionDomain,
+} from './managed-session-records.js';
 
 interface Revision {
   readonly occurredAt: number;
@@ -129,6 +133,44 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect([...pending].sort()).toEqual(fixtures.pendingDeliveryStates);
   });
 
+  it('partitions the enabled domains between the bodies and the envelope list', () => {
+    // Every enabled domain commits either through the envelope path (the
+    // list) or through a Stage H body. monitor_run's body is registered
+    // while its domain stays disabled, so the partition is over the
+    // enabled names only.
+    const bodied = new Set(Object.keys(MANAGED_EXTENSION_RECORD_BODIES));
+    expect(
+      MANAGED_SESSION_ENABLED_DOMAINS.filter((domain) => !bodied.has(domain)),
+    ).toEqual(MANAGED_SESSION_ENVELOPE_DOMAINS);
+  });
+
+  it('refuses to load over a body registered for an envelope domain', async () => {
+    // The tripwire runs once, at module load, over the real registry, so
+    // the test rebuilds the module graph around a registry whose envelope
+    // list names a body-bearing domain.
+    vi.resetModules();
+    vi.doMock('./managed-session-records.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./managed-session-records.js')
+      >('./managed-session-records.js');
+      return {
+        ...actual,
+        MANAGED_SESSION_ENVELOPE_DOMAINS: [
+          ...actual.MANAGED_SESSION_ENVELOPE_DOMAINS,
+          'monitor_run',
+        ],
+      };
+    });
+    try {
+      await expect(import('./managed-extension-projection.js')).rejects.toThrow(
+        /stay out of the envelope/,
+      );
+    } finally {
+      vi.doUnmock('./managed-session-records.js');
+      vi.resetModules();
+    }
+  });
+
   it('keeps every case id unique', () => {
     const lists = Object.entries(fixtures).filter(([name]) =>
       name.endsWith('Cases'),
@@ -187,6 +229,9 @@ describe('managed-extension-projection/1 fixtures', () => {
   it('settles and unbinds every run state whose line ends', () => {
     // The projection's terminal set is the run line's own: a run state
     // whose successors are empty must stamp `settledAt` and no runtime.
+    // The execution proven to have ended carries the state, so only the
+    // terminality of the line itself can force the runtime out — without
+    // it the assertion short-circuits on `execution === null`.
     for (const [state, successors] of Object.entries(
       MANAGED_EXTENSION_STATE_LINES.run.transitions,
     )) {
@@ -195,11 +240,11 @@ describe('managed-extension-projection/1 fixtures', () => {
         state,
         reason: null,
         definition: null,
-        executionCallId: null,
+        executionCallId: 'call-1',
         effectId: null,
         dispatchId: null,
         deliveryId: null,
-        execution: null,
+        execution: 'settled',
         runtime: null,
         delivery: null,
       });

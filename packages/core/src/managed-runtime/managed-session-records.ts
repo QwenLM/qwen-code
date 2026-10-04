@@ -373,7 +373,7 @@ function assertNoUnknownKeys(
   }
 }
 
-function boundedString(
+export function boundedString(
   value: ManagedSessionJsonValue | undefined,
   label: string,
   maxBytes: number,

@@ -173,7 +173,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 4. **逻辑启动与物理启动。** H0b 允许运行在执行已处于 `running_attached` 时仍停在 `admitted`，此时任务显示为 `pending`，Runtime 状态为 `ready`，且没有启动时间。收紧这条规则属于对 H0b 契约的修改。
 5. **重放的 domain 记录。** `commitDomainRecord` 会在发现命令是重放之前就发布新的正文，并返回这个正文的引用，而不是已提交的那个。`commitExtensionRecord` 先检查重放；旧方法留待单独修复。
 6. **通知唤醒。** 提交通知输入的修订也会提交对应的 `wake.requested`，但目前还没有任何消费方。托管 Session 路径在已接受的输入缺少 `turn.settled` 时拒绝重新打开 Session（`hosted_turn_recovery_required`），因此 H3 在开放会发出通知的 domain 之前，必须先运行或结算这类输入。
-7. **后续新增的正文。** Java 存储只物化它认识的正文，其他 domain 的 `domain.committed` 事件则与 H0c 之前一样直接放行。以信封路径提交记录的已开放 domain 列在 `MANAGED_SESSION_ENVELOPE_DOMAINS` 中，而正文绝不注册给它们：正文模块加载时会拒绝这种冲突，重开的 authority 则会跳过它们的注册前信封——任何封闭正文都无法解析的记录——而不是因此拒绝打开。注册下一个正文的切片承担这三项检查：这张清单、这道绊线以及这一次跳过。正文若是与自身 domain 同时发布的，正如 H1 与 H2 的记录，就无需这些迁移。若要为已经通过 `commitExtensionRecord` 提交的 domain 注册正文，仍然必须先让服务端上线，再让任何写入者提交它，或者从日志回填它的行。H0c 唯一的正文 `monitor_run` 两侧同时具备，且仍未开放。
+7. **后续新增的正文。** Java 存储只物化它认识的正文，其他 domain 的 `domain.committed` 事件则与 H0c 之前一样直接放行。以信封路径提交记录的已开放 domain 列在 `MANAGED_SESSION_ENVELOPE_DOMAINS` 中，而正文绝不注册给它们：正文模块加载时会拒绝这种冲突，重开的 authority 则会跳过它们的注册前信封——任何封闭正文都无法解析的记录——而不是因此拒绝打开。注册下一个正文的切片承担这四项检查：这张清单、这道绊线、这一次跳过，以及跳过所依赖的键不相交性——它识别的三个信封键 `operationId`、`revision` 与 `previousRecordRef` 必须始终落在每一个正文的封闭键集之外，否则重开会跳过该正文自己已提交的修订。正文若是与自身 domain 同时发布的，正如 H1 与 H2 的记录，就无需这些迁移。若要为已经通过 `commitExtensionRecord` 提交的 domain 注册正文，仍然必须先让服务端上线，再让任何写入者提交它，或者从日志回填它的行。H0c 唯一的正文 `monitor_run` 两侧同时具备，且仍未开放。
 
 ## 后续工作
 

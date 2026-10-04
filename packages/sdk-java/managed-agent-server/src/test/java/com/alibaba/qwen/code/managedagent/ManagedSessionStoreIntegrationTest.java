@@ -105,14 +105,25 @@ class ManagedSessionStoreIntegrationTest {
         }
         JsonNode tasks = written.required("tasks");
         assertThat(tasks).isNotEmpty();
+        List<String> taskFields = new ArrayList<>(
+                ManagedExtensionProjectionContractTest.PROJECTION_FIELDS);
+        // The journal task node carries the projection plus the identity
+        // fields read here, and exactly those, so a new projected column
+        // cannot reach this contract without the replay comparing it.
+        taskFields.addAll(List.of("kind", "sessionId", "taskId"));
+        taskFields.sort(null);
         for (JsonNode task : tasks) {
             TaskRow row = records.findTask(tenant, session,
                     task.required("taskId").textValue()).orElseThrow();
             assertThat(row.kind()).isEqualTo(task.required("kind")
                     .textValue());
+            List<String> names = new ArrayList<>();
+            task.fieldNames().forEachRemaining(names::add);
+            names.sort(null);
+            assertThat(names).isEqualTo(taskFields);
             ObjectNode projectionOnly = ((ObjectNode) task).deepCopy()
-                    .retain("state", "runtimeState", "definitionRevision",
-                            "createdAt", "startedAt", "settledAt");
+                    .retain(ManagedExtensionProjectionContractTest
+                            .PROJECTION_FIELDS);
             assertThat(row.projection()).isEqualTo(
                     ManagedExtensionProjectionContractTest.view(
                             projectionOnly));

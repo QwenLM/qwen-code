@@ -125,7 +125,10 @@ class ManagedExtensionProjectionContractTest {
     @Test
     void settlesEveryRunStateWhoseLineEnds() throws IOException {
         // The projection's terminal set is the run line's own: a state with
-        // no successors must stamp settledAt and no runtime state.
+        // no successors must stamp settledAt and no runtime state. The
+        // execution proven to have ended carries the state, so only the
+        // terminality of the line itself can force the runtime out —
+        // without it the assertion short-circuits on execution == null.
         ManagedExtensionRecords.TRANSITIONS.get("run").forEach((state,
                 successors) -> {
             if (!successors.isEmpty()) {
@@ -133,9 +136,9 @@ class ManagedExtensionProjectionContractTest {
             }
             JsonNode run = JSON.createObjectNode().put("state", state)
                     .putNull("reason").putNull("definition")
-                    .putNull("executionCallId").putNull("effectId")
+                    .put("executionCallId", "call-1").putNull("effectId")
                     .putNull("dispatchId").putNull("deliveryId")
-                    .putNull("execution").putNull("runtime")
+                    .put("execution", "settled").putNull("runtime")
                     .putNull("delivery");
             ManagedExtensionRecords.requireRun(run);
             TaskProjection view = ManagedExtensionProjection.project(null,
@@ -214,14 +217,18 @@ class ManagedExtensionProjectionContractTest {
                 "viewCases"), names);
     }
 
+    /** The six components the projection record carries, sorted. */
+    static final List<String> PROJECTION_FIELDS = List.of("createdAt",
+            "definitionRevision", "runtimeState", "settledAt", "startedAt",
+            "state");
+
     static TaskProjection view(JsonNode view) {
         List<String> keys = new ArrayList<>();
         view.fieldNames().forEachRemaining(keys::add);
         keys.sort(null);
         // The same six components the record carries, so a seventh fixture
         // field cannot pass unread.
-        assertEquals(List.of("createdAt", "definitionRevision",
-                "runtimeState", "settledAt", "startedAt", "state"), keys);
+        assertEquals(PROJECTION_FIELDS, keys);
         return new TaskProjection(text(view, "state"),
                 text(view, "runtimeState"),
                 view.required("definitionRevision").isNull() ? null
