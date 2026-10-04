@@ -113,12 +113,14 @@ export async function resolveAgentPersona(
       // another, wearing the first one's instructions.
       //
       // Refused rather than ignored, on the same reasoning as the rendered
-      // prompt below: an executor block on a borrowed definition is a
+      // prompt below. A workspace agent that should run elsewhere says so with
+      // `execution: { mode: 'managed-host' }` on its own record, which the
+      // dispatcher honours; an executor block on a borrowed definition is a
       // misconfiguration, and a silent one is the expensive kind.
       if (loaded.executor !== undefined) {
         return {
           status: 'unavailable',
-          error: `Agent definition "${agent.agentType}" declares an external executor, which a workspace Agent cannot use. Use a definition without an executor block.`,
+          error: `Agent definition "${agent.agentType}" declares an external executor, which a workspace Agent cannot use. Set execution.mode to "managed-host" on the Agent instead, or use a definition without an executor block.`,
         };
       }
       const runtime = await manager.convertToRuntimeConfig(loaded, config);

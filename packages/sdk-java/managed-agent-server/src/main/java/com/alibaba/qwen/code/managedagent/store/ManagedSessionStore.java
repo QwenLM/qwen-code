@@ -144,7 +144,7 @@ public class ManagedSessionStore {
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
         requireWriter(head, writer, generation, token, now, true);
-        return new PublicationWriter(now.getTime(), head.writerLeaseUntil().getTime(),
+        return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
                 head.latestCheckpointResourceId(), head.recoveryStatus());
     }
@@ -157,6 +157,12 @@ public class ManagedSessionStore {
         validateLeaseMillis(request.leaseMillis());
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
+                (row, index) -> row.getString("status"), tenantId, sessionId);
+        if (!closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
+            throw conflict("managed_session_not_writable", "The Session is closing or closed.");
+        }
         String tokenHash = tokenHash(writerToken);
         Timestamp createdAt = databaseNow();
         Timestamp initialLeaseUntil = plusMillis(createdAt,
@@ -181,7 +187,7 @@ public class ManagedSessionStore {
                     initialLeaseUntil.getNanos() / 1_000,
                     wholeSeconds(initialLeaseUntil),
                     tokenHash, createdAt, createdAt);
-            return new WriterGrant(1, initialLeaseUntil.getTime(), 0, 0,
+            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
@@ -230,7 +236,7 @@ public class ManagedSessionStore {
                 generation, request.writerId(), leaseUntil.getNanos() / 1_000,
                 wholeSeconds(leaseUntil),
                 tokenHash, now, tenantId, sessionId);
-        return new WriterGrant(generation, leaseUntil.getTime(),
+        return new WriterGrant(generation, databaseEpochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
@@ -1001,12 +1007,12 @@ public class ManagedSessionStore {
      * has not expired by database time. A Harness renews that lease while it
      * holds the Session and seals the writer when it closes the Session.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean hasLiveWriter(String tenantId, String sessionId) {
         List<Timestamp> leases = jdbc.query("SELECT writer_lease_until FROM"
                         + " qwen_managed_session_journal_head WHERE"
                         + " tenant_id = ? AND session_id = ? AND state ="
-                        + " 'ACTIVE'",
+                        + " 'ACTIVE' FOR UPDATE",
                 (result, row) -> result.getTimestamp("writer_lease_until"),
                 tenantId, sessionId);
         return !leases.isEmpty() && leases.getFirst() != null
@@ -1022,11 +1028,18 @@ public class ManagedSessionStore {
         return now;
     }
 
-    private static WriterGrant grant(HeadRow head, Timestamp leaseUntil,
+    private WriterGrant grant(HeadRow head, Timestamp leaseUntil,
             boolean replayed) {
-        return new WriterGrant(head.writerGeneration(), leaseUntil.getTime(),
+        return new WriterGrant(head.writerGeneration(), databaseEpochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
+    }
+
+    private long databaseEpochMillis(Timestamp timestamp) {
+        // DATETIME uses the database zone; keep fractions outside MariaDB's bind.
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(CAST(? AS DATETIME(6)))",
+                Long.class, wholeSeconds(timestamp)) * 1_000
+                + timestamp.getNanos() / 1_000_000;
     }
 
     private static Timestamp plusMillis(Timestamp timestamp, long millis) {

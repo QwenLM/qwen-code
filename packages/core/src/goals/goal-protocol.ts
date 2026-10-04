@@ -467,6 +467,14 @@ export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
 export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
   'The session started closing before the turn finished. Run /goal resume to continue.';
 /**
+ * A Managed session blocked after a Runtime tool call ended without a known
+ * outcome. It refuses every later turn, including a `/goal` slash command,
+ * and a Goal resumed another way pauses again at once, so this names no
+ * command to resume with.
+ */
+export const GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED =
+  'The session is blocked because a Runtime tool call ended without a known outcome, so no Goal turn can run in it.';
+/**
  * A headless run that ended while its Goal was still going. It is not a
  * failure, and it must not tell the reader to run a slash command in a
  * process that has already exited.
