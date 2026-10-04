@@ -345,6 +345,10 @@ class Issue13181QueryBudgetTest {
                 .materializeNextBatch(tenant, sessionId, 200));
         assertThat(fixture.ledger.count("update managed_agent_snapshot set"))
                 .isZero();
+        // The empty tick — the scheduler's hottest path — is pinned whole:
+        // the event read, the session lock, the progress lock, and the
+        // snapshot read.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.
@@ -857,8 +861,8 @@ class Issue13181QueryBudgetTest {
                 null, 10);
         // The published contract: the cursor-less page serves every event
         // after the snapshot, so the stream can resume at the reported
-        // watermark with no band left unserved; the tail read pages the
-        // events table in bounded reads (two pages for 150 events).
+        // watermark with no band left unserved; the tail is one read sized
+        // by the snapshot gate's lag bound.
         assertThat(transcript.events().stream()
                 .filter(event -> event.sequence()
                         > transcript.coveredSequence())
@@ -869,7 +873,45 @@ class Issue13181QueryBudgetTest {
         assertThat(transcript.olderCursor()).isNull();
         assertThat(transcript.lastSequence()).isEqualTo(lastSequence);
         assertThat(fixture.ledger.count("from managed_agent_event",
-                "sequence_id >")).isEqualTo(2);
+                "sequence_id >")).isEqualTo(1);
+    }
+
+    @Test
+    void aMaximallyLaggingSnapshotTailIsOneRead() {
+        Fixture fixture = new Fixture();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = fixture.store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "lag-" + UUID.randomUUID(), "digest",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        for (int index = 0; index < 5; index++) {
+            fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
+                    "turn-1", "item.tool_call.updated",
+                    Map.of("callId", "call-" + index, "status", "completed"),
+                    false, "lag-" + index);
+        }
+        fixture.tx.executeWithoutResult(status -> fixture.store
+                .materializeNextBatch(tenant, sessionId, 100));
+        long covered = fixture.store
+                .findSnapshotCoveredSequences(tenant, List.of(sessionId))
+                .getOrDefault(sessionId, 0L);
+        // The gate's lag ceiling: 999 events appended, none materialized.
+        for (int index = 0; index < 999; index++) {
+            fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
+                    "turn-1", "item.tool_call.updated",
+                    Map.of("callId", "call-b-" + index, "status",
+                            "completed"),
+                    false, "lag-b-" + index);
+        }
+        fixture.ledger.reset();
+        var transcript = fixture.service.transcript(tenant, null, sessionId,
+                null, 10);
+        // The full 999-event tail is served, in one event read.
+        assertThat(transcript.events().stream()
+                .filter(event -> event.sequence() > covered).count())
+                .isEqualTo(999);
+        assertThat(transcript.hasMore()).isFalse();
+        assertThat(fixture.ledger.count("from managed_agent_event",
+                "sequence_id >")).isEqualTo(1);
     }
 
     @Test

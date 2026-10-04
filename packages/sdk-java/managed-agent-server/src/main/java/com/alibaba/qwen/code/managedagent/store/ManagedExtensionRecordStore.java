@@ -187,6 +187,13 @@ public class ManagedExtensionRecordStore {
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
+        // Every event line must be scoped to the committing Session — the
+        // closed-key check both read paths enforce applies at write time
+        // too, so a misscoped line never enters the journal at all.
+        JsonNode sessionScope = JSON.createObjectNode()
+                .put("tenantId", tenantId)
+                .put("workspaceId", workspaceId)
+                .put("sessionId", sessionId);
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
             if (record == null) {
@@ -202,23 +209,22 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
+            // requireEnvelope owns the domain.committed lines (its
+            // closed-shape and scope messages are pinned by name); every
+            // other enveloped event line gets the closed-key check here. A
+            // bare event-subtype line with no envelope is inert — it carries
+            // no evidence anywhere — and stays tolerated.
+            if (event.isObject()
+                    && !"domain.committed".equals(event.path("kind")
+                            .textValue())) {
+                require(event.path("v").asInt() == 1
+                        && sessionScope.equals(event.path("sessionKey")),
+                        "Journal event scope conflicts");
+            }
             if ("activation.changed".equals(event.path("kind")
                     .textValue())) {
                 require(index < eventCount,
                         "Activation change has an invalid journal position");
-                // The capture writes durable authorization state, so it
-                // applies the same scope check both read paths enforce —
-                // a line naming another Session is refused, not promoted.
-                // The read paths compare against the contract-closed key
-                // (exactly the three fields), so this compares against a
-                // closed key too: an extra-fielded key reads as foreign.
-                JsonNode expected = JSON.createObjectNode()
-                        .put("tenantId", tenantId)
-                        .put("workspaceId", workspaceId)
-                        .put("sessionId", sessionId);
-                require(event.path("v").asInt() == 1
-                        && expected.equals(event.path("sessionKey")),
-                        "Journal event scope conflicts");
                 lastActivation = payload;
             }
             if ("tool.receipt".equals(event.path("kind").asText())) {

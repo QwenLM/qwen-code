@@ -1390,37 +1390,105 @@ class ToolPublicationStoreTest {
     }
 
     // A journal line scoped to another Session (or a version the reader
-    // does not know) must not serve as publication evidence.
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void foreignScopedIntentLinesAreFenced(boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    // does not know) must not serve as publication evidence; the commit
+    // side refuses to write it in the first place.
+    @Test
+    void foreignScopedIntentLinesAreRejectedAtCommit() {
         ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2")
                 .put("outcomeSource", "runtime");
         intent.set("argsRef", binding.get("argsRef"));
         JsonNode foreignKey = JSON.createObjectNode().put("tenantId", "tenant-1")
                 .put("workspaceId", "workspace-1").put("sessionId", "session-9");
-        ObjectNode second = addSecondExecutionWith(
-                event(3, "tool.intent", intent, foreignKey, 1) + "{}\n");
-        ObjectNode candidate = request("reserve");
-        candidate.set("binding", second);
-        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+        assertThatThrownBy(() -> addSecondExecutionWith(
+                event(3, "tool.intent", intent, foreignKey, 1) + "{}\n"))
                 .hasMessageContaining("Journal event scope conflicts");
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void unknownVersionIntentLinesAreFenced(boolean journalHeadAuthorization) {
-        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+    @Test
+    void unknownVersionIntentLinesAreRejectedAtCommit() {
         ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2")
                 .put("outcomeSource", "runtime");
         intent.set("argsRef", binding.get("argsRef"));
-        ObjectNode second = addSecondExecutionWith(
-                event(3, "tool.intent", intent, binding.get("sessionKey"), 2) + "{}\n");
-        ObjectNode candidate = request("reserve");
-        candidate.set("binding", second);
-        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+        assertThatThrownBy(() -> addSecondExecutionWith(
+                event(3, "tool.intent", intent, binding.get("sessionKey"), 2) + "{}\n"))
                 .hasMessageContaining("Journal event scope conflicts");
+    }
+
+    // A pre-existing journal (written before the commit-side check) with a
+    // misscoped activation line must not be promoted into the trusted head
+    // columns by either authorization path.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aForeignScopedActivationInAPreExistingJournalIsNotPromoted(
+            boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        reserve();
+        // Simulate the pre-existing poison: the stored activation line
+        // names another Session.
+        byte[] record = jdbc.queryForObject("SELECT record_bytes FROM"
+                + " qwen_managed_session_journal_tx WHERE tenant_id = 'tenant-1'"
+                + " AND session_id = 'session-1' AND journal_revision = 2",
+                byte[].class);
+        String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
+        StringBuilder poisoned = new StringBuilder();
+        for (String line : lines) {
+            if (line.contains("activation.changed")) {
+                line = line.replace("\"sessionId\":\"session-1\"",
+                        "\"sessionId\":\"session-9\"");
+            }
+            poisoned.append(line).append("\n");
+        }
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?"
+                + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
+                + " AND journal_revision = 2",
+                poisoned.toString().getBytes(StandardCharsets.UTF_8));
+        // A cold head forces both flag settings through the journal scan.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                + " activation_id = NULL, activation_phase = NULL,"
+                + " activation_event_epoch = NULL, activation_expires_at = NULL,"
+                + " activation_head_revision = NULL");
+        assertThatThrownBy(() -> store.verifyDispatch(
+                executions.findByExecutionCallId("execution-1"), "pub-1",
+                PUBLICATION_TOKEN))
+                .hasMessageContaining("Journal event scope conflicts");
+        assertThat(jdbc.queryForObject("SELECT activation_id FROM"
+                        + " qwen_managed_session_journal_head", String.class))
+                .isNull();
+    }
+
+    // The discriminating position: a misscoped line ABOVE the intent is
+    // parsed by the legacy walk and refused; the warm head path never
+    // re-reads it — the accepted §9 residual, narrowed by the commit-side
+    // check to journals written before this change.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aForeignScopedLineAboveTheIntentIsRefusedByTheLegacyScan(
+            boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        reserve();
+        append("tool.wait", event(3, "checkpoint.saved", JSON.createObjectNode()) + "{}\n", 1,
+                List.of(), null);
+        byte[] record = jdbc.queryForObject("SELECT record_bytes FROM"
+                + " qwen_managed_session_journal_tx WHERE tenant_id = 'tenant-1'"
+                + " AND session_id = 'session-1' AND journal_revision = 3",
+                byte[].class);
+        String poisoned = new String(record, StandardCharsets.UTF_8)
+                .replace("\"sessionId\":\"session-1\"", "\"sessionId\":\"session-9\"");
+        // The walk's digest verification still sees a consistent row.
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?,"
+                + " record_digest = ?"
+                + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
+                + " AND journal_revision = 3",
+                poisoned.getBytes(StandardCharsets.UTF_8), digest(poisoned));
+        if (journalHeadAuthorization) {
+            // The warm head path answers from the head columns and never
+            // re-parses the intermediate revision — the §9 residual.
+            store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN);
+        } else {
+            assertThatThrownBy(() -> store.apply(request("renew"),
+                    WRITER_TOKEN, PUBLICATION_TOKEN))
+                    .hasMessageContaining("Journal event scope conflicts");
+        }
     }
 
     @Test
@@ -1433,7 +1501,11 @@ class ToolPublicationStoreTest {
         jdbc.update("DELETE FROM qwen_managed_session_journal_tx WHERE tenant_id = 'tenant-1'"
                 + " AND session_id = 'session-1' AND journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining("Committed journal evidence is missing");
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode())
+                            .isEqualTo("managed_session_journal_corrupt");
+                    assertThat(error.getStatus().is5xxServerError()).isTrue();
+                });
     }
 
     @ParameterizedTest
@@ -1445,13 +1517,17 @@ class ToolPublicationStoreTest {
         append("tool.wait", event(3, "checkpoint.saved", JSON.createObjectNode()) + "{}\n", 1,
                 List.of(), null);
         // A damaged write zeroed a revision's byte_length between the
-        // intent's and the head: both paths must refuse the evidence.
+        // intent's and the head: both paths must refuse the evidence with
+        // the journal-corruption fault (500), not a client request fault.
         jdbc.update("UPDATE qwen_managed_session_journal_tx SET byte_length = 0"
                 + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
                 + " AND journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining(journalHeadAuthorization
-                        ? "journal evidence is missing" : "failed verification");
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode())
+                            .isEqualTo("managed_session_journal_corrupt");
+                    assertThat(error.getStatus().is5xxServerError()).isTrue();
+                });
     }
 
     @Test
@@ -1463,7 +1539,11 @@ class ToolPublicationStoreTest {
                 + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
                 + " AND journal_revision = 1");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .hasMessageContaining("Committed journal evidence is missing");
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode())
+                            .isEqualTo("managed_session_journal_corrupt");
+                    assertThat(error.getStatus().is5xxServerError()).isTrue();
+                });
     }
 
     @Test

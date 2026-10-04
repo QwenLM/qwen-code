@@ -1442,7 +1442,9 @@ public class ManagedSessionStore {
                 "The Managed Session writer grant is stale or unavailable.");
     }
 
-    private static ApiException journalCorrupt() {
+    // Package-private: ToolPublicationStore's evidence reads answer a
+    // damaged journal with the same fault the session store raises.
+    static ApiException journalCorrupt() {
         return new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
                 ManagedSessionStoreModels.ERROR_JOURNAL_CORRUPT,
                 "The Managed Session transaction failed verification.");

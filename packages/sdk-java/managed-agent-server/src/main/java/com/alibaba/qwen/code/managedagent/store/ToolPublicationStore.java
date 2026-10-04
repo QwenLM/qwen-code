@@ -189,7 +189,14 @@ public final class ToolPublicationStore {
                         || !"activation.changed".equals(text(event.path("managedSession"), "kind"))) {
                     continue;
                 }
-                found = event.path("managedSession").path("payload");
+                // The promoted payload becomes durable trusted state, so the
+                // line must pass the same scope check the other readers
+                // enforce before it may backfill the head.
+                JsonNode managed = event.path("managedSession");
+                require(managed.path("sessionKey").equals(binding.get("sessionKey"))
+                        && managed.path("v").asInt() == 1,
+                        "Journal event scope conflicts");
+                found = managed.path("payload");
                 break;
             }
         }
@@ -494,7 +501,12 @@ public final class ToolPublicationStore {
                         + " AND journal_revision <= ?",
                 Long.class, tenant, session, intentSequence, intentSequence,
                 headRevision);
-        require(revisions.size() == 1, "Committed journal evidence is missing");
+        // A missing or ambiguous revision, a hole, or a corrupt row means
+        // server-side journal damage: answer the session store's corruption
+        // fault (500), not a client request fault (400).
+        if (revisions.size() != 1) {
+            throw ManagedSessionStore.journalCorrupt();
+        }
         long revision = revisions.get(0);
         // The legacy walk proved the chain contiguous down from the head
         // and sane (the byte-length tripwire); the same proof here is one
@@ -506,13 +518,15 @@ public final class ToolPublicationStore {
                         + " AND byte_length >= 1 AND byte_length <= ?",
                 Long.class, tenant, session, revision, headRevision,
                 ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);
-        require(above != null && above == headRevision - revision,
-                "Committed journal evidence is missing");
+        if (above == null || above != headRevision - revision) {
+            throw ManagedSessionStore.journalCorrupt();
+        }
         var page = sessions.transactions(tenant, text(key, "workspaceId"),
                 session, writerToken, revision - 1, 1);
-        require(page.transactions().size() == 1
-                && page.transactions().get(0).journalRevision() == revision,
-                "Committed journal evidence is missing");
+        if (page.transactions().size() != 1
+                || page.transactions().get(0).journalRevision() != revision) {
+            throw ManagedSessionStore.journalCorrupt();
+        }
         byte[] bytes = Base64.getDecoder().decode(
                 page.transactions().get(0).recordBytesBase64());
         JsonNode intent = null;

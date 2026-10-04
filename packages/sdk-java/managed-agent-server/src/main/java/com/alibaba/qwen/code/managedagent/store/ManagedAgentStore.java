@@ -73,7 +73,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final String MESSAGE_PROJECTION = "message_projection";
     // Between full rewrites the snapshot may lag the projection by this many
     // events or this long; the batch that ends a Turn rewrites it anyway.
-    private static final int SNAPSHOT_REFRESH_EVENTS = 1000;
+    public static final int SNAPSHOT_REFRESH_EVENTS = 1000;
     private static final long SNAPSHOT_REFRESH_MILLIS = 5000;
     private static final String INSERT_EVENT = "INSERT INTO managed_agent_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id,"

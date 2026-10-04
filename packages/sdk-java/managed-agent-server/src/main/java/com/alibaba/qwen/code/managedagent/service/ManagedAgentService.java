@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -773,8 +774,10 @@ public class ManagedAgentService {
         List<EventRecord> result = new ArrayList<>();
         long cursor = afterSequence;
         while (cursor < throughSequence) {
+            // Paged at the snapshot gate's lag bound: a session whose
+            // snapshot lags within the gate is served in one round trip.
             List<EventRecord> page = store.findEvents(tenantId, sessionId,
-                    cursor, 100);
+                    cursor, ManagedAgentStore.SNAPSHOT_REFRESH_EVENTS);
             if (page.isEmpty()) {
                 break;
             }
