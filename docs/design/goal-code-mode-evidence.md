@@ -24,7 +24,7 @@ Nested results use subtype `code_mode_tool_result`. Actual read results and erro
 
 The evidence window includes original nested work results and classifies outer script output separately. Older direct `exec` records are recognized from their structured response name. Older wrapped results are recognized by the matching Goal-turn function-call identity, including case-insensitive bridge targets. Call IDs from another Goal revision or turn cannot change the classification.
 
-The shared API-history projection skips `code_mode_tool_result`: internal calls have no model-emitted function-call partner. The transcript retains them for Goal verification, while resumed model history retains the outer call/result pair. The transcript validator and managed-session sink recognize the new subtype. Current readers accept existing transcript types and older proof kinds; no Goal-state version change is needed. Older binaries do not recognize the new subtype, so restoring a new transcript requires an updated reader.
+The API-history and shared ACP replay projections skip `code_mode_tool_result`: internal calls have no model-emitted function-call partner. Document exports use the shared replay projection; export normalization and file statistics exclude internal results before matching outer calls. Completed-turn branch checkpoints ignore internal results when tracking pending calls and validating the outer tool loop. The transcript retains them for Goal verification, while resumed model history retains the outer call/result pair. The transcript validator and managed-session sink recognize the new subtype. Current readers accept existing transcript types and older proof kinds; no Goal-state version change is needed. Older binaries do not recognize the new subtype, so restoring a new transcript requires an updated reader.
 
 ## Constraints and risks
 
@@ -35,7 +35,7 @@ Permissions, hooks, cancellation, terminal proposal barriers, evidence byte limi
 - A real Exec/Goal runtime/recorder/file-tool regression fails before the correction: the aggregate path has no original nested results. Both direct and deferred outer recording must retain originals without duplicate outer results.
 - A script reads a file silently, echoes Goal metadata, swallows a missing-file error, invents a file/test claim and computes `42`. Only the original file result and error are `external_fact`; computation remains available as `execution_output`; Goal bookkeeping is absent from the evidence window.
 - Older direct and wrapped script records stay classified as script output, with unrelated-turn facts preserved.
-- API history includes the outer call/result pair and no orphaned internal responses.
+- API history, ACP replay and exports include the outer call/result pair without fabricated internal calls. Document completeness, direct-call file statistics and completed-turn branch checkpoints remain valid while raw internal evidence is retained.
 - Focused Goal, Code Mode, recording and history tests, build and typecheck pass. An independent test engineer verifies the bundled CLI's actual headless recording and verifier request, including permission denial and the terminal barrier.
 
 The global CLI baseline is attempted first. An installed version without Code Mode is documented as unsupported; historical native input replay and fresh local CLI verification are reported separately.
