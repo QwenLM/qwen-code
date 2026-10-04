@@ -63,6 +63,7 @@ import {
   parseHostedHookPin,
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
+import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
@@ -141,6 +142,7 @@ interface HostedSession {
   shell?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
   hooks?: HostedHookSession;
+  childRuns?: HostedChildRunSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -767,6 +769,9 @@ async function verifyWorkspaceRestore(
         envelope.capture === null
       )
         continue;
+      // A detached start handle has no publication delivery to verify, like
+      // an unstarted one: its durable truth is the child_run record.
+      if (envelope.capture?.captureStatus === 'detached') continue;
       const receipt = object(
         await session.publication.owner.request('/receipts/verify', {
           executionCallId,
@@ -1175,6 +1180,7 @@ async function executeHostedTurn(
                 },
                 session.mcp,
                 session.hooks,
+                session.childRuns,
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1520,6 +1526,14 @@ export function registerHostedHarnessSessionRoutes(
           managed,
           hookCatalog,
           session.mcp?.broker,
+        );
+      if (session.toolProfile && brokerOptions)
+        session.childRuns = new HostedChildRunSession(
+          {
+            authority: session.managed.authority,
+            resources: session.managed.resources,
+          },
+          session.managed.authority.sessionHeader.sessionKey,
         );
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
@@ -2697,6 +2711,8 @@ export function registerHostedHarnessSessionRoutes(
             waiters: session.waiters,
           },
           session.mcp,
+          undefined,
+          session.childRuns,
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {

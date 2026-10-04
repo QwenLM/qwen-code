@@ -60,6 +60,7 @@ import type {
   HostedHookSession,
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
+import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import {
   HookEventName,
   PreToolUseHookOutput,
@@ -236,6 +237,8 @@ export class HostedWorkspaceToolTurn {
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
+  // Stored ahead of the H3 background admission branch that consumes it.
+  private readonly childRuns?: HostedChildRunSession;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -260,7 +263,12 @@ export class HostedWorkspaceToolTurn {
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
     private readonly hooks?: HostedHookSession,
+    childRuns?: HostedChildRunSession,
   ) {
+    this.childRuns = childRuns;
+    // Read once so the stored-ahead field typechecks until the H3 background
+    // admission branch consumes it.
+    void this.childRuns;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
