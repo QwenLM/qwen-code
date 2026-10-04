@@ -386,6 +386,10 @@ describe('recoverHostedRuntimeTurn', () => {
 
   it('reports parked executions without dispatching on a passive load', async () => {
     await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
     const execute = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'execute')
       .mockRejectedValue(new Error('must not dispatch'));
@@ -402,8 +406,11 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: true,
       });
+      expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       expect(recovered).toBeDefined();
       expect(execute).not.toHaveBeenCalled();
+      // The adoption is held for the cancel route: loading never releases it.
+      expect(release).not.toHaveBeenCalled();
       // A passive load only reads: nothing may be journaled for the prompt.
       expect(
         (await replacement.sink.project()).filter(
@@ -438,6 +445,10 @@ describe('recoverHostedRuntimeTurn', () => {
     'reports an execution the Broker cannot account for as unknown (%s)',
     async (status) => {
       await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
         status,
       );
@@ -451,6 +462,8 @@ describe('recoverHostedRuntimeTurn', () => {
           brokerOptions,
           passive: true,
         });
+        expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
+        expect(release).not.toHaveBeenCalled();
         expect(recovered!.report.executions).toEqual([
           expect.objectContaining({
             executionCallId: EXECUTION_ID,
@@ -774,7 +787,9 @@ describe('recoverHostedRuntimeTurn', () => {
         expect(recovered?.report.executions[0]?.runtimeSessionId).toBe(
           'hooks-old-owner',
         );
-        expect(acquire).toHaveBeenCalledTimes(passive ? 0 : 1);
+        // Both modes adopt the original owner now: the continuation to
+        // re-dispatch into it, the cancellation to read and release it.
+        expect(acquire).toHaveBeenCalledTimes(1);
         expect(execute).toHaveBeenCalledTimes(passive ? 0 : 1);
         expect(status).toHaveBeenCalledTimes(passive ? 1 : 0);
       } finally {
@@ -785,6 +800,10 @@ describe('recoverHostedRuntimeTurn', () => {
 
   it('reports only the state, never the result payload, from a passive read', async () => {
     await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'settled',
     });
@@ -798,6 +817,9 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: true,
       });
+      expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
+      // The adoption is held for the cancel route: loading never releases it.
+      expect(release).not.toHaveBeenCalled();
       // A passive load only reads: nothing may be journaled for the prompt.
       expect(
         (await replacement.sink.project()).filter(
@@ -813,6 +835,321 @@ describe('recoverHostedRuntimeTurn', () => {
         outcome: 'known',
         status: { state: 'settled' },
       });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('adopts the Runtime Session on a passive results_ready load', async () => {
+    // The parked turn's executions all settled before the owner died: zero
+    // pending, yet the dead owner's Runtime Session still pins the Workspace.
+    await parkAtAwaitRuntime('write_file', false, true);
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(recovered!.report.phase).toBe('results_ready');
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('leaves the adoption owed when a passive load fails transiently', async () => {
+    await parkAtAwaitRuntime();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockRejectedValueOnce(new Error('transient broker error'))
+      .mockResolvedValue({ state: 'prepared' });
+    const first = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: first,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('transient broker error');
+      // No compensation release: a release persists RELEASED and wedges
+      // every retried acquire with 409 runtime_session_not_acquirable on the
+      // real Broker.
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await first.close();
+    }
+    // The retried takeover re-acquires the same identity — idempotent
+    // server-side — and produces the report.
+    const second = await open('boot-3', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: second,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(recovered!.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'prepared' },
+        }),
+      ]);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('propagates an acquire failure without a compensation release', async () => {
+    await parkAtAwaitRuntime();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockRejectedValue(new Error('broker unreachable'));
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('broker unreachable');
+      expect(acquire).toHaveBeenCalledOnce();
+      // A lost acquire reply may still have landed READY server-side;
+      // releasing here would wedge the retried takeover. Leave it owed.
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('leaves the adoption owed when the final authorization fails on a passive load', async () => {
+    await parkAtAwaitRuntime();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const first = await open('boot-2', false);
+    try {
+      const authority = first.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          return Promise.reject(new Error('store hiccup'));
+        return original();
+      });
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: first,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('store hiccup');
+      expect(acquire).toHaveBeenCalledOnce();
+      // The load route offers the coordinator a retry, so a release here
+      // would persist RELEASED and wedge every retried acquire with
+      // runtime_session_not_acquirable.
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await first.close();
+    }
+    // The retried takeover re-acquires the same identity — idempotent
+    // server-side — and produces the report.
+    const second = await open('boot-3', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: second,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('leaves the adoption owed when the final authorization is not runnable on a passive load', async () => {
+    await parkAtAwaitRuntime();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const first = await open('boot-2', false);
+    try {
+      const authority = first.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          // A transiently blocked authorization is not a reason to release:
+          // the coordinator retries the load, and a release would wedge it.
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'missing_state',
+          } as never);
+        return original();
+      });
+      const recovered = await recoverHostedRuntimeTurn({
+        session: first,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(recovered).toBeUndefined();
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await first.close();
+    }
+    const second = await open('boot-3', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: second,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('hands the lease back when the final authorization fails on a continuation load', async () => {
+    // The no-pending re-attach shape: the continuation acquires even with
+    // nothing left to drive, and this route's failure exits are the only
+    // handback that exists when no report is returned.
+    await parkAtAwaitRuntime('write_file', false, true);
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          return Promise.reject(new Error('store hiccup'));
+        return original();
+      });
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      ).rejects.toThrow('store hiccup');
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the lease back when the final authorization is not runnable on a continuation load', async () => {
+    await parkAtAwaitRuntime('write_file', false, true);
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const authority = replacement.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'missing_state',
+          } as never);
+        return original();
+      });
+      const recovered = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(recovered).toBeUndefined();
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
     } finally {
       await replacement.close();
     }

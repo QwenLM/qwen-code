@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import java.net.URI;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -84,6 +85,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 && !workspaceId.equals(runtimeWorkspaceId)) {
             throw new IllegalStateException("Managed Session Store and"
                     + " Runtime Broker workspace IDs must match");
+        }
+        Duration turnDeadline = this.properties.getTurnDeadline();
+        if (turnDeadline == null
+                || turnDeadline.compareTo(Duration.ofMillis(1)) < 0
+                || turnDeadline.compareTo(
+                        Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalStateException("Hosted Harness turn deadline must"
+                    + " be between 1 and 2147483647 milliseconds");
         }
         this.approvalMode = parseApprovalMode(
                 this.properties.getApprovalMode());
@@ -150,7 +159,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
-                .payloadDigest(payloadDigest);
+                .payloadDigest(payloadDigest)
+                .deadline(properties.getTurnDeadline());
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
         return new Admission(receipt.getLastEventId(),

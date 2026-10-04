@@ -20,6 +20,7 @@ import {
   isUnattendedMode,
 } from './retry.js';
 import { retryContext } from './retryContext.js';
+import { runWithRetryWaitObserver, type RetryWaitEvent } from './retry-wait.js';
 import { getErrorStatus } from './errors.js';
 import { isRateLimitError } from './rateLimit.js';
 import { setSimulate429 } from './testUtils.js';
@@ -1216,5 +1217,147 @@ describe('retryWithBackoff — Phase 4b retry context (ALS)', () => {
       onRetry,
     }).catch((e: unknown) => e);
     expect(onRetry).not.toHaveBeenCalled();
+  });
+});
+
+describe('retryWithBackoff - retry wait notifications', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setSimulate429(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function retryAfterError(status: number, seconds: number): HttpError {
+    return Object.assign(new Error('Rate limited'), {
+      status,
+      response: { headers: { 'retry-after': String(seconds) } },
+    });
+  }
+
+  function serverError(): HttpError {
+    return Object.assign(new Error('Server error'), { status: 500 });
+  }
+
+  function observe(): {
+    events: RetryWaitEvent[];
+    run: <T>(fn: () => Promise<T>) => Promise<T>;
+  } {
+    const events: RetryWaitEvent[] = [];
+    return {
+      events,
+      run: (fn) => runWithRetryWaitObserver((e) => events.push(e), fn),
+    };
+  }
+
+  it('announces each HTTP backoff with the delay it actually sleeps', async () => {
+    const { events, run } = observe();
+    const onRetry = vi.fn();
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(retryAfterError(429, 7))
+      .mockRejectedValueOnce(serverError())
+      .mockResolvedValue('ok');
+    const promise = run(() =>
+      retryWithBackoff(fn, { maxAttempts: 3, initialDelayMs: 100, onRetry }),
+    );
+    await vi.advanceTimersByTimeAsync(6_999);
+    expect(events).toEqual([
+      { phase: 'start', waitId: expect.any(String), delayMs: 7_000 },
+    ]);
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+    const starts = events.filter((e) => e.phase === 'start');
+    expect(starts.map((e) => (e as { delayMs: number }).delayMs)).toEqual(
+      onRetry.mock.calls.map(([info]) => info.delayMs),
+    );
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    expect(events.map((e) => e.phase)).toEqual([
+      'start',
+      'end',
+      'start',
+      'end',
+    ]);
+    expect(events[1]!.waitId).toBe(events[0]!.waitId);
+    expect(events[3]!.waitId).toBe(events[2]!.waitId);
+    expect(events[2]!.waitId).not.toBe(events[0]!.waitId);
+  });
+
+  it('announces a content-check backoff without firing onRetry', async () => {
+    const { events, run } = observe();
+    const onRetry = vi.fn();
+    const fn = vi
+      .fn()
+      .mockResolvedValueOnce({ bad: true })
+      .mockResolvedValue({ bad: false });
+    const promise = run(() =>
+      retryWithBackoff(fn, {
+        maxAttempts: 2,
+        initialDelayMs: 1000,
+        shouldRetryOnContent: (r) => (r as unknown as { bad: boolean }).bad,
+        onRetry,
+      }),
+    );
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toEqual({ bad: false });
+    expect(onRetry).not.toHaveBeenCalled();
+    expect(events.map((e) => e.phase)).toEqual(['start', 'end']);
+  });
+
+  it('announces one persistent sleep once, however many heartbeats it has', async () => {
+    const { events, run } = observe();
+    const heartbeatFn = vi.fn();
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(retryAfterError(429, 120))
+      .mockResolvedValue('ok');
+    const promise = run(() =>
+      retryWithBackoff(fn, {
+        maxAttempts: 2,
+        persistentMode: true,
+        heartbeatIntervalMs: 30_000,
+        heartbeatFn,
+      }),
+    );
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+    expect(heartbeatFn).toHaveBeenCalledTimes(3);
+    expect(events).toEqual([
+      { phase: 'start', waitId: expect.any(String), delayMs: 120_000 },
+      { phase: 'end', waitId: events[0]!.waitId },
+    ]);
+  });
+
+  it('ends the wait as soon as the signal aborts the backoff', async () => {
+    const { events, run } = observe();
+    const controller = new AbortController();
+    const fn = vi.fn().mockRejectedValue(retryAfterError(429, 60));
+    const promise = run(() =>
+      retryWithBackoff(fn, { maxAttempts: 3, signal: controller.signal }),
+    );
+    const settled = promise.catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(events.map((e) => e.phase)).toEqual(['start']);
+    controller.abort();
+    expect(String(await settled)).toMatch(/aborted/);
+    expect(events.map((e) => e.phase)).toEqual(['start', 'end']);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the retry outcome when the observer throws', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(serverError())
+      .mockResolvedValue('ok');
+    const promise = runWithRetryWaitObserver(
+      () => {
+        throw new Error('observer failure');
+      },
+      () => retryWithBackoff(fn, { maxAttempts: 2, initialDelayMs: 10 }),
+    );
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
   });
 });
