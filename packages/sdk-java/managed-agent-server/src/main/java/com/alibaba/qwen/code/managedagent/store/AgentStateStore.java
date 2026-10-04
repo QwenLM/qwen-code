@@ -221,6 +221,17 @@ public interface AgentStateStore {
             String turnId, String owner, String harnessBootId,
             String eventEpoch);
 
+    /**
+     * Retracts the published text of the in-flight message a restarted model
+     * attempt replaces (#13319): deltas of the Turn in the live epoch with a
+     * source id at or after {@code fromSourceId} are emptied, projections are
+     * rebuilt, and a {@code stream.reconciled} event is appended. The Harness
+     * cursor advances past {@code retractionSourceId} either way.
+     */
+    void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId);
+
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events);
