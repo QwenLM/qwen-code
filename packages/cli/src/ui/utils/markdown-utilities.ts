@@ -56,6 +56,7 @@ const findNextFence = (
   while (lineStart < content.length) {
     const newlineIndex = content.indexOf('\n', lineStart);
     const lineEnd = newlineIndex === -1 ? content.length : newlineIndex;
+    // This pre-filter must remain a superset of CODE_FENCE_RE.
     let delimiterStart = lineStart;
     while (content[delimiterStart] === ' ') delimiterStart++;
     if (
@@ -63,6 +64,12 @@ const findNextFence = (
       (content.startsWith('```', delimiterStart) ||
         content.startsWith('~~~', delimiterStart))
     ) {
+      let delimiterEnd = delimiterStart + 3;
+      while (content[delimiterEnd] === content[delimiterStart]) delimiterEnd++;
+      if (content.slice(delimiterEnd, lineEnd).includes('`')) {
+        lineStart = lineEnd + 1;
+        continue;
+      }
       const match = CODE_FENCE_RE.exec(content.slice(lineStart, lineEnd));
       if (!match) {
         lineStart = lineEnd + 1;

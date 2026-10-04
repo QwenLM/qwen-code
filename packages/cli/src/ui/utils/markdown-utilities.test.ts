@@ -93,6 +93,25 @@ describe('markdown-utilities', () => {
       expect(findLastSafeSplitPoint(content, 40)).toBe(40);
     });
 
+    it('re-arms the closed-block walk for the single-newline fallback', () => {
+      const content = '```a\nx\n\ny\n```\n```b\nz\n```TAIL';
+      expect(findLastSafeSplitPoint(content, 22)).toBe(14);
+    });
+
+    it.each(['```', '``````', '~~~'])(
+      'skips the fence regex for a backtick after the full %s delimiter',
+      (delimiter) => {
+        const content = delimiter + ' '.repeat(20000) + '`\n\nafter';
+        const scan = vi.spyOn(CODE_FENCE_RE, 'exec');
+        try {
+          expect(findLastSafeSplitPoint(content, 16384)).toBe(16384);
+          expect(scan.mock.calls.length).toBe(0);
+        } finally {
+          scan.mockRestore();
+        }
+      },
+    );
+
     it.each([200, 2000])(
       'scans fences once when rejecting %s internal blank lines',
       (records) => {
@@ -101,6 +120,7 @@ describe('markdown-utilities', () => {
         const scan = vi.spyOn(CODE_FENCE_RE, 'exec');
         try {
           expect(findLastSafeSplitPoint(content, 16384)).toBe(fenced.length);
+          expect(scan.mock.calls.length).toBeGreaterThan(0);
           expect(scan.mock.calls.length).toBeLessThanOrEqual(4);
         } finally {
           scan.mockRestore();
@@ -117,6 +137,7 @@ describe('markdown-utilities', () => {
         expect(findLastSafeSplitPoint(content, fenced.length + 10)).toBe(
           fenced.length,
         );
+        expect(scan.mock.calls.length).toBeGreaterThan(0);
         expect(scan.mock.calls.length).toBeLessThanOrEqual(blocks * 2);
       } finally {
         scan.mockRestore();
@@ -340,6 +361,22 @@ describe('markdown-utilities', () => {
         getEnclosingFenceInfo(content, content.indexOf('After')),
       ).toBeNull();
     });
+
+    it.each(['~~~x', '~~~~~x'])(
+      'advances past a same-character fence marker in the info string: %s',
+      (info) => {
+        const content = `~~~ ${info}\ncode\n~~~\nAfter`;
+        expect(getEnclosingFenceInfo(content, content.indexOf('code'))).toEqual(
+          {
+            lang: info,
+            startLine: 1,
+          },
+        );
+        expect(
+          getEnclosingFenceInfo(content, content.indexOf('After')),
+        ).toBeNull();
+      },
+    );
 
     it('advances past a fence info string containing the other fence marker', () => {
       const content = '``` ~~~\ncode\n```\nAfter';
