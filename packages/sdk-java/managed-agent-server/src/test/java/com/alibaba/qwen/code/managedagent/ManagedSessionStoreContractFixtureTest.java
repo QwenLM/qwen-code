@@ -84,28 +84,18 @@ class ManagedSessionStoreContractFixtureTest {
         long firstSequence = request.required("firstSequence").longValue();
         long lastSequence = request.required("lastSequence").longValue();
         long eventCount = request.required("eventCount").longValue();
-        if ("session.create".equals(request.required("operation")
-                .textValue())) {
-            assertEquals(0L, eventCount);
-            assertEquals(0L, firstSequence);
-            assertEquals(0L, lastSequence);
-            assertEquals(2, request.required("recordCount").intValue());
-            assertTrue(request.path("eventsDigest").isMissingNode()
-                    || request.required("eventsDigest").isNull());
-            assertTrue(request.path("previousCommitDigest").isMissingNode()
-                    || request.required("previousCommitDigest").isNull());
-            assertTrue(request.path("commitDigest").isMissingNode()
-                    || request.required("commitDigest").isNull());
-        } else {
-            assertTrue(eventCount >= 1 && firstSequence >= 1
-                            && lastSequence >= firstSequence
-                            && lastSequence - firstSequence + 1 == eventCount
-                            && request.required("recordCount").intValue()
-                                    == eventCount + 1
-                            && !request.required("eventsDigest").isNull()
-                            && !request.required("commitDigest").isNull(),
-                    "transaction range/record summary is inconsistent");
-        }
+        assertEquals("session.create",
+                request.required("operation").textValue());
+        assertEquals(0L, eventCount);
+        assertEquals(0L, firstSequence);
+        assertEquals(0L, lastSequence);
+        assertEquals(2, request.required("recordCount").intValue());
+        assertTrue(request.path("eventsDigest").isMissingNode()
+                || request.required("eventsDigest").isNull());
+        assertTrue(request.path("previousCommitDigest").isMissingNode()
+                || request.required("previousCommitDigest").isNull());
+        assertTrue(request.path("commitDigest").isMissingNode()
+                || request.required("commitDigest").isNull());
         StringBuilder jsonl = new StringBuilder();
         for (JsonNode record : transaction.required("records")) {
             jsonl.append(JSON.writeValueAsString(record)).append('\n');

@@ -586,10 +586,7 @@ class QwenHostedHarnessConnectorTest {
         when(client.createSession(any()))
                 .thenThrow(mock(SessionCreationOutcomeUnknownException.class));
         when(client.loadSession(any())).thenReturn(attached);
-        QwenHostedHarnessConnector connector =
-                new QwenHostedHarnessConnector(properties(), sessions(),
-                        mock(WorkspaceExecutionStore.class));
-        ReflectionTestUtils.setField(connector, "client", client);
+        QwenHostedHarnessConnector connector = connector(client);
 
         HarnessConnector.Attachment admission =
                 connector.createOrLoad("tenant-a", SESSION_ID, false);
@@ -617,10 +614,7 @@ class QwenHostedHarnessConnectorTest {
         when(attached.getHarnessLastEventId()).thenReturn(23L);
         when(attached.getHarnessEventEpoch()).thenReturn("epoch-3");
         when(client.loadSession(any())).thenReturn(attached);
-        QwenHostedHarnessConnector connector =
-                new QwenHostedHarnessConnector(properties(), sessions(),
-                        mock(WorkspaceExecutionStore.class));
-        ReflectionTestUtils.setField(connector, "client", client);
+        QwenHostedHarnessConnector connector = connector(client);
 
         HarnessConnector.Attachment admission =
                 connector.createOrLoad("tenant-a", SESSION_ID, true);
@@ -641,10 +635,7 @@ class QwenHostedHarnessConnectorTest {
         DaemonHttpException failure = mock(DaemonHttpException.class);
         when(failure.getStatusCode()).thenReturn(500);
         when(client.createSession(any())).thenThrow(failure);
-        QwenHostedHarnessConnector connector =
-                new QwenHostedHarnessConnector(properties(), sessions(),
-                        mock(WorkspaceExecutionStore.class));
-        ReflectionTestUtils.setField(connector, "client", client);
+        QwenHostedHarnessConnector connector = connector(client);
 
         // Widening the 409 fallback to any daemon error would mask a real
         // daemon bug as an attach to an unrelated session.

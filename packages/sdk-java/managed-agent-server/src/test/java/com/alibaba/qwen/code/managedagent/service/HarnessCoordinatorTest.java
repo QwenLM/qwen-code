@@ -1109,6 +1109,63 @@ class HarnessCoordinatorTest {
                 anyString(), anyLong());
     }
 
+    @Test
+    void retriesTheTurnWhenTheRecoveredWatermarkRegresses() {
+        String tenantId = "tenant-recovery-regression";
+        String sessionId = "session-recovery-regression";
+        String turnId = "turn-recovery-regression";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-new", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-new", 7);
+
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        ExecutorService executor = directExecutor();
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isContinuationReady()).thenReturn(true);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
+        when(recovery.getActivationId()).thenReturn("activation-1");
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", recovery, 9L,
+                        "epoch-new"));
+        when(store.bindRecoveredHarness(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), eq("boot-old"), eq("boot-new")))
+                .thenReturn(true);
+        when(store.findTurn(tenantId, sessionId, turnId))
+                .thenReturn(Optional.of(claimed));
+        // The continuation answers on the takeover's epoch but from a lower
+        // watermark: the epoch comparison cannot see the backward step, so
+        // only the lastEventId operand can stop this drive before the
+        // regressed cursor is persisted.
+        when(harness.continueManagedRuntime(tenantId, sessionId, promptId,
+                "checkpoint-1", "activation-1"))
+                .thenReturn(new Admission(7, "epoch-new"));
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+        verify(store).scheduleTurnRetry(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyLong());
+        verify(store, never()).recordRecoveryAdmission(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString(), anyLong());
+    }
+
     // A restarted model attempt retracts the prefix it published (#13319):
     // the deltas it covers are flushed before the store blanks their range,
     // and the cursor passes the retraction event itself.

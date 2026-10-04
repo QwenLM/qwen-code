@@ -466,7 +466,8 @@ class ManagedAgentMySqlIT {
                 "managed_agent_item", "managed_agent_turn",
                 "managed_agent_event", "managed_agent_snapshot",
                 "managed_agent_consumer_progress",
-                "managed_agent_command")) {
+                "managed_agent_command", "managed_agent_operation",
+                "managed_workspace_create_command")) {
             deleteIfTableExists(jdbc, table,
                     "tenant_id IN ('case-tenant', 'CASE-TENANT')");
         }
