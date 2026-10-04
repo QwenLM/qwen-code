@@ -719,17 +719,22 @@ describe('ManagedToolRuntime', () => {
       ToolConfirmationOutcome.ProceedOnce,
     );
     const rejection = confirming.catch((error: unknown) => error);
-    await vi.waitFor(() =>
-      expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
-    );
-    expect(runtime.cancel(ref).state).toBe('cancel_requested');
-    expect(() =>
-      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
-    ).toThrow('unfinished');
-    expect(runtime.status(ref).state).toBe('cancel_requested');
-    expect(runtime.hasActiveWork()).toBe(true);
-    gate.resolve();
-    await rejection;
+    try {
+      await vi.waitFor(() =>
+        expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
+      );
+      expect(runtime.cancel(ref).state).toBe('cancel_requested');
+      expect(() =>
+        runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+      ).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('cancel_requested');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve();
+    }
+    expect(await rejection).toMatchObject({
+      message: expect.stringContaining('cancelled'),
+    });
     await vi.waitFor(() => expect(runtime.status(ref).state).toBe('settled'));
     expect(runtime.status(ref).result?.executionStatus).toBe('not_started');
   });
