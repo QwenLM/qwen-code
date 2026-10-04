@@ -1106,17 +1106,74 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
+      const controlSchema = {
+        name: 'tool_call',
+        parameters: { type: 'OBJECT', properties: {} },
+      };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
+        { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema, mcpToolDouble.schema];
+      const declared = [skillToolSchema, mcpToolDouble.schema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
       );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      expect(unscaled.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
+      expect(unscaled.breakdown.builtinTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)) -
+          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
+      // The hidden MCP schema does not consume the declared control's budget.
+      const hiddenMcp = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          tools,
+          declared: [skillToolSchema, controlSchema],
+          history,
+        }),
+        false,
+      );
+      expect(hiddenMcp.breakdown.mcpTools).toBe(0);
+      expect(hiddenMcp.breakdown.builtinTools).toBe(
+        estimateContextTextTokens(
+          JSON.stringify([skillToolSchema, controlSchema]),
+        ) - estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      // With no declared schemas, only the listing is billed to skills.
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        false,
+      );
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      for (const estimate of [hiddenMcp, undeclared]) {
+        expect(estimate.breakdown.freeSpace).toBe(
+          Math.max(
+            0,
+            estimate.contextWindowSize -
+              sumRows(estimate.breakdown) -
+              estimate.breakdown.autocompactBuffer,
+          ),
+        );
+      }
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
       const total =

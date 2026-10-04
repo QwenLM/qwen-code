@@ -100,7 +100,6 @@ export function hasAgentSkillExecBinding(
       !!registry?.getAllToolNames().includes(ToolNames.EXEC) &&
       !(
         registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
-        !registry?.isDeferredToolRevealed?.(ToolNames.SKILL) &&
         !context.getVisibleTools?.().has(ToolNames.SKILL)
       ))
   );

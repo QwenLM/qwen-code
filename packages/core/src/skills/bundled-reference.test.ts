@@ -31,6 +31,9 @@ import {
   isToolHiddenBehindToolSearch,
 } from './bundled-reference.js';
 import type { Config } from '../config/config.js';
+import { makeFakeConfig } from '../test-utils/config.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from './workflow-authoring-skill.js';
 
 /** First body line of each reference, after the frontmatter is stripped. */
@@ -43,6 +46,36 @@ const REFERENCES = [
 ] as const;
 
 describe('hybrid reference routes', () => {
+  it.each([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL])(
+    'inlines an eager-hidden Skill for an agent missing %s',
+    async (missingBridge) => {
+      const config = makeFakeConfig({
+        toolMode: 'code_mode',
+        eagerTools: [ToolNames.READ_FILE],
+        disabledTools: [missingBridge],
+      });
+      const permissions = new PermissionManager(config);
+      permissions.initialize();
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(permissions);
+      vi.spyOn(config, 'getSkillManager').mockReturnValue({} as never);
+      const registry = await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      try {
+        expect(registry.getAllToolNames()).toContain(ToolNames.EXEC);
+        expect(registry.getAllToolNames()).toContain(ToolNames.SKILL);
+        expect(registry.isPermissionDeferred(ToolNames.SKILL)).toBe(true);
+        expect(resolveBundledReferenceRoute(config, 'agent-delegation')).toBe(
+          'inline',
+        );
+      } finally {
+        await registry.stop();
+      }
+    },
+  );
+
   it.each([
     [[], 'skill'],
     [['tool_search'], 'skill'],

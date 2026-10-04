@@ -16,6 +16,7 @@ import {
 } from './types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ExecTool } from '../tools/exec.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -3233,6 +3234,38 @@ describe('SubagentManager', () => {
           expect(context.getToolRegistry().getAllToolNames()).toContain(
             ToolNames.SKILL,
           );
+        },
+      );
+
+      it.each([false, true])(
+        'withholds the manager for an eager-hidden Hybrid Skill even if parent revealed it: %s',
+        async (revealed) => {
+          const parent = makeFakeConfig({
+            toolMode: 'code_mode',
+            eagerTools: [ToolNames.READ_FILE],
+          });
+          const registry = new ToolRegistry(parent);
+          registry.registerTool(new ExecTool(parent));
+          registry.registerPermissionDeferredFactory(
+            ToolNames.SKILL,
+            async () => new MockTool({ name: ToolNames.SKILL }),
+          );
+          await registry.ensureTool(ToolNames.SKILL);
+          if (revealed) registry.revealDeferredTool(ToolNames.SKILL);
+          vi.spyOn(parent, 'getSkillManager').mockReturnValue(sessionManager);
+          vi.spyOn(parent, 'getSubagentManager').mockReturnValue(manager);
+          vi.spyOn(parent, 'getToolRegistry').mockReturnValue(registry);
+          const { context, dispose } = await launchHandle(
+            { tools: [ToolNames.EXEC, ToolNames.AGENT] },
+            parent,
+          );
+          try {
+            expect(context.getSkillManager()).toBeNull();
+            expect(resolveAgentDelegationSurface(context)).toBe('inline');
+          } finally {
+            await dispose();
+            await registry.stop();
+          }
         },
       );
 

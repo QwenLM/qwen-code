@@ -15,6 +15,7 @@ import { MockTool } from '../../test-utils/mock-tool.js';
 import { ToolMode } from '../../tools/code-mode.js';
 import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import { ToolSearchTool } from '../../tools/tool-search.js';
+import { hasAgentSkillExecBinding } from './subagent-plan-tool-policy.js';
 
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
@@ -368,6 +369,19 @@ describe('AgentCore skill-gate inputs', () => {
         } else if (visibility === 'revealed') {
           registry.revealDeferredTool(ToolNames.SKILL);
         }
+        const parentExecBinding = hasAgentSkillExecBinding(config);
+        const childRegistry = new ToolRegistry(config);
+        childRegistry.registerTool(new ExecTool(config));
+        childRegistry.registerPermissionDeferredFactory(
+          ToolNames.SKILL,
+          async () => new MockTool({ name: ToolNames.SKILL }),
+        );
+        childRegistry.copyDiscoveredToolsFrom(registry);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(childRegistry);
+        expect(childRegistry.isDeferredToolRevealed(ToolNames.SKILL)).toBe(
+          false,
+        );
+        expect(hasAgentSkillExecBinding(config)).toBe(parentExecBinding);
         const core = new AgentCore(
           'skill-route',
           config,
@@ -382,7 +396,7 @@ describe('AgentCore skill-gate inputs', () => {
           }
         ).willHaveSkillTool();
         expect(willHaveSkill).toBe(
-          mode === ToolMode.CodeModeOnly || visibility !== 'hidden',
+          mode === ToolMode.CodeModeOnly || visibility === 'visible',
         );
         const declared = await declaredNames(core);
         expect(gate(core, declared)).toBe(willHaveSkill);

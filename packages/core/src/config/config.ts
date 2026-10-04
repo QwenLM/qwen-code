@@ -12308,6 +12308,7 @@ export class Config {
       this,
       this.eventEmitter,
       sendSdkMcpMessage,
+      options?.forSubAgent,
     );
     // The registry refuses every other tool of a Managed session, but its
     // manager still connects a runtime-added server.

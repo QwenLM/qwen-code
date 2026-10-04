@@ -278,6 +278,7 @@ export class ToolRegistry {
     config: Config,
     eventEmitter?: EventEmitter,
     sendSdkMcpMessage?: SendSdkMcpMessage,
+    readonly forSubAgent = false,
   ) {
     this.config = config;
     // options-bag
