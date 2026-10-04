@@ -180,4 +180,9 @@ attempt.`): once `message.delta` records are journaled, the partial attempt
   pre-streaming behavior did. A transient provider capacity event mid-stream
   therefore fails the Turn permanently rather than being retried by the
   coordinator (a `turn_result` is terminal). Classifying this settlement as
-  retryable for the coordinator is a follow-up.
+  retryable for the coordinator is a follow-up. (Superseded by #13319's
+  in-band retraction: a retry landing after publication replays the request
+  fresh, the Harness journals `message.retracted`, and the server empties the
+  message's deltas by source-sequence range and publishes
+  `stream.reconciled` — see
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.md).)

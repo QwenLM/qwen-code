@@ -8056,6 +8056,76 @@ describe('LlmChat', async () => {
           'prompt-transport-continuation-replaced-by-omni',
         );
       });
+
+      // A consumer that retracts delivered output (the Hosted Harness) takes a
+      // fresh replay, never a continuation: the replayed request replaces the
+      // retracted prefix instead of gluing a possible restart onto it
+      // (#13319).
+      it('replays a delivered-content cut when the consumer retracts delivered output', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          streamOf(textChunk('MIDSTREAM_RECOVERED_AFTER_RETRY', 'STOP')),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-replay',
+          undefined,
+          { retractDeliveredOutputOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const retries = eventsOfType(events, StreamEventType.RETRY);
+        expect(retries).toEqual([{ type: StreamEventType.RETRY }]);
+        expectStreamCalls(2);
+        // The replay re-sends the original request: no synthetic model/user
+        // turns carrying the delivered prefix or the resume instruction.
+        const replayed = requestContentsOfCall(1);
+        expect(hasText(replayed, 'MIDSTREAM_PARTIAL')).toBe(false);
+        expect(hasText(replayed, RESUME_INSTRUCTION)).toBe(false);
+        // The consumer sees both attempts' chunks; dropping the prefix on
+        // RETRY is what keeps the transcript clean. History keeps only the
+        // replay's answer: the failed attempt's partial turn is popped.
+        expect(deliveredText(events)).toBe(
+          'MIDSTREAM_PARTIALMIDSTREAM_RECOVERED_AFTER_RETRY',
+        );
+        expectLastText('MIDSTREAM_RECOVERED_AFTER_RETRY');
+        expectWarned('Transport stream retry scheduled', {
+          retryDecision: 'retry',
+        });
+      });
+
+      it('fails a delivered-content cut when the replay budget is spent, never continuing', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-exhausted',
+          undefined,
+          { retractDeliveredOutputOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeDefined();
+        // Three attempts, two plain replays, and no continuation: the answer
+        // never asks the model to resume a prefix the caller retracted.
+        expectStreamCalls(3);
+        expect(
+          events.filter(
+            (event) =>
+              event.type === StreamEventType.RETRY &&
+              event.isContinuation === true,
+          ),
+        ).toHaveLength(0);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {

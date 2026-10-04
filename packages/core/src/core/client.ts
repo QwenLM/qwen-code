@@ -275,6 +275,13 @@ export interface SendMessageOptions {
   }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts
+   * (the Hosted Harness, whose streamed text is published durably). Forwarded
+   * to `LlmChat` so a post-delivery cut replays instead of continuing
+   * (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 export interface SteerInput {
@@ -4457,6 +4464,7 @@ export class LlmClient {
         // Only a first-party user prompt opens a rewindable identity. Re-entry
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        options?.retractDeliveredOutputOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

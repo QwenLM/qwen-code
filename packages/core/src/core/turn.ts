@@ -706,6 +706,7 @@ export class Turn {
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
     private readonly promptIdentity?: string,
+    private readonly retractDeliveredOutputOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -728,7 +729,12 @@ export class Turn {
         },
         this.prompt_id,
         this.goalContext,
-        this.promptIdentity ? { promptId: this.promptIdentity } : undefined,
+        {
+          ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+          ...(this.retractDeliveredOutputOnRetry
+            ? { retractDeliveredOutputOnRetry: true }
+            : {}),
+        },
       );
 
       for await (const streamEvent of responseStream) {
