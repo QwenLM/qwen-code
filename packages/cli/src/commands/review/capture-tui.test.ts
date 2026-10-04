@@ -44,6 +44,7 @@ import {
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
+import { validateAssetContent } from './lib/assets.js';
 
 const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   encoding: 'utf8',
@@ -251,7 +252,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       const callLog = join(dir, 'tmux-calls');
       writeFileSync(
         join(binDir, 'tmux'),
-        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -616,6 +617,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     writeFileSync(
       join(binDir, 'tmux'),
       `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -664,9 +666,13 @@ exit 0
       const realPath = process.env['PATH'];
       try {
         mkdirSync(join(root, 'rel'), { recursive: true });
-        writeFileSync(join(root, 'rel', 'sleep'), '#!/bin/sh\nexit 0\n', {
-          mode: 0o755,
-        });
+        writeFileSync(
+          join(root, 'rel', 'sleep'),
+          '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nexit 0\n',
+          {
+            mode: 0o755,
+          },
+        );
         process.chdir(root);
         // Both non-absolute shapes, and a `sleep` execvp would find through
         // either of them.
@@ -701,7 +707,7 @@ exit 0
       try {
         writeFileSync(
           join(root, 'tmux'),
-          '#!/bin/sh\necho "tmux 9.9-PLANTED"\nexit 0\n',
+          '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "tmux 9.9-PLANTED"\nexit 0\n',
           { mode: 0o755 },
         );
         mkdirSync(join(root, 'empty'), { recursive: true });
@@ -792,12 +798,13 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
-    mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+    mkdir -p -m 700 "\${TMUX_TMPDIR}/tmux-$(id -u)"  # 0700, not umask-default: a real tmux on this host refuses a looser socket dir
     : > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
     s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
     [ -n "$s" ] && : > "$s"
@@ -875,6 +882,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -963,12 +971,13 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
-    mkdir -p "/tmp/tmux-$(id -u)"
+    mkdir -p -m 700 "/tmp/tmux-$(id -u)"  # 0700, not umask-default: a real tmux on this host refuses a looser socket dir
     : > "/tmp/tmux-$(id -u)/$SRV"
     s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
     [ -n "$s" ] && : > "$s"
@@ -1056,12 +1065,13 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
-    mkdir -p "/tmp/tmux-$(id -u)"
+    mkdir -p -m 700 "/tmp/tmux-$(id -u)"  # 0700, not umask-default: a real tmux on this host refuses a looser socket dir
     : > "/tmp/tmux-$(id -u)/$SRV"
     s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
     [ -n "$s" ] && : > "$s"
@@ -1122,6 +1132,102 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'an unstamped run never connects or unlinks an entry at its unique name on ANOTHER base',
+    async () => {
+      // The 2x2 cell the guard used to leave open (no stamp × another
+      // base): a start whose stamp lstat failed leaves this run with
+      // nothing to compare, and until this pin existed the fail-closed
+      // was gated on the start base only — so a foreign socket at this
+      // run's unique name under /tmp (think of it as the USER's own) had
+      // the pinned kill connected to it, was unlinked, and the run
+      // exited silent. Neither must happen on a base the entry cannot
+      // be shown to be this run's own on: no connect, no unlink, and
+      // the entry is left for the next sweep.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-unstmp-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const killLog = join(dir, 'kills');
+      // Binds NOTHING under the start base (stamp cannot be taken there),
+      // while a foreign entry stands at this run's unique name under
+      // /tmp. kill calls are logged verbatim with their TMUX_TMPDIR.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    mkdir -p -m 700 "/tmp/tmux-$(id -u)"  # 0700, not umask-default: a real tmux on this host refuses a looser socket dir
+    : > "/tmp/tmux-$(id -u)/$SRV"
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "$TMUX_TMPDIR" >> '${killLog}'
+    echo "no server running on \${TMUX_TMPDIR}/tmux-$(id -u)/$SRV" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      const foreignSocket = `/tmp/tmux-${process.getuid!()}`;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        expect(stderr).not.toContain('kill-server failed twice');
+        const kills = existsSync(killLog)
+          ? readFileSync(killLog, 'utf8').trim().split('\n')
+          : [];
+        // The start base is examined honestly — and /tmp never took a
+        // kill at all...
+        expect(kills.filter((b) => b === '/tmp')).toEqual([]);
+        // ...and the foreign entry at the run's unique name survives:
+        // unlinked, the next sweep re-examines it.
+        expect(
+          readdirSync(foreignSocket).filter((f) =>
+            f.startsWith(`qwen-review-capture-${process.pid}-`),
+          ),
+        ).not.toEqual([]);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        spawnSync('bash', [
+          '-c',
+          `rm -f "/tmp/tmux-$(id -u)"/qwen-review-capture-${process.pid}-*`,
+        ]);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'reads the stamped identity at VERDICT time, not once before the loop',
     async () => {
       // The identity arm used to read a snapshot taken before the candidate
@@ -1148,6 +1254,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -1235,6 +1342,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -1310,6 +1418,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -1318,7 +1427,7 @@ for a in "$@"; do
     mkdir -p "\${TMUX_TMPDIR}/tmux-${uid}"
     : > "\${TMUX_TMPDIR}/tmux-${uid}/$SRV"
     printf '%s' "$SRV" > '${srvFile}'
-    mkdir -p /tmp/tmux-${uid}
+    mkdir -p -m 700 /tmp/tmux-${uid}  # 0700, not umask-default: a real tmux on this host refuses a looser socket dir
     : > /tmp/tmux-${uid}/"$SRV"
     s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
     [ -n "$s" ] && : > "$s"
@@ -1404,6 +1513,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -1528,6 +1638,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -1604,6 +1715,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 SRV=""; prev=""
 for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
@@ -1699,6 +1811,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -1784,7 +1897,7 @@ exit 0
       const freezeBin = join(dir, 'fakebin', 'freeze');
       writeFileSync(
         freezeBin,
-        '#!/bin/sh\nprintf \'PNG-BYTES\' > "$5"\nexit 0\n',
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nprintf \'PNG-BYTES\' > "$last"\nexit 0\n',
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -1829,6 +1942,71 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
+    'lands a PNG the publish gate accepts — freeze picks its format FROM the --output extension',
+    async () => {
+      // freeze v0.2.2 chooses .png/.svg/.webp by the --output extension
+      // and falls back to SVG for anything else. The render used to stage
+      // at `<out>.png.render-<nonce>` — no .png extension — so on every
+      // real-freeze host the rung landed an SVG at <out>.png, certified
+      // `evidence: "png"`, and the repo's own publish allowlist refused it
+      // on content (maintainer-measured on the real binary). This fake
+      // freeze honours the extension exactly like the real one, so a
+      // regression of the staged name's suffix goes red here: the landed
+      // file must sniff as PNG through the same gate publish-assets uses.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const realFreezeProbe = probes.freeze;
+      probes.freeze = () => ({ status: 'ok', out: '' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngext-'));
+      writeFakeTmux(dir, 'true');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\ncase "$last" in\n' +
+          '  *.png) printf \'\\211PNG\\015\\012\\032\\012\' > "$last";;\n' +
+          '  *) printf \'<svg xmlns="http://www.w3.org/2000/svg"></svg>\' > "$last";;\n' +
+          'esac\nexit 0\n',
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined();
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('png');
+        // The pipeline claim, validated by the same predicate the publish
+        // loop calls — anything but PNG bytes here (the SVG shape) fails.
+        const landed = readFileSync(join(dir, 'cap.png'));
+        expect(validateAssetContent('cap.png', landed.subarray(0, 8))).toEqual({
+          ok: true,
+        });
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        probes.freeze = realFreezeProbe;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'does not DELETE a file planted at <out>.png mid-window when the render fails',
     async () => {
       // The sibling harm on the failed-render cleanup: it removes the png
@@ -1845,7 +2023,11 @@ exit 0
         `    printf 'PLANTED-BY-COMMAND' > '${join(dir, 'cap.png')}'`,
       );
       const freezeBin = join(dir, 'fakebin', 'freeze');
-      writeFileSync(freezeBin, '#!/bin/sh\nexit 9\n', { mode: 0o755 });
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nexit 9\n',
+        { mode: 0o755 },
+      );
       const realPath = process.env['PATH'];
       const realBin = freezeRender.bin;
       process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
@@ -1904,9 +2086,13 @@ exit 0
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-pngtorn-'));
       writeFakeTmux(dir, '    :');
       const freezeBin = join(dir, 'fakebin', 'freeze');
-      writeFileSync(freezeBin, '#!/bin/sh\nprintf torn > "$5"\nexit 9\n', {
-        mode: 0o755,
-      });
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nprintf torn > "$last"\nexit 9\n',
+        {
+          mode: 0o755,
+        },
+      );
       const realPath = process.env['PATH'];
       const realBin = freezeRender.bin;
       process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
@@ -2016,8 +2202,9 @@ exit 0
       writeFileSync(
         freezeBin,
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 ln -s '${outside}' '${join(dir, 'cap.png')}'
-printf 'PNG-BYTES' > "$5"
+printf 'PNG-BYTES' > "$last"
 exit 0
 `,
         { mode: 0o755 },
@@ -2082,9 +2269,10 @@ exit 0
       writeFileSync(
         freezeBin,
         `#!/bin/sh
-[ "$3" = '${join(dir, 'cap.ans')}' ] && { echo "render read the .ans by name" >&2; exit 9; }
-[ -s "$3" ] || { echo "render input missing" >&2; exit 9; }
-printf 'x' > "$5"
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
+[ "$mid3" = '${join(dir, 'cap.ans')}' ] && { echo "render read the .ans by name" >&2; exit 9; }
+[ -s "$mid3" ] || { echo "render input missing" >&2; exit 9; }
+printf 'x' > "$last"
 exit 0
 `,
         { mode: 0o755 },
@@ -2199,7 +2387,7 @@ exit 0
       const rendered = join(dir, 'freeze-ran');
       writeFileSync(
         freezeBin,
-        `#!/bin/sh\ncat "$3" > "$5"\n: > '${rendered}'\nexit 0\n`,
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\ncat "$mid3" > "$last"\n: > '${rendered}'\nexit 0\n`,
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -2288,7 +2476,7 @@ exit 0
         // Reads the staged input by name — following a symlink exactly
         // like the real freeze (measured on v0.2.2) — and records that it
         // ran at all.
-        `#!/bin/sh\ncat "$3" > "$5"\n: > '${rendered}'\nexit 0\n`,
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\ncat "$mid3" > "$last"\n: > '${rendered}'\nexit 0\n`,
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -2365,8 +2553,9 @@ exit 0
       writeFileSync(
         freezeBin,
         `#!/bin/sh
-rm -f "$3" && mkdir "$3"
-printf 'x' > "$5"
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
+rm -f "$mid3" && mkdir "$mid3"
+printf 'x' > "$last"
 exit 0
 `,
         { mode: 0o755 },
@@ -2424,9 +2613,13 @@ exit 0
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-tcaveat-'));
       writeFakeTmux(dir, '    :');
       const freezeBin = join(dir, 'fakebin', 'freeze');
-      writeFileSync(freezeBin, '#!/bin/sh\nprintf x > "$5"\nexit 0\n', {
-        mode: 0o755,
-      });
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nprintf x > "$last"\nexit 0\n',
+        {
+          mode: 0o755,
+        },
+      );
       const realPath = process.env['PATH'];
       const realBin = freezeRender.bin;
       process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
@@ -2489,6 +2682,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -2592,6 +2786,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -2680,6 +2875,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -2765,6 +2961,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -2854,6 +3051,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -2942,6 +3140,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -3019,6 +3218,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -3093,6 +3293,7 @@ exit 0
       writeFileSync(
         join(binDir, 'tmux'),
         `#!/bin/sh
+last=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done
 [ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
 for a in "$@"; do
   if [ "$a" = "new-session" ]; then
@@ -3176,7 +3377,7 @@ exit 0
       const freezeBin = join(dir, 'fakebin', 'freeze');
       writeFileSync(
         freezeBin,
-        "#!/bin/sh\nhead -c 3145728 /dev/zero | tr '\\0' 'x' >&2\nexit 9\n",
+        "#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nhead -c 3145728 /dev/zero | tr '\\0' 'x' >&2\nexit 9\n",
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -3235,7 +3436,7 @@ exit 0
       const callLog = join(dir, 'tmux-calls');
       writeFileSync(
         join(binDir, 'tmux'),
-        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 2.8"; exit 0; }\necho ""\nexit 0\n`,
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 2.8"; exit 0; }\necho ""\nexit 0\n`,
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -3291,7 +3492,7 @@ exit 0
       mkdirSync(binDir, { recursive: true });
       writeFileSync(
         join(binDir, 'tmux'),
-        '#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
         { mode: 0o755 },
       );
       const realPath = process.env['PATH'];
@@ -3653,6 +3854,123 @@ exit 0
   });
 
   it.skipIf(process.platform === 'win32')(
+    'a probe that DIES BY SIGNAL asserts no usability — tmux refusal side',
+    async () => {
+      // spawnSync reports a signal-killed child as {status:null, signal}
+      // and the probe used to map that to `spawned: true` + "the binary
+      // ran and failed, so it is installed but not usable here — Fix the
+      // installation": a group-directed signal (coreutils `timeout`, a
+      // terminal Ctrl-C) can land on the probe child while its parent's
+      // handler stays queued, so the run refused the whole capture with
+      // a claim its host never answered. A self-signalling shim produces
+      // the identical spawnSync result without racy group kills.
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-sigprobe-'));
+      const binDir = join(dir, 'bin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nkill -TERM $$\n',
+        {
+          mode: 0o755,
+        },
+      );
+      const realPath = process.env['PATH'];
+      const realTmp = process.env['TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMPDIR'] = dir; // the TMPDIR gate needs it writable
+      try {
+        const { stdout, stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('killed by a signal');
+        expect(stderr).toContain('nothing about its usability was established');
+        expect(stderr).not.toContain('ran and failed');
+        expect(stderr).not.toContain('Fix the installation');
+        expect(JSON.parse(stdout.trim())).toEqual({
+          captured: false,
+          evidence: 'none',
+          reason: expect.stringContaining('killed by a signal'),
+        });
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = realTmp;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a probe that DIES BY SIGNAL asserts no usability in the manifest — freeze degrade side',
+    async () => {
+      // Same root, worse surface: the freeze consumer persisted
+      // "installed but not usable here" into degradedBecause, an
+      // environment claim the ladder exists to avoid. Self-signalling
+      // shim for the freeze probe; the tmux side is faked OK.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-sigfreeze-'));
+      writeFakeTmux(dir, 'true');
+      const freezeBin = join(dir, 'fakebin', 'freeze');
+      writeFileSync(
+        freezeBin,
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nkill -TERM $$\n',
+        {
+          mode: 0o755,
+        },
+      );
+      const realPath = process.env['PATH'];
+      const realBin = freezeRender.bin;
+      process.env['PATH'] = `${join(dir, 'fakebin')}:${realPath ?? ''}`;
+      freezeRender.bin = freezeBin;
+      try {
+        const { stdout } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        expect(process.exitCode).toBeUndefined(); // captured, not refused
+        expect(JSON.parse(stdout.trim()).captured).toBe(true);
+        const manifest = JSON.parse(
+          readFileSync(join(dir, 'cap.json'), 'utf8'),
+        );
+        expect(manifest.evidence).toBe('ans-only');
+        expect(manifest.degradedBecause).toContain('killed by a signal');
+        expect(manifest.degradedBecause).toContain(
+          'nothing about its usability was established',
+        );
+        expect(manifest.degradedBecause).not.toContain(
+          'installed but not usable here',
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        freezeRender.bin = realBin;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'cuts a HANGING availability probe with the belt — wedged, not absent',
     async () => {
       // A tmux -V that hangs would otherwise block before the refusal
@@ -3671,7 +3989,7 @@ exit 0
       // past any deadline — the SIGKILL half of the belt is what this pins.
       writeFileSync(
         join(binDir, 'tmux'),
-        "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n",
+        "#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\ntrap '' TERM\nwhile :; do :; done\n",
         {
           mode: 0o755,
         },
@@ -4301,7 +4619,7 @@ exit 0
         const callLog = join(dir, 'tmux-calls');
         writeFileSync(
           join(binDir, 'tmux'),
-          `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+          `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
           { mode: 0o755 },
         );
         const realTmuxProbe = probes.tmux;
@@ -4681,6 +4999,40 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'a decoy session planted on the SAME socket cannot replace the capture — exact -t match, never fuzzy',
+    async () => {
+      // The pane command inherits $TMUX, so it can reach this run's own
+      // private server: plant `capdecoy`, kill `=cap`, and a bare
+      // `-t cap` then prefix-matches the DECOY — every later capture
+      // records foreign bytes as this run's evidence (measured: `kill
+      // -t '=cap'`; `capture-pane -p -t cap` → DECOY-FROM-INSIDE, exit
+      // 0). `=<name>:` forces exact match: the same call fails outright
+      // with `can't find session: cap` — the mid-capture refusal, exit
+      // 3, and no .ans — exactly what an honest capture must do when
+      // the session it was told to trust is gone.
+      // The pane shell carries $TMUX as <socket>,<pid>,<index>: the
+      // server name is the socket path's basename, so the decoy reaches
+      // the same private server with -L — a bare `tmux new-session`
+      // would refuse to nest.
+      const { stderr } = await withStdio(() =>
+        run({
+          command:
+            `srv=$(basename "\${TMUX%%,*}"); ` +
+            `tmux -L "$srv" new-session -d -s capdecoy 'printf "DECOY-FROM-INSIDE\\n"; sleep 40'; ` +
+            `tmux -L "$srv" kill-session -t '=cap'; ` +
+            `sleep 40`,
+          until: 'NEVER-APPEARS',
+          timeoutMs: 4_000,
+        }),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('tmux failed mid-capture');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    },
+    30_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'drops -N and records the caveat when tmux -V does not parse ("tmux next")',
     async () => {
       // R24-1: a probe that SUCCEEDS with an unparseable banner answered
@@ -4700,7 +5052,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       const callLog = join(dir, 'tmux-calls');
       writeFileSync(
         join(binDir, 'tmux'),
-        `#!/bin/sh\necho "$*" >> '${callLog}'\n` +
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> '${callLog}'\n` +
           `if [ "$1" = "-V" ]; then echo "tmux next"; exit 0; fi\n` +
           `exec '${realTmuxBin}' "$@"\n`,
         { mode: 0o755 },
@@ -4765,7 +5117,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       const callLog = join(dir, 'tmux-calls');
       writeFileSync(
         join(binDir, 'tmux'),
-        `#!/bin/sh\necho "$*" >> '${callLog}'\n` +
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> '${callLog}'\n` +
           `if [ "$1" = "-V" ]; then printf ''; exit 0; fi\n` +
           `exec '${realTmuxBin}' "$@"\n`,
         { mode: 0o755 },
@@ -5054,7 +5406,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      '#!/bin/sh\n[ "$1" = "-V" ] && exit 0\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && exit 0\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho "fake tmux: refusing" >&2\nexit 1\n',
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -5096,7 +5448,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const callLog = join(dir, 'tmux-calls');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "new-session" ] && sleep 5; done\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "new-session" ] && sleep 5; done\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realBelt = tmuxControl.timeoutMs;
@@ -5234,7 +5586,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     // NOT withStdio: it installs its own stderr spy, which would replace a
@@ -5286,7 +5638,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const callLogPath = join(dir, 'tmux-calls');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     // TMUX_TMPDIR controlled like the sibling socket-dir tests: the reap
@@ -5354,7 +5706,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const callLog = join(dir, 'tmux-calls');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realHolder = holderInit.timeoutMs;
@@ -5391,7 +5743,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -5432,7 +5784,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const manifest = JSON.parse(readFileSync(join(dir, 'nocwd.json'), 'utf8'));
     expect(manifest.cwd).toBe(process.cwd());
     const ans = readFileSync(join(dir, 'nocwd.ans'), 'utf8');
-    expect(ans).toContain(process.cwd());
+    // De-wrapped, not contiguous: tmux hard-wraps at the 80-column grid
+    // edge with NO inserted character, so on a checkout whose packages/cli
+    // prefix is 80+ characters (a nested worktree, a scratch checkout) the
+    // contiguous form is red against healthy code. `-N` cannot pad the
+    // full row the wrap came from, and widening the pane geometry only
+    // moves the threshold.
+    expect(ans.replace(/\r?\n/g, '')).toContain(process.cwd());
   });
 
   it('survives a C-\\ sent through --keys — QUIT is trapped at layer 0', async () => {
@@ -5478,7 +5836,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const marker = join(dir, 'kill-attempted');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { if [ ! -e "${marker}" ]; then : > "${marker}"; echo "transient" >&2; exit 1; fi; exit 0; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { if [ ! -e "${marker}" ]; then : > "${marker}"; echo "transient" >&2; exit 1; fi; exit 0; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -5923,7 +6281,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // The fake refuses to render unless the .ans already exists and is
     // non-empty: a write-after-render mutant fails it.
     await withFakeFreeze(
-      '#!/bin/sh\n[ -s "$3" ] || { echo "ans missing at render time" >&2; exit 9; }\nprintf x > "$5"\nexit 0\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ -s "$mid3" ] || { echo "ans missing at render time" >&2; exit 9; }\nprintf x > "$last"\nexit 0\n',
       () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
@@ -5941,7 +6299,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // uncaught ENOENT — exit 1, no contract JSON, a stack trace, and both
     // artifacts orphaned with no manifest (fault-injected upstream).
     await withFakeFreeze(
-      '#!/bin/sh\nln -s /no-such-target-for-stat "$5"\nexit 0\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nln -s /no-such-target-for-stat "$last"\nexit 0\n',
       () => run(),
     );
     expect(process.exitCode).toBeUndefined();
@@ -5958,7 +6316,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // SIGKILL after the 30000ms render belt' — a hang that never happened.
     // The fake spews past the cap instead of hanging: same disposition,
     // different cause.
-    await withFakeFreeze('#!/bin/sh\nexec yes "spew" \n', () => run());
+    await withFakeFreeze(
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nexec yes "spew" \n',
+      () => run(),
+    );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.degradedBecause).toContain('signal SIGKILL');
@@ -5968,7 +6329,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
 
   it('records a freeze CRASH with its diagnostics, not just its absence', async () => {
     await withFakeFreeze(
-      '#!/bin/sh\necho "boom: render exploded" >&2\nexit 9\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\necho "boom: render exploded" >&2\nexit 9\n',
       () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
@@ -5990,8 +6351,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // failed-render arm keeps its hands off too. The leftover is loud,
     // not lost: the manifest denies the png rung and names it, and the
     // next run's ladder degrades on the occupant.
-    await withFakeFreeze('#!/bin/sh\nprintf torn > "$5"\nexit 9\n', () =>
-      run(),
+    await withFakeFreeze(
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nprintf torn > "$last"\nexit 9\n',
+      () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
@@ -6004,7 +6366,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const realBelt = freezeRender.timeoutMs;
     freezeRender.timeoutMs = 1000;
     try {
-      await withFakeFreeze('#!/bin/sh\nsleep 40\n', () => run());
+      await withFakeFreeze(
+        '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nsleep 40\n',
+        () => run(),
+      );
     } finally {
       freezeRender.timeoutMs = realBelt;
     }
@@ -6031,7 +6396,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const patch = join(dir, 'stdio-enospc.cjs');
@@ -6172,7 +6537,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // that can still produce evidence — or replacing the file.
     const foreign = 'a foreign image';
     writeFileSync(join(dir, 'cap.png'), foreign);
-    await withFakeFreeze('#!/bin/sh\nprintf x > "$5"\n', () => run());
+    await withFakeFreeze(
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nprintf x > "$last"\n',
+      () => run(),
+    );
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
@@ -6191,12 +6559,15 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   // load-bearing and is not.
   for (const [label, script] of [
     ['exits 0 without writing', 'exit 0'],
-    ['exits 9 after a torn write', 'printf torn > "$5"; exit 9'],
+    ['exits 9 after a torn write', 'printf torn > "$last"; exit 9'],
   ] as const) {
     it(`never spawns freeze at all when <out>.png is occupied — ${label}`, async () => {
       writeFileSync(join(dir, 'cap.png'), 'the user file');
       const ran = join(dir, 'freeze-ran');
-      await withFakeFreeze(`#!/bin/sh\n: > "${ran}"\n${script}\n`, () => run());
+      await withFakeFreeze(
+        `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n: > "${ran}"\n${script}\n`,
+        () => run(),
+      );
       expect(existsSync(ran)).toBe(false);
       const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
       expect(manifest.evidence).toBe('ans-only');
@@ -6211,7 +6582,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   it('never manifests a png rung on exit code alone — the file must exist', async () => {
     // A freeze that exits 0 without writing anything would otherwise ship
     // "evidence": "png" pointing at nothing.
-    await withFakeFreeze('#!/bin/sh\nexit 0\n', () => run());
+    await withFakeFreeze(
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nexit 0\n',
+      () => run(),
+    );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.pngPath).toBeNull();
@@ -6223,7 +6597,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // mid-write — the shape the .ans write guard's comment names) would
     // otherwise sail past an existence-only guard and publish zero pixels
     // as "evidence": "png" (probe-verified end-to-end).
-    await withFakeFreeze('#!/bin/sh\n: > "$5"\nexit 0\n', () => run());
+    await withFakeFreeze(
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n: > "$last"\nexit 0\n',
+      () => run(),
+    );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.pngPath).toBeNull();
@@ -6253,7 +6630,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'freeze'),
-      '#!/bin/sh\n[ "$1" = "--help" ] && exit 0\nexit 1\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n[ "$1" = "--help" ] && exit 0\nexit 1\n',
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -6926,7 +7303,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // not have it (NixOS store paths, minimal rootfs) — sh has no set -e,
       // so the shim went on to write the png and the test silently stopped
       // testing the render window.
-      `#!/bin/sh\n: > "${renderStarted}"\nsleep 4 || exit 97\nprintf x > "$5"\n`,
+      `#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\n: > "${renderStarted}"\nsleep 4 || exit 97\nprintf x > "$last"\n`,
       { mode: 0o755 },
     );
     const driver = join(dir, 'driver-render.mts');
@@ -7003,7 +7380,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // character device and hangs it indefinitely, while a regular file
       // sends it into file mode — both would have satisfied a `-c` test
       // while breaking the render. Compare the device itself.
-      '#!/bin/sh\nif [ ! -c /dev/stdin ] || [ -t 0 ]; then echo "ERROR No input" >&2; exit 1; fi\nprintf x > "$5"\nexit 0\n',
+      '#!/bin/sh\nlast=;mid2=;mid3=;for a do mid3=$mid2; mid2=$last; last=$a; done\nif [ ! -c /dev/stdin ] || [ -t 0 ]; then echo "ERROR No input" >&2; exit 1; fi\nprintf x > "$last"\nexit 0\n',
       () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));

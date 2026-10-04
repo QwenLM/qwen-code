@@ -158,6 +158,20 @@ type ProbeResult =
   // which, because "could not spawn it" is a false claim about the second.
   | { status: 'hung'; code?: string; spawned?: boolean };
 
+/** Whether a hung-probe code is "the child died by signal" — spawnSync
+ * reports a signal kill as `{status: null, signal}` with no errno, and
+ * probeOutput maps it to `signal <SIG>`. A signal death establishes HOW
+ * the child died and NOTHING about its usability: the spawn-sync child
+ * sits in this process's own group (no `detached`), so a group-directed
+ * signal — coreutils `timeout`, a terminal Ctrl-C, a harness kill —
+ * reaches the probe while this process's own handler stays queued until
+ * the drain. Asserting "ran and failed" there persisted "installed but
+ * not usable here" into the manifest for a host that never answered,
+ * and refusing the whole run sent the operator to fix a healthy binary. */
+function isSignalDeathCode(code: string | undefined): boolean {
+  return code?.startsWith('signal ') ?? false;
+}
+
 /** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
  * host without `which` would otherwise misdiagnose an installed binary as
  * missing, and the binary answering is the only fact that matters. Answers
@@ -1014,7 +1028,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   if (tmuxProbe.status === 'hung') {
     refuse(
       tmuxProbe.code
-        ? `tmux could not be probed (${tmuxProbe.code}) — ` +
+        ? isSignalDeathCode(tmuxProbe.code)
+          ? `tmux could not be probed (${tmuxProbe.code}) — killed by a ` +
+            "signal, possibly this run's own termination, so nothing " +
+            'about its usability was established. Retry once the host ' +
+            'settles; rendering claims stay argued from the code until ' +
+            'it answers.'
+          : `tmux could not be probed (${tmuxProbe.code}) — ` +
             (tmuxProbe.spawned
               ? 'the binary ran and failed, so it is installed but not ' +
                 'usable here. Fix the installation; rendering claims stay ' +
@@ -1490,23 +1510,25 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // A tmux-created socket has exactly one link, so more is never
             // this run's own.
             entry.nlink > 1 ||
+            // With NO stamp this run has nothing to compare on ANY base —
+            // an entry at its unique name cannot be shown to be its own,
+            // so it is not connected to. Reachable without a race (the
+            // stamp capture documents both states: a start that bound
+            // under the other base, or a stamp lstat that failed after a
+            // successful start); gating the fails-closed on the start base
+            // left the untried cell in the 2x2 (no stamp × another base),
+            // and a plain foreign socket bound at this run's name under
+            // /tmp took the pinned kill and destroyed the user's own
+            // server — exit 0, no WARNING (measured). Keyed on the STANDING
+            // entry only: an unstamped run with nothing at the path throws
+            // at the lstat above and proceeds in silence, which is the
+            // shape the unstamped-success pins cover.
+            socketStamp === undefined ||
             // Identity only on the base the stamp was taken under: the
             // server binds ONE socket, and only there does a differing
             // inode mean the entry was swapped rather than that this base
             // never held it.
-            //
-            // FAIL-CLOSED on a missing stamp, because the stamp is absent in
-            // two states and one of them is the attack: a start that bound
-            // under the other base leaves no entry here at all (the lstat
-            // above throws and nothing is refused), while a stamp that
-            // FAILED after a successful start leaves the check with nothing
-            // to compare — and a plain foreign socket bound at this run's
-            // own name then passed all three tests and took the pinned
-            // kill. An entry standing here that this run cannot show is its
-            // own is not connected to; the WARNING carries the manual
-            // command, which is the disclosed cost of that choice.
-            (resolve(base) === startBase &&
-              (socketStamp === undefined || !isStampedSocket(entry))) ||
+            (resolve(base) === startBase && !isStampedSocket(entry)) ||
             // A stamp PROVES the bind happened on the start base — the same
             // fact `confirmedDead` already leans on. So on any OTHER base a
             // socket at this run's unique name cannot be ours, and the kill
@@ -1516,7 +1538,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // tests and took the pinned kill (measured: the user's own
             // server destroyed, exit 0, no WARNING). Uses only the run's own
             // stamp, no forgeable identity signal.
-            (socketStamp !== undefined && resolve(base) !== startBase);
+            resolve(base) !== startBase;
         } catch {
           // Absent or unstattable: there is nothing planted to connect
           // through, and the kill's own goal-state wordings already answer
@@ -2157,14 +2179,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     degradations.push(
       freezeProbe.status === 'hung'
         ? freezeProbe.code
-          ? // The SPAWN failed, which says nothing about installation: a
-            // false 'not installed' would persist in the manifest as an
-            // environment claim this run never established.
-            `freeze could not be probed (${freezeProbe.code}) — ${
-              freezeProbe.spawned
-                ? 'it ran and failed, so it is installed but not usable here'
-                : 'it may be installed; this host could not spawn it'
-            }. .ans text captured, no image rendered`
+          ? isSignalDeathCode(freezeProbe.code)
+            ? // A signal death is not "ran and failed": nothing about the
+              // binary's usability was answered, and persisting
+              // "installed but not usable here" is the environment claim
+              // this ladder exists to avoid — see isSignalDeathCode.
+              `freeze could not be probed (${freezeProbe.code}) — killed ` +
+              "by a signal, possibly this run's own termination; nothing " +
+              'about its usability was established. .ans text captured, ' +
+              'no image rendered'
+            : // The SPAWN failed, which says nothing about installation: a
+              // false 'not installed' would persist in the manifest as an
+              // environment claim this run never established.
+              `freeze could not be probed (${freezeProbe.code}) — ${
+                freezeProbe.spawned
+                  ? 'it ran and failed, so it is installed but not usable here'
+                  : 'it may be installed; this host could not spawn it'
+              }. .ans text captured, no image rendered`
           : `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
         : // Same caveat the tmux refusal carries: execve answers ENOENT for
           // a present-but-unexecable binary too, and nothing in the spawn
@@ -2203,9 +2234,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const freezeBin = isAbsolute(freezeRender.bin)
       ? freezeRender.bin
       : resolveOnPath(freezeRender.bin);
+    // The OUTPUT stage still ends in `.png`, nonce-bearing and all:
+    // freeze v0.2.2 picks its output format FROM the --output
+    // extension (`.svg`, `.png`, `.webp` — anything else is SVG), and
+    // for one evening every capture on a freeze host landed an SVG at
+    // <out>.png, certified `evidence: "png"`, and was refused by the
+    // repo's own content-allowlist at publish time. The nonce's job —
+    // a name no other run knows — still holds; the suffix is the same
+    // string with its format hint restored.
     const renderNonce = randomBytes(6).toString('hex');
     const ansStage = `${ansPath}.render-${renderNonce}`;
-    const pngStage = `${pngPath}.render-${renderNonce}`;
+    const pngStage = `${pngPath}.render-${renderNonce}.png`;
     let renderInputStaged = false;
     try {
       linkSync(ansPath, ansStage);

@@ -1347,6 +1347,50 @@ describe('runCleanup', () => {
         );
       });
 
+      it('treats an already-GONE entry after the kill as the goal state, not a swap', () => {
+        // The mirror of the change-under-kill warning above: tmux itself
+        // unlinks the socket with the server it just killed (version-
+        // dependent), and a host-wide sibling sweep can land its rmSync
+        // between this kill and this re-check. Folding that ENOENT into
+        // `entryChanged` printed a WARNING whose own words — "its socket
+        // was left in place" — were false, withheld the Reaped line on a
+        // successful kill, and let failedAny suppress the run's
+        // Nothing-to-clean claim for a host that was clean (witnessed
+        // on a real sweep both directions).
+        const planted = captureServerName(Number(deadPid), '2f2f');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        let lstatCalls = 0;
+        mocks.lstatSync.mockImplementation((_p: string): SweepEntryStat => {
+          if (lstatCalls++ === 0) {
+            // The guard's look: the plain socket the scan found.
+            return {
+              isSymbolicLink: () => false,
+              isSocket: () => true,
+              nlink: 1,
+              ino: 111,
+              mode: 0o140700,
+            };
+          }
+          // The post-kill re-check: already gone — the kill's own tmux
+          // unlinked it, or a sibling sweep did.
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('changed between the type guard'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
       it('does not credit an ENOENT answer as death — the file can vanish under a live server', () => {
         // The sweep found the entry by readdir, so an ENOENT answer from
         // the kill means the file vanished between the scan and the kill —

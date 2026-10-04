@@ -573,7 +573,17 @@ export function tmuxPlan(opts: {
       // there would fail the call outright ("unknown flag -T", measured).
       ...(opts.captureTrim ? ['-T'] : []),
       '-t',
-      opts.session,
+      // Exact-match, not fuzzy: tmux resolves a bare `-t cap` by PREFIX
+      // once no exact match exists, and the captured command runs in the
+      // pane with $TMUX inherited — it can plant `capdecoy` on this same
+      // socket and kill `=cap`, and every later capture then reads the
+      // decoy's bytes as this run's evidence (measured on 3.4). `=<name>:`
+      // forces exact match and fails the call outright once our session
+      // is gone; for a pane target the `=` form must carry the trailing
+      // colon or tmux parses it as a pane index. ab-drive's own comment
+      // names the same class ("=<name> forces exact match, the only form
+      // that names one session").
+      `=${opts.session}:`,
     ],
     // The MATCHING view for --until: `-J` joins wrapped lines and no `-e`
     // keeps escapes out, so a marker that spans a wrap boundary or an SGR
@@ -592,7 +602,10 @@ export function tmuxPlan(opts: {
       // rendering across an erased region can still never match.
       ...(opts.captureTrim ? ['-T'] : []),
       '-t',
-      opts.session,
+      // Same exact-match spelling as capture above — the marker poll is
+      // the view the matcher reads; a fuzzy match here finds the decoy's
+      // marker.
+      `=${opts.session}:`,
     ],
     // kill-server, not kill-session: the server is ours alone (private -L),
     // and killing it reaps the session and everything still in it — no
@@ -611,7 +624,9 @@ export function tmuxPlan(opts: {
       ...scope,
       'send-keys',
       '-t',
-      opts.session,
+      // Same exact-match spelling as capture above — keys into a decoy
+      // session are typed evidence corruption twice over.
+      `=${opts.session}:`,
       '--',
       escapeTrailingSemicolon(key),
     ],
@@ -622,5 +637,21 @@ export function tmuxPlan(opts: {
  * FIRST, then render" survives (freeze has hung mid-render on this repo's
  * own workflows; the text evidence must already be on disk when it does). */
 export function freezePlan(ansPath: string, pngPath: string): string[] {
-  return ['--language', 'ansi', ansPath, '--output', pngPath];
+  // Generic monospace before anything else: freeze v0.2.2 rasterizes the
+  // PNG with the SYSTEM default font on hosts where its own embedded
+  // JetBrains Mono only lands in the SVG variant (measured on a Debian
+  // real-freeze host rendering an 80-column TUI: the box border landed
+  // at a different x per row), so a column claim read off the pixels
+  // reported a layout the .ans never had. The generic family needs no
+  // font file and asks for the one property terminal rendering
+  // guarantees.
+  return [
+    '--font.family',
+    'monospace',
+    '--language',
+    'ansi',
+    ansPath,
+    '--output',
+    pngPath,
+  ];
 }

@@ -801,10 +801,23 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       const postKill = lstatSync(join(dir, name));
       entryChanged =
         postKill.ino !== entryStat.ino || postKill.mode !== entryStat.mode;
-    } catch {
-      // Gone between the kill and the re-check — only a racer removes an
-      // entry this sweep has not unlinked yet.
-      entryChanged = true;
+    } catch (e) {
+      // Already GONE is the goal state, not a swap: tmux itself unlinks
+      // the socket with the server it just killed ("does not always" —
+      // it varies by version), and a host-wide sibling sweep can land
+      // its rmSync between this kill and this re-check — the benign
+      // remover this function's own hoisted-above-the-lease design
+      // invites. A successful kill plus nothing at the path is the end
+      // state achieved; folding ENOENT into entryChanged printed a
+      // WARNING asserting "its socket was left in place" over a path
+      // with nothing at all on it, withheld the Reaped line, and
+      // suppressed the run's Nothing-to-clean claim for a host that was
+      // clean (witnessed both directions). Every OTHER lstat failure —
+      // EPERM on own-uid dirs is not one we know benign — keeps the
+      // doubt.
+      entryChanged =
+        (e as NodeJS.ErrnoException).code !== 'ENOENT' &&
+        (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
     }
     if (entryChanged) {
       // NEVER unlink here. The entry is no longer the plain socket the guard

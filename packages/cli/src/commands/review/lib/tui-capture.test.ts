@@ -351,7 +351,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       'srv',
       'send-keys',
       '-t',
-      'cap',
+      '=cap:',
       '--',
       'C-c',
     ]);
@@ -363,7 +363,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       'srv',
       'send-keys',
       '-t',
-      'cap',
+      '=cap:',
       '--',
       '-l',
     ]);
@@ -665,7 +665,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       '-p',
       '-J',
       '-t',
-      'cap',
+      '=cap:',
     ]);
   });
 
@@ -683,7 +683,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       '-e',
       '-N',
       '-t',
-      'cap',
+      '=cap:',
     ]);
   });
 });
@@ -691,6 +691,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
 describe('freezePlan', () => {
   it('renders the .ans as ansi to the named output', () => {
     expect(freezePlan('/x/a.ans', '/x/a.png')).toEqual([
+      // Generic monospace: freeze v0.2.2 rasterizes PNG with the system
+      // default (measured proportional on a real Linux host), so a
+      // column claim read off the pixels misdescribes the .ans.
+      '--font.family',
+      'monospace',
       '--language',
       'ansi',
       '/x/a.ans',
