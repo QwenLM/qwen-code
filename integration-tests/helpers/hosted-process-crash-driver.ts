@@ -38,6 +38,7 @@ const report = {
   operations: [] as string[],
   signalEvidence: [] as unknown[],
   restoreTransactions: [] as Transaction[],
+  sealedWriterRenewals: 0,
   target: undefined as Transaction | undefined,
 };
 const proof = path.join(config.directory, 'proof.txt');
@@ -49,6 +50,7 @@ let restoring = false;
 let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
+const sealedWriters = new Set<string>();
 
 function events(transaction: Transaction) {
   return Buffer.from(transaction.recordBytesBase64, 'base64')
@@ -153,8 +155,28 @@ const proxy = createServer(async (req, res) => {
       ?.includes('application/json')
       ? JSON.parse(bytes.toString())
       : undefined;
+    const writerGrant = `${fields.writerId}:${fields.writerGeneration}`;
+    if (
+      store &&
+      url.pathname.endsWith('/writers:seal') &&
+      upstream.status === 200
+    )
+      sealedWriters.add(writerGrant);
     if (!serviceKilled) {
-      if (upstream.status === 409) {
+      if (
+        upstream.status === 409 &&
+        store &&
+        url.pathname.endsWith('/writers:renew') &&
+        sealedWriters.has(writerGrant)
+      ) {
+        // A renewal already in flight may reach the Store after its seal.
+        assert.equal(
+          json.error.code,
+          'managed_session_writer_conflict',
+          `${url}: ${bytes}`,
+        );
+        report.sealedWriterRenewals++;
+      } else if (upstream.status === 409) {
         assert(
           injected &&
             !store &&
