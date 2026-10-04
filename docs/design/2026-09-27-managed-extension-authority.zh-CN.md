@@ -161,7 +161,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 - 对每个 fixture 用例，TypeScript 与 Java 得出相同的任务 ID、任务视图与 outbox 归属，并拒绝相同的修订链；两侧各自把本侧读取的 Runtime 报告映射为 fixture 给出的执行状态。
 - 被拒绝的修订在两侧都不提交任何内容。
 - 重新打开的 authority 与重启后的服务报告与之前相同的任务列表。
-- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表、`capabilities.tasks`、更严格的记录行解析之外，只有通用追加路径从接受全部已注册名字收窄为仅接受四个已开放的信封 domain。
+- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表、`capabilities.tasks`、更严格的记录行解析之外，还有通用追加路径：现在只有已开放、且没有 Stage H 记录体的 domain 才能追加 `domain.committed` 事件——今天是 `goal_state`、`session_metadata`、`file_history` 与 `session_source`——而不再接受每一个已注册的名字。
 - H0 门槛在契约层面成立。fixture 固定了任务 ID、修订链规则（Runtime 只能在未知结果之后、以更新的代数重新挂接）、Broker 的执行状态以及 Broker 为其上报的线上状态。TypeScript、Java 存储与 Broker 各自回放自己的部分。目前只有提交路径是端到端运行的：在 H3 开放 `monitor_run`、H1 接入 gate 之前，生产代码不会调用 `commitExtensionRecord`、grant gate 或执行状态映射。
 - `monitor_run` 仍被拒绝提交。
 

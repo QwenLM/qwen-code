@@ -325,7 +325,10 @@ WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` �
 - **H0c。** 实现任务投影，把这些路由标为 `partial`，并定义宣告任务变化的 Session 事件。
   只标记路由还不够：`PublicCommandOperation.task_id`、`WebShellCommandOperation.taskId`
   和两个 `capabilities.tasks` 标志都是独立的 `planned` 属性，承载其中一个标志的
-  `WebShellSession.capabilities` 对象本身也是 planned。此后其中三项已随 H0c（#12855）变为已提供且必填；`task_id` 与 `taskId` 按 H0c 决策 9 随取消保持 `planned`。
+  `WebShellSession.capabilities` 对象本身也是 planned。此后两个 `capabilities.tasks`
+  标志已随 H0c（#12855）变为已提供且必填，该对象则已提供但非必填；本变更把该对象加入
+  `WebShellSession.required`，与早已要求它的公开 `Session` 对齐，生成的 WebShell 类型
+  由此不再带 `?`。`task_id` 与 `taskId` 按 H0c 决策 9 随取消保持 `planned`。
 - **输出恢复。** H3 定义输出分段，并随之定义 `cursor_expired` 之后调用方如何无重叠地衔接任务的
   Artifact 与保留的事件。
 - **Artifact 归属。** `PublicArtifact` 没有任务引用，artifact 列表也没有按任务过滤，

@@ -103,7 +103,11 @@ class ManagedExtensionRecordStoreTest {
     @Test
     void refusesTheSharedRejectedChains() throws Exception {
         for (JsonNode reject : fixtures().required("monitorChainRejectCases")) {
-            String sessionId = UUID.randomUUID().toString();
+            // Public, so the Session event count in assertRefused is not
+            // vacuous: appendLiveSessionEventIfAbsent needs the row.
+            String sessionId = agents.createSession(TENANT, "reject-"
+                    + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                    List.of()).sessionId();
             ExtensionRecordJournal journal = journal(sessionId);
             int index = 0;
             for (JsonNode monitor : reject.required("accepted")) {
@@ -118,17 +122,22 @@ class ManagedExtensionRecordStoreTest {
                     ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
             String commandId = reuse == null ? "rejected"
                     : "accepted-" + reuse.intValue();
+            CommitTransactionRequest refusedRequest = journal.request(
+                    operation, commandId, ExtensionRecordJournal.bytes(
+                            reject.required("next")), occurredAt, event -> {
+                            }, records -> records);
             assertRefused(reject.required("id").textValue(), sessionId,
                     ManagedExtensionRecordStore.ERROR_REJECTED, null,
-                    () -> journal.commit(journal.request(operation,
-                            commandId, ExtensionRecordJournal.bytes(
-                                    reject.required("next")), occurredAt,
-                            event -> {
-                            }, records -> records)));
+                    () -> journal.commit(refusedRequest));
             if (reuse == null) {
-                // Rollback proves itself by consequence: the same operation
-                // and command id commits as new, not as a replay of the
-                // refused call.
+                // No command row survives a refusal: the identical bytes
+                // are refused again, not replayed, and the resource rows a
+                // lost rollback would keep collide the resend on the
+                // resource reference primary key.
+                assertRefused(reject.required("id").textValue() + " resent",
+                        sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                        null, () -> journal.commit(refusedRequest));
+                // A new body under the same command id commits as new.
                 JsonNode retry = ((ObjectNode) chain().get(0)
                         .required("monitorRun").deepCopy()).put("monitorId",
                         "monitor-retry-" + index);
@@ -444,10 +453,11 @@ class ManagedExtensionRecordStoreTest {
 
     /**
      * A refused commit leaves no resource reference, no revision and no
-     * Session event behind, which it would if the store did not roll back;
-     * the refused command row itself is proven by committing it again as
-     * new, which the tests do where the pair is fresh. A {@code message}
-     * names the rule that refused it.
+     * Session event behind, the rows only a rollback removes. The event
+     * count is vacuous without a public Session, so the chain refusals
+     * create one, and the refused command row itself is proven where the
+     * pair is fresh by committing the identical bytes again: a refusal,
+     * not a replay. A {@code message} names the rule that refused it.
      */
     private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {

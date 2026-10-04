@@ -512,11 +512,13 @@ the runtime guarantees above. Before H3 or the cancel slice marks its routes
   for submission.
 - **H0c.** Builds the task projection, maps these routes as `partial`, and
   defines the Session events that announce task changes. Marking the routes
-  alone was not enough: `capabilities.tasks` and the
-  `WebShellSession.capabilities` object that holds it became served and
-  required with them (#12855), while `PublicCommandOperation.task_id` and
-  `WebShellCommandOperation.taskId` stay `planned` with cancel, as the H0c
-  design's Decision 9 says.
+  alone was not enough: `capabilities.tasks` became served and required
+  with them (#12855), inside a `WebShellSession.capabilities` object that
+  #12855 served without requiring; this change adds the object to
+  `WebShellSession.required`, mirroring the public `Session` that already
+  required it, so the generated WebShell type loses its `?`.
+  `PublicCommandOperation.task_id` and `WebShellCommandOperation.taskId`
+  stay `planned` with cancel, as the H0c design's Decision 9 says.
 - **Output recovery.** H3 defines output segmentation, and with it how a
   caller joins the task's Artifacts with the retained events after
   `cursor_expired` without overlap.

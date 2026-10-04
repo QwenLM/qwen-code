@@ -161,7 +161,7 @@ A Python labeler written from this document, independent of both languages and k
 - TypeScript and Java produce the same task IDs, task views and outbox membership for every fixture case and refuse the same chains, and each maps the Runtime reports it reads to the execution states the fixtures give.
 - A refused revision commits nothing on either side.
 - A reopened authority and a restarted server report the same task list as before.
-- No planned route is mapped, and nothing changes for Sessions without Stage H records except the empty task list, `capabilities.tasks`, the stricter parse of record lines, and the generic append paths that now accept only the four enabled envelope domains instead of every registered name.
+- No planned route is mapped, and nothing changes for Sessions without Stage H records except the empty task list, `capabilities.tasks`, the stricter parse of record lines, and the generic append paths, which now accept a `domain.committed` event only for an enabled domain that has no Stage H record body — `goal_state`, `session_metadata`, `file_history` and `session_source` today — instead of for every registered name.
 - The H0 gate holds at the level of the contract. The fixtures pin the task IDs, the chain rules (a Runtime is attached again only under a later generation, after an unknown outcome), the Broker's execution states and the wire statuses the Broker reports for them. TypeScript, the Java store and the Broker each replay their part. Only the commit path runs end to end: nothing in production calls `commitExtensionRecord`, the grant gate or the execution mappings before H3 enables `monitor_run` and H1 wires the gate.
 - `monitor_run` is still refused for submission.
 

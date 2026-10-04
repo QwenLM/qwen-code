@@ -680,8 +680,10 @@ class ManagedAgentMySqlIT {
                 Integer.class, tenant, session, refusedResource)).isZero();
         assertThat(count(jdbc, "qwen_managed_session_resource_ref", tenant,
                 session)).isEqualTo(references);
-        // Rollback is observable by consequence: the same operation and
-        // command id commits as new, not as a replay of the refused call.
+        // No command row survives the refusal: the same operation and
+        // command id commit a new body as new, not as a replay of the
+        // refused call; the rollback of its resource rows is pinned by the
+        // counts above.
         JsonNode retry = ((ObjectNode) chain.get(0).required("monitorRun")
                 .deepCopy()).put("monitorId", "monitor-retry");
         CommitReceipt resent = inTransaction(transactions,
