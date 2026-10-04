@@ -5,6 +5,7 @@
  */
 
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -214,7 +215,10 @@ export class HostedMonitorLoop {
     if (this.ended || this.buffered.length === 0) return;
     const lines = this.buffered;
     this.buffered = [];
-    await this.monitors.observe(this.monitorId, { lines });
+    const nextSequence =
+      (this.monitors.record(this.monitorId)?.observationSequence ?? 0) + 1;
+    const input = await this.notification(nextSequence, lines);
+    await this.monitors.observe(this.monitorId, { lines }, { input });
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
@@ -223,6 +227,29 @@ export class HostedMonitorLoop {
       sequence >= this.params.maxEvents
     )
       await this.settle('max_events', true);
+  }
+
+  /** One notification per accepted observation, as the Legacy wake did. */
+  private async notification(
+    sequence: number,
+    lines: readonly string[],
+  ): Promise<ManagedSessionInputRequest> {
+    const inputId = `${this.monitorId}:notify:${sequence}`;
+    return {
+      inputId,
+      turnId: inputId,
+      source: 'monitor',
+      contentRef: await this.monitors.resourceStore.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify({ text: lines.join('\n') }), 'utf8'),
+      ),
+      deadline: null,
+      admissionRef: await this.monitors.resourceStore.publish(
+        'managed-admission',
+        Buffer.from('{}', 'utf8'),
+      ),
+      wakeReason: 'input',
+    };
   }
 
   private async settle(

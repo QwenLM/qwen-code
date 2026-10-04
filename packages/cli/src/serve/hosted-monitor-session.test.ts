@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
-import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  type ManagedSessionInputRequest,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
@@ -274,6 +277,47 @@ describe('HostedMonitorSession', () => {
       expect(committed(authority).body).toMatchObject({
         stopReason: 'idle_timeout',
         run: { state: 'settled', execution: 'settled' },
+      });
+    });
+  });
+
+  it('advances the watermark only when a notification rides the revision', async () => {
+    const harness = await createHarness();
+    await withOrchestrator(harness, async (authority, orchestrator) => {
+      await admitCall(orchestrator);
+      await orchestrator.dispatchStarted('monitor-1', BINDING);
+      await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
+      const input: ManagedSessionInputRequest = {
+        inputId: 'monitor-1:notify:1',
+        turnId: 'monitor-1:notify:1',
+        source: 'monitor',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"changed"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      };
+      await orchestrator.observe('monitor-1', { size: 1 }, { input });
+      expect(committed(authority).body).toMatchObject({
+        observationSequence: 1,
+        notifiedThrough: 1,
+      });
+      expect(
+        authority
+          .readEvents()
+          .slice(-3)
+          .map((event) => event.kind),
+      ).toEqual(['domain.committed', 'input.accepted', 'wake.requested']);
+
+      await orchestrator.observe('monitor-1', { size: 2 });
+      expect(committed(authority).body).toMatchObject({
+        observationSequence: 2,
+        notifiedThrough: 1,
       });
     });
   });

@@ -247,11 +247,32 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     expect(committed(rig.authority).observationSequence).toBe(1);
     const body = committed(rig.authority);
+    expect(body.notifiedThrough).toBe(1);
     expect(
       JSON.parse(
         (await harness.store.read(body.lastObservationRef!)).toString(),
       ),
     ).toEqual({ lines: ['built', 'tested'] });
+
+    // The observation, its notification input and its wake landed in one
+    // transaction: the turn the wake raises reads exactly these lines.
+    const events = rig.authority.readEvents().slice(-3);
+    expect(events.map((event) => event.kind)).toEqual([
+      'domain.committed',
+      'input.accepted',
+      'wake.requested',
+    ]);
+    expect(events[2].payload).toMatchObject({
+      sourceEventId: 'monitor-1:notify:1:accepted',
+      requiredSequence: events[1].sequence,
+    });
+    expect(
+      JSON.parse(
+        (
+          await harness.store.read(events[1].payload['contentRef'] as never)
+        ).toString(),
+      ),
+    ).toEqual({ text: 'built\ntested' });
     await closeLoop(rig);
   });
 
@@ -266,6 +287,7 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     expect(committed(rig.authority)).toMatchObject({
       observationSequence: 2,
+      notifiedThrough: 2,
       stopReason: 'max_events',
       run: { state: 'settled', execution: 'settled' },
     });

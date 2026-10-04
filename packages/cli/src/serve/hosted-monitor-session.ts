@@ -14,6 +14,7 @@ import type {
 import type {
   ManagedSessionActor,
   ManagedSessionCommand,
+  ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type {
   ManagedSessionDurableRef,
@@ -76,6 +77,11 @@ export class HostedMonitorSession {
       monitorId,
     );
     return existing ? parseMonitorRun(existing.record) : undefined;
+  }
+
+  /** The Session resource store notification bodies publish through. */
+  get resourceStore(): HostedMonitorStore['resources'] {
+    return this.store.resources;
   }
 
   /** Revision 1: the watch call's intent, before any physical side effect. */
@@ -160,18 +166,27 @@ export class HostedMonitorSession {
   observe(
     monitorId: string,
     observation: Record<string, unknown>,
+    notification?: { readonly input: ManagedSessionInputRequest },
   ): Promise<void> {
-    return this.reviseAsync(monitorId, async (previous) => {
-      const lastObservationRef = await this.store.resources.publish(
-        'managed-monitor-observation',
-        Buffer.from(JSON.stringify(observation), 'utf8'),
-      );
-      return {
-        ...previous,
-        observationSequence: previous.observationSequence + 1,
-        lastObservationRef,
-      };
-    });
+    return this.commit(
+      monitorId,
+      async (previous) => {
+        if (!previous)
+          throw new Error(`Monitor ${monitorId} has no record to revise.`);
+        const lastObservationRef = await this.store.resources.publish(
+          'managed-monitor-observation',
+          Buffer.from(JSON.stringify(observation), 'utf8'),
+        );
+        const sequence = previous.observationSequence + 1;
+        return {
+          ...previous,
+          observationSequence: sequence,
+          lastObservationRef,
+          notifiedThrough: notification ? sequence : previous.notifiedThrough,
+        };
+      },
+      notification?.input,
+    );
   }
 
   /** The output manifest advanced; only ever to a newer revision of it. */
@@ -254,6 +269,7 @@ export class HostedMonitorSession {
     record:
       | MonitorRun
       | ((previous: MonitorRun | undefined) => Promise<MonitorRun>),
+    input?: ManagedSessionInputRequest,
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(
@@ -263,7 +279,8 @@ export class HostedMonitorSession {
       const previous = existing ? parseMonitorRun(existing.record) : undefined;
       const next =
         typeof record === 'function' ? await record(previous) : record;
-      if (previous && isDeepStrictEqual(previous, next)) return;
+      if (previous && isDeepStrictEqual(previous, next) && input === undefined)
+        return;
       await this.store.authority.commitExtensionRecord(
         {
           operation: 'commitMonitorRun',
@@ -273,7 +290,11 @@ export class HostedMonitorSession {
           sessionKey: this.key,
           contentDigest: digest(next),
         },
-        { domain: 'monitor_run', record: next },
+        {
+          domain: 'monitor_run',
+          record: next,
+          ...(input !== undefined ? { input } : {}),
+        },
         TRUSTED,
       );
     });
