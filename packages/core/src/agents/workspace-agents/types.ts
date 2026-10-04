@@ -377,6 +377,12 @@ export interface ThreadRun {
   closeKind?: RunCloseKind;
   closeAcknowledgedAtSequence?: number;
   finalMessageId?: string;
+  /** Written with terminal settlement only when a Host result was accepted. */
+  hostResultReceipt?: {
+    attempt: number;
+    leaseId: string;
+    digest: string;
+  };
   usageByRound: RunUsageRound[];
   /**
    * The task session's cumulative token total when this run started. The delta

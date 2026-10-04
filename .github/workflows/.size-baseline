@@ -13,14 +13,14 @@
 # sibling .md and long steps into .github/scripts/ first; if the growth is
 # real, bump the number and say why in the PR.
 2226 assign-issue-owner.yml
-2125 assign-pr-owner.yml
+3555 assign-pr-owner.yml
 3480 audio-capture-prebuilds.yml
 9023 auto-minimize-spam.yml
 9256 build-and-publish-image.yml
 50773 cd-cua-driver.yml
 2222 cd-mobile-mcp.yml
 147136 ci.yml
-1482 codeql.yml
+4193 codeql.yml
 9389 comment-attachment-guard.yml
 1634 desktop-packaging-check.yml
 38401 desktop-release.yml
@@ -55,7 +55,7 @@
 35955 release.yml
 44285 repo-hygiene.yml
 1079 scorecard-monthly.yml
-23524 sdk-java.yml
+26765 sdk-java.yml
 3886 sdk-python.yml
 5595 security-checks.yml
 6777 serve-ab-publish.yml
@@ -64,7 +64,7 @@
 11328 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
 11206 sync-release-to-oss.yml
-2676 tui-parity.yml
+6786 tui-parity.yml
 7187 update-ecs-runner-qwen.yml
 6206 verify-landlock-helper.yml
 2307 web-shell-visuals-cleanup.yml

@@ -126,6 +126,11 @@ import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
+  bindRetryWaitObserver,
+  runWithRetryWaitObserver,
+  type RetryWaitEvent,
+} from '../../utils/retry-wait.js';
+import {
   getTeammateContext,
   runWithTeammateIdentity,
 } from '../team/identity.js';
@@ -303,6 +308,25 @@ export interface ReasoningLoopOptions {
    * future external inputs instead of finalizing immediately.
    */
   shouldWaitForExternalMessages?: () => boolean;
+  /**
+   * Enforce `maxTimeMinutes` while the round's request sleeps in a retry
+   * backoff, ending the loop with TIMEOUT instead of waiting out the backoff.
+   * Internal opt-in for workflow dispatches; other agents keep checking the
+   * limit only between rounds.
+   */
+  enforceTimeLimitDuringRetryWait?: boolean;
+}
+
+/** Largest delay `setTimeout` accepts without overflowing to ~immediate. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Observes the retry waits of one round's request. */
+interface RetryWaitScope {
+  run<T>(fn: () => T): T;
+  bind<T>(iterator: AsyncIterator<T>): AsyncIterableIterator<T>;
+  /** True once the time limit aborted the round during a retry wait. */
+  timedOut(): boolean;
+  close(): void;
 }
 
 /**
@@ -1047,10 +1071,18 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let retryWaitScope: RetryWaitScope | undefined;
 
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        retryWaitScope = this.createRetryWaitScope(
+          turnCounter,
+          promptId,
+          roundAbortController,
+          startTime,
+          options,
+        );
 
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
@@ -1082,13 +1114,20 @@ export class AgentCore {
         };
 
         const roundStreamStart = Date.now();
-        const responseStream = await chat.sendMessageStream(
-          this.modelConfig.model ||
-            this.runtimeContext.getModel() ||
-            DEFAULT_QWEN_MODEL,
-          messageParams,
-          promptId,
-        );
+        const sendMessage = () =>
+          chat.sendMessageStream(
+            this.modelConfig.model ||
+              this.runtimeContext.getModel() ||
+              DEFAULT_QWEN_MODEL,
+            messageParams,
+            promptId,
+          );
+        // The request (and any send-time compaction) runs partly before the
+        // stream is returned and partly while it is iterated; both belong to
+        // this round's retry-wait observer.
+        const responseStream = retryWaitScope
+          ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
+          : await sendMessage();
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
           round: turnCounter,
@@ -1116,7 +1155,9 @@ export class AgentCore {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
+              terminateMode: retryWaitScope?.timedOut()
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
               turnsUsed: turnCounter,
             };
           }
@@ -1445,7 +1486,16 @@ export class AgentCore {
           promptId,
           timestamp: Date.now(),
         } as AgentRoundEvent);
+      } catch (error) {
+        // The time limit aborted a retry wait: the request or its stream
+        // rejects with the abort, which is this agent's TIMEOUT, not an error.
+        if (retryWaitScope?.timedOut()) {
+          terminateMode = AgentTerminateMode.TIMEOUT;
+          break;
+        }
+        throw error;
       } finally {
+        retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
         // long-running parents like the per-message roundAbortController in
@@ -1461,6 +1511,92 @@ export class AgentCore {
       ...(terminateMode === AgentTerminateMode.LOOP_DETECTED
         ? { loopType: loopDetector.getLastLoopType() }
         : {}),
+    };
+  }
+
+  /**
+   * Observes the retry waits of one round's request: republishes them as
+   * RETRY_WAIT events and, under `enforceTimeLimitDuringRetryWait`, aborts the
+   * round once the agent's time limit passes while a wait is active. `close()`
+   * ends every wait still registered and ignores later notifications, so a
+   * late callback cannot reach the next round.
+   */
+  private createRetryWaitScope(
+    round: number,
+    promptId: string,
+    roundAbortController: AbortController,
+    startTime: number,
+    options?: ReasoningLoopOptions,
+  ): RetryWaitScope | undefined {
+    const deadline =
+      options?.enforceTimeLimitDuringRetryWait && options.maxTimeMinutes
+        ? startTime + options.maxTimeMinutes * 60 * 1000
+        : undefined;
+    const emitter = this.eventEmitter;
+    if (!emitter && deadline === undefined) return undefined;
+
+    const active = new Set<string>();
+    let closed = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const clearTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    const armDeadline = (): void => {
+      if (deadline === undefined) return;
+      // Deferred even when already past, so the abort never runs inside the
+      // retry layer's own start notification.
+      timer = setTimeout(
+        () => {
+          timer = undefined;
+          if (closed || active.size === 0) return;
+          if (roundAbortController.signal.aborted) return;
+          if (Date.now() < deadline) {
+            armDeadline();
+            return;
+          }
+          timedOut = true;
+          roundAbortController.abort(
+            new Error('Agent time limit reached during a retry wait.'),
+          );
+        },
+        Math.min(Math.max(0, deadline - Date.now()), MAX_TIMER_DELAY_MS),
+      );
+    };
+    const publish = (event: RetryWaitEvent): void => {
+      emitter?.emit(AgentEventType.RETRY_WAIT, {
+        ...event,
+        subagentId: this.subagentId,
+        round,
+        promptId,
+        timestamp: Date.now(),
+      });
+    };
+    const observer = (event: RetryWaitEvent): void => {
+      if (closed) return;
+      if (event.phase === 'start') {
+        if (active.has(event.waitId)) return;
+        active.add(event.waitId);
+        publish(event);
+        if (active.size === 1) armDeadline();
+        return;
+      }
+      if (!active.delete(event.waitId)) return;
+      publish(event);
+      if (active.size === 0) clearTimer();
+    };
+    return {
+      run: (fn) => runWithRetryWaitObserver(observer, fn),
+      bind: (iterator) => bindRetryWaitObserver(observer, iterator),
+      timedOut: () => timedOut,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        clearTimer();
+        for (const waitId of active) publish({ phase: 'end', waitId });
+        active.clear();
+      },
     };
   }
 

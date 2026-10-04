@@ -79,7 +79,8 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 - **E2E 把 Workspace 准入当部署数据种子化**（registry 行、access 授权、Broker mount），并在
   两个 Spring owner 上都开启 `harness.workspace-files-enabled` 与可信 actor 头。物理副作用是
   固定的 `write_file`；恰好一次断言由持久执行记录、dispatch generation 与模型请求次数承载，
-  而不是文件字节。`--session-failover` 保持非绑定、不改动。
+  而不是文件字节。`--session-failover` 仍创建非绑定 Session，但这套准入接线不再按模式
+  门控：每个模式的 owner 都携带它(#13258)，其配置与其他模式一致。
 - **两个模式并入 `hosted-harness-mysql` 任务**，该任务安装 runner 私有 `mysqld` 所需的
   MySQL 二进制。
 
@@ -123,11 +124,18 @@ G1 归属 #12952。issue 的切片文本曾假定接管机器已存在；本设�
 - 接管 load 的应答丢失后轮次卡死：Harness 已挂载会话，之后的 load 一律 409
   `hosted_session_already_attached`，恢复快照再也取不回来。接管 load 需要做成幂等。注意该
   load 正常最长可跑 120 秒，而协调器 `request-timeout` 默认 30 秒。
-- 含 `message.delta` 事件的 journal 无法被旧版本 Harness 打开（`managed_session_open_failed`）。
-  本构建的读取方没问题，但回滚或滚动发布期间的混合机群不行。启用 Hosted Workspace 轮次前请先
-  升级机群，或对回滚做门控。
+- 含 `message.delta` 事件的 journal 无法被旧版本 Harness 打开。发布版 0.24.7 的拒绝形态是
+  fail-closed 的 `POST /session/:id/load` 应答：503 加
+  `{"error":"managed_session_open_failed","code":"managed_session_open_failed"}` —— 比
+  journal 读取器自身的报错面早一层，且在混合机群期间由协调器持续重试。自 #13320 起，Java
+  客户端透出拒绝码（`HarnessSessionRefusedException`），协调器在重试日志与准入前重试预算耗尽
+  后的终态失败里都记录该码，滚动发布手册由此能把「journal 比读取方新」与「Harness 真不可用」
+  区分开。本构建的读取方没问题，但回滚或滚动发布期间的混合机群不行。启用 Hosted Workspace
+  轮次前请先升级机群，或对回滚做门控。
 - 首个流式分片之后才到达的模型回退或重试会让轮次终态失败（`Hosted Harness cannot retract a
 published model attempt.`）：`message.delta` 一旦落盘，部分尝试就已公开、无法撤回，轮次只能以
   `error` 结算，而不是像流式化之前那样丢弃该次尝试并重试。因此一次瞬时的 provider 容量事件会
   在流中途永久失败该轮次，而不会由协调器重试（`turn_result` 是终态）。把这类结算归类为协调器
-  可重试是后续项。
+  可重试是后续项。（其后由 #13319 改为带内撤回：发布后到达的重试改为全新 replay，Harness 落账
+  `message.retracted`，server 按源序号范围置空该消息的 delta 并发布 `stream.reconciled`——见
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.zh-CN.md)。）
