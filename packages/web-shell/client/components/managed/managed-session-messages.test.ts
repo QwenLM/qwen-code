@@ -268,6 +268,46 @@ describe('Managed transcript projection', () => {
       ],
     });
   });
+
+  it('renders the failed event message as an error bubble', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Go' }] }),
+        event(2, 'failed', { message: 'boom' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      variant: 'error',
+      content: 'boom',
+    });
+  });
+
+  it('coalesces two assistant_thought deltas into one thinking message', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'assistant_thought', { text: 'plan ' }),
+        event(2, 'assistant_thought', { text: 'step' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toMatchObject([
+      { role: 'thinking', content: 'plan step', isStreaming: true },
+    ]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('marks a failed tool completed from its failed flag', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_started', { toolCallId: 'c' }),
+        event(2, 'tool_completed', { toolCallId: 'c', failed: true }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
+  });
 });
 
 it('preserves the order of assistant / current-turn result / assistant', () => {

@@ -80,9 +80,11 @@ class ManagedTurnQueryTest {
                 "turn.accepted", Map.of("input", List.of()), false,
                 "accepted:second");
 
-        assertThat(store.findLatestTurn(tenant, sessionId)).get()
+        assertThat(store.findLatestTurns(tenant, List.of(sessionId))
+                .get(sessionId))
                 .satisfies(turn -> assertThat(turn.turnId()).isEqualTo("turn_a"));
-        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).isEmpty();
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant, List.of(sessionId)))).isEmpty();
 
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn_a",
                 "environment.ready", Map.of(), false, "ready:second");
@@ -90,7 +92,9 @@ class ManagedTurnQueryTest {
                 "environment.failed", Map.of("code", "runtime_warm_failed"),
                 false, "failed:first");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).get()
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant, List.of(sessionId)))
+                .get(sessionId))
                 .satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo("turn_a");
                     assertThat(event.type()).isEqualTo("environment.ready");

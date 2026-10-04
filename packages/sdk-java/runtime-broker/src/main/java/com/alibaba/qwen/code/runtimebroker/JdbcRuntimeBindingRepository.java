@@ -72,6 +72,50 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)
+                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
+                || !jdbcExecutions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Release requires the same DataSource");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            // Statement order is load-bearing under InnoDB REPEATABLE READ:
+            // this locking read must stay first, and the plain execution read
+            // below must stay the transaction's first consistent read, so its
+            // read view is built after the row lock is held and therefore
+            // sees an admission that committed before it. A read moved ahead
+            // of the lock silently reopens the race, and H2 would not show it.
+            RuntimeSessionRecord current = JdbcRuntimeSessionRepository.selectSession(
+                    connection, expected.getSession().getScope(),
+                    expected.getRuntimeSessionId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()) {
+                return null;
+            }
+            if (current.getState() == RuntimeSessionRecord.State.RELEASING
+                    || current.getState() == RuntimeSessionRecord.State.RELEASED) {
+                return current;
+            }
+            if (current.getState() != RuntimeSessionRecord.State.READY
+                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
+                throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                        "Runtime Session is not ready for release", false);
+            }
+            if (JdbcToolExecutionRepository.hasActiveByRuntimeSession(connection,
+                    current.getBindingId(), current.getRuntimeGeneration(),
+                    current.getRuntimeSessionId())) {
+                throw new RuntimeBrokerException(409, "runtime_session_busy",
+                        "Runtime Session has an active operation", false);
+            }
+            return JdbcRuntimeSessionRepository.compareAndSet(connection, current,
+                    current.withState(RuntimeSessionRecord.State.RELEASING,
+                            JdbcRepositorySupport.databaseNow(connection)));
+        });
+    }
+
+    @Override
     public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected) {
         return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());

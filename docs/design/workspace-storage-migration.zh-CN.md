@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-已完成本地实现并整合主干 `bf3ab0723`，包括 W1b、可靠 Session close、持久进程默认设置、输出回收和持久化 Session 工具 profile；生产 Linux 验收仍待完成。首版限定同一可信 Linux 主机、原存储可访问、已结算的 `hosted-workspace-files/1` Session，以及保持不变的绝对 `QWEN_HOME`/file-history 卷。只移动 Workspace root。排除 Shell/O2、MCP/Hook、外部 Memory root、不透明绝对路径、跨主机和源丢失恢复。所有保留成员参与，包括关闭、归档和删除记录；不支持或无法证明的成员阻止整个操作。
+已完成本地实现并整合主干 `9915c7ff8`，包括 W1b、可靠 Session close、持久进程默认设置、输出回收和持久化 Session 工具 profile；生产 Linux 验收仍待完成。首版限定同一可信 Linux 主机、原存储可访问、已结算的 `hosted-workspace-files/1` Session，以及保持不变的绝对 `QWEN_HOME`/file-history 卷。只移动 Workspace root。排除 Shell/O2、MCP/Hook、外部 Memory root、不透明绝对路径、跨主机和源丢失恢复。所有保留成员参与，包括关闭、归档和删除记录；不支持或无法证明的成员阻止整个操作。
 
 逻辑 storage、全部 ContextBinding 字段、私有 Session Store key、原创建回执、journal、消息和资源引用保持不可变。迁移不关闭公共 Session，也不重新开放关闭的 Session。
 
@@ -26,9 +26,9 @@
 
 最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可由同一操作续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。若已取消或失效的操作留下 marker 或临时文件，新操作必须通过外部流程重新准备与新 capture 匹配的目标副本，不接受或删除其他操作的产物。反向迁移需要新操作/capture 和更高 revision。
 
-长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close、V33–V34 定义/回收和 V35 Session 工具 profile 迁移字节，W1c 新增 V36 保存迁移状态与 fence，V37 为历史 Session 和已完成迁移查询增加索引。
+长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，逐字节保留已发布主干到 V39 的全部迁移；W1c 新增 V40 保存迁移状态与 fence，V41 为历史 Session 和已完成迁移查询增加索引，V42 修正二进制身份比较。这些 W1c 编号在合入前分配，避开已发布的 V36–V39 activation、事件、快照和 journal 索引。升级测试从主干 V39 开始，保留原 Flyway 已应用记录。使用早期未合入 W1c 版本的开发数据库需要重建一次性 fixture，不能修补或改写已应用的生产迁移历史。
 
-V38 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认不区分大小写的数据库，不修改 V36/V37 历史。MySQL 专属字符集转换不由 H2 模拟。加锁来源清查先无锁检查 journal head 是否存在，再锁住已有 head；保留的租户权威锁阻止新 writer，同时避免缺失键的 InnoDB gap 锁阻塞其他租户。
+V42 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认不区分大小写的数据库，不修改 V40/V41 SQL 字节。MySQL 专属字符集转换不由 H2 模拟。加锁来源清查先无锁检查 journal head 是否存在，再锁住已有 head；保留的租户权威锁阻止新 writer，同时避免缺失键的 InnoDB gap 锁阻塞其他租户。
 
 ## 部署与 Runtime 路由
 
