@@ -46,7 +46,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -336,28 +335,20 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private void requireCreationScope(String tenantId, String idempotencyKey,
             boolean workspaceBound) {
-        try {
-            jdbc.update("INSERT INTO managed_session_create_scope"
-                            + " (tenant_id, idempotency_key, workspace_bound)"
-                            + " VALUES (?, ?, ?)",
-                    tenantId, idempotencyKey, workspaceBound);
-            return;
-        } catch (DuplicateKeyException exists) {
-            // Concurrent admissions deadlock when the same-tenant scope
-            // index sequence is ON DUPLICATE KEY UPDATE plus a locking
-            // read; the PRIMARY KEY deduplicates the race instead, and the
-            // re-read below targets a row that now provably exists.
-            Boolean existing = jdbc.queryForObject(
-                    "SELECT workspace_bound FROM managed_session_create_scope"
-                            + " WHERE tenant_id = ? AND idempotency_key = ?"
-                            + " FOR UPDATE",
-                    Boolean.class, tenantId, idempotencyKey);
-            if (!Boolean.valueOf(workspaceBound).equals(existing)) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different"
-                                + " content.");
-            }
+        jdbc.update("INSERT INTO managed_session_create_scope"
+                        + " (tenant_id, idempotency_key, workspace_bound)"
+                        + " VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE"
+                        + " workspace_bound = workspace_bound",
+                tenantId, idempotencyKey, workspaceBound);
+        Boolean existing = jdbc.queryForObject(
+                "SELECT workspace_bound FROM managed_session_create_scope"
+                        + " WHERE tenant_id = ? AND idempotency_key = ?"
+                        + " FOR UPDATE",
+                Boolean.class, tenantId, idempotencyKey);
+        if (!Boolean.valueOf(workspaceBound).equals(existing)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
         }
     }
 
