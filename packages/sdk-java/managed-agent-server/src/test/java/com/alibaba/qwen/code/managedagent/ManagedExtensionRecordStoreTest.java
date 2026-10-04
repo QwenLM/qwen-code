@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskP
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
@@ -102,7 +103,11 @@ class ManagedExtensionRecordStoreTest {
     @Test
     void refusesTheSharedRejectedChains() throws Exception {
         for (JsonNode reject : fixtures().required("monitorChainRejectCases")) {
-            String sessionId = UUID.randomUUID().toString();
+            // Public, so the Session event count in assertRefused is not
+            // vacuous: appendLiveSessionEventIfAbsent needs the row.
+            String sessionId = agents.createSession(TENANT, "reject-"
+                    + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                    List.of()).sessionId();
             ExtensionRecordJournal journal = journal(sessionId);
             int index = 0;
             for (JsonNode monitor : reject.required("accepted")) {
@@ -117,13 +122,30 @@ class ManagedExtensionRecordStoreTest {
                     ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
             String commandId = reuse == null ? "rejected"
                     : "accepted-" + reuse.intValue();
+            CommitTransactionRequest refusedRequest = journal.request(
+                    operation, commandId, ExtensionRecordJournal.bytes(
+                            reject.required("next")), occurredAt, event -> {
+                            }, records -> records);
             assertRefused(reject.required("id").textValue(), sessionId,
                     ManagedExtensionRecordStore.ERROR_REJECTED, null,
-                    () -> journal.commit(journal.request(operation,
-                            commandId, ExtensionRecordJournal.bytes(
-                                    reject.required("next")), occurredAt,
-                            event -> {
-                            }, records -> records)));
+                    () -> journal.commit(refusedRequest));
+            if (reuse == null) {
+                // No command row survives a refusal: the identical bytes
+                // are refused again, not replayed, and the resource rows a
+                // lost rollback would keep collide the resend on the
+                // resource reference primary key.
+                assertRefused(reject.required("id").textValue() + " resent",
+                        sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                        null, () -> journal.commit(refusedRequest));
+                // A new body under the same command id commits as new.
+                JsonNode retry = ((ObjectNode) chain().get(0)
+                        .required("monitorRun").deepCopy()).put("monitorId",
+                        "monitor-retry-" + index);
+                CommitReceipt resent = journal.commit(journal.request(
+                        commandId, retry, occurredAt + 1_000));
+                assertThat(resent.replayed()).isFalse();
+                assertThat(revisions(sessionId)).isEqualTo(index + 1L);
+            }
         }
     }
 
@@ -147,9 +169,17 @@ class ManagedExtensionRecordStoreTest {
         byte[] trailing = (new String(start, StandardCharsets.UTF_8)
                 + " {}").getBytes(StandardCharsets.UTF_8);
         Map<String, Refusal> events = Map.ofEntries(
+                Map.entry("another tenant", new Refusal(
+                        "names another Session", event -> ((ObjectNode) event
+                                .get("sessionKey")).put("tenantId",
+                                        "other"))),
                 Map.entry("another workspace", new Refusal(
                         "names another Session", event -> ((ObjectNode) event
                                 .get("sessionKey")).put("workspaceId",
+                                        "other"))),
+                Map.entry("another Session", new Refusal(
+                        "names another Session", event -> ((ObjectNode) event
+                                .get("sessionKey")).put("sessionId",
                                         "other"))),
                 Map.entry("an extra Session key field", new Refusal(
                         "event.sessionKey must be an object with exactly",
@@ -206,6 +236,20 @@ class ManagedExtensionRecordStoreTest {
             refuse(edit.getKey(), edit.getValue().message(), start,
                     edit.getValue().editEvent(), records -> records);
         }
+        // The fifth field of the reference takes the missing-resource
+        // answer, not the mismatch one.
+        String missingId = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missingId);
+        assertRefused("a reference of another resource", missingId,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                "A referenced Managed Session resource is missing.",
+                () -> missingJournal.commit(missingJournal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000,
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("resourceId",
+                                        "other-resource"),
+                        records -> records)));
         refuse("a body with trailing content", "The Stage H record is not a"
                 + " JSON object the Session authority can read", trailing,
                 event -> {
@@ -253,15 +297,33 @@ class ManagedExtensionRecordStoreTest {
                             start, 1_000, event -> {
                             }, edit.getValue())));
         }
+        // And the refusal names the right line when only the second is bad.
+        String second = UUID.randomUUID().toString();
+        ExtensionRecordJournal secondJournal = journal(second);
+        assertRefused("a duplicate key on the second line", second,
+                ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                "Record line 2 is not a JSON object the Session authority"
+                        + " can read",
+                () -> secondJournal.commit(secondJournal.request(
+                        ExtensionRecordJournal.OPERATION, "refused-second",
+                        start, 1_000, event -> {
+                        }, records -> records.replaceFirst(
+                                "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
+                                "{\"dup\":1,\"dup\":2,\"uuid\""))));
         // The deepest line the authority reads is still accepted, on a line
         // the Stage H rules do not otherwise look at.
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
                 "deepest", start, 1_000, event -> {
-                }, records -> records.replaceFirst(
-                        "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
-                        "{\"deep\":" + nested(63) + ",\"uuid\"")));
+                }, records -> {
+                    String edited = records.replaceFirst(
+                            "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
+                            "{\"deep\":" + nested(63) + ",\"uuid\"");
+                    assertThat(edited).as("the injection landed")
+                            .isNotEqualTo(records);
+                    return edited;
+                }));
         assertThat(revisions(sessionId)).isEqualTo(1);
     }
 
@@ -288,6 +350,92 @@ class ManagedExtensionRecordStoreTest {
                         revision.resources())));
     }
 
+    @Test
+    void answersTheThreeResourceRefusals() throws Exception {
+        byte[] start = ExtensionRecordJournal.bytes(chain().get(0)
+                .required("monitorRun"));
+        // A body the reference names was never committed.
+        String missing = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missing);
+        assertThatThrownBy(() -> missingJournal.commit(
+                missingJournal.request(ExtensionRecordJournal.OPERATION,
+                        "missing", start, 1_000,
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("resourceId",
+                                        "missing-body-1"),
+                        records -> records))).isInstanceOfSatisfying(
+                ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING);
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.CONFLICT);
+                });
+        // A row that no longer reads back, two ways the store knows it.
+        ExtensionRecordJournal corruptJournal = journal(
+                UUID.randomUUID().toString());
+        JsonNode first = chain().get(0).required("monitorRun");
+        corruptJournal.commitMonitor("corrupt-1", first, 1_000);
+        String corruptId = ExtensionRecordJournal.resourceId(
+                ExtensionRecordJournal.bytes(first));
+        // Its bytes no longer hold its recorded digest.
+        byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
+                .deepCopy()).put("maxEvents", 1));
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " inline_bytes = ?, byte_length = ? WHERE"
+                        + " tenant_id = ? AND resource_id = ?",
+                shifted, shifted.length, TENANT, corruptId);
+        assertThatThrownBy(() -> corruptJournal.commitMonitor("corrupt-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_resource_corrupt");
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.INTERNAL_SERVER_ERROR);
+                });
+        // Its Session is not the request's, though the row says otherwise.
+        ExtensionRecordJournal foreignJournal = journal(
+                UUID.randomUUID().toString());
+        foreignJournal.commitMonitor("foreign-1", first, 1_000);
+        String foreignId = ExtensionRecordJournal.resourceId(
+                ExtensionRecordJournal.bytes(first));
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
+                        + " AND resource_id = ?",
+                TENANT, foreignId);
+        assertThatThrownBy(() -> foreignJournal.commitMonitor("foreign-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_not_found");
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                });
+    }
+
+    @Test
+    void announcesNothingInTheDeletingWindow() throws Exception {
+        String sessionId = agents.createSession(TENANT, "deleting-"
+                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode first = chain().get(0).required("monitorRun");
+        journal.commitMonitor("deleting-1", first, 1_000);
+        // The delete stays pending while this journal's writer holds the
+        // Session, so the Session is DELETING when the revision lands.
+        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
+                "sha256:" + "d".repeat(64), "delete", "digest-delete");
+        assertThat(jdbc.queryForObject("SELECT status FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class,
+                TENANT, sessionId)).isEqualTo("DELETING");
+        journal.commitMonitor("deleting-2",
+                chain().get(1).required("monitorRun"), 2_000);
+        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
+                .extracting(EventRecord::type)
+                .containsOnlyOnce("task.updated");
+        assertThat(revisions(sessionId)).isEqualTo(2);
+    }
+
     private record Refusal(String message, Consumer<ObjectNode> editEvent) {
     }
 
@@ -304,15 +452,18 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /**
-     * A refused commit leaves no journal row, no resource reference and no
-     * revision behind, which it would if the store did not roll back. A
-     * {@code message} names the rule that refused it.
+     * A refused commit leaves no resource reference, no revision and no
+     * Session event behind, the rows only a rollback removes. The event
+     * count is vacuous without a public Session, so the chain refusals
+     * create one, and the refused command row itself is proven where the
+     * pair is fresh by committing the identical bytes again: a refusal,
+     * not a replay. A {@code message} names the rule that refused it.
      */
     private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {
-        long transactions = rows("qwen_managed_session_journal_tx", sessionId);
         long references = rows("qwen_managed_session_resource_ref",
                 sessionId);
+        long events = rows("managed_agent_event", sessionId);
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -328,10 +479,10 @@ class ManagedExtensionRecordStoreTest {
                                 .contains(message);
                     }
                 });
-        assertThat(rows("qwen_managed_session_journal_tx", sessionId))
-                .as(label).isEqualTo(transactions);
         assertThat(rows("qwen_managed_session_resource_ref", sessionId))
                 .as(label).isEqualTo(references);
+        assertThat(rows("managed_agent_event", sessionId)).as(label)
+                .isEqualTo(events);
         assertThat(revisions(sessionId)).as(label).isEqualTo(revisions);
     }
 

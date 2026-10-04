@@ -316,14 +316,38 @@ class WorkspaceSessionRetentionMySqlIT {
     @Test
     void prerequisiteMigrationsPreserveExistingCloseEvidenceAndAllowRetirement() {
         Flyway.configure().dataSource(source).locations("classpath:db/migration").target("31").load().migrate();
+        String tenant = "upgrade";
+        String session = "legacy-closed-session";
+        // Seed the historical schema directly; current writers require later columns.
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
+                tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES (?, ?, 'qwen-code', 'CLOSED', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
+                tenant, session, "sha256:" + java.util.HexFormat.of().formatHex(sha256(
+                        WorkspaceExecutionProfile.CONFIG_REF + "\u0000" + WorkspaceExecutionProfile.POLICY_REF)),
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key,"
+                + " request_digest, session_id, created_at) VALUES (?, ?, 'legacy-create', 'create-digest', ?, 1)",
+                tenant, OWNER.getBytes(StandardCharsets.UTF_8), session);
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
+                + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
+                + " session_status_before, receipt_id, available_at, created_at, updated_at, completed_at)"
+                + " VALUES (?, ?, 'legacy-close', 'CLOSE', ?, 'legacy-close-key', 'close-digest', 'COMPLETED',"
+                + " 'HARNESS_CONFIRMED', 'CONFIRMED', 'ACTIVE', 'legacy-close-receipt', 1, 1, 1, 1)",
+                tenant, session, ACTOR_DIGEST);
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
-        String tenant = "upgrade";
-        String session = closed(store, tenant, false);
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
         assertThat(store.hasCompletedWorkspaceClose(tenant, session)).isTrue();
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED");
+        assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().receiptId()).isEqualTo("legacy-close-receipt");
         var deletion = deleteClaim(store, tenant, session);
         assertThat(transaction(() -> store.completeOperation(tenant, session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false))).isTrue();
         assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);

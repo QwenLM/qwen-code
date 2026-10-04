@@ -176,6 +176,68 @@ it('requires confirmation for the exact Shell receipt acknowledgement', async ()
   ).rejects.toThrow('acknowledge');
 });
 
+it('replays a Shell receipt acknowledgement whose reply was lost', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    // The Broker applies the acknowledgement, but the reply never arrives.
+    if (attempts.length === 1) return { drop: true };
+    return {
+      body: { ...identity, executionCallId: 'execution', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual({
+    ...attempts[0],
+    requestId: expect.any(String),
+  });
+  expect((attempts[1] as Record<string, unknown>)['receipt']).toEqual(
+    attempts[0]!['receipt'],
+  );
+});
+
+it('does not replay a refused Shell receipt acknowledgement', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    return {
+      code: 409,
+      body: { code: 'runtime_execution_conflict', message: 'conflict' },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedWorkspaceBrokerRejection);
+  expect(attempts).toHaveLength(1);
+});
+
 it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
   const broker = await fixture((_path, body) => {
     expect(body['receipt']).toEqual({

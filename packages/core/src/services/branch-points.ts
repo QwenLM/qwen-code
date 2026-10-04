@@ -38,6 +38,11 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function parts(record: BranchPointRecord): readonly Part[] {
+  if (
+    record.type === 'tool_result' &&
+    record.subtype === 'code_mode_tool_result'
+  )
+    return [];
   // Transcript JSONL can contain null part elements; validation only checks
   // that parts is an array, so skip non-object entries before dereferencing.
   return ((record.message?.parts ?? []) as unknown[]).filter(
@@ -152,7 +157,11 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
     const record = activeChain[index]!;
     pendingCalls.push(...functionCalls(record));
     const responses = functionResponses(record);
-    if (record.type === 'tool_result' || responses.length > 0) {
+    if (
+      (record.type === 'tool_result' &&
+        record.subtype !== 'code_mode_tool_result') ||
+      responses.length > 0
+    ) {
       lastToolResultIndex = index;
     }
     for (const response of responses) {
