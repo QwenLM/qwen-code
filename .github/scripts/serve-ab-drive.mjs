@@ -472,41 +472,54 @@ async function waitForHealth(base, timeoutMs = 30000) {
   throw new Error(`daemon did not become healthy within ${timeoutMs}ms`);
 }
 
+/**
+ * The ACP handshake budget for both legs. The daemon's 10s default is sized for
+ * an idle machine; on the shared ECS pool a parallel-build peak pushed one
+ * `POST /session` setup past it, the daemon SIGKILLed its own ACP child and
+ * answered 504 `init_timeout`, and the lane went red with no regression in the
+ * PR (#13266). The green comparison run took ~3s. The integration harnesses
+ * that spawn `serve` already pass 60s for the same reason (#10846, #11041), and
+ * no scenario asserts the budget, so raising it changes no capture.
+ */
+export const INITIALIZE_TIMEOUT_MS = 60_000;
+
+export function serveArgs({ cliEntry, port, token, home }) {
+  return [
+    cliEntry,
+    'serve',
+    '--port',
+    String(port),
+    '--token',
+    token,
+    '--hostname',
+    '127.0.0.1',
+    '--workspace',
+    home,
+    '--initialize-timeout-ms',
+    String(INITIALIZE_TIMEOUT_MS),
+  ];
+}
+
 export async function driveCli(cliEntry, outDir) {
   clearCaptureDir(outDir);
   mkdirSync(outDir, { recursive: true });
   const home = mkdtempSync(join(tmpdir(), 'serve-ab-home-'));
   const token = 'serve-ab-token';
   const port = await freePort();
-  const daemon = spawn(
-    'node',
-    [
-      cliEntry,
-      'serve',
-      '--port',
-      String(port),
-      '--token',
-      token,
-      '--hostname',
-      '127.0.0.1',
-      '--workspace',
-      home,
-    ],
-    {
-      // No real model: dummy OpenAI creds so session auth never contacts a
-      // backend. HOME/QWEN_HOME isolate any on-disk state per run.
-      env: {
-        ...process.env,
-        HOME: home,
-        QWEN_HOME: join(home, '.qwen'),
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-      },
-      stdio: ['ignore', 'inherit', 'inherit'],
+  const daemon = spawn('node', serveArgs({ cliEntry, port, token, home }), {
+    // No real model: dummy OpenAI creds so session auth never contacts a
+    // backend. HOME/QWEN_HOME isolate any on-disk state per run.
+    env: {
+      ...process.env,
+      HOME: home,
+      QWEN_HOME: join(home, '.qwen'),
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
     },
-  );
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
   const base = `http://127.0.0.1:${port}`;
   // The daemon canonicalizes `--workspace`, and the on-disk project directory
   // is derived from that canonical path — so fixtures must be staged under the

@@ -22,8 +22,9 @@
  * the Host and carries these decisions across the network.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { assembleAgentPrompt } from './prompt.js';
 import { rebookUndeliveredTriggersInTransaction } from './dispatcher.js';
 import {
@@ -49,6 +50,8 @@ import {
   type ThreadRun,
   type WorkspaceAgent,
 } from './types.js';
+
+const debug = createDebugLogger('WORKSPACE_AGENTS_HOST_LEASE');
 
 type RunStep = NonNullable<NonNullable<ThreadRun['progress']>['steps']>[number];
 
@@ -684,6 +687,29 @@ export async function pickupRunForHost(
   });
 }
 
+function hostResultDigest(input: HostRunResult): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        input.threadId,
+        input.runId,
+        input.hostId,
+        input.attempt,
+        input.leaseId,
+        input.status,
+        input.close?.kind,
+        input.close?.kind === 'blocked'
+          ? input.close.question
+          : input.close?.kind === 'review'
+            ? input.close.summary
+            : undefined,
+        input.error,
+        input.tokens,
+      ]),
+    )
+    .digest('hex');
+}
+
 /** Applies a Host result only while that exact attempt still owns the lease. */
 export async function applyHostRunResult(
   projectRoot: string,
@@ -703,10 +729,40 @@ export async function applyHostRunResult(
       run.lease.hostId === input.hostId &&
       run.lease.leaseId === input.leaseId
     ) {
-      return {
-        ok: true as const,
-        value: { thread: current, alreadyApplied: true },
-      };
+      if (
+        !(await readAgentHostsUnlocked(projectRoot)).hosts.some(
+          (host) => host.id === input.hostId,
+        )
+      ) {
+        return { ok: false, reason: 'stale_lease' as const };
+      }
+      const receipt = run.hostResultReceipt;
+      if (
+        receipt?.attempt === input.attempt &&
+        receipt.leaseId === input.leaseId
+      ) {
+        return receipt.digest === hostResultDigest(input)
+          ? {
+              ok: true as const,
+              value: { thread: current, alreadyApplied: true },
+            }
+          : { ok: false, reason: 'stale_lease' as const };
+      }
+      // Terminal settlement ends this attempt's write authority, including
+      // usageByRound, which threadTokens sums for tree budget enforcement.
+      // Matching lease identity grants no writes, even before lease expiry.
+      if (
+        withHostUsage(run.usageByRound, input.attempt, input.tokens) !==
+        run.usageByRound
+      ) {
+        debug.warn('Ignored post-terminal host usage report:', {
+          threadId: current.id,
+          runId: run.id,
+          attempt: input.attempt,
+          tokens: input.tokens,
+        });
+      }
+      return { ok: false, reason: 'stale_lease' as const };
     }
     if (
       run.status === 'finishing' &&
@@ -775,6 +831,11 @@ export async function applyHostRunResult(
       outcome: {
         status: input.status,
         attempt: input.attempt,
+        hostResultReceipt: {
+          attempt: input.attempt,
+          leaseId: input.leaseId,
+          digest: hostResultDigest(input),
+        },
         ...(input.error ? { error: input.error } : {}),
         ...(input.status === 'failed' ? { failureStage: 'execution' } : {}),
       },
