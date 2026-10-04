@@ -13,6 +13,7 @@ import type {
   ToolResultSegmentStore,
 } from './managed-tool-result-store.js';
 import { parseChildRun } from './managed-child-run-record.js';
+import { parseMonitorRun } from './managed-extension-record.js';
 import { LocalShellStreamCapture } from './local-shell-stream-capture.js';
 
 // H3 of #12827: the post-start counterpart of ManagedShellResultSession
@@ -29,6 +30,20 @@ export interface LocalShellStreamAdmission {
   readonly sink: LocalShellStreamCapture;
 }
 
+const DOMAINS = {
+  child_run: {
+    label: 'Background Shell',
+    parse: parseChildRun,
+  },
+  monitor_run: {
+    label: 'Monitor',
+    parse: parseMonitorRun,
+  },
+} as const;
+
+/** The prove-a-live-start record of an open-ended capture's family. */
+export type LocalShellStreamRecordDomain = keyof typeof DOMAINS;
+
 export class LocalShellStreamResultSession {
   private readonly activation: ManagedSession['activation'];
   private readonly prepared = new Map<string, string>();
@@ -40,13 +55,14 @@ export class LocalShellStreamResultSession {
     private readonly assertWriter: () => Promise<void>,
     private readonly runtimeSessionId: string,
     private readonly captureResources: ManagedSessionResourceStore = session.resources,
+    private readonly recordDomain: LocalShellStreamRecordDomain = 'child_run',
   ) {
     if (
       !/^[1-9][0-9]{0,18}$/.test(bindingGeneration) ||
       BigInt(bindingGeneration) > 2n ** 63n - 1n
     ) {
       throw new Error(
-        'Background Shell capture binding generation is invalid.',
+        `${DOMAINS[this.recordDomain].label} capture binding generation is invalid.`,
       );
     }
     this.activation = session.activation;
@@ -83,6 +99,7 @@ export class LocalShellStreamResultSession {
   ): Promise<LocalShellStreamAdmission> {
     await this.assertWritable();
     const { reference, capture } = request;
+    const domain = DOMAINS[this.recordDomain];
     const key = this.session.authority.sessionHeader.sessionKey;
     if (
       capture.tenantId !== key.tenantId ||
@@ -93,24 +110,24 @@ export class LocalShellStreamResultSession {
       capture.background !== true
     ) {
       throw new Error(
-        'Background Shell capture belongs to another Session or binding.',
+        `${domain.label} capture belongs to another Session or binding.`,
       );
     }
     const record = this.session.authority.extensionRecord(
-      'child_run',
+      this.recordDomain,
       capture.executionCallId,
     );
     if (!record) {
-      throw new Error('Background Shell record is missing on the Session.');
+      throw new Error(`${domain.label} record is missing on the Session.`);
     }
-    const run = parseChildRun(record.record).run;
+    const run = domain.parse(record.record).run;
     if (
       run.executionCallId !== capture.executionCallId ||
       (run.execution !== 'dispatch_started' &&
         run.execution !== 'running_attached')
     ) {
       throw new Error(
-        'Background Shell capture does not match its proven start.',
+        `${domain.label} capture does not match its proven start.`,
       );
     }
     const captureId = createHash('sha256')
