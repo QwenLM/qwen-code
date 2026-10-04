@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
@@ -184,6 +185,14 @@ public class HarnessCoordinator {
         } catch (DaemonProtocolException error) {
             terminal = fail(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.");
+        } catch (HarnessSessionRefusedException error) {
+            // A named load refusal is fail-closed and known, but the Turn
+            // still awaits a Harness that can open the Session (a mixed
+            // fleet rolls forward), so it retries like any transient
+            // failure — with the refusal code recorded when retries run
+            // out.
+            terminal = transientFailure(claimed, submissionAttempted.get(),
+                    error);
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
@@ -591,7 +600,12 @@ public class HarnessCoordinator {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
-                    error.getClass().getSimpleName(), error);
+                    failureLabel(error), error);
+            if (error instanceof HarnessSessionRefusedException refusal) {
+                return fail(turn, refusal.getCode(),
+                        "Hosted Harness refused to open the Session before"
+                                + " Turn admission.");
+            }
             return fail(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
@@ -604,9 +618,14 @@ public class HarnessCoordinator {
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
-                turn.retryCount() + 1, delay,
-                error.getClass().getSimpleName());
+                turn.retryCount() + 1, delay, failureLabel(error));
         return true;
+    }
+
+    private static String failureLabel(RuntimeException error) {
+        return error instanceof HarnessSessionRefusedException refusal
+                ? refusal.getCode()
+                : error.getClass().getSimpleName();
     }
 
     static long retryDelay(Duration initialDelay, Duration maxDelay,
