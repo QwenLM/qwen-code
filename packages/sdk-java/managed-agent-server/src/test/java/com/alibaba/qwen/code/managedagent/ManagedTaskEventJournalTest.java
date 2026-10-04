@@ -229,6 +229,39 @@ class ManagedTaskEventJournalTest {
     }
 
     @Test
+    void appendArtifactKeepsEveryReferenceSyncWrites() {
+        String sessionId = session(true);
+        String taskId = "task_" + "cc".repeat(32);
+        events.appendArtifact(TENANT, sessionId, taskId, "artifact-a", 1);
+        events.appendArtifact(TENANT, sessionId, taskId, "artifact-b", 2);
+        assertThat(events.positions(TENANT, sessionId,
+                taskId).artifactRefs()).containsExactly("artifact-a",
+                "artifact-b");
+        assertThat(events.read(TENANT, sessionId, taskId, 0, 8).events())
+                .hasSize(2)
+                .allSatisfy(event -> assertThat(event.type())
+                        .isEqualTo("artifact"));
+    }
+
+    @Test
+    void staleSnapshotCannotRewriteTheReferenceList() {
+        String sessionId = session(true);
+        String taskId = "task_" + "dd".repeat(32);
+        events.appendArtifact(TENANT, sessionId, taskId, "artifact-a", 1);
+        // The clobber the old write shape could carry: a writer holding the
+        // outdated empty list. The compare-and-set latch must refuse it.
+        int rewritten = jdbc.update("UPDATE"
+                        + " qwen_managed_session_task_journal_cursor"
+                        + " SET artifact_refs = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND task_id = ?"
+                        + " AND artifact_refs = ?",
+                "[\"artifact-b\"]", TENANT, sessionId, taskId, "[]");
+        assertThat(rewritten).isZero();
+        assertThat(events.positions(TENANT, sessionId,
+                taskId).artifactRefs()).containsExactly("artifact-a");
+    }
+
+    @Test
     void artifactReferencesStopFailLoudAtTheBound() {
         String sessionId = session(true);
         String taskId = "task_" + "bb".repeat(32);
