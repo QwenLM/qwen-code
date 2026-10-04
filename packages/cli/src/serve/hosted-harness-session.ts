@@ -64,6 +64,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
@@ -143,6 +144,7 @@ interface HostedSession {
   mcp?: HostedMcpSession;
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
+  monitors?: HostedMonitorSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -1181,6 +1183,7 @@ async function executeHostedTurn(
                 session.mcp,
                 session.hooks,
                 session.childRuns,
+                session.monitors,
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1529,6 +1532,14 @@ export function registerHostedHarnessSessionRoutes(
         );
       if (session.toolProfile && brokerOptions)
         session.childRuns = new HostedChildRunSession(
+          {
+            authority: session.managed.authority,
+            resources: session.managed.resources,
+          },
+          session.managed.authority.sessionHeader.sessionKey,
+        );
+      if (session.toolProfile && brokerOptions && session.shell)
+        session.monitors = new HostedMonitorSession(
           {
             authority: session.managed.authority,
             resources: session.managed.resources,
@@ -2713,6 +2724,7 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp,
           undefined,
           session.childRuns,
+          session.monitors,
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {

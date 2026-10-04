@@ -71,7 +71,10 @@ const broker = vi.hoisted(() => ({
 }));
 // child_run is enabled by the H3 enablement slice; background tests flip
 // this per case, per the same harness the core suites use.
-const enablement = vi.hoisted(() => ({ childRun: false }));
+const enablement = vi.hoisted(() => ({
+  childRun: false,
+  monitorRun: false,
+}));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
@@ -102,9 +105,9 @@ vi.mock(
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (domain !== 'child_run' || !enablement.childRun) {
-          actual.assertManagedSessionDomainEnabled(domain);
-        }
+        if (domain === 'child_run' && enablement.childRun) return;
+        if (domain === 'monitor_run' && enablement.monitorRun) return;
+        actual.assertManagedSessionDomainEnabled(domain);
       },
     };
   },
@@ -238,6 +241,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   enablement.childRun = false;
+  enablement.monitorRun = false;
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.
@@ -4120,6 +4124,269 @@ function backgroundTurnRig(
   return { order, orchestrator, turn };
 }
 
+function monitorTurnRig(outcome: ToolResultEnvelope) {
+  enablement.childRun = true;
+  enablement.monitorRun = true;
+  const order: string[] = [];
+  const monitors = {
+    calls: [] as Array<readonly [string, unknown]>,
+    record(_id: string) {
+      return undefined;
+    },
+    async admit(params: unknown) {
+      monitors.calls.push(['admit', params]);
+    },
+    async dispatchStarted(id: string, runtime: unknown) {
+      monitors.calls.push(['dispatchStarted', { id, runtime }]);
+    },
+    async attach(id: string, runtime: unknown, receipt: unknown) {
+      monitors.calls.push(['attach', { id, runtime, receipt }]);
+    },
+    async settleFailed(id: string, params: unknown) {
+      monitors.calls.push(['settleFailed', { id, params }]);
+    },
+  };
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    rememberAdmission: vi.fn(),
+    request: vi.fn(async (route: string, body: unknown) => {
+      const operation = (body as { operation?: string }).operation;
+      if (route === '/grants' && operation === 'reserve') {
+        order.push('reserve');
+        return { state: 'OPEN' };
+      }
+      if (route === '/grants' && operation === 'renew') {
+        order.push('renew');
+        return { state: 'OPEN' };
+      }
+      if (route === '/grants' && operation === 'close_not_started') {
+        order.push('close_not_started');
+        return { state: 'NOT_STARTED' };
+      }
+      throw new Error('Unexpected publication route ' + route);
+    }),
+  } as unknown as HttpToolPublicationOwner;
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'monitor-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockImplementation(async () => {
+    order.push('execute');
+    expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    return outcome;
+  });
+  broker.acknowledgeV3.mockImplementation(async () => {
+    order.push('ack');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+  });
+  const turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts, model, identity) => {
+      order.push(type);
+      const uuid = identity?.uuid ?? randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        model,
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
+      });
+      return uuid;
+    },
+    () => true,
+    { owner, captureBytes: 1024 * 1024 },
+    {
+      resources: {} as never,
+      assertWritable: async () => {},
+    } as never,
+    undefined,
+    undefined,
+    undefined,
+    {
+      admit: async () => {},
+      dispatchStarted: async () => {},
+      attach: async () => {},
+      settleFailed: async () => {},
+      record: () => undefined,
+    } as never,
+    monitors as never,
+  );
+  return { order, monitors, turn };
+}
+
+function monitorCall() {
+  const call = {
+    ...calls[0],
+    name: 'monitor',
+    callId: 'monitor-call',
+    args: { command: 'tail -f build.log' },
+  };
+  const parts: Part[] = [
+    {
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    },
+  ];
+  return { call, parts };
+}
+
+describe('hosted Monitor admission arm', () => {
+  const DETACHED: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Monitor watch started under unit qwen-mon-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+
+  it('admits, dispatches and attaches through the monitor funnel', async () => {
+    const { call, parts } = monitorCall();
+    const rig = monitorTurnRig(DETACHED);
+    turn = rig.turn;
+    const result = await rig.turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(result[0]?.functionResponse?.response).toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+      'admit',
+      'dispatchStarted',
+      'attach',
+    ]);
+    const [admit] = rig.monitors.calls;
+    expect(admit?.[1]).toMatchObject({
+      monitorId: 'monitor-execution',
+      ownerScopeId: session.authority.sessionHeader.sessionKey.sessionId,
+      executionCallId: 'monitor-execution',
+      maxEvents: 1_000,
+      idleTimeoutMs: 300_000,
+      debounceMs: 1_000,
+    });
+    const [, , attach] = rig.monitors.calls;
+    expect(attach?.[1]).toMatchObject({
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    const receipt = (attach?.[1] as { receipt: Record<string, unknown> })
+      .receipt;
+    expect(receipt['executionCallId']).toBe('monitor-execution');
+    expect(receipt['bindingGeneration']).toBe('1');
+    expect(receipt['unitName']).toMatch(/^qwen-mon-/);
+    expect(broker.acknowledgeV3).toHaveBeenCalledWith('monitor-execution', {
+      executionCallId: 'monitor-execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    const receipts = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt');
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]!.payload).toMatchObject({
+      executionCallId: 'monitor-execution',
+      resultRef: null,
+      resources: [],
+    });
+  });
+
+  it('settles a proven-unstarted monitor as start_failed', async () => {
+    const { call, parts } = monitorCall();
+    const rejectedStart: ToolResultEnvelope = {
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: {
+        message:
+          'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+      },
+    };
+    const rig = monitorTurnRig(rejectedStart);
+    turn = rig.turn;
+    await rig.turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+      'admit',
+      'dispatchStarted',
+      'settleFailed',
+    ]);
+    expect(rig.monitors.calls.at(-1)?.[1]).toEqual({
+      id: 'monitor-execution',
+      params: { stopReason: 'start_failed', started: false },
+    });
+    expect(rig.order).toEqual([
+      'assistant',
+      'reserve',
+      'renew',
+      'execute',
+      'close_not_started',
+      'tool_result',
+    ]);
+  });
+
+  it('records a monitor refusal without any funnel call on an empty session', async () => {
+    const { call, parts } = monitorCall();
+    const bare = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      {
+        resources: {} as never,
+        assertWritable: async () => {},
+      } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const result = await bare.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(result[0]?.functionResponse?.response).toMatchObject({
+      error:
+        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
+    });
+  });
+});
+
 function backgroundCall() {
   const call = {
     ...calls[0],
@@ -4383,6 +4650,7 @@ it('keeps the deliberate refusal while child_run stays disabled', async () => {
   const rig = backgroundTurnRig(stillAdmitted);
   turn = rig.turn;
   enablement.childRun = false;
+  enablement.monitorRun = false;
   const { call, parts } = backgroundCall();
   const result = await turn.execute(
     [call],

@@ -3022,6 +3022,7 @@ describe('Hosted Harness no-tool session', () => {
       'write_file',
       'edit',
       'run_shell_command',
+      'monitor',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -3120,21 +3121,22 @@ describe('Hosted Harness no-tool session', () => {
       try {
         expect(descriptor).toBeDefined();
         expect(execute).toHaveBeenCalledOnce();
-        expect(close).toHaveBeenCalledOnce();
-        await expect(
-          fetch(descriptor!.url, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${descriptor!.token}` },
-          }),
-        ).rejects.toThrow();
+        // The publisher lives on the Session: a turn end never closes it.
+        expect(close).not.toHaveBeenCalled();
+        const answer = await fetch(descriptor!.url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${descriptor!.token}` },
+        });
+        expect([200, 400, 409]).toContain(answer.status);
       } finally {
-        // Also release the real listener if the lifecycle regression fails.
-        for (const publisher of start.mock.contexts)
-          await (publisher as HostedShellPublisher).close();
         await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
           'X-Qwen-Client-Id',
           clientId,
         );
+        // The Session's own close is what closes the publisher now.
+        expect(close).toHaveBeenCalledOnce();
+        for (const publisher of start.mock.contexts)
+          await (publisher as HostedShellPublisher).close();
       }
     },
   );

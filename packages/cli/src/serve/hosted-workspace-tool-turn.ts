@@ -62,6 +62,7 @@ import type {
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HookEventName,
   PreToolUseHookOutput,
@@ -126,6 +127,17 @@ function shellHistoryId(executionCallId: string): string {
 function childRunAdmissionsEnabled(): boolean {
   try {
     assertManagedSessionDomainEnabled('child_run');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H3: Monitor admissions exist only while the monitor_run domain is
+// enabled for commits; otherwise the turn keeps its monitor refusals.
+function monitorRunAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('monitor_run');
     return true;
   } catch {
     return false;
@@ -213,6 +225,22 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'monitor',
+    description:
+      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. The watch is admitted only on Sessions whose Monitor path is enabled.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        idle_timeout_ms: { type: 'integer', minimum: 1, maximum: 600000 },
+        max_events: { type: 'integer', minimum: 1, maximum: 10000 },
+        description: { type: 'string' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function physicalToolStatus(
@@ -254,8 +282,8 @@ export class HostedWorkspaceToolTurn {
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
-  // Stored ahead of the H3 background admission branch that consumes it.
   private readonly childRuns?: HostedChildRunSession;
+  private readonly monitors?: HostedMonitorSession;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -281,11 +309,10 @@ export class HostedWorkspaceToolTurn {
     private readonly mcp?: HostedMcpSession,
     private readonly hooks?: HostedHookSession,
     childRuns?: HostedChildRunSession,
+    monitors?: HostedMonitorSession,
   ) {
     this.childRuns = childRuns;
-    // Read once so the stored-ahead field typechecks until the H3 background
-    // admission branch consumes it.
-    void this.childRuns;
+    this.monitors = monitors;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -753,6 +780,7 @@ export class HostedWorkspaceToolTurn {
         let validationError: string | undefined;
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
+        let monitorAdmitted = false;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -818,6 +846,54 @@ export class HostedWorkspaceToolTurn {
             : this.publication
               ? { ...args }
               : { ...args, is_background: false };
+        } else if (call.name === 'monitor') {
+          const args = call.args;
+          const unsupportedKey = Object.keys(args).find(
+            (key) =>
+              ![
+                'command',
+                'idle_timeout_ms',
+                'max_events',
+                'description',
+              ].includes(key),
+          );
+          // H3: a Monitor request is admitted exactly when this Session
+          // owns its monitor_run orchestrator, a Shell-mode publisher, and
+          // the domain is enabled.
+          monitorAdmitted =
+            this.monitors !== undefined &&
+            this.shell !== undefined &&
+            monitorRunAdmissionsEnabled();
+          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+            validationError = 'Hosted Monitor requires a nonempty command.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted Monitor received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+          } else if (!monitorAdmitted) {
+            validationError =
+              'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
+          } else if (
+            args['description'] !== undefined &&
+            typeof args['description'] !== 'string'
+          ) {
+            validationError = 'Hosted Monitor description must be a string.';
+          } else if (
+            args['idle_timeout_ms'] !== undefined &&
+            (!Number.isSafeInteger(args['idle_timeout_ms']) ||
+              (args['idle_timeout_ms'] as number) < 1 ||
+              (args['idle_timeout_ms'] as number) > 600000)
+          ) {
+            validationError =
+              'Hosted Monitor idle_timeout_ms must be an integer from 1 to 600000 ms.';
+          } else if (
+            args['max_events'] !== undefined &&
+            (!Number.isSafeInteger(args['max_events']) ||
+              (args['max_events'] as number) < 1 ||
+              (args['max_events'] as number) > 10000)
+          ) {
+            validationError =
+              'Hosted Monitor max_events must be an integer from 1 to 10000.';
+          }
+          input = { ...args, is_monitor: true };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -847,9 +923,14 @@ export class HostedWorkspaceToolTurn {
           mcp: mcpInput !== undefined,
           ...encoded,
           argsDigest: `sha256:${managedToolDigest(input)}`,
-          publicationId: isShell && this.publication ? randomUUID() : null,
+          publicationId:
+            (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
+            this.publication
+              ? randomUUID()
+              : null,
           runtimeCallId,
           background: mcpInput === undefined && backgroundAdmitted,
+          monitoring: mcpInput === undefined && monitorAdmitted,
         };
       });
     };
@@ -933,7 +1014,7 @@ export class HostedWorkspaceToolTurn {
       this.uncertain = true;
       if (
         this.shell &&
-        requests.some((request) => request.isShell) &&
+        requests.some((request) => request.isShell || request.monitoring) &&
         !this.publisher
       ) {
         this.publisher = this.shell!.publisher ??= new HostedShellPublisher(
@@ -1135,7 +1216,7 @@ export class HostedWorkspaceToolTurn {
         let executionCallId: string;
         try {
           prepared =
-            request.isShell && this.publication
+            (request.isShell || request.monitoring) && this.publication
               ? await this.broker.prepareV3(
                   request.runtimeCallId,
                   request.argsDigest,
@@ -1234,6 +1315,26 @@ export class HostedWorkspaceToolTurn {
               args: request.input,
             });
           }
+          if (request.monitoring) {
+            await this.monitors!.admit({
+              monitorId: executionCallId,
+              ownerScopeId: authority.sessionHeader.sessionKey.sessionId,
+              executionCallId,
+              args: request.input,
+              maxEvents: Math.min(
+                Math.max((request.input['max_events'] as number) ?? 1_000, 1),
+                10_000,
+              ),
+              idleTimeoutMs: Math.min(
+                Math.max(
+                  (request.input['idle_timeout_ms'] as number) ?? 300_000,
+                  1,
+                ),
+                600_000,
+              ),
+              debounceMs: 1_000,
+            });
+          }
         }
         bindings.push({
           functionCallId: request.call.callId,
@@ -1258,7 +1359,7 @@ export class HostedWorkspaceToolTurn {
           attemptId: messageId,
           routeRef,
         });
-        if (request.isShell && this.publisher) {
+        if ((request.isShell || request.monitoring) && this.publisher) {
           this.publisher!.register(
             {
               reference: {
@@ -1275,6 +1376,9 @@ export class HostedWorkspaceToolTurn {
                 bindingGeneration: this.bindingGeneration!,
                 capturePolicy: 'complete_required',
                 ...(request.background ? { background: true } : {}),
+                ...(request.monitoring
+                  ? { background: true, monitoring: true }
+                  : {}),
               },
             },
             request.call.callId,
@@ -1289,14 +1393,18 @@ export class HostedWorkspaceToolTurn {
         });
       // H3: dispatch is durable the moment the checkpoint commits.
       for (const [index, request] of requests.entries()) {
-        if (!request.background) continue;
+        if (!request.background && !request.monitoring) continue;
         const executionCallId = reserved.get(index)!;
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
-        await this.childRuns!.dispatchStarted(executionCallId, {
+        const runtime = {
           runtimeBindingId: saved.runtimeBindingId,
           generation: saved.bindingGeneration,
-        });
+        };
+        if (request.background)
+          await this.childRuns!.dispatchStarted(executionCallId, runtime);
+        if (request.monitoring)
+          await this.monitors!.dispatchStarted(executionCallId, runtime);
       }
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
@@ -1411,7 +1519,7 @@ export class HostedWorkspaceToolTurn {
           continue;
         }
         const executionCallId = reserved.get(index)!;
-        if (request.isShell && this.publication) {
+        if ((request.isShell || request.monitoring) && this.publication) {
           const saved = shellBindings.get(executionCallId);
           if (!saved) throw new Error('Original Shell publication is missing.');
           await renewGrants!();
@@ -1445,7 +1553,17 @@ export class HostedWorkspaceToolTurn {
               throw new Error('Finished publication binding changed.');
             result = parseToolResultEnvelope(finished['result']);
           }
-          if (request.background) {
+          if (request.monitoring) {
+            responses.push(
+              ...(await this.acceptMonitor(
+                request,
+                executionCallId,
+                saved,
+                result,
+                model,
+              )),
+            );
+          } else if (request.background) {
             responses.push(
               ...(await this.acceptBackgroundShell(
                 request,
@@ -1661,6 +1779,211 @@ export class HostedWorkspaceToolTurn {
       inputBytes,
       digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
     };
+  }
+
+  /**
+   * H3 Monitor watch settlement, the mirror of acceptBackgroundShell: an
+   * unstarted refuse settles start_failed on the record; a settled
+   * detached handle lands blocked with no second journal receipt, and the
+   * watch's physical start attaches through the same idempotent rule —
+   * a journaled receipt verdict first, attach only when this identity
+   * still lacks its start receipt.
+   */
+  private async acceptMonitor(
+    request: {
+      call: ToolCallRequestInfo;
+      input: Record<string, unknown>;
+    },
+    executionCallId: string,
+    saved: {
+      publicationId: string;
+      publicationToken: string;
+      runtimeBindingId: string;
+      bindingGeneration: string;
+      runtimeCallId: string;
+    },
+    result: ToolResultEnvelope,
+    model: string,
+  ): Promise<Part[]> {
+    if (result.executionStatus === 'not_started' && result.capture === null) {
+      await this.monitors!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return this.acceptShell(
+        request.call,
+        executionCallId,
+        saved.publicationId,
+        saved.publicationToken,
+        result,
+        model,
+      );
+    }
+    if (
+      result.executionStatus !== 'success' ||
+      result.capture?.captureStatus !== 'detached'
+    ) {
+      throw new Error(
+        `Monitor watch settled with an unexpected result shape (${result.executionStatus}).`,
+      );
+    }
+    const authority = this.session.authority;
+    let receipt = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+    if (receipt === undefined) {
+      const existing = this.monitors!.record(executionCallId);
+      if (existing === undefined || existing.startReceiptRef === null) {
+        await this.monitors!.attach(
+          executionCallId,
+          {
+            runtimeBindingId: saved.runtimeBindingId,
+            generation: saved.bindingGeneration,
+          },
+          {
+            executionCallId,
+            runtimeCallId: saved.runtimeCallId,
+            unitName: `qwen-mon-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
+            bindingGeneration: saved.bindingGeneration,
+            occurredAt: Date.now(),
+          },
+        );
+      }
+    }
+    let ref: ManagedSessionDurableRef;
+    let converted: Part[];
+    let messageId: string;
+    let timestamp: string;
+    if (receipt) {
+      ref = assertManagedSessionDurableRef(
+        receipt.payload['toolOutcomeRef'],
+        'original tool outcome',
+      );
+      const savedResult = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      ) as Record<string, unknown>;
+      const history = savedResult['history'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        savedResult['schemaVersion'] !== 1 ||
+        savedResult['decision'] !== 'blocked' ||
+        !isDeepStrictEqual(savedResult['envelope'], result) ||
+        savedResult['manifestRef'] !== null ||
+        receipt.payload['resultRef'] !== null ||
+        (receipt.payload['resources'] !== undefined &&
+          !isDeepStrictEqual(receipt.payload['resources'], [])) ||
+        receipt.payload['historyRevision'] !== receipt.sequence ||
+        typeof history?.['messageId'] !== 'string' ||
+        typeof history['timestamp'] !== 'string' ||
+        typeof history['model'] !== 'string' ||
+        !Array.isArray(history['parts'])
+      )
+        throw new Error('Original Monitor watch receipt conflicts.');
+      converted = history['parts'] as Part[];
+      messageId = history['messageId'] as string;
+      timestamp = history['timestamp'] as string;
+      model = history['model'] as string;
+    } else {
+      converted = convertToFunctionResponse(
+        request.call.name,
+        request.call.callId,
+        result.responseParts as Part[],
+      );
+      const response = converted[0]?.functionResponse;
+      if (!response || converted.length !== 1)
+        throw new Error('Monitor watch result cannot be recorded.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'success',
+      };
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Monitor watch result cannot be recorded.');
+      const originalIntent = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.intent' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      if (!originalIntent)
+        throw new Error('Original Monitor watch intent is missing.');
+      messageId = shellHistoryId(executionCallId);
+      timestamp = new Date(originalIntent.occurredAt).toISOString();
+      const outcome = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          decision: 'blocked',
+          envelope: result,
+          manifestRef: null,
+          history: { messageId, timestamp, model, parts: converted },
+        }),
+      );
+      if (
+        outcome.byteLength >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Monitor watch outcome exceeds its limit.');
+      ref = await this.session.resources.publish(
+        'managed-tool-outcome',
+        outcome,
+      );
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: executionCallId,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${executionCallId}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          kind: 'tool.receipt',
+          occurredAt: Date.now(),
+          payload: {
+            executionCallId,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+    }
+    if (!receipt)
+      throw new Error('Original Monitor watch receipt disappeared.');
+    await this.commit('tool_result', converted, model, {
+      uuid: messageId,
+      timestamp,
+    });
+    await this.harness.resolveAwaitRuntime(executionCallId, ref);
+    try {
+      await this.broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest: null,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+      });
+    } catch (cause) {
+      throw new Error(
+        `Monitor watch acknowledgement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    return converted;
   }
 
   /**
