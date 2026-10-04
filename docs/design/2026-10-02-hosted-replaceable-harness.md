@@ -313,11 +313,13 @@ happen.
 
 - **D9a, retry budget vs writer lease.** A 409 on the recovery attach
   path of a bound Session is exempt from the pre-admission retry cap only
-  when its body carries a lease-shaped code
-  (`hosted_turn_recovery_required`, `managed_session_writer_conflict`) —
-  that wait is bounded by the predecessor's own lease: the former is a
-  parked Turn the predecessor still owns, the latter the one refusal that
-  provably ends when the fenced writer lease lapses.
+  when its body carries the lease's OWN code
+  (`managed_session_writer_conflict`) — the one refusal that provably
+  ends when the fenced writer lease lapses. The exemption is keyed on
+  the lease itself, not the code family: `hosted_turn_recovery_required`
+  covers arbitrary takeover failures, including refusals no retry can
+  change, and exempting those wedged durable refusals in an unbounded
+  retry (R6-1).
   `hosted_prompt_recovery_required` is deliberately absent: it can only
   arrive after the submission mark is set, where the exemption gate is
   already bypassed, so listing it could never change an outcome.

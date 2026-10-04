@@ -45,21 +45,21 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessCoordinator {
-    // 409 bodies whose wait is bounded by the predecessor's writer lease,
-    // and which may therefore stretch past the pre-admission budget. Every
-    // other body shape meets it — including `hosted_session_already_attached`,
-    // which looks transient but is not: the daemon drops an attachment only
-    // on an explicit detach or delete, and this control plane never detaches,
-    // so a Spring restart against a surviving Harness would otherwise retry
-    // a permanent refusal forever instead of ending the Turn.
-    // `managed_session_writer_conflict` is the only wait that provably ends
-    // on its own: the fenced predecessor's lease simply lapses, so retrying
-    // past the budget's pre-admission window is exactly the wait D9a meant.
+    // The one 409 whose wait provably ends on its own: a fenced
+    // predecessor's writer lease lapses, so retrying past the budget's
+    // pre-admission window is exactly the wait D9a meant. The exemption is
+    // keyed on the lease's own wire code, never on a catch-all code:
+    // `hosted_turn_recovery_required` covers arbitrary takeover failures
+    // including refusals no retry can change, so exempting IT wedged a
+    // durable refusal in an unbounded retry (R6-1). Every other body shape
+    // meets the budget — including `hosted_session_already_attached`, which
+    // looks transient but is not: the daemon drops an attachment only on
+    // an explicit detach or delete, and this control plane never detaches.
     // `hosted_prompt_recovery_required` is absent not by oversight: it only
     // arrives after markSubmissionAttempted, where the budget is bypassed
     // anyway, so an entry could never change an outcome.
-    private static final Set<String> LEASE_BOUNDED_409_CODES = Set.of(
-            "hosted_turn_recovery_required", "managed_session_writer_conflict");
+    private static final Set<String> LEASE_BOUNDED_409_CODES =
+            Set.of("managed_session_writer_conflict");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;

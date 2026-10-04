@@ -6978,6 +6978,74 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('keeps a durably blocked cancel-arm restore on the retriable refusal', async () => {
+    // The restore guard runs before the takeover branch: a durable verdict
+    // on a cancellation-only load answers the baseline retriable refusal —
+    // an attach from a blocked restore is unsafe for ANY shape, and the
+    // kernel's inapplicable still wants no terminal write from this code.
+    await parkToolTurn();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'opaque_state',
+    } as never);
+    const { loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBeUndefined();
+  });
+
+  it('answers a cancellation takeover of a parked no-tool Turn as the plain attach', async () => {
+    // The pre-kernel no-tool guard is shape-blind no longer: the
+    // cancellation arm attaches plain (inapplicable, mirroring the
+    // kernel); the drive shape of the same journal keeps its typed
+    // model_start decline. Surface the connector's workspace==null shape:
+    // a definition lacking any toolProfile, so the load itself stays
+    // tool-free.
+    await parkToolTurn();
+    const read = LocalManagedSessionResourceStore.prototype.read;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'read',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionResourceStore,
+      reference,
+    ) {
+      const bytes = await read.call(this, reference);
+      if (reference.kind !== 'managed-definition') return bytes;
+      const definition = JSON.parse(bytes.toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      delete definition['toolProfile'];
+      return Buffer.from(JSON.stringify(definition));
+    });
+    const drive = await replacementHeaders(
+      supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      driveRuntimeRecovery: true,
+    });
+    expect(drive.status).toBe(409);
+    expect(drive.body.code).toBe('hosted_turn_recovery_declined');
+    expect(drive.body.reason).toBe('model_start');
+
+    // The decline closed its authority, releasing the writer latch for
+    // the cancellation arm's plain attach.
+    const passive = await replacementHeaders(
+      supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(passive.status).toBe(200);
+    expect(
+      passive.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
+    ).toBeUndefined();
+  });
+
   it('replays the snapshot only to a request re-proving its store identity', async () => {
     // The replay hands over the attached session's client id, so a caller
     // with the harness token and a matching takeover shape must also

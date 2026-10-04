@@ -191,10 +191,11 @@ class HarnessCoordinatorTest {
     }
 
     // A permanent transport failure meets the pre-admission budget even on
-    // a bound Session — only takeover-shaped 409s use the lease-window
-    // exemption, never any other failure kind.
+    // a bound Session — only the writer lease's own code use the
+    // lease-window exemption, never any other failure kind (its takeover
+    // arm now lives beside durableRecoveryRequired409MeetsRetryBudget).
     @Test
-    void boundSessionMeetsRetryBudgetExceptOnTakeover409() {
+    void boundSessionMeetsRetryBudgetExceptOnWriterConflict() {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
@@ -222,34 +223,6 @@ class HarnessCoordinatorTest {
                 anyString(), eq("hosted_harness_unavailable"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong());
-
-        AgentStateStore takeover = mock(AgentStateStore.class);
-        HarnessConnector takeoverHarness = mock(HarnessConnector.class);
-        DaemonHttpException conflict = mock(DaemonHttpException.class);
-        when(conflict.getStatusCode()).thenReturn(409);
-        when(conflict.getErrorCode())
-                .thenReturn("hosted_turn_recovery_required");
-        when(takeover.claimTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), any(Duration.class)))
-                .thenReturn(Optional.of(claimed));
-        when(takeover.requireSession("tenant", "session")).thenReturn(
-                new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
-        when(takeoverHarness.recoverManagedRuntime("tenant", "session",
-                false)).thenThrow(conflict);
-        HarnessCoordinator takeoverCoordinator = new HarnessCoordinator(
-                takeover, takeoverHarness, new HarnessEventProjector(),
-                mock(RuntimeWarmer.class), directExecutor(),
-                Clock.systemUTC(), new ManagedAgentProperties());
-        try {
-            takeoverCoordinator.dispatch("tenant", "session", "turn");
-        } finally {
-            takeoverCoordinator.close();
-        }
-        verify(takeover).scheduleTurnRetry(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyLong());
-        verify(takeover, never()).failTurn(anyString(), anyString(),
-                anyString(), anyString(), anyString(), anyString());
     }
 
     // A lease-shaped 409 exempts only on a bound Session; on an unbound
@@ -380,6 +353,45 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    // The exemption is keyed on the lease's own wire code only: a durable
+    // refusal arriving as hosted_turn_recovery_required is NOT a
+    // lease-shaped wait, so it meets the pre-admission budget like every
+    // other body shape — exempting it wedged these Turns.
+    @Test
+    void durableRecoveryRequired409MeetsRetryBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException durable = mock(DaemonHttpException.class);
+        when(durable.getStatusCode()).thenReturn(409);
+        when(durable.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(durable);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     // A codeless error body must never take the contains() NPE hostage:

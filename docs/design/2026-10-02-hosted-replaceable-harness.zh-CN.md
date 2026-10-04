@@ -273,10 +273,11 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
 ### D9 —— 生产默认值改到自洽（按 issue 的拍板项）
 
 - **D9a，重试预算对 writer lease。** 已绑定 Session 的恢复附着路径
-  上，一个 body 带 lease 形态 code（`hosted_turn_recovery_required`、
-  `managed_session_writer_conflict`）的 409 豁免于准入前上限——该等待
-  以前任自己的 lease 为上界：前者是前任仍持有的停放 Turn，后者是
-  受防 writer lease 失效时必然终结的拒绝。
+  上，一个 body 带 lease 自己的 code（`managed_session_writer_conflict`）
+  的 409 豁免于准入前上限——该拒绝在受防 writer lease 失效时必然终结。
+  豁免绑定在 lease 本身而非 code 家族：`hosted_turn_recovery_required`
+  覆盖任意接管失败（含重试不可改变的 durable 拒绝），豁免它会把
+  durable 拒绝卡进无上限重试（R6-1）。
   `hosted_prompt_recovery_required` 刻意缺席：它只可能在 submission
   标记设置之后到达，那时豁免门已无作用，列入它不可能改变任何结果。
   其余一律计入预算，其中也包括

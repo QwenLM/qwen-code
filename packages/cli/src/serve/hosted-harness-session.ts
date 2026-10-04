@@ -1652,7 +1652,12 @@ export function registerHostedHarnessSessionRoutes(
           .catch(() => undefined);
         await managed.close();
         if (verdict?.status === 'blocked' && isDurableBlockedVerdict(verdict)) {
-          recoveryDeclined(res, 'checkpoint_blocked');
+          // Same shape rule as the kernel: a cancellation-only load must
+          // not terminalize — the refusal is the baseline retriable one
+          // even for a durable verdict, because nothing here can attach.
+          if (body?.['passiveManagedRuntimeRecovery'] !== true)
+            recoveryDeclined(res, 'checkpoint_blocked');
+          else error(res, 409, 'hosted_turn_recovery_required');
           return;
         }
         error(res, 409, 'hosted_turn_recovery_required');
@@ -1677,6 +1682,9 @@ export function registerHostedHarnessSessionRoutes(
       let resume: { promptId: string; text: string; parts: Part[] } | undefined;
       let settlePromptId: string | undefined;
       let recovery: HostedRuntimeRecoveryReport | undefined;
+      // A takeover that answers inapplicable has spoken: the plain attach
+      // must not fail the bare-load refusal below on its empty recovery.
+      let inapplicableAnswer = false;
       if (
         restore.recoveryStatus === 'ok' &&
         unsettled !== undefined &&
@@ -1687,22 +1695,37 @@ export function registerHostedHarnessSessionRoutes(
         // cancellation) and answer with the recovery snapshot. A Turn with
         // no Runtime work (a model round, or every Turn of a no-tool
         // Session) cannot be driven here: refuse it with a typed terminal
-        // decline rather than a refusal the coordinator retries forever.
-        if (toolProfile === undefined || !brokerOptions) {
+        // decline rather than a refusal the coordinator retries forever —
+        // on the DRIVE shape. A cancellation-only load meets the kernel's
+        // inapplicable even at this pre-kernel guard: the plain attach
+        // continues, and the coordinator's cancel arm settles what a
+        // decline would have killed.
+        if (
+          (toolProfile === undefined || !brokerOptions) &&
+          body?.['passiveManagedRuntimeRecovery'] !== true
+        ) {
           await managed.close();
           recoveryDeclined(res, 'model_start');
           return;
         }
         try {
-          const outcome = await recoverHostedRuntimeTurn({
-            session: managed,
-            sessionId,
-            cwd,
-            promptId: unsettled,
-            brokerOptions,
-            passive: body?.['passiveManagedRuntimeRecovery'] === true,
-          });
-          if (outcome.kind === 'declined') {
+          const outcome =
+            toolProfile !== undefined && brokerOptions !== undefined
+              ? await recoverHostedRuntimeTurn({
+                  session: managed,
+                  sessionId,
+                  cwd,
+                  promptId: unsettled,
+                  brokerOptions,
+                  passive: body?.['passiveManagedRuntimeRecovery'] === true,
+                })
+              : // A cancellation-only load of a no-tool Session has no
+                // Runtime work to owe — by request shape or by ambient
+                // config; the plain attach below is the kernel's answer.
+                undefined;
+          if (outcome === undefined || outcome.kind === 'inapplicable') {
+            inapplicableAnswer = true;
+          } else if (outcome.kind === 'declined') {
             await managed.close();
             recoveryDeclined(res, outcome.reason);
             return;
@@ -1833,7 +1856,8 @@ export function registerHostedHarnessSessionRoutes(
           !resume &&
           !settlePromptId &&
           !session.hooks &&
-          !recovery)
+          !recovery &&
+          !inapplicableAnswer)
       ) {
         // A retry-inviting refusal keeps a takeover-adopted lease owed on
         // the Broker side: the coordinator's retried load re-acquires the
