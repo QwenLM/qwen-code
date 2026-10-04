@@ -12,7 +12,7 @@ import java.util.Set;
 public final class ManagedShellProtocol {
     static final String PATH = "/internal/managed-runtime/v3/shells";
     private static final Set<String> KINDS = Set.of("shell-status", "shell-terminate");
-    private static final Set<String> VIEW_FIELDS = Set.of("operationId", "state", "unitName", "evidence", "error");
+    private static final Set<String> VIEW_FIELDS = Set.of("operationId", "state", "unitName", "evidence");
     private static final Set<String> STATES = Set.of("running", "exited", "unknown");
     private static final Set<String> EVIDENCE_FIELDS = Set.of("exitCode", "exitSignal");
 
@@ -57,10 +57,7 @@ public final class ManagedShellProtocol {
                 || "exited".equals(state) && !validEvidence(view.get("evidence"))
                 || "running".equals(state) && !(view.get("unitName") instanceof String)
                 || !"exited".equals(state) && view.containsKey("evidence")
-                || "unknown".equals(state) && view.containsKey("unitName")
-                || view.containsKey("error") && (!(view.get("error") instanceof Map<?, ?> error)
-                        || !error.keySet().equals(Set.of("code"))
-                        || !(error.get("code") instanceof String code) || !code.matches("[a-z][a-z0-9_]{0,127}"))) {
+                || "unknown".equals(state) && view.containsKey("unitName")) {
             throw new RuntimeBrokerException(502, "managed_shell_response_invalid",
                     "Managed Shell response is invalid.", false);
         }
