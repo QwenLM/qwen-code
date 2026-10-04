@@ -152,7 +152,11 @@ describe('ManagedMonitorWatcher', () => {
 
   it('terminates through the supervisor evidence rules', async () => {
     const { process, watcher } = rig();
-    const handle = await watcher.start({ command: 'du -sh .' }, () => {});
+    const handle = await watcher.start(
+      { command: 'du -sh .' },
+      () => {},
+      () => {},
+    );
     await handle.terminate();
     expect(process.terminateCalls).toEqual([5_000]);
   });

@@ -68,6 +68,12 @@ import {
   MANAGED_SHELL_WORKER_ROUTE,
   registerManagedShellRoutes,
 } from './managed-shell-routes.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorRuntime } from './managed-monitor-runtime.js';
+import {
+  MANAGED_MONITOR_WORKER_ROUTE,
+  registerManagedMonitorRoutes,
+} from './managed-monitor-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -79,6 +85,7 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
   MANAGED_SHELL_WORKER_ROUTE,
+  MANAGED_MONITOR_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -298,6 +305,11 @@ export function registerManagedContextRoutes(
     app,
     boot,
     new ManagedShellRuntime(backgroundRegistry),
+  );
+  registerManagedMonitorRoutes(
+    app,
+    boot,
+    new ManagedMonitorRuntime(new ManagedMonitorRegistry()),
   );
   registerManagedRuntimeProviderRoute(
     app,
