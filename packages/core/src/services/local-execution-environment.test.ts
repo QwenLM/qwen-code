@@ -45,6 +45,19 @@ describe('LocalExecutionEnvironment', () => {
     return environment.execute(id, signal);
   }
 
+  it('names an admitted tool with its parameter schema as its declaration', async () => {
+    expect(environment.toolDefinition('read_file')).toEqual({
+      name: 'read_file',
+      parametersJsonSchema: expect.anything(),
+    });
+    expect(
+      (environment.toolDefinition('write_file') as { name: unknown }).name,
+    ).toBe('write_file');
+    expect(() => environment.toolDefinition('not_a_tool')).toThrow(
+      'Unsupported execution tool',
+    );
+  });
+
   it('runs a prepared call elsewhere, with its final parameters', async () => {
     const file = path.join(workspace, 'file.txt');
     const run = vi.fn(async () => ({

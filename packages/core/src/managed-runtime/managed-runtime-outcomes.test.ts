@@ -203,14 +203,31 @@ describe('LocalManagedRuntimeOutcomes', () => {
       );
       expect(new Set(refs).size).toBe(1);
 
+      // A different tool publishes its own definition once, and the first
+      // tool's definition keeps serving later calls.
+      await outcomes.admit({
+        ...admission('call-c'),
+        toolName: 'write_file',
+        params: { file_path: '/workspace/c.txt', content: 'c' },
+        toolDefinition: { name: 'write_file', parametersJsonSchema: {} },
+      });
+      await outcomes.admit(admission('call-d'));
+      const afterRefs = events(session, 'tool.intent').map(
+        (intent) =>
+          (intent.payload['toolDefinitionRef'] as { resourceId: string })
+            .resourceId,
+      );
+      expect(new Set(afterRefs).size).toBe(2);
+      expect(afterRefs[3]).toBe(refs[0]);
+
       const checkpoint = (await checkpointOf(session))!;
       expect(checkpoint.tools?.batchId).toBe('batch-call-a');
       expect(
         checkpoint.tools?.items.map((item) => item.executionCallId),
-      ).toEqual(['call-a', 'call-b']);
+      ).toEqual(['call-a', 'call-b', 'call-c', 'call-d']);
       expect(
         checkpoint.runtime?.bindings.map((binding) => binding.state),
-      ).toEqual(['dispatch', 'dispatch']);
+      ).toEqual(['dispatch', 'dispatch', 'dispatch', 'dispatch']);
     } finally {
       await session.close();
     }
@@ -400,6 +417,34 @@ describe('LocalManagedRuntimeOutcomes', () => {
       await expect(
         unresolvedRuntimeWorkReason(session.authority),
       ).resolves.toBeUndefined();
+      // A batch that only ever refused never wrote a checkpoint, and closing
+      // it is a no-op rather than a blocked-authorization failure.
+      await expect(
+        new LocalManagedRuntimeOutcomes(session).finalizeBatch(),
+      ).resolves.toBeUndefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('refuses an inadmissible call before anything durable is written', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const { session } = await openSession(root, 'session-oversized');
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      const oversized = 'x'.repeat(256 * 1024 + 8);
+      await expect(
+        outcomes.admit(
+          admission('call-a', {
+            file_path: '/workspace/a.txt',
+            content: oversized,
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(events(session, 'tool.intent')).toHaveLength(0);
+      const checkpoint = (await checkpointOf(session))!;
+      expect(checkpoint.tools).toBeNull();
     } finally {
       await session.close();
     }
@@ -432,10 +477,15 @@ describe('admission failure recovery', () => {
       await outcomes.admit(admission('call-b'));
       expect(failed).toBe(1);
       expect(events(session, 'tool.intent')).toHaveLength(2);
+      await outcomes.admit(admission('call-c'));
+      const routePublishes = vi
+        .mocked(session.resources.publish)
+        .mock.calls.filter((call) => call[0] === 'managed-execution-route');
+      expect(routePublishes).toHaveLength(2);
       const checkpoint = (await checkpointOf(session))!;
       expect(
         checkpoint.tools?.items.map((item) => item.executionCallId),
-      ).toEqual(['call-b']);
+      ).toEqual(['call-b', 'call-c']);
     } finally {
       await session.close();
     }
@@ -443,6 +493,123 @@ describe('admission failure recovery', () => {
 });
 
 describe('restored runtime block', () => {
+  it('settles a settled-but-unsettled crash victim and re-records its result', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-recovering');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      const harness = (
+        outcomes as unknown as {
+          harness: {
+            resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+          };
+        }
+      ).harness;
+      let sabotaged = false;
+      const settling = harness.resolveAwaitRuntime.bind(harness);
+      harness.resolveAwaitRuntime = async (id, ref) => {
+        if (!sabotaged) {
+          sabotaged = true;
+          throw new Error('crashed between the receipt and the settlement');
+        }
+        return settling(id, ref);
+      };
+      await outcomes.admit(admission('call-a'));
+      // The durable outcome and receipt land; the checkpoint settlement
+      // crashes where the process died between the two commits.
+      await expect(
+        outcomes.settle({
+          functionCallId: 'call-a',
+          executionStatus: 'success',
+          payload: {
+            executionStatus: 'success',
+            responseParts: [{ type: 'text', text: 'the answer' }],
+          },
+        }),
+      ).rejects.toThrow('crashed between');
+      expect(events(session, 'tool.receipt')).toHaveLength(1);
+      const crashed = (await checkpointOf(session))!;
+      expect(crashed.continuation.phase).toBe('await_runtime');
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-recovering');
+    try {
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toContain('never settled');
+
+      // The receipts prove the calls, so the restore settles them and the
+      // outcome becomes the missing tool_result record.
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const checkpoint = (await checkpointOf(restored))!;
+      expect(checkpoint.continuation.phase).toBe('results_ready');
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      expect(body.toString()).toContain('call-a');
+      expect(body.toString()).toContain('the answer');
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toBeUndefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('re-records a settled result whose record died with the process', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-unrecorded');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'settled but unrecorded' }],
+        },
+      });
+      // Every checkpoint commit landed; the recorder's tool_result record
+      // never did — the process died between the resolve and the write.
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-unrecorded');
+    try {
+      // Nothing is pending, yet the restore repair still runs: the settled
+      // outcome becomes the tool_result the session history needs.
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      expect(body.toString()).toContain('call-a');
+      expect(body.toString()).toContain('settled but unrecorded');
+      const checkpoint = (await checkpointOf(restored))!;
+      expect(checkpoint.continuation.phase).toBe('results_ready');
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toBeUndefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
   it('answers for a log whose dispatch never settled, across a reopen', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);

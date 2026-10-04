@@ -31,6 +31,8 @@ import { createManagedEngineChannelFactory } from './managed-engine-channel-fact
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { localManagedSessionKey } from '@qwen-code/qwen-code-core/utils/sessionStorageUtils.js';
+import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
@@ -297,6 +299,30 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     }
   }
 
+  /** The durable outcome behind the newest tool.receipt on these log lines. */
+  async function readLatestOutcome(
+    lines: Array<{
+      managedSession?: {
+        kind?: string;
+        payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+      };
+    }>,
+    sessionId: string,
+  ): Promise<{ executionStatus: string }> {
+    const sessionKey = localManagedSessionKey(workspace, sessionId);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey,
+    });
+    const refs = lines
+      .filter((line) => line.managedSession?.kind === 'tool.receipt')
+      .map((line) => line.managedSession!.payload!.toolOutcomeRef!);
+    const envelope = JSON.parse(
+      (await resources.read(refs[refs.length - 1]! as never)).toString(),
+    ) as { result?: { executionStatus?: string } };
+    return { executionStatus: envelope.result?.executionStatus ?? 'unknown' };
+  }
+
   /** The session's Managed Session log, as the child left it. */
   async function readManagedLog(sessionId: string): Promise<string> {
     const transcript = new SessionService(workspace, {
@@ -422,36 +448,22 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       runtimeBaseDir: path.join(root, 'runtime'),
       sessionKey: localManagedSessionKey(workspace, sessionId),
     });
-    const checkpoints: Array<Record<string, never>> = [];
+    const checkpoints: HarnessCheckpointV1[] = [];
     for (const ref of checkpointRefs) {
       checkpoints.push(
-        JSON.parse((await resources.read(ref)).toString()) as Record<
-          string,
-          never
-        >,
+        JSON.parse(
+          (await resources.read(ref)).toString(),
+        ) as HarnessCheckpointV1,
       );
     }
     const closed = checkpoints
       .reverse()
       .find(
         (checkpoint) =>
-          (checkpoint as { continuation?: { phase?: string } }).continuation
-            ?.phase === 'turn_settled' &&
-          Array.isArray(
-            (checkpoint as { tools?: { items?: unknown[] } }).tools?.items,
-          ),
+          checkpoint.continuation.phase === 'turn_settled' &&
+          Array.isArray(checkpoint.tools?.items),
       );
-    const closedItems = (
-      closed as unknown as {
-        tools: {
-          items: Array<{
-            state: string;
-            consumed: boolean;
-            outcomeRef: unknown;
-          }>;
-        };
-      }
-    )?.tools.items;
+    const closedItems = closed?.tools?.items;
     expect(closedItems).toBeDefined();
     expect(closedItems!.length).toBe(4);
     expect(
@@ -512,12 +524,27 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // The worker settled the call only after the command stopped.
     expect(isAlive(sleepPid)).toBe(false);
     expect(isAlive(worker.pid)).toBe(true);
-    // The cancellation settled as a receipt too: the log says the call ended,
-    // and how.
+    // The cancellation settled as a receipt too, and its outcome says how
+    // the call ended — read from the outcome itself, not a substring.
     const cancelledLog = await readManagedLog(sessionId);
     expect(cancelledLog).toContain('"tool.intent"');
     expect(cancelledLog).toContain('"tool.receipt"');
-    expect(cancelledLog).toContain('"cancelled"');
+    const outcome = await readLatestOutcome(
+      cancelledLog
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              managedSession?: {
+                kind?: string;
+                payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+              };
+            },
+        ),
+      sessionId,
+    );
+    expect(outcome.executionStatus).toBe('cancelled');
 
     // The same worker serves the session's next call.
     const nextOut = path.join(workspace, 'next.txt');

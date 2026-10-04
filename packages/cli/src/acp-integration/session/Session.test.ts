@@ -3203,11 +3203,16 @@ describe('Session', () => {
 
     it('flushes the recorded results and closes the continuation in that order', async () => {
       const order: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       mockChatRecordingService.recordToolResult.mockImplementation(() => {
         order.push('recordToolResult');
       });
       mockChatRecordingService.flush.mockImplementation(async () => {
         order.push('flush');
+        await gate;
       });
       const finalizeBatch = vi.fn().mockImplementation(async () => {
         order.push('finalizeBatch');
@@ -3216,20 +3221,24 @@ describe('Session', () => {
         finalizeBatch,
       });
       const execute = driveToolTurn();
-
-      await session.prompt({
+      const sendSpy = mockChat.sendMessageStream;
+      const prompt = session.prompt({
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'run it' }],
       });
 
+      await vi.waitFor(() =>
+        expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+      );
+      // A fire-and-forget close could not hold it: while the flush is
+      // uncommitted the model is never asked again.
+      await new Promise((resolve) => setImmediate(resolve));
       expect(execute).toHaveBeenCalled();
-      expect(order.indexOf('recordToolResult')).toBeGreaterThanOrEqual(0);
-      expect(order.indexOf('flush')).toBeGreaterThan(
-        order.indexOf('recordToolResult'),
-      );
-      expect(order.indexOf('finalizeBatch')).toBeGreaterThan(
-        order.indexOf('flush'),
-      );
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      release();
+      await prompt;
+      expect(order).toEqual(['recordToolResult', 'flush', 'finalizeBatch']);
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
     });
 
     it('runs neither for a Legacy session', async () => {

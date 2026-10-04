@@ -129,6 +129,8 @@ const server = http.createServer(async (req, res) => {
   }
   if (route === 'acknowledge') {
     if (mode === 'fails-before-journal') return send(200, { protocolVersion: 2, state: 'unknown' });
+    // Never answers: the receipt hangs on the client's control timeout.
+    if (mode === 'acknowledge-never') return;
     return send(200, { protocolVersion: 2, state: 'acknowledged' });
   }
   send(404, {});
@@ -751,11 +753,16 @@ describe.skipIf(process.platform === 'win32')(
         .map((entry) => entry.request);
     }
 
-    function create(mode: string) {
+    function create(mode: string, extraEnv: Record<string, string> = {}) {
       environment = createManagedRuntimeEnvironment(config, () => ({
         command: process.execPath,
         args: [script],
-        env: { ...process.env, FAKE_MODE: mode, FAKE_LOG: logFile },
+        env: {
+          ...process.env,
+          FAKE_MODE: mode,
+          FAKE_LOG: logFile,
+          ...extraEnv,
+        },
       }));
       return environment;
     }
@@ -813,6 +820,14 @@ describe.skipIf(process.platform === 'win32')(
         expect.objectContaining({
           functionCallId: 'write',
           executionStatus: 'success',
+          payload: expect.objectContaining({
+            executionStatus: 'success',
+            responseParts: [
+              expect.objectContaining({
+                text: `ran ${JSON.stringify({ file_path: file, content: 'x' })}`,
+              }),
+            ],
+          }),
         }),
       ]);
       await vi.waitFor(async () => {
@@ -914,6 +929,8 @@ describe.skipIf(process.platform === 'win32')(
       await vi.waitFor(async () => {
         expect(await readFile(logFile, 'utf8')).toContain('"execute"');
       });
+      // The worker never forgot anything before the commit landed.
+      expect(await readFile(logFile, 'utf8')).not.toContain('"acknowledge"');
       await new Promise((resolve) => setImmediate(resolve));
       expect(resolved).toBe(false);
       release();
@@ -936,6 +953,109 @@ describe.skipIf(process.platform === 'win32')(
         expect(acknowledgesNow).toHaveLength(1);
         expect(acknowledgesNow[0]!.request?.reference?.callId).toBe('write');
       });
+    });
+
+    it('refuses to dispatch with no durable outcome writer', async () => {
+      const soConfig = new Config({
+        sessionId: SESSION_ID,
+        targetDir: root,
+        cwd: root,
+        debugMode: false,
+        model: 'test-model',
+        usageStatisticsEnabled: false,
+        telemetry: { enabled: false },
+        deferTelemetryInitialization: true,
+      });
+      environment = createManagedRuntimeEnvironment(soConfig, () => ({
+        command: process.execPath,
+        args: [script],
+        env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+      }));
+      const env = environment;
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await expect(env.execute('write', signal)).rejects.toThrow(
+        'records no log',
+      );
+      expect(await readFile(logFile, 'utf8')).toBe('');
+    });
+
+    it('commits nothing when the turn cancels while the worker boots', async () => {
+      const env = create('slow-ready', { FAKE_READY_MS: '600' });
+      const controller = new AbortController();
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        controller.signal,
+      );
+      const result = env.execute('write', controller.signal);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.abort();
+      const settled = await result;
+      expect(settled.error?.message).toBe('The tool call was cancelled.');
+      expect(admissions).toHaveLength(0);
+      expect(settlements).toHaveLength(0);
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+    });
+
+    it('returns the settled result when the receipt never lands', async () => {
+      // Poison every acknowledge answer: the log shows the call ran, yet no
+      // receipt comes back, and the model still gets its result.
+      const env = create('acknowledge-never');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      const result = await env.execute('write', signal);
+      expect(result.llmContent).toEqual([
+        {
+          text: `ran ${JSON.stringify({ file_path: path.join(root, 'written.txt'), content: 'x' })}`,
+        },
+      ]);
+      expect(settlements).toHaveLength(1);
+      await vi.waitFor(async () => {
+        expect(await readFile(logFile, 'utf8')).toContain('"acknowledge"');
+      });
+    });
+
+    it('blocks the session when the durable settlement fails', async () => {
+      const env = create('ok');
+      outcomeFailures.settle = new Error('the authority stopped writing');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      const failure = env.execute('write', signal);
+      await expect(failure).rejects.toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect(config.getManagedSessionBlock()).toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect(config.getManagedSessionBlock()?.message).toContain(
+        'durable settlement',
+      );
+      // The call was admitted before dispatch; its settlement never landed,
+      // which is the durable unknown-outcome shape.
+      expect(admissions).toHaveLength(1);
+      expect(settlements).toHaveLength(0);
     });
 
     it('commits a refused call as not started and still settles it', async () => {
@@ -1269,6 +1389,11 @@ describe('toToolResult', () => {
       'not_started',
       { message: 'refused' },
       'The tool call did not run: refused',
+    ],
+    [
+      'not_started',
+      undefined,
+      'The tool call did not run: the Runtime worker did not run it.',
     ],
     ['cancelled', undefined, 'The tool call was cancelled.'],
   ] as const)(
