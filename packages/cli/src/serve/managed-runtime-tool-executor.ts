@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { realpath } from 'node:fs/promises';
+import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
   checkHostedGlobPattern,
@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   AnyDeclarativeTool,
+  AnyToolInvocation,
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
@@ -872,6 +873,7 @@ export class ManagedToolExecutor {
     let payload: ManagedToolResultPayload;
     try {
       const params = structuredClone(entry.input);
+      let fileInvocation: AnyToolInvocation | undefined;
       if (
         directory &&
         entry.toolName !== ShellTool.Name &&
@@ -887,6 +889,11 @@ export class ManagedToolExecutor {
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
+        );
+        // Validation unescapes file_path. Check and record the path this
+        // invocation consumes without applying that normalization twice.
+        fileInvocation = sessionIdContext.run(sessionId, () =>
+          tool.build(params),
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
@@ -907,7 +914,8 @@ export class ManagedToolExecutor {
           path.isAbsolute(relative)
         ) {
           // The boundary is the Session directory only when the target lands
-          // in ANOTHER installed Session's directory; anywhere else inside
+          // in ANOTHER installed Session's directory (or its binding cannot
+          // be resolved); anywhere else inside
           // the mount — a linked dependency's real location — stays
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
@@ -982,7 +990,7 @@ export class ManagedToolExecutor {
       }
       const invoke = () =>
         sessionIdContext.run(sessionId, () => {
-          const invocation = tool.build(params);
+          const invocation = fileInvocation ?? tool.build(params);
           return entry.version === 3 && entry.captureSink
             ? (invocation as ShellToolInvocation).execute(
                 entry.controller.signal,
@@ -1369,7 +1377,8 @@ function escapesSession(relative: string): boolean {
 /**
  * A create's leaf does not exist yet, so a bare realpath cannot see a symlink
  * mid-path (`peek/pwned.txt` through `peek -> ../web`): resolve the deepest
- * ancestor that does exist and re-attach the lexical tail below it. A path
+ * ancestor that does exist and re-attach the lexical tail below it. A dangling
+ * link is resolved to its intended target before any tail is re-attached. A path
  * with no symlink in its ancestry keeps its lexical value, so the tool keeps
  * its own not-found answer rather than being accused as traversal; any
  * non-ENOENT failure to resolve is not something containment may assume away.
@@ -1377,16 +1386,33 @@ function escapesSession(relative: string): boolean {
 async function realpathDeepestExisting(candidate: string): Promise<string> {
   let resolved = candidate;
   const tail: string[] = [];
-  for (;;) {
-    try {
-      return path.join(await realpath(resolved), ...tail);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  try {
+    for (;;) {
+      try {
+        return path.join(await realpath(resolved), ...tail);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+      // A dangling link exists even though realpath cannot resolve its leaf.
+      try {
+        if ((await lstat(resolved)).isSymbolicLink()) {
+          resolved = path.resolve(
+            await realpath(path.dirname(resolved)),
+            await readlink(resolved),
+          );
+          continue;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
       const parent = path.dirname(resolved);
       if (parent === resolved) return path.join(resolved, ...tail);
       tail.unshift(path.basename(resolved));
       resolved = parent;
     }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    throw new Error(`Path could not be resolved (${code ?? 'unknown error'}).`);
   }
 }
 

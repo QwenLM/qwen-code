@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
@@ -184,6 +185,14 @@ public class HarnessCoordinator {
         } catch (DaemonProtocolException error) {
             terminal = fail(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.");
+        } catch (HarnessSessionRefusedException error) {
+            // A named load refusal is fail-closed and known, but the Turn
+            // still awaits a Harness that can open the Session (a mixed
+            // fleet rolls forward), so it retries like any transient
+            // failure — with the refusal code recorded when retries run
+            // out.
+            terminal = transientFailure(claimed, submissionAttempted.get(),
+                    error);
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
@@ -396,6 +405,23 @@ public class HarnessCoordinator {
                         && !turn.promptId().equals(source.promptId())) {
                     continue;
                 }
+                if ("message_retracted".equals(source.type())) {
+                    // A restarted model attempt retracts the prefix the failed
+                    // one published (#13319). Flush the pending batch first:
+                    // the retraction range covers deltas this stream already
+                    // read but has not recorded yet.
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
+                    store.retractHarnessTurnOutput(turn.tenantId(),
+                            turn.sessionId(), turn.turnId(), owner,
+                            stream.eventEpoch(), retractionFromSequence(source),
+                            source.id());
+                    // The replay's first chunk is the new first visible text:
+                    // the transcript it replaces was just blanked.
+                    flushFirstVisibleText = true;
+                    continue;
+                }
                 ProjectedEvent projection = projector.project(source,
                         turn.turnId());
                 HarnessEvent event = new HarnessEvent(source.id(),
@@ -489,6 +515,21 @@ public class HarnessCoordinator {
     private static boolean isTextDelta(ProjectedEvent event) {
         return "item.output_text.delta".equals(event.type())
                 || "item.reasoning.delta".equals(event.type());
+    }
+
+    // The journal sequence of the retracted message's first delta (#13319).
+    // Fail closed on a malformed event: skipping it would keep the orphaned
+    // prefix in the public transcript.
+    private static long retractionFromSequence(SourceEvent event) {
+        Object data = event.data();
+        if (data instanceof Map<?, ?> map) {
+            Object fromSequence = map.get("fromSequence");
+            if (fromSequence instanceof Number number) {
+                return number.longValue();
+            }
+        }
+        throw new IllegalStateException(
+                "Hosted Harness retraction is missing fromSequence");
     }
 
     private static int estimatedBytes(ProjectedEvent event) {
@@ -591,7 +632,12 @@ public class HarnessCoordinator {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
-                    error.getClass().getSimpleName(), error);
+                    failureLabel(error), error);
+            if (error instanceof HarnessSessionRefusedException refusal) {
+                return fail(turn, refusal.getCode(),
+                        "Hosted Harness refused to open the Session before"
+                                + " Turn admission.");
+            }
             return fail(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
@@ -604,9 +650,14 @@ public class HarnessCoordinator {
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
-                turn.retryCount() + 1, delay,
-                error.getClass().getSimpleName());
+                turn.retryCount() + 1, delay, failureLabel(error));
         return true;
+    }
+
+    private static String failureLabel(RuntimeException error) {
+        return error instanceof HarnessSessionRefusedException refusal
+                ? refusal.getCode()
+                : error.getClass().getSimpleName();
     }
 
     static long retryDelay(Duration initialDelay, Duration maxDelay,

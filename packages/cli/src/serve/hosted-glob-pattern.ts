@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { braceExpand } from 'minimatch';
+import { braceExpand, unescape } from 'minimatch';
 
 /** The longest Hosted glob pattern, matching the `path` argument's cap. */
 export const HOSTED_GLOB_PATTERN_MAX_LENGTH = 1024;
@@ -26,9 +26,9 @@ export type HostedGlobPatternCheck = 'ok' | 'escapes' | 'too-complex';
 
 /**
  * Classifies a model-supplied glob pattern before anything expands it.
- * brace-expansion expands without an output cap here (minimatch passes no
- * `max`), and glob expands the same pattern again, so the size is bounded
- * from the pattern's structure first; only a pattern proven small is
+ * brace-expansion's output cap exceeds the Hosted search budget, and glob
+ * expands the same pattern again, so the size is bounded from the pattern's
+ * structure first; only a pattern proven small is
  * expanded, and its alternatives must stay relative and free of `..`
  * segments. The walk itself is contained too (GlobTool's
  * `containmentRoot`); this check is the cheap, model-correctable fast path.
@@ -42,10 +42,10 @@ export function checkHostedGlobPattern(
   )
     return 'too-complex';
   // Segment equality, so a literal `a/..b/*.ts` stays usable.
-  return braceExpand(pattern).some(
-    (alternative) =>
-      path.isAbsolute(alternative) || alternative.split(/[\\/]/).includes('..'),
-  )
+  return braceExpand(pattern).some((alternative) => {
+    const shape = unescape(alternative);
+    return path.isAbsolute(shape) || shape.split(/[\\/]/).includes('..');
+  })
     ? 'escapes'
     : 'ok';
 }
@@ -107,14 +107,18 @@ function alternativesBound(text: string): number {
     if (items[0] > 1 || body.includes('{')) return Infinity;
     const range = SEQUENCE.exec(body);
     if (!range) return 1;
+    if (
+      [range[1], range[2], range[5]].some(
+        (value) => value !== undefined && !Number.isSafeInteger(Number(value)),
+      )
+    )
+      return Infinity;
     const step = Math.max(Math.abs(Number(range[5] ?? 1)), 1);
     const span =
       range[1] !== undefined
         ? Math.abs(Number(range[2]) - Number(range[1]))
         : Math.abs(range[4].charCodeAt(0) - range[3].charCodeAt(0));
-    // An endpoint past Number's range is ±Infinity, and Infinity - Infinity is
-    // NaN, which the gate's `> bound` test reads as within bound.
-    if (!Number.isFinite(span) || !Number.isFinite(step)) return Infinity;
+    if (!Number.isSafeInteger(span)) return Infinity;
     return Math.min(Math.floor(span / step) + 1, limit);
   };
 

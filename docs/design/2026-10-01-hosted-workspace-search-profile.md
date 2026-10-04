@@ -32,22 +32,27 @@ product and `glob` covers the need.
 The Hosted Harness accepts the two new profile strings at Session create and
 load, persisted in the Session definition exactly like `/1`; a load with a
 different profile is still a `409 hosted_tool_profile_conflict`, and existing
-Sessions keep their pinned `/1` snapshot. Shell `/2` inherits the Shell wiring
-(capture capacity, publisher or deferred-capture options) unchanged.
+Sessions keep their pinned `/1` snapshot. Both the initial turn and
+continuation construct their tool turn with that saved profile. Shell `/2`
+inherits the Shell wiring (capture capacity, publisher or deferred-capture
+options) unchanged.
 
 The `glob` declaration takes a required `pattern` and an optional `path`
 relative to the saved Session working directory. The Harness validates `path`
 with the existing `normalizeWorkspaceRelativePath` before acquisition, so an
 absolute or `..` path is a model-correctable refusal with no Runtime work, the
-same treatment `file_path` gets today. An empty `pattern` is refused the same
-way.
+same treatment `file_path` gets today. A blank or null `path` is treated as
+omitted. The trimmed `pattern` must be a nonempty string; the shared checker
+refuses absolute or `..` brace alternatives after unescaping, and unsafe expansion before
+acquisition, and the worker re-checks the dispatched value. Patterns use `/`
+as the directory separator; backslashes retain glob escape semantics.
 
 Glob is read-only, so the hosted approval policy pre-approves it under the
 `default` and `auto-edit` modes, alongside `read_file`.
 
 ## Worker
 
-The worker admits `GlobTool` and builds it into the managed tool set. Two
+The worker admits `GlobTool` and builds it into the managed tool set. These
 invariants hold there, because Glob's own validation admits external paths:
 
 - The search is pinned to the Session's installed context directory. An omitted
@@ -61,14 +66,15 @@ invariants hold there, because Glob's own validation admits external paths:
   it. No pattern spelling (`..`, `[.][.]`, `\.\.`, brace alternatives, a
   symlinked directory) can walk, report or count anything outside, so an
   existing and a missing outside path answer identically.
-- The pattern is bounded before anything expands it. brace-expansion runs
-  without an output cap and glob expands the same pattern again, so both the
-  Harness (pre-acquisition) and the worker refuse a pattern over 1024
-  characters, with unbalanced braces, or with more than 64 brace
-  alternatives, computed from its structure; only then is it expanded and
-  its alternatives checked for absolute or `..` segments as a fast path.
-- Results are rewritten to Workspace-relative paths before they reach the
-  wire, the model, or the durable record. The Runtime host's physical layout
+- The pattern is bounded before anything expands it. brace-expansion's
+  output cap exceeds the Hosted search budget, and glob expands the same
+  pattern again. Both the Harness (pre-acquisition) and the worker refuse
+  patterns over 1024 characters, with unbalanced braces, with unsafe numeric
+  endpoints, steps or spans, or with more than 64 brace alternatives computed
+  from their structure. Only then are they expanded and their alternatives
+  unescaped and checked for absolute or `..` segments as a fast path.
+- Results are rewritten relative to the Session working directory before
+  reaching the wire, the model, or the durable record. The Runtime host's physical layout
   must not leak to the Harness; for a search tool the paths are the payload.
 
 Core ignore filtering is rooted at the Session directory. A Session below
@@ -76,15 +82,28 @@ the repository root does not inherit ancestor `.gitignore` rules; dependency
 files may consume the scan limit. Its own ignore files still apply. This
 slice does not promise repository-root ignore semantics. An outward symlink
 that a broad glob merely lists (a venv's `bin/python`) stays visible, because
-entries are judged by their parent's realpath.
+entries are judged by their parent's realpath. Walking through that link is
+pruned, including ordinary workspace-dependency links; a broad search retains
+its in-Session matches.
+
+The boot-v2 file-tool containment permits shared locations inside the mount
+and excludes directories owned by another Session installed in the same
+worker. An unresolved sibling binding refuses directory-external access;
+own-directory access remains available. Dangling links are checked against
+their intended targets before a write. That registry check is worker-local, not a confidentiality guarantee
+across separate workers. It preserves `/1` linked-dependency reads; file
+history retains its own write boundary. Boot v1 keeps the stricter Session
+boundary. Non-ENOENT resolution failures must fail without exposing Node's
+physical-path diagnostics.
 
 ## Bounds
 
 A glob result is a path list. When the serialized outcome would exceed the
 64 KiB inline Session limit, the Harness keeps the longest whole-line prefix
-that fits and appends a narrowing hint (`Narrow the pattern or path.`), instead
-of dropping the whole result into the output-omitted path that `read_file`'s
-offset/limit retry hint supplements. If even an empty list cannot fit, the
+that fits both the outcome resource and transcript record and appends a
+narrowing hint (`Narrow the pattern or path.`), on both live turns and crash
+recovery, instead of dropping the whole result into the output-omitted path
+that `read_file`'s offset/limit retry hint supplements. If even an empty list cannot fit, the
 existing omitted path still applies.
 
 ## Implementation boundaries
@@ -102,14 +121,18 @@ existing omitted path still applies.
 
 ## Validation and acceptance
 
-Focused tests cover: declarations per profile version, refusal of a `glob`
-call a `/1` Session never advertised, model-correctable argument refusals
-before acquisition, path normalization on dispatch, prefix truncation at the
-inline limit, and profile pinning across create/load. Worker route tests cover
-containment (a sibling Session's files are never searched), relative output,
-and the `..` refusal. Approval tests pin glob's pre-approval. Local validation:
-`packages/cli` typecheck of the touched files is clean, and the four affected
-suites (995 tests) pass.
+Focused CLI suites are `hosted-glob-pattern`, `hosted-workspace-tool-turn`,
+`hosted-harness-session`, `hosted-runtime-recovery`, `managed-context-worker`,
+`managed-runtime-tool-executor`, `hosted-tool-approval`, and
+`workspace-recovery-session`. They cover profile declarations and pinning at
+create/load/continuation, free correctable refusals and normalized dispatch,
+expansion budgets, live/recovered prefix truncation at both durable ceilings,
+relative output and error handling, worker-local file containment, linked
+reads, creation through symlinks, and W1 `/2` recovery. Relativizer units pin
+path-token anchoring and the filesystem-root case. Core's `glob` suite covers
+contained traversal and unchanged ordinary CLI behavior. Executed platform
+and test totals belong in the PR verification report rather than this
+changing design inventory.
 
 ## Risks and open questions
 
@@ -127,5 +150,18 @@ old workers. This is an operator-enforced requirement, not a negotiated
 capability or an automatic safety check. Public connector enablement remains
 separate. Mixed-version operation needs a versioned worker identity or
 worker-derived capability advertisement before it can be supported.
+
+**Behavior change for existing Sessions:** the realpath containment that
+glob made necessary applies to `read_file`, `write_file` and `edit` on every
+Hosted profile, `/1` included. On a Workspace-capability worker, shared
+locations inside the mount remain reachable when sibling bindings resolve.
+Directory-external access is refused when its realpath leaves the mount,
+lands in another installed Session's directory, or a sibling binding cannot
+be resolved. A linked dependency inside the mount
+(`node_modules/@acme/ui -> ../../packages/ui`) still reads through with resolved
+bindings. A boot-v1
+worker has no Workspace mount or Session registry, so its boundary is the
+Session directory itself: a path that resolves through a symlink outside it,
+a linked dependency included, is refused where it previously read through.
 
 A lighter dispatch path for read-only, idempotent tools is out of scope.

@@ -18,24 +18,39 @@ describe('checkHostedGlobPattern', () => {
     '{a,b}{c,d}{e,f}',
     '{1..64}',
     '{a..z}',
+    '{9007199254740990..9007199254740991}',
     'x{a,{b,c{d,e}}}y',
     'a/..b/*.ts',
     '[.][.]/**/*',
     '\\{a,b\\}',
+    'file\\?.txt',
   ])('admits %s', (pattern) => {
     expect(checkHostedGlobPattern(pattern)).toBe('ok');
   });
 
-  it.each(['/etc/host*', '../**/*', '{/etc,/zz}/host*', '{.,..}/**/*'])(
-    'refuses the escaping %s',
-    (pattern) => {
-      expect(checkHostedGlobPattern(pattern)).toBe('escapes');
-    },
-  );
+  it.each([
+    '/etc/host*',
+    '../**/*',
+    '{/etc,/zz}/host*',
+    '{.,..}/**/*',
+    '\\.\\./**/*',
+    'src/{x,\\.\\.}/**/*',
+  ])('refuses the escaping %s', (pattern) => {
+    expect(checkHostedGlobPattern(pattern)).toBe('escapes');
+  });
 
   it.each([
     ['a nesting bomb', '{a,'.repeat(3400) + 'x' + '}'.repeat(3400)],
     ['a range bomb', '{1..100000}/passwd'],
+    ['an unsafe endpoint', '{9007199254740992..9007199254740992}/*'],
+    ['an unsafe negative endpoint', '{-9007199254740992..-9007199254740992}/*'],
+    ['a nonfinite endpoint', `{${'9'.repeat(310)}..${'9'.repeat(310)}}/*`],
+    ['a nested unsafe range', '{{9007199254740992..9007199254740992},src}/*'],
+    ['an unsafe step', '{1..2..9007199254740992}'],
+    [
+      'an unsafe span',
+      '{-9007199254740991..9007199254740991..9007199254740991}',
+    ],
     ['a product bomb', '{a,b}'.repeat(30)],
     ['one alternative too many', '{1..65}'],
     ['an unbalanced brace', '{a,b'],
