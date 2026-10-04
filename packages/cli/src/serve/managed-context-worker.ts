@@ -62,6 +62,12 @@ import {
   MANAGED_MCP_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedShellRuntime } from './managed-shell-runtime.js';
+import {
+  MANAGED_SHELL_WORKER_ROUTE,
+  registerManagedShellRoutes,
+} from './managed-shell-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -72,6 +78,7 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
+  MANAGED_SHELL_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -250,6 +257,7 @@ export function registerManagedContextRoutes(
   const backgroundSupervisor = cgroupRoot
     ? ManagedChildRunSupervisor.create({ cgroupRoot })
     : undefined;
+  const backgroundRegistry = new ManagedBackgroundShellRegistry();
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -284,6 +292,12 @@ export function registerManagedContextRoutes(
     mcp,
     hooks,
     backgroundSupervisor,
+    backgroundRegistry,
+  );
+  registerManagedShellRoutes(
+    app,
+    boot,
+    new ManagedShellRuntime(backgroundRegistry),
   );
   registerManagedRuntimeProviderRoute(
     app,

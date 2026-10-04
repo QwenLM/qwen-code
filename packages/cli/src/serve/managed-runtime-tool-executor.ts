@@ -196,7 +196,7 @@ export interface ManagedShellCapturePublisher {
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
-  private readonly backgroundRegistry = new ManagedBackgroundShellRegistry();
+  private readonly backgroundRegistry: ManagedBackgroundShellRegistry;
   private readonly mcpCalls = new Map<
     string,
     {
@@ -293,7 +293,11 @@ export class ManagedToolExecutor {
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
-  ) {}
+    backgroundRegistry?: ManagedBackgroundShellRegistry,
+  ) {
+    this.backgroundRegistry =
+      backgroundRegistry ?? new ManagedBackgroundShellRegistry();
+  }
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
     // Boot v1 configures its one directory at startup, as it always has.

@@ -66,6 +66,12 @@ export class ManagedBackgroundShellRegistry {
     return count;
   }
 
+  /** The live registration of one unit, for the maintenance route. */
+  describe(unitName: string): { readonly sessionId: string } | undefined {
+    const entry = this.entries.get(unitName);
+    return entry ? { sessionId: entry.sessionId } : undefined;
+  }
+
   /**
    * Registers a freshly started process and its capture pipeline, and
    * returns the completion promise that resolves with the physical end
@@ -90,14 +96,21 @@ export class ManagedBackgroundShellRegistry {
     return this.entries.get(unitName)?.completion;
   }
 
-  /** Stop and drain one entry, waiting for real exit via the supervisor. */
+  /**
+   * Stops and drains one entry through the supervisor. An end it cannot
+   * prove answers immediately as unproven — the hold stays registered and
+   * nothing waits on a completion that may only come later.
+   */
   async terminate(
     unitName: string,
     graceMs: number,
   ): Promise<BackgroundShellReceipt | undefined> {
     const entry = this.entries.get(unitName);
     if (!entry) return undefined;
-    await entry.process.terminate(graceMs);
+    const evidence = await entry.process.terminate(graceMs);
+    if (evidence === null) {
+      return { unitName, evidence: null, captureError: null };
+    }
     return entry.completion;
   }
 
