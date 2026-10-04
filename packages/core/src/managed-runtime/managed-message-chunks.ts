@@ -23,10 +23,11 @@ export const MANAGED_MESSAGE_CHUNKS_KIND = 'managed-message-chunks';
  * already published the same text in full.
  */
 export const MANAGED_MESSAGE_PART_BYTES = 60 * 1024;
+export const MANAGED_MESSAGE_INLINE_BYTES = 64 * 1024;
 
 /**
  * Publishes a reader-facing record body as one inline resource, or — past the
- * part bound — as ordered byte parts behind a chunk manifest. Parts split on
+ * inline bound — as ordered byte parts behind a chunk manifest. Parts split on
  * byte offsets, not character boundaries; reassembly concatenates bytes before
  * decoding, so a split never damages the document.
  */
@@ -34,7 +35,7 @@ export async function publishManagedMessageBody(
   resources: ManagedSessionResourceStore,
   body: Buffer,
 ): Promise<ManagedSessionDurableRef> {
-  if (body.byteLength <= MANAGED_MESSAGE_PART_BYTES) {
+  if (body.byteLength <= MANAGED_MESSAGE_INLINE_BYTES) {
     return resources.publish(MANAGED_MESSAGE_KIND, body);
   }
   const parts: ManagedSessionDurableRef[] = [];
@@ -69,8 +70,9 @@ export async function readManagedMessageBody(
     return read(ref);
   }
   const { parts } = parseManagedMessageChunkManifest(await read(ref));
-  // Independent reads fan out together; the result array keeps part order.
-  const buffers = await Promise.all(parts.map((part) => read(part)));
+  // Workspace recovery uses a single-flight RPC for these reads.
+  const buffers: Buffer[] = [];
+  for (const part of parts) buffers.push(await read(part));
   return Buffer.concat(buffers);
 }
 

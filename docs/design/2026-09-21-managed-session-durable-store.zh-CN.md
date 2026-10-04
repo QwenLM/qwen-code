@@ -147,7 +147,13 @@ interface ManagedSessionResourceStore {
 - `LocalManagedSessionResourceStore` 继续作为本地资源适配器。
 - `HttpManagedSessionJournalStore` 与 `HttpManagedSessionResourceStore` 在 hosted 模式调用 Java 内部 API。
 
-远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两类记录不受此边界约束：Hook 消息快照与 reader-facing 消息正文在超过阈值时切分为 inline parts（`managed-hook-message-part` / `managed-message-part`）并由切分清单引用，因此永远不需要 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两类记录不受此边界约束：Hook 消息快照与 reader-facing 消息正文在超过阈值时切分为 inline parts（`managed-hook-message-part` / `managed-message-part`）并由切分清单引用，因此在事务预算内不需要 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+
+reader-facing 消息的序列化 `ChatRecord` 正文不超过 65,536 UTF-8 字节时沿用 `managed-message`。更大的正文使用 schema version 1 的 `managed-message-chunks` 资源，内容为 `{ parts: DurableRef[] }`；有序的 `managed-message-part` 每片最多保存 61,440 原始字节。完整 JSON 文档按字节偏移切分，拼接后才统一解码，因此保留多字节字符和所有记录字段。分片与清单进入同一 journal 事务的引用闭包。服务端 8 MiB 的 inline 资源总预算包含正文分片和清单，因此不承诺支持整整 8 MiB 的消息正文；超限事务仍被原子拒绝。
+
+所有消息消费方使用同一重组助手：冷热历史投影、Hosted 事件 envelope 和 Workspace 恢复。分片顺序读取，因为恢复 worker 的 RPC 只允许一个请求在途；每次资源读取校验字节长度和摘要。缺片或损坏使整次读取失败。原始分片不能单独当 JSON 解析。消息 UUID、parent UUID 和 delta 身份保持一致，已流式输出正文的最终记录不会再次追加全文。新读取方兼容历史单资源消息。新增资源 kind 不改变 journal 事件、公开 API 或 SQL 表结构，但旧 Harness/恢复工具无法读取分片记录；开始写入前统一升级所有消费方，之后不要回退读取方。
+
+打包栈回归入口为 `npm run test:e2e:managed-agent-server -- --big-output`。它以分段前缀各不相同的确定性 192,000 个 UTF-16 code unit / 224,000 字节模型回答（避开 provider 的累积流启发式）和 8,000 字符对照回答，运行真实 MySQL 与 Java 存储，比较模型原文、公开 delta 和持久记录，删除两个 owner 的本地 home，并核对替换 owner 的模型请求包含完整首条回答。每个 Turn 只接受一次成功终态。Workspace 恢复测试还通过实际单请求 RPC 完成 bundle 捕获与校验，并拒绝缺片或摘要损坏。
 
 远端提交一次接收一个完整 Managed 事务：通常是一至三条 event record 加一条 commit marker，并带上待提交的 inline resources。Java 保存 UTF-8 JSONL 精确字节及 SHA-256，不解析或重新序列化私有事件正文；它只校验外层 scope、大小、记录数量、sequence 范围、引用列表、lease 和摘要链。
 
@@ -341,6 +347,7 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 | 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                                                                     |
 | Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                                                                      |
 | 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验（切分的消息正文则以 inline parts 加清单提交） |
+| 超长最终 assistant 消息                  | 模型原文、公开 delta、持久 ChatRecord 与恢复后的模型历史完全相同；一次成功终态，不重复追加最终全文                                 |
 | SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                                                               |
 | Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                                                                 |
 | 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                                                               |

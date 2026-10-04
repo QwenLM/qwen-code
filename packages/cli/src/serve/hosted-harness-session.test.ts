@@ -23,7 +23,6 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
@@ -33,10 +32,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import {
-  assertManagedSessionDurableRef,
-  ManagedSessionRecordError,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
@@ -82,6 +78,7 @@ const state = vi.hoisted(() => ({
       promptId?: string;
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
+      textDeltas?: import('./hosted-text-deltas.js').HostedTextDeltaStream;
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -130,6 +127,66 @@ vi.mock('./hosted-harness-model.js', () => ({
 const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
+
+async function enforceInlineResourceLimit() {
+  const actual = await vi.importActual<
+    typeof import('@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js')
+  >('@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js');
+  const bounded = actual.createHttpManagedSessionStores({
+    baseUrl: 'http://store.test',
+    writerId: BOOT_ID,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    },
+  }).resourceStore;
+  const publish = LocalManagedSessionResourceStore.prototype.publish;
+  vi.spyOn(
+    LocalManagedSessionResourceStore.prototype,
+    'publish',
+  ).mockImplementation(async function (
+    this: LocalManagedSessionResourceStore,
+    kind,
+    bytes,
+  ) {
+    await bounded.publish(kind, bytes);
+    return publish.call(this, kind, bytes);
+  });
+}
+
+function expectFullStreamedAnswer(
+  events: Array<{ type: string; data?: Record<string, unknown> }>,
+  text: string,
+) {
+  expect(events.filter((event) => event.type === 'turn_complete')).toHaveLength(
+    1,
+  );
+  expect(events.filter((event) => event.type === 'turn_error')).toEqual([]);
+  const deltas = events
+    .filter((event) => event.type === 'session_update')
+    .map((event) => {
+      const update = event.data?.['update'] as
+        | { sessionUpdate?: string; content?: { text?: string } }
+        | undefined;
+      return update?.sessionUpdate === 'agent_message_chunk'
+        ? (update.content?.text ?? '')
+        : '';
+    });
+  expect(deltas.filter(Boolean).length).toBeGreaterThan(1);
+  expect(deltas.join('')).toBe(text);
+  const records = events
+    .filter((event) => event.type === 'managed_journal_event')
+    .map((event) => event.data?.['record'] as ChatRecord | undefined);
+  const answer = records.find(
+    (record) =>
+      record?.type === 'assistant' &&
+      record.message?.parts?.some((part) => part.text === text),
+  );
+  expect(answer?.message?.parts).toEqual([{ text }]);
+  expect(answer?.parentUuid).toEqual(expect.any(String));
+  expect(answer?.daemonPromptId).toBe(PROMPT_ID);
+}
 
 const listeners = new Set<Server>();
 
@@ -3900,83 +3957,87 @@ describe('Hosted Harness no-tool session', () => {
     expect(gone.status).toBe(404);
   });
 
-  it('completes a turn whose answer exceeds the 64KB inline resource limit', async () => {
-    // Past the limit the durable message record commits as chunks; the turn
-    // used to fail after the whole answer had already streamed (#13326).
-    const text = '长'.repeat(70_000);
-    state.model.mockImplementationOnce(async () => ({
-      text,
-      model: 'test-model',
-    }));
-    // This suite swaps the HTTP store for the local one, which has no inline
-    // limit; enforce the real store's bound so the chunked path is pinned.
-    const maxInlineBytes =
-      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
-    const publish = LocalManagedSessionResourceStore.prototype.publish;
-    vi.spyOn(
-      LocalManagedSessionResourceStore.prototype,
-      'publish',
-    ).mockImplementation(function (
-      this: LocalManagedSessionResourceStore,
-      kind,
-      bytes,
-    ) {
-      if (bytes.byteLength > maxInlineBytes) {
-        throw new ManagedSessionRecordError(
-          `resource bytes exceed the ${maxInlineBytes}-byte inline limit; OSS storage is not enabled.`,
-        );
-      }
-      return publish.call(this, kind, bytes);
-    });
-    const server = await app();
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-    });
-    expect(created.status).toBe(200);
-    const prompt = [{ type: 'text', text: 'hello' }];
-    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    const admitted = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/prompt`),
-    )
-      .set('X-Qwen-Client-Id', created.body.clientId as string)
-      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
-    expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
+  it.each([false, true])(
+    'completes a long answer (streamed: %s) under the real inline bound',
+    async (streamed) => {
+      // Past the limit the durable message record commits as chunks; the turn
+      // used to fail after the whole answer had already streamed (#13326).
+      const text = '长😀'.repeat(25_000);
+      state.model.mockImplementationOnce(async ({ textDeltas }) => {
+        if (streamed) {
+          expect(textDeltas).toBeDefined();
+          await textDeltas!.delta(text);
+        }
+        return { text, model: 'test-model' };
+      });
+      await enforceInlineResourceLimit();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const server = await app(streamed);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...(streamed ? { toolProfile: 'hosted-workspace-files/1' } : {}),
+      });
+      expect(created.status).toBe(200);
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      const admitted = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+      expect(admitted.status).toBe(202);
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      });
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
       ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
-    const transcript = await headers(
-      supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', created.body.clientId as string);
-    expect(transcript.body.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
-      ]),
-    );
-    expect(
-      (transcript.body.events as Array<Record<string, unknown>>).filter(
-        (event) => event['type'] === 'turn_error',
-      ),
-    ).toEqual([]);
-    const answer = (
-      transcript.body.events as Array<{
-        type: string;
-        data?: {
-          update?: { sessionUpdate?: string; content?: { text?: string } };
-        };
-      }>
-    ).find(
-      (event) =>
-        event.type === 'session_update' &&
-        event.data?.update?.sessionUpdate === 'agent_message_chunk',
-    );
-    expect(answer?.data?.update?.content?.text).toBe(text);
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  });
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+          }),
+        ]),
+      );
+      expect(
+        (transcript.body.events as Array<Record<string, unknown>>).filter(
+          (event) => event['type'] === 'turn_error',
+        ),
+      ).toEqual([]);
+      if (streamed) {
+        expectFullStreamedAnswer(transcript.body.events, text);
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', created.body.clientId as string)
+          .expect(204);
+        const reloaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        });
+        expect(reloaded.status).toBe(200);
+        const cold = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', reloaded.body.clientId as string);
+        expectFullStreamedAnswer(cold.body.events, text);
+      } else {
+        const answer = transcript.body.events.find(
+          (event: {
+            type: string;
+            data?: { update?: { content?: { text?: string } } };
+          }) => event.type === 'session_update',
+        );
+        expect(answer?.data?.update?.content?.text).toBe(text);
+      }
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    },
+  );
 
   it('rejects unsupported prompt content before model or tool execution', async () => {
     const server = await app();
@@ -8390,8 +8451,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(release).toHaveBeenCalled();
   });
 
-  it('clears the pending file history when a recovered Write continuation answers with text', async () => {
+  it('completes a streamed oversized answer after a recovered Write continuation', async () => {
     await parkToolTurn();
+    await enforceInlineResourceLimit();
+    const text = '续接😀'.repeat(25_000);
+    state.model.mockImplementationOnce(async ({ textDeltas }) => {
+      expect(textDeltas).toBeDefined();
+      await textDeltas!.delta(text);
+      return { text, model: 'test-model' };
+    });
+
     // The parked Write left its file-history obligation durable.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
       executionStatus: 'success',
@@ -8430,6 +8499,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).get(`/session/${SESSION_ID}/files/history`),
     ).set('X-Qwen-Client-Id', clientId);
     expect(historyAfter.body.history.pendingTurn).toBeNull();
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expectFullStreamedAnswer(transcript.body.events, text);
     // The obligation is gone: a cold load and a file tool run normally.
     await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/detach`),

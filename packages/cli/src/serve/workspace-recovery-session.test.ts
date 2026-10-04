@@ -5,6 +5,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
   describeTransaction,
@@ -32,6 +36,14 @@ import {
   type RecoverySessionIO,
   type RecoverySessionSource,
 } from './workspace-recovery-session.js';
+import {
+  createRecoveryRpc,
+  runRecoveryWorker,
+} from './workspace-recovery-worker.js';
+import {
+  recoveryDigest,
+  type RecoveryRpc,
+} from './workspace-recovery-bundle.js';
 
 const SESSION = '6d629e8b-ceb2-4c98-9fa2-2b1a34777517';
 const KEY = {
@@ -951,6 +963,134 @@ describe('verifyRecoverySession', () => {
       message?: { parts?: Array<{ text?: string }> };
     };
     expect(record.message?.parts?.[0]?.text).toBe(text);
+
+    const root = await mkdtemp(
+      join(await realpath(tmpdir()), 'chunked-recovery-'),
+    );
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const rpc = createRecoveryRpc(input, output);
+    const sourceJson = JSON.stringify(f.source);
+    const sourceDigest = recoveryDigest(sourceJson);
+    const context = {
+      protocol: 'workspace-recovery/1',
+      mode: 'capture',
+      request: {
+        operationId: '00000000-0000-4000-8000-000000000001',
+        tenantId: KEY.tenantId,
+        storageId: f.source.binding.storageId,
+        sourceRoot: join(root, 'source'),
+        bundleRoot: join(root, 'bundle'),
+        fileHistoryRoot: join(root, 'history'),
+        fenceOperationId: '00000000-0000-4000-8000-000000000002',
+        mountRevision: 2,
+      },
+      registration: {
+        tenantId: KEY.tenantId,
+        storageId: f.source.binding.storageId,
+        mountRevision: 2,
+      },
+      sourceDigest: recoveryDigest(`${sourceJson}\n`),
+      sessionCount: 1,
+      capture: null as null | { operationId: string; manifestDigest: string },
+    };
+    const assets = new Map<string, unknown>();
+    const authority: RecoveryRpc = async (method, value) => {
+      const params = value as Record<string, unknown>;
+      if (method === 'context') return context;
+      if (method === 'sessions')
+        return {
+          sessions: [
+            { sessionId: SESSION, source: f.source, sourceJson, sourceDigest },
+          ],
+          nextSessionId: null,
+        };
+      if (method === 'transaction')
+        return {
+          ...f.transactions[Number(params['revision']) - 1],
+          recordEncoding: 'identity',
+        };
+      if (method === 'resource') {
+        const ref = params['ref'] as ManagedSessionDurableRef;
+        return { ref, bytesBase64: (await f.io.read(ref)).toString('base64') };
+      }
+      if (method === 'enqueueRef') {
+        await f.io.enqueue(params['ref'] as ManagedSessionDurableRef);
+        return {};
+      }
+      if (method === 'nextRef') return f.io.nextReference();
+      if (method === 'completeRef') {
+        await f.io.completeReference(params['ref'] as ManagedSessionDurableRef);
+        return {};
+      }
+      if (method === 'asset') {
+        assets.set(String(params['key']), params['metadata']);
+        return params['metadata'];
+      }
+      if (method === 'assetLookup')
+        return assets.get(String(params['key'])) ?? null;
+      if (method === 'assetPage')
+        return {
+          assets: [...assets]
+            .filter(([key]) => key > String(params['afterKey'] ?? ''))
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, metadata]) => ({ key, metadata })),
+          nextKey: null,
+        };
+      if (method === 'sessionComplete') return {};
+      if (method === 'finish') return params;
+      throw new Error(`Unexpected recovery RPC ${method}`);
+    };
+    output.on('data', (bytes: Buffer) => {
+      const request = JSON.parse(bytes.toString()) as {
+        id: number;
+        method: string;
+        params: unknown;
+      };
+      void authority(request.method, request.params).then(
+        (result) =>
+          input.write(`${JSON.stringify({ id: request.id, result })}\n`),
+        (error: Error) =>
+          input.write(
+            `${JSON.stringify({ id: request.id, error: { code: error.message } })}\n`,
+          ),
+      );
+    });
+    try {
+      for (const directory of [
+        context.request.sourceRoot,
+        context.request.bundleRoot,
+        context.request.fileHistoryRoot,
+        join(context.request.bundleRoot, 'workspace'),
+      ])
+        await mkdir(directory);
+      f.complete.clear();
+      const capture = (await runRecoveryWorker(rpc)) as {
+        manifestDigest: string;
+      };
+      context.capture = {
+        operationId: context.request.operationId,
+        manifestDigest: capture.manifestDigest,
+      };
+      context.mode = 'verify';
+      f.complete.clear();
+      await expect(runRecoveryWorker(rpc)).resolves.toMatchObject({
+        manifestDigest: capture.manifestDigest,
+      });
+    } finally {
+      input.destroy();
+      output.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+
+    f.resources.delete(parts[1].resourceId);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'missing_resource',
+    );
+    f.resources.set(parts[1].resourceId, Buffer.alloc(parts[1].byteLength));
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'resource bytes conflict',
+    );
   });
 
   it('distinguishes an absent head from a writer-created head without genesis', async () => {

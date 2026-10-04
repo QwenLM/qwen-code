@@ -98,7 +98,27 @@ describe('managed message chunks', () => {
     ).resolves.toEqual(body);
   });
 
-  it('reassembles in part order even when parts resolve out of order', async () => {
+  it.each([65_535, 65_536, 65_537, 224 * 1024, 3 * 1024 * 1024])(
+    'round-trips a %i-byte serialized record at the inline boundary',
+    async (byteLength) => {
+      const store = new MemoryResourceStore();
+      const body = Buffer.from(
+        JSON.stringify({ text: 'x'.repeat(byteLength - 11) }),
+      );
+      expect(body.byteLength).toBe(byteLength);
+      const ref = await publishManagedMessageBody(store, body);
+      expect(ref.kind).toBe(
+        byteLength <= 65_536
+          ? MANAGED_MESSAGE_KIND
+          : MANAGED_MESSAGE_CHUNKS_KIND,
+      );
+      await expect(
+        readManagedMessageBody((r) => store.read(r), ref),
+      ).resolves.toEqual(body);
+    },
+  );
+
+  it('reads parts in order through a single-flight reader', async () => {
     const store = new MemoryResourceStore();
     const body = Buffer.from(
       JSON.stringify({ text: '块'.repeat(50_000) }),
@@ -109,16 +129,37 @@ describe('managed message chunks', () => {
       ref.kind,
       store.resources.get(ref.resourceId)!.bytes,
     );
-    // Earlier parts resolve later: a completion-order merge would scramble
-    // the document; the result must follow manifest order instead.
-    const read = (part: ManagedSessionDurableRef) =>
-      new Promise<Buffer>((resolve) =>
-        setTimeout(
-          () => resolve(store.read(part)),
-          (parts.length - parts.indexOf(part)) * 5,
-        ),
-      );
+    let busy = false;
+    const seen: string[] = [];
+    const read = async (part: ManagedSessionDurableRef) => {
+      if (busy) throw new Error('concurrent_recovery_request');
+      busy = true;
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+        seen.push(part.resourceId);
+        return await store.read(part);
+      } finally {
+        busy = false;
+      }
+    };
     await expect(readManagedMessageBody(read, ref)).resolves.toEqual(body);
+    expect(seen).toEqual([ref, ...parts].map((part) => part.resourceId));
+  });
+
+  it('fails instead of returning a partial body when a part is missing', async () => {
+    const store = new MemoryResourceStore();
+    const ref = await publishManagedMessageBody(
+      store,
+      Buffer.alloc(224 * 1024),
+    );
+    const parts = managedMessageChunkParts(
+      ref.kind,
+      store.resources.get(ref.resourceId)!.bytes,
+    );
+    store.resources.delete(parts[1].resourceId);
+    await expect(
+      readManagedMessageBody((r) => store.read(r), ref),
+    ).rejects.toThrow('resource missing or conflicting');
   });
 
   it('refuses a manifest that does not reference message parts', async () => {

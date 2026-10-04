@@ -25,6 +25,7 @@ let settingsPath = path.join(homedir(), '.qwen', 'settings.json');
 let sessionFailover = false;
 let inflightFailover = false;
 let continuationFailover = false;
+let bigOutput = false;
 
 for (let index = 0; index < argumentsList.length; index += 1) {
   const argument = argumentsList[index];
@@ -42,30 +43,32 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     sessionFailover = true;
   } else if (argument === '--inflight-failover') {
     inflightFailover = true;
+  } else if (argument === '--big-output') {
+    bigOutput = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--big-output]',
     );
   }
 }
 
 if (
-  [sessionFailover, inflightFailover, continuationFailover].filter(Boolean)
-    .length > 1
+  [sessionFailover, inflightFailover, continuationFailover, bigOutput].filter(
+    Boolean,
+  ).length > 1
 ) {
-  throw new Error(
-    '--session-failover, --inflight-failover, and --continuation-failover are exclusive',
-  );
+  throw new Error('The deterministic E2E modes are exclusive');
 }
 
 const durableFailover =
-  sessionFailover || inflightFailover || continuationFailover;
-const workspaceTurns = inflightFailover || continuationFailover;
+  sessionFailover || inflightFailover || continuationFailover || bigOutput;
+const runtimeTakeover = inflightFailover || continuationFailover;
+const workspaceTurns = runtimeTakeover || bigOutput;
 // The tool-driven modes take over a dead Runtime binding, which needs the
 // durable local-Worker reclaim from the W0e line — Linux-only today.
-if (workspaceTurns && process.platform !== 'linux') {
+if (runtimeTakeover && process.platform !== 'linux') {
   throw new Error(
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
   );
@@ -552,12 +555,94 @@ function runMysql(port: number, sql: string): string {
       '--execute',
       sql,
     ],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
   );
   if (result.status !== 0) {
     throw new Error(`MySQL command failed: ${result.stderr}`);
   }
   return result.stdout.trim();
+}
+
+function assertStoredAnswer(
+  port: number,
+  tenant: string,
+  sessionId: string,
+  expected: string,
+): void {
+  const rows = runMysql(
+    port,
+    `SELECT resource_id, kind, byte_length, sha256, HEX(inline_bytes) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(sessionId)} AND kind IN ('managed-message', 'managed-message-chunks', 'managed-message-part')`,
+  ).split('\n');
+  const bodies = new Map<string, { kind: string; bytes: Buffer }>();
+  for (const row of rows) {
+    const [id, kind, length, digest, hex] = row.split('\t');
+    const bytes = Buffer.from(hex ?? '', 'hex');
+    if (
+      !id ||
+      !kind ||
+      bytes.length !== Number(length) ||
+      createHash('sha256').update(bytes).digest('hex') !== digest ||
+      bytes.length > 65_536
+    ) {
+      throw new Error('Stored message resource failed byte/digest validation');
+    }
+    bodies.set(id, { kind, bytes });
+  }
+  const records = [...bodies.values()]
+    .filter(({ kind }) => kind !== 'managed-message-part')
+    .map(({ kind, bytes }) => {
+      if (kind === 'managed-message-chunks') {
+        const manifest = JSON.parse(bytes.toString('utf8')) as {
+          parts: Array<{ resourceId: string }>;
+        };
+        bytes = Buffer.concat(
+          manifest.parts.map((part) => {
+            const stored = bodies.get(part.resourceId);
+            if (stored?.kind !== 'managed-message-part')
+              throw new Error('Stored message part is missing');
+            return stored.bytes;
+          }),
+        );
+      }
+      return JSON.parse(bytes.toString('utf8')) as {
+        type: string;
+        uuid: string;
+        parentUuid: string;
+        message?: { parts?: Array<{ text?: string }> };
+      };
+    });
+  const answers = records.filter(
+    (record) =>
+      record.type === 'assistant' &&
+      record.message?.parts?.map((part) => part.text ?? '').join('') ===
+        expected,
+  );
+  if (answers.length !== 1 || !answers[0].uuid || !answers[0].parentUuid)
+    throw new Error('Stored answer is incomplete or duplicated');
+  const manifests = [...bodies.values()].filter(
+    ({ kind }) => kind === 'managed-message-chunks',
+  );
+  if (manifests.length !== 1)
+    throw new Error(
+      'Expected one chunked long answer and an inline short control',
+    );
+}
+
+function assertPublicAnswer(events: PublicEvent[], expected: string): void {
+  const terminal = events.filter((event) => event.terminal);
+  const text = events
+    .filter((event) => event.type === 'item.output_text.delta')
+    .map(eventText)
+    .join('');
+  if (
+    terminal.length !== 1 ||
+    terminal[0].type !== 'turn.completed' ||
+    text !== expected
+  ) {
+    throw new Error(
+      `Long-answer integrity failed: terminal=${terminal.map((event) => event.type)} expectedChars=${expected.length} actualChars=${text.length}`,
+    );
+  }
 }
 
 function sqlString(value: string): string {
@@ -640,8 +725,22 @@ async function waitForTerminal(
 
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
-const failoverFirstResponse = 'FIRST_TURN_DURABLY_COMMITTED';
-const failoverSecondResponse = 'SECOND_TURN_RESTORED_CONTEXT';
+const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
+  bigOutput ? 8_000 : 0,
+);
+const failoverFirstResponse = bigOutput
+  ? Array.from({ length: 48 }, (_, index) => {
+      // Distinct prefixes keep the provider's cumulative-stream detection out
+      // of this storage regression without changing its character/byte sizes.
+      return (
+        String(index).padStart(4, '0') +
+        bigOutputSource.slice(index * 4_000 + 4, (index + 1) * 4_000)
+      );
+    }).join('')
+  : 'FIRST_TURN_DURABLY_COMMITTED';
+const failoverSecondResponse = bigOutput
+  ? 'CONTROL_ANSWER__'.repeat(500)
+  : 'SECOND_TURN_RESTORED_CONTEXT';
 const failoverMissingResponse = 'SECOND_TURN_CONTEXT_MISSING';
 const inflightMarker = 'MANAGED_SESSION_INFLIGHT_FAILOVER';
 const inflightResponse = 'INFLIGHT_TURN_RECOVERED';
@@ -732,7 +831,13 @@ try {
         };
       }
       if (serialized.includes(failoverFirstMarker)) {
-        return { content: failoverFirstResponse };
+        return bigOutput
+          ? {
+              contentChunks: Array.from({ length: 48 }, (_, index) =>
+                failoverFirstResponse.slice(index * 4_000, (index + 1) * 4_000),
+              ),
+            }
+          : { content: failoverFirstResponse };
       }
       return { content: 'UNEXPECTED_FAILOVER_PROMPT' };
     });
@@ -823,13 +928,13 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
         // Trusted reboot recovery stays pinned off in every runner mode;
-        // durable local process follows workspaceTurns. Both pins keep each
+        // durable local process follows runtimeTakeover. Both pins keep each
         // mode's previously verified behavior and keep the runner starting
         // off Linux.
         QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-        ...(workspaceTurns
+        ...(runtimeTakeover
           ? {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
             }
@@ -976,7 +1081,9 @@ try {
               ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
               : inflightFailover
                 ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
-                : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
+                : bigOutput
+                  ? `${failoverFirstMarker}. Produce the configured long answer.`
+                  : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
         ...(workspaceTurns
@@ -1085,6 +1192,20 @@ try {
         throw new Error(
           `First failover Turn ended with ${firstTerminal?.type ?? 'no terminal event'}; store head=${storeHead || 'missing'}`,
         );
+      }
+      if (bigOutput) {
+        const modelRequests = fake?.requests.filter(
+          ({ body }) => body['stream'] === true,
+        );
+        if (modelRequests?.length !== 1)
+          throw new Error('The long answer must complete without model retry');
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverFirstResponse,
+        );
+        assertPublicAnswer(firstTurn.events, failoverFirstResponse);
       }
     }
 
@@ -1199,7 +1320,7 @@ try {
           QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
           QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
           QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-          ...(workspaceTurns
+          ...(runtimeTakeover
             ? {
                 QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
               }
@@ -1527,6 +1648,22 @@ try {
         );
       }
 
+      if (bigOutput) {
+        assertPublicAnswer(secondTurn.events, failoverSecondResponse);
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverFirstResponse,
+        );
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverSecondResponse,
+        );
+      }
+
       const secondRequest = [...(fake?.requests ?? [])]
         .reverse()
         .find(({ body }) =>
@@ -1585,6 +1722,14 @@ try {
             journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
             committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
             terminalTurns: terminalCount,
+            ...(bigOutput
+              ? {
+                  expectedCharacters: failoverFirstResponse.length,
+                  expectedUtf8Bytes: Buffer.byteLength(failoverFirstResponse),
+                  shortControlCharacters: failoverSecondResponse.length,
+                  fullTextPreserved: true,
+                }
+              : {}),
             restoredFirstTurnContext: true,
             oldHarnessDiskDeleted: !existsSync(harnessHome),
           },
