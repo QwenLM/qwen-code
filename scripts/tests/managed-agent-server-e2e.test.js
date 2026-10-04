@@ -13,6 +13,8 @@ import {
   transpileModule,
 } from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
+import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
 
 const read = (file) =>
@@ -28,44 +30,6 @@ const namedScripts = (text) => [
     ),
   ),
 ];
-
-// A fenced launch block is shell: `#` comment lines, `KEY=value` (or
-// `export KEY=value`) assignment prefixes, line-continuation backslashes,
-// and the command itself. Return the assignments and the command words; a
-// shape outside that grammar leaves the command empty and the pin fails.
-const parseLaunchBlock = (block) => {
-  const env = {};
-  const argv = [];
-  for (const physicalLine of block.replace(/\\\n/g, ' ').split('\n')) {
-    const line = physicalLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const words = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-    let index = 0;
-    for (;;) {
-      if (words[index] === 'export') index += 1;
-      const assignment = words[index]?.match(
-        /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/,
-      );
-      if (!assignment) break;
-      env[assignment[1]] = assignment[2]
-        .replace(/^"([\s\S]*)"$/, '$1')
-        .replace(/^'([\s\S]*)'$/, '$1');
-      index += 1;
-    }
-    argv.push(...words.slice(index));
-  }
-  return { env, argv };
-};
-
-// A `$VAR` value defers to the credential pair the reader already exported
-// for Spring in Prerequisites; stand in a conforming value so the validator
-// judges the block's shape rather than the placeholder spelling.
-const expandReference = (value, kind) =>
-  /^\$\{?\w+\}?$/.test(value)
-    ? kind === 'digest'
-      ? `sha256:${'a'.repeat(64)}`
-      : 'documented-value'
-    : value;
 
 describe('managed-agent-server e2e runner', () => {
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
@@ -279,70 +243,72 @@ describe('managed-agent-server e2e runner', () => {
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
   });
 
-  it('pins every fenced hosted-harness launch block in the server README to a startable form', () => {
+  it('pins the fenced hosted-harness launch block in the server README to a startable form', () => {
     // The oracle is the profile validator itself, not a copy of its rules:
-    // a fenced, presented-as-runnable block must supply everything
-    // validateHostedHarnessProfile rejects for missing, or the documented
-    // launch fails at startup while this pin stays green. The option mapping
-    // mirrors serve.ts and run-qwen-serve.ts: mode is always http-bridge,
-    // --no-web flips serveWebShell, the token resolves from --token then
-    // QWEN_SERVER_TOKEN, and the capability digest falls back to
-    // QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.
+    // the documented launch must supply everything
+    // validateHostedHarnessProfile rejects for missing, or the launch fails
+    // at startup while this pin stays green. The block is matched exactly —
+    // a grammar that parses the fence into argv/env fails open on every
+    // shell spelling it does not model. The CLI-side credential names come
+    // from the production constants so renaming one reddens this pin instead
+    // of stranding the README's spelling.
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
     const fencedBlocks = [
       ...readme.matchAll(
         /```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g,
       ),
-    ]
-      .map((match) => match[1])
-      .filter((block) => /--profile[=\s]+hosted-harness/.test(block));
-    expect(fencedBlocks.length).toBeGreaterThan(0);
-    for (const block of fencedBlocks) {
-      const { env, argv } = parseLaunchBlock(block);
-      const flags = {};
-      for (let index = 0; index < argv.length; index++) {
-        const word = argv[index];
-        if (!word.startsWith('--')) continue;
-        const eq = word.indexOf('=');
-        if (eq !== -1) {
-          flags[word.slice(2, eq)] = word.slice(eq + 1);
-        } else if (word.startsWith('--no-')) {
-          flags[word.slice(5)] = false;
-        } else if (
-          index + 1 < argv.length &&
-          !argv[index + 1].startsWith('--')
-        ) {
-          flags[word.slice(2)] = argv[index + 1];
-          index += 1;
-        } else {
-          flags[word.slice(2)] = true;
-        }
+    ].map((match) => match[1]);
+    const command =
+      'qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web';
+    const launchBlocks = fencedBlocks.filter((block) =>
+      block.includes(command),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    expect(launchBlocks[0]).toBe(
+      [
+        `${QWEN_SERVER_TOKEN_ENV}="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \\`,
+        `${HOSTED_HARNESS_CAPABILITY_DIGEST_ENV}="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \\`,
+        command,
+      ].join('\n') + '\n',
+    );
+    // A `$VAR` reference defers to a name the reader was told to export; a
+    // renamed or dropped Prerequisites export expands to empty in the
+    // reader's shell and the launch dies at startup, so every name the
+    // launch block references must be assigned in a fenced README block.
+    const assigned = new Set();
+    for (const fenced of fencedBlocks) {
+      for (const match of fenced.matchAll(
+        /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm,
+      )) {
+        assigned.add(match[1]);
       }
-      expect(
-        flags['profile'],
-        'a fenced hosted-harness block must carry the profile flag itself',
-      ).toBe('hosted-harness');
-      const supplied = (flag, envName, kind) =>
-        flags[flag] !== undefined
-          ? expandReference(String(flags[flag]), kind)
-          : env[envName] !== undefined
-            ? expandReference(env[envName], kind)
-            : undefined;
-      const launch = {
-        profile: flags['profile'],
-        hostname: flags['hostname'] ?? '127.0.0.1',
-        port: Number(flags['port'] ?? 4170),
-        mode: 'http-bridge',
-        token: supplied('token', 'QWEN_SERVER_TOKEN', 'token'),
-        serveWebShell: flags['web'] ?? true,
-        hostedHarnessCapabilityDigest: supplied(
-          'hosted-harness-capability-digest',
-          'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST',
-          'digest',
-        ),
-      };
-      expect(() => validateHostedHarnessProfile(launch)).not.toThrow();
     }
+    for (const match of launchBlocks[0].matchAll(
+      /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+    )) {
+      expect(
+        assigned.has(match[1]),
+        `the launch block references $${match[1]}, which no fenced README block assigns`,
+      ).toBe(true);
+    }
+    // The configuration the documented launch resolves to: mode is always
+    // http-bridge, --no-web flips serveWebShell, and the deferred `$VAR`
+    // credentials stand in as conforming values so the validator judges the
+    // launch's shape rather than the placeholder spelling.
+    expect(() =>
+      validateHostedHarnessProfile({
+        profile: 'hosted-harness',
+        hostname: '127.0.0.1',
+        port: 4171,
+        mode: 'http-bridge',
+        token: 'documented-value',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+    ).not.toThrow();
   });
 
   it('pairs the 4171 base-url export with a startup-order note in the dual-path entry', () => {
