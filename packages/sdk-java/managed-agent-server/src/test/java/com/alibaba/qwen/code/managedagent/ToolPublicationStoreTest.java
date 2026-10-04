@@ -1414,6 +1414,19 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("Journal event scope conflicts");
     }
 
+    // A misscoped domain.committed line for an unknown domain has no
+    // requireEnvelope to catch it — the write-side scope check does.
+    @Test
+    void unknownDomainLinesAreRejectedAtCommit() {
+        ObjectNode payload = JSON.createObjectNode()
+                .put("domain", "no.such.domain");
+        JsonNode foreignKey = JSON.createObjectNode().put("tenantId", "tenant-1")
+                .put("workspaceId", "workspace-1").put("sessionId", "session-9");
+        assertThatThrownBy(() -> addSecondExecutionWith(
+                event(3, "domain.committed", payload, foreignKey, 1) + "{}\n"))
+                .hasMessageContaining("Journal event scope conflicts");
+    }
+
     // A pre-existing journal (written before the commit-side check) with a
     // misscoped activation line must not be promoted into the trusted head
     // columns by either authorization path.
@@ -1489,6 +1502,22 @@ class ToolPublicationStoreTest {
                     WRITER_TOKEN, PUBLICATION_TOKEN))
                     .hasMessageContaining("Journal event scope conflicts");
         }
+    }
+
+    // A binding naming a never-committed intent sequence is a client fault
+    // (400) on both paths — the 500 corruption fault is reserved for a
+    // journal damaged inside the committed span.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aNeverCommittedIntentSequenceIsAClientFault(
+            boolean journalHeadAuthorization) {
+        store = newStore(10 * ALLOCATION, 10, journalHeadAuthorization);
+        ObjectNode candidate = request("reserve");
+        ((ObjectNode) candidate.get("binding")).put("intentSequence", 99);
+        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN,
+                PUBLICATION_TOKEN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Committed publication evidence is missing");
     }
 
     @Test

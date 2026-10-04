@@ -209,35 +209,37 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
-            // requireEnvelope owns the domain.committed lines (its
-            // closed-shape and scope messages are pinned by name); every
-            // other enveloped event line gets the closed-key check here. A
-            // bare event-subtype line with no envelope is inert — it carries
-            // no evidence anywhere — and stays tolerated.
-            if (event.isObject()
-                    && !"domain.committed".equals(event.path("kind")
-                            .textValue())) {
+            String kind = event.path("kind").textValue();
+            String domain = "domain.committed".equals(kind)
+                    ? payload.path("domain").textValue() : null;
+            // requireEnvelope owns the domain.committed lines for known
+            // domains (its closed-shape and scope messages are pinned by
+            // name); every other enveloped event line — including an
+            // unknown-domain one — gets the closed-key check here. A bare
+            // event-subtype line with no envelope is inert — it carries no
+            // evidence anywhere — and stays tolerated.
+            boolean envelopeOwned = domain != null
+                    && ManagedExtensionProjection.RECORD_BODIES
+                            .containsKey(domain);
+            if (event.isObject() && !envelopeOwned) {
                 require(event.path("v").asInt() == 1
                         && sessionScope.equals(event.path("sessionKey")),
                         "Journal event scope conflicts");
             }
-            if ("activation.changed".equals(event.path("kind")
-                    .textValue())) {
+            if ("activation.changed".equals(kind)) {
                 require(index < eventCount,
                         "Activation change has an invalid journal position");
                 lastActivation = payload;
             }
-            if ("tool.receipt".equals(event.path("kind").asText())) {
+            if ("tool.receipt".equals(kind)) {
                 require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
                         "Tool receipt has an invalid journal position");
                 receipts.add(event);
             }
-            if (!"domain.committed".equals(event.path("kind").textValue())) {
+            if (domain == null) {
                 continue;
             }
-            String domain = payload.path("domain").textValue();
-            Body body = domain == null ? null
-                    : ManagedExtensionProjection.RECORD_BODIES.get(domain);
+            Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body != null) {
                 require(index < eventCount, "The Stage H record event is not"
                         + " one of the transaction's events.");

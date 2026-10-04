@@ -403,7 +403,7 @@ public final class ToolPublicationStore {
             // The binding names the intent's sequence, so its revision is
             // read directly instead of walking the journal down to it.
             intent = readIntent(b, key, writerToken, intentSequence,
-                    writer.journalRevision());
+                    writer);
         } else {
             intent = null;
             for (long revision = writer.journalRevision(); revision > 0
@@ -491,7 +491,9 @@ public final class ToolPublicationStore {
      * locked head must be gap-free.
      */
     private JsonNode readIntent(JsonNode b, JsonNode key, String writerToken,
-            long intentSequence, long headRevision) {
+            long intentSequence,
+            ManagedSessionStore.PublicationWriter writer) {
+        long headRevision = writer.journalRevision();
         String tenant = text(key, "tenantId");
         String session = text(key, "sessionId");
         List<Long> revisions = jdbc.queryForList(
@@ -501,10 +503,20 @@ public final class ToolPublicationStore {
                         + " AND journal_revision <= ?",
                 Long.class, tenant, session, intentSequence, intentSequence,
                 headRevision);
-        // A missing or ambiguous revision, a hole, or a corrupt row means
-        // server-side journal damage: answer the session store's corruption
-        // fault (500), not a client request fault (400).
-        if (revisions.size() != 1) {
+        // An ambiguous range or a hole inside the committed span means
+        // server-side journal damage: the session store's corruption fault
+        // (500). A sequence beyond the committed span means the binding
+        // names evidence that was never committed — a client request fault.
+        if (revisions.size() > 1) {
+            throw ManagedSessionStore.journalCorrupt();
+        }
+        if (revisions.isEmpty()) {
+            if (intentSequence > writer.committedSequence()) {
+                // The binding names evidence that was never committed —
+                // the requester's fault, not the journal's.
+                throw new IllegalArgumentException(
+                        "Committed publication evidence is missing");
+            }
             throw ManagedSessionStore.journalCorrupt();
         }
         long revision = revisions.get(0);

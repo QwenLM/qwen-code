@@ -912,6 +912,24 @@ class Issue13181QueryBudgetTest {
         assertThat(transcript.hasMore()).isFalse();
         assertThat(fixture.ledger.count("from managed_agent_event",
                 "sequence_id >")).isEqualTo(1);
+        // A tail longer than one page (a session the materializer never
+        // visited) is served completely, paging per 1000.
+        for (int index = 0; index < 600; index++) {
+            fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
+                    "turn-1", "item.tool_call.updated",
+                    Map.of("callId", "call-c-" + index, "status",
+                            "completed"),
+                    false, "lag-c-" + index);
+        }
+        fixture.ledger.reset();
+        var longer = fixture.service.transcript(tenant, null, sessionId,
+                null, 10);
+        assertThat(longer.events().stream()
+                .filter(event -> event.sequence() > covered).count())
+                .isEqualTo(1599);
+        assertThat(longer.hasMore()).isFalse();
+        assertThat(fixture.ledger.count("from managed_agent_event",
+                "sequence_id >")).isEqualTo(2);
     }
 
     @Test
