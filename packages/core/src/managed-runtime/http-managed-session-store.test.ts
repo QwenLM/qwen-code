@@ -161,6 +161,69 @@ describe('HTTP Managed Session store', () => {
     ).not.toThrow();
   });
 
+  it('scopes lifecycle authorization to the current claim and preserves writer identity', async () => {
+    const server = new FakeManagedSessionStore();
+    const observed: Array<{
+      path: string;
+      claim: string | null;
+      operation: string | null;
+    }> = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const url = new URL(requestUrl(input));
+        if (!url.pathname.endsWith(':authorize'))
+          return server.fetch(input, init);
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+        });
+        observed.push({
+          path: url.pathname.split('/').at(-1)!,
+          claim: headers.get('X-Qwen-Lifecycle-Claim-Generation'),
+          operation: headers.get('X-Qwen-Lifecycle-Operation-Id'),
+        });
+        return jsonResponse({});
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 1,
+      });
+      await stores.authorizeLifecycle('delete');
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 2,
+      });
+      await stores.authorizeLifecycle();
+      stores.setLifecycleAuthority();
+      await stores.authorizeOrdinary();
+      expect(observed).toEqual([
+        {
+          path: 'lifecycle:authorize',
+          operation: 'delete-original',
+          claim: '1',
+        },
+        {
+          path: 'lifecycle:authorize',
+          operation: 'delete-original',
+          claim: '2',
+        },
+        { path: 'execution:authorize', operation: null, claim: null },
+      ]);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;
@@ -368,6 +431,9 @@ describe('HTTP Managed Session store', () => {
     'exhausted-503',
     'changed-receipt',
     'invalid-json',
+    'lifecycle-403',
+    'lifecycle-409',
+    'uncertain-lifecycle-403',
   ])(
     'preserves activation transaction identity and failure fencing after %s',
     async (failure) => {
@@ -381,6 +447,8 @@ describe('HTTP Managed Session store', () => {
         failure === 'uncommitted-503' ||
         failure === 'lost-commit-response' ||
         failure === 'lost-response-body';
+      const refused =
+        failure === 'lifecycle-403' || failure === 'lifecycle-409';
       let armed = false;
       let replay: unknown;
       const stores = createHttpManagedSessionStores({
@@ -396,6 +464,23 @@ describe('HTTP Managed Session store', () => {
             >;
             if (body['operation'] === 'installActivation') {
               requests.push(String(init?.body));
+              if (refused || failure === 'uncertain-lifecycle-403')
+                return jsonResponse(
+                  {
+                    error: {
+                      message: 'Lifecycle authorization revoked',
+                      code:
+                        failure === 'lifecycle-409'
+                          ? 'workspace_lifecycle_authorization_revoked'
+                          : 'workspace_access_denied',
+                    },
+                  },
+                  failure === 'uncertain-lifecycle-403' && requests.length === 1
+                    ? 503
+                    : failure === 'lifecycle-409'
+                      ? 409
+                      : 403,
+                );
               if (failure === 'permanent-409' || failure === 'exhausted-503')
                 return jsonResponse(
                   { error: { code: 'commit_rejected' } },
@@ -460,6 +545,11 @@ describe('HTTP Managed Session store', () => {
         create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
       });
       try {
+        if (refused || failure === 'uncertain-lifecycle-403')
+          stores.setLifecycleAuthority({
+            operationId: 'lifecycle',
+            claimGeneration: 1,
+          });
         armed = true;
         const controller = new ManagedHookActivationController(session);
         const run = vi.fn(async () => 'completed');
@@ -497,16 +587,44 @@ describe('HTTP Managed Session store', () => {
           await expect(
             controller.runTurn('next-turn', async () => 'accepted'),
           ).resolves.toBe('accepted');
+        } else if (refused) {
+          await expect(operation).rejects.toThrow();
+          expect(run).not.toHaveBeenCalled();
+          expect(requests).toHaveLength(2);
+          expect(JSON.parse(requests[1])).toMatchObject({
+            firstSequence: JSON.parse(requests[0]).firstSequence,
+            previousCommitDigest: JSON.parse(requests[0]).previousCommitDigest,
+          });
+          expect(session.authority.writesStopped).toBe(false);
+          armed = false;
+          await expect(
+            controller.runHookOperation(
+              {
+                operationId: 'notification-retry',
+                occurrenceId: 'notification-retry',
+                originTurnId: null,
+              },
+              run,
+            ),
+          ).resolves.toBe('completed');
+          expect(run).toHaveBeenCalledOnce();
         } else {
           await expect(operation).rejects.toThrow('writes stopped');
           expect(run).not.toHaveBeenCalled();
-          expect(requests).toHaveLength(failure === 'exhausted-503' ? 3 : 1);
+          expect(requests).toHaveLength(
+            failure === 'exhausted-503'
+              ? 3
+              : failure === 'uncertain-lifecycle-403'
+                ? 2
+                : 1,
+          );
           expect(session.authority.writesStopped).toBe(true);
           await expect(controller.runTurn('next-turn', run)).rejects.toThrow(
             'current Session activation',
           );
         }
-        expect(requests.every((body) => body === requests[0])).toBe(true);
+        if (!refused)
+          expect(requests.every((body) => body === requests[0])).toBe(true);
       } finally {
         await session.close();
       }

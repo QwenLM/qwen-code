@@ -33,6 +33,10 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_harness_drain", "phase", "VARCHAR(32) NOT NULL DEFAULT 'DRAINING'");
+            addColumn(statement, "qwen_runtime_harness_drain", "operation_id", "VARCHAR(128)");
+            addColumn(statement, "qwen_runtime_harness_drain", "claim_generation", "BIGINT NOT NULL DEFAULT 0");
+            addColumn(statement, "qwen_runtime_harness_drain", "claim_lease_until", "BIGINT");
             addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
             addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
         } catch (SQLException exception) {

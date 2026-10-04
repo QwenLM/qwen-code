@@ -101,7 +101,13 @@ public final class StoreModels {
             String operationId, OperationKind kind, String requestDigest,
             String state, String admissionStage, String deliveryState,
             String sessionStatusBefore, String receiptId, String leaseOwner,
-            long claimGeneration, int attemptCount, String failureCode) {
+            long claimGeneration, int attemptCount, String failureCode, int lifecycleProtocolVersion) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, failureCode, 0);
+        }
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {

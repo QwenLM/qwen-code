@@ -110,8 +110,17 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 requireProtocol(body);
                 JsonCodec.requiredString(body, "requestId", "warm request");
                 String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "warm request");
-                complete(exchange, service.warm(sessionId), ignored -> Map.of(
+                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), ignored -> Map.of(
                         "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true));
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "lifecycle authorization");
+                requireProtocol(body);
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "lifecycle authorization");
+                String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "lifecycle authorization");
+                complete(exchange, service.authorizeLifecycle(sessionId, lifecycleAuthority(exchange)),
+                        ignored -> envelope(sessionId, runtimeSessionId, "authorized", true));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -145,6 +154,19 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
+    private static RuntimeLifecycleAuthority lifecycleAuthority(HttpExchange exchange) {
+        String operation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.GENERATION_HEADER);
+        if (operation == null && generation == null) {
+            return null;
+        }
+        try {
+            return new RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
+        } catch (RuntimeException error) {
+            throw new RuntimeBrokerException(400, "runtime_lifecycle_authority_invalid", "Invalid lifecycle authority", false);
+        }
+    }
+
     private void acquire(HttpExchange exchange) throws IOException {
         Map<String, Object> body = requestBody(exchange, "acquire request");
         requireProtocol(body);
@@ -155,8 +177,15 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 "runtimeSessionId", "acquire request");
         String turnKind = JsonCodec.requiredString(body, "turnKind",
                 "acquire request");
-        complete(exchange, service.acquire(harnessSessionId, runtimeSessionId,
-                turnKind), record -> {
+        CompletionStage<RuntimeSessionRecord> acquisition;
+        if (body.containsKey("recoveryBindingId")) {
+            acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
+                    JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
+                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")));
+        } else {
+            acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
+        }
+        complete(exchange, acquisition, record -> {
                     Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
                             runtimeSessionId, "acquired", true));
                     RuntimeScope scope = record.getSession().getScope();
@@ -202,7 +231,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
             complete(exchange, service.control(harnessSessionId,
-                    runtimeSessionId, operation), result -> envelope(
+                    runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",
                             result));
             return;

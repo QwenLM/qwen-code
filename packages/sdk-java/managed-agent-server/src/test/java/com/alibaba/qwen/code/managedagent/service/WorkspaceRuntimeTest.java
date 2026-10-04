@@ -626,6 +626,34 @@ class WorkspaceRuntimeTest {
         authority.assertHeld(session.workspace(), fixture.record());
     }
 
+    @Test
+    void legacyCloseHooksUseTheOriginalRuntimeAndStillCheckCurrentAuthorization() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        long now = System.currentTimeMillis();
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?",
+                session.tenantId(), session.sessionId());
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before, lease_until,"
+                + " available_at, created_at, updated_at) VALUES (?, ?, ?, 'CLOSE', 'actor', 'close', 'digest', 'PENDING',"
+                + " 'ACCEPTED', 'LEASED', 'ACTIVE', ?, ?, ?, ?)", session.tenantId(), session.sessionId(), UUID.randomUUID().toString(),
+                now + 60_000, now, now, now);
+        fixture.bindings().requestHarnessDrain(session.tenantId(), session.sessionId());
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
+        for (String kind : List.of("hook-execute", "hook-catalog")) {
+            Map<String, Object> hook = hookControl(session, kind);
+            fixture.transport().control(fixture.lease(), runtimeSession, hook).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), runtimeSession, hook);
+        }
+        assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-execute")));
+        fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-status")).toCompletableFuture().join();
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
     private static Map<String, Object> hookControl(SessionRecord session, String kind) {
         return Map.of("kind", kind, "operationId", kind,
                 "sessionKey", Map.of("tenantId", session.tenantId(),

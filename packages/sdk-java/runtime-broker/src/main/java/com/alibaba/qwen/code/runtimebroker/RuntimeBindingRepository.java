@@ -47,6 +47,27 @@ public interface RuntimeBindingRepository {
 
     boolean isHarnessDraining(String tenantId, String harnessSessionId);
 
+    default boolean isHarnessAdmissionClosed(String tenantId, String harnessSessionId) {
+        return isHarnessDraining(tenantId, harnessSessionId);
+    }
+
+    default void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null || isHarnessDraining(scope.getTenantId(), harnessSessionId)) {
+            throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session admission is closed", false);
+        }
+    }
+
+    default void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        requireHarnessAdmission(scope, harnessSessionId, authority);
+    }
+
+    default void verifyHarnessStopped(java.sql.Connection connection, String tenantId, String harnessSessionId)
+            throws java.sql.SQLException {
+        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Stop verification is unavailable", false);
+    }
+
     List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
             String afterBindingId, int limit);
 

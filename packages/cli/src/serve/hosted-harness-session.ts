@@ -31,6 +31,8 @@ import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   type HttpToolPublicationOwner,
+  type HttpManagedSessionStores,
+  type ManagedSessionLifecycleAuthority,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   openManagedSession,
@@ -173,6 +175,9 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  stores?: HttpManagedSessionStores;
+  lifecycle?: ManagedSessionLifecycleAuthority;
+  lifecycleKind?: 'close' | 'delete';
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
    * teardown hand it back; retry-inviting refusals deliberately leave it
@@ -223,6 +228,26 @@ function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function lifecycleAuthority(
+  value: unknown,
+): ManagedSessionLifecycleAuthority | undefined {
+  if (value === undefined) return undefined;
+  const fields = object(value);
+  if (
+    !fields ||
+    Object.keys(fields).sort().join(',') !== 'claimGeneration,operationId' ||
+    typeof fields['operationId'] !== 'string' ||
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(fields['operationId']) ||
+    !Number.isSafeInteger(fields['claimGeneration']) ||
+    (fields['claimGeneration'] as number) < 1
+  )
+    throw new Error('Invalid lifecycle authority.');
+  return {
+    operationId: fields['operationId'],
+    claimGeneration: fields['claimGeneration'] as number,
+  };
 }
 
 function error(
@@ -1542,6 +1567,17 @@ export function registerHostedHarnessSessionRoutes(
       );
       return;
     }
+    let lifecycle: ManagedSessionLifecycleAuthority | undefined;
+    try {
+      lifecycle = lifecycleAuthority(body?.['lifecycleAuthority']);
+      if (lifecycle) {
+        if (create) throw new Error('Lifecycle load cannot create a Session.');
+        stores.setLifecycleAuthority(lifecycle);
+      }
+    } catch {
+      error(res, 400, 'invalid_hosted_lifecycle_authority');
+      return;
+    }
     opening.add(sessionId);
     let managed: ManagedSession | undefined;
     try {
@@ -1655,6 +1691,8 @@ export function registerHostedHarnessSessionRoutes(
         admissions: new Map(),
         blocked: false,
         waiters: new HostedApprovalWaiters(),
+        stores,
+        lifecycle,
         ...(toolProfile ? { toolProfile } : {}),
         ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
         captureBytes !== undefined
@@ -1695,7 +1733,7 @@ export function registerHostedHarnessSessionRoutes(
         session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
       if (hookCatalog && brokerOptions)
         session.hooks = new HostedHookSession(
-          brokerOptions,
+          { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
           hookCatalog,
           session.mcp?.broker,
@@ -1708,6 +1746,7 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover =
+        !lifecycle &&
         !session.hooks &&
         (body?.['passiveManagedRuntimeRecovery'] === true ||
           body?.['driveRuntimeRecovery'] === true);
@@ -1836,6 +1875,7 @@ export function registerHostedHarnessSessionRoutes(
           return;
         }
       } else if (
+        !lifecycle &&
         restore.recoveryStatus === 'ok' &&
         (session.publication || session.hooks || fileHistory) &&
         brokerOptions
@@ -1972,7 +2012,7 @@ export function registerHostedHarnessSessionRoutes(
         !recovery
       )
         session.blocked = true;
-      await settleCancelledHookTurn(session);
+      if (!session.lifecycle) await settleCancelledHookTurn(session);
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -2084,6 +2124,127 @@ export function registerHostedHarnessSessionRoutes(
   });
   app.post('/session/:id/load', (req, res) => {
     void open(req, res, false);
+  });
+
+  app.use('/session/:id', async (req, res, next) => {
+    const session = sessions.get(req.params['id']);
+    if (
+      session?.lifecycle &&
+      req.method !== 'GET' &&
+      !['/lifecycle', '/detach', '/heartbeat'].includes(req.path)
+    )
+      return error(res, 409, 'hosted_lifecycle_operation_active');
+    if (
+      session &&
+      req.method !== 'GET' &&
+      !['/lifecycle', '/heartbeat'].includes(req.path) &&
+      !session.lifecycle
+    ) {
+      try {
+        await session.stores!.authorizeOrdinary(
+          req.method === 'DELETE' && req.path === '/'
+            ? 'legacy-close'
+            : undefined,
+        );
+      } catch {
+        return error(res, 409, 'hosted_lifecycle_operation_active');
+      }
+    }
+    next();
+  });
+
+  app.post('/session/:id/lifecycle', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const body = object(req.body);
+    let authority: ManagedSessionLifecycleAuthority | undefined;
+    try {
+      authority = lifecycleAuthority(body?.['authority']);
+    } catch {
+      return error(res, 400, 'invalid_hosted_lifecycle_authority');
+    }
+    const kind = body?.['kind'];
+    if (
+      !authority ||
+      (kind !== 'close' && kind !== 'delete') ||
+      !isDeepStrictEqual(
+        body?.['sessionKey'],
+        session.managed.authority.sessionHeader.sessionKey,
+      ) ||
+      session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+    )
+      return error(res, 400, 'invalid_hosted_lifecycle_request');
+    if (
+      session.lifecycle &&
+      (session.lifecycle.operationId !== authority.operationId ||
+        (session.lifecycleKind && session.lifecycleKind !== kind))
+    )
+      return error(res, 409, 'hosted_lifecycle_operation_conflict');
+    if (
+      session.active ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.hooksBusy
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const previousAuthority = session.lifecycle;
+    session.stores!.setLifecycleAuthority(authority);
+    session.hooksBusy = true;
+    let authorized = false;
+    try {
+      await session.stores!.authorizeLifecycle(kind);
+      authorized = true;
+      session.lifecycle = authority;
+      session.lifecycleKind = kind;
+      session.mcpClosing = true;
+      const events =
+        kind === 'close'
+          ? [HookEventName.SessionEnd]
+          : [HookEventName.SessionEnd, HookEventName.SessionDelete];
+      const occurrences = events.map((event) =>
+        hostedHookOccurrenceId(event, authority.operationId),
+      );
+      await session.hooks?.drain(new Set(occurrences));
+      const effects = [];
+      if (session.hooks) {
+        for (const event of events) {
+          await runHostedLifecycleHook(
+            session,
+            event,
+            authority.operationId,
+            event === HookEventName.SessionEnd
+              ? { reason: 'other' }
+              : { deleted_session_id: req.params['id'] },
+          );
+          await session.hooks.settleOccurrence(
+            hostedHookOccurrenceId(event, authority.operationId),
+          );
+          const entry = session.managed.authority.extensionRecord(
+            'hook_execution',
+            hostedHookOccurrenceId(event, authority.operationId),
+          );
+          if (!entry || !parseHookExecution(entry.record).resultRef)
+            throw new HostedHookRecoveryRequiredError();
+          effects.push({ event, recordRef: entry.recordRef });
+        }
+      }
+      res.json({
+        protocolVersion: 1,
+        sessionKey: session.managed.authority.sessionHeader.sessionKey,
+        operationId: authority.operationId,
+        kind,
+        definitionRef: session.managed.authority.sessionHeader.definitionRef,
+        effects,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted lifecycle requires recovery: ${String(cause)}`,
+      );
+      error(res, 503, 'hosted_lifecycle_recovery_required');
+    } finally {
+      if (!authorized) session.stores!.setLifecycleAuthority(previousAuthority);
+      session.hooksBusy = false;
+    }
   });
 
   app.post('/session/:id/prompt', (req, res) => {
@@ -2380,7 +2541,7 @@ export function registerHostedHarnessSessionRoutes(
       .then(async (execution) => {
         if (execution.hookId !== '__plan__')
           await session.hooks!.status(execution.occurrenceId);
-        await settleCancelledHookTurn(session);
+        if (!session.lifecycle) await settleCancelledHookTurn(session);
         res.json({
           operationId: execution.hookExecutionId,
           state: execution.run.state,
@@ -3514,6 +3675,19 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
+      if (session.lifecycle) {
+        if (req.method === 'DELETE')
+          return error(res, 409, 'hosted_lifecycle_operation_active');
+        const authority = lifecycleAuthority(object(req.body)?.['authority']);
+        if (
+          !authority ||
+          authority.operationId !== session.lifecycle.operationId
+        )
+          return error(res, 409, 'hosted_lifecycle_operation_conflict');
+        session.lifecycle = authority;
+        session.stores!.setLifecycleAuthority(authority);
+        await session.stores!.authorizeLifecycle();
+      }
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
         try {
@@ -3549,7 +3723,7 @@ export function registerHostedHarnessSessionRoutes(
       );
       error(res, 503, 'managed_session_close_failed');
     } finally {
-      session.mcpClosing = false;
+      session.mcpClosing = !!session.lifecycle;
       session.mcpBusy = false;
     }
   };

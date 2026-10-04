@@ -266,6 +266,72 @@ public class ManagedExtensionRecordStore {
         return new ApplyResult(receipts, lastActivation);
     }
 
+    boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        boolean dispatch = false;
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode event = parse(line).path("managedSession");
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(event.path("kind").asText())
+                    || "tool.intent".equals(event.path("kind").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if ("model.attempt".equals(event.path("kind").asText())
+                    && "started".equals(payload.path("state").asText())) {
+                dispatch = true;
+            }
+            if (!"domain.committed".equals(event.path("kind").asText())) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+            if (!"dispatch_started".equals(next.path("run").path("execution").asText())) {
+                continue;
+            }
+            String field = "hook_execution".equals(domain) ? "hookExecutionId" : "registrationId";
+            var previous = listRecords(tenantId, sessionId, domain).stream()
+                    .filter(record -> next.path(field).equals(record.path(field))).findFirst();
+            if (previous.isEmpty() || !"dispatch_started".equals(previous.get().path("run").path("execution").asText())) {
+                dispatch = true;
+            }
+        }
+        return dispatch;
+    }
+
+    void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode event = parse(line).path("managedSession");
+            String kind = event.path("kind").asText();
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(kind) || "tool.intent".equals(kind)
+                    || "model.attempt".equals(kind) && "started".equals(payload.path("state").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if (!"domain.committed".equals(kind)) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+            String id = next.path(domain.equals("hook_execution") ? "hookExecutionId"
+                    : "registrationId").asText();
+            JsonNode previous = listRecords(tenantId, sessionId, domain).stream().filter(record ->
+                    id.equals(record.path(domain.equals("hook_execution") ? "hookExecutionId"
+                            : "registrationId").asText()))
+                    .findFirst().orElse(null);
+            if (previous == null || "intent".equals(previous.path("run").path("execution").asText())
+                    && "dispatch_started".equals(next.path("run").path("execution").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+        }
+    }
+
     public TaskPage listTasks(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTaskId, int limit) {
         List<Object> arguments = new ArrayList<>();

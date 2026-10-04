@@ -345,6 +345,7 @@ class WorkspaceSessionRetentionMySqlIT {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         assertThat(store.hasCompletedWorkspaceClose(tenant, session)).isTrue();
+        assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().lifecycleProtocolVersion()).isZero();
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED");
         assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-files/1");
         assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().receiptId()).isEqualTo("legacy-close-receipt");

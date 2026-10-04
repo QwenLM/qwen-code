@@ -78,6 +78,28 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void hookRecoveryUsesTheOriginalBindingAndNeverAcquiresAReplacement() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            int acquires = fixture.transport.acquireCalls.get();
+            int provisions = fixture.provisioner.calls.get();
+            assertSame(original, join(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                    original.getBindingId(), original.getRuntimeGeneration())));
+            for (CompletionStage<RuntimeSessionRecord> request : List.of(
+                    fixture.service.acquireRecovery("harness-b", "runtime-a", original.getBindingId(), original.getRuntimeGeneration()),
+                    fixture.service.acquireRecovery("harness-a", "runtime-a", original.getBindingId(), original.getRuntimeGeneration() + 1),
+                    fixture.service.acquireRecovery("harness-a", "missing", original.getBindingId(), original.getRuntimeGeneration()))) {
+                assertEquals("workspace_close_identity_unverified", failure(request).getCode());
+            }
+            join(fixture.service.release("harness-a", "runtime-a"));
+            assertEquals("workspace_close_identity_unverified", failure(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                    original.getBindingId(), original.getRuntimeGeneration())).getCode());
+            assertEquals(acquires, fixture.transport.acquireCalls.get());
+            assertEquals(provisions, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void concurrentAcquireOfOneSessionCallsRuntimeOnce() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Void> acquire = new CompletableFuture<>();
@@ -1204,6 +1226,24 @@ class RuntimeBrokerServiceTest {
                     "request", Map.of("kind", "resource_read", "uri", "a\uD83D\uDE00b"));
             assertEquals("ok", join(fixture.service.control("harness", "runtime", valid)));
             assertEquals(valid, fixture.transport.lastControl);
+        }
+    }
+
+    @Test
+    void legacyDrainAllowsOnlyOriginalHookControlAndNoNewOrdinaryAdmission() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.bindingRepository.requestHarnessDrain("tenant", "harness");
+            Map<String, Object> hook = Map.of("kind", "hook-execute", "operationId", "legacy-end",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", hook)));
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+            Map<String, Object> ordinary = Map.of("kind", "mcp-configure", "operationId", "ordinary",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("runtime_admission_closed", failure(fixture.service.control("harness", "runtime", ordinary)).getCode());
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
         }
     }
 

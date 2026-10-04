@@ -32,6 +32,7 @@ import {
   type DurableToolResultResourceStore,
 } from './resource-tool-result-store.js';
 import {
+  ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
@@ -86,6 +87,11 @@ export interface HttpManagedSessionStoreOptions {
   readonly allowInsecureHttp?: boolean;
 }
 
+export interface ManagedSessionLifecycleAuthority {
+  readonly operationId: string;
+  readonly claimGeneration: number;
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -93,6 +99,9 @@ export interface HttpManagedSessionStores {
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
   close(): Promise<void>;
+  setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
+  authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
+  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
 }
 
 export interface HttpToolPublicationOwner {
@@ -141,6 +150,10 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     close: () => client.seal(),
+    setLifecycleAuthority: (authority) =>
+      client.setLifecycleAuthority(authority),
+    authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
+    authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
   };
 }
 
@@ -399,6 +412,31 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
+  private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
+    this.lifecycleAuthority = authority;
+  }
+
+  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+    await this.assertWritable();
+    await this.json('/execution:authorize', 'POST', {
+      ...(kind ? { kind } : {}),
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+  }
+
+  async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {
+    await this.assertWritable();
+    await this.json('/lifecycle:authorize', 'POST', {
+      ...(kind ? { kind } : {}),
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+  }
   private readonly publicationAdmissions = new Map<string, string>();
 
   constructor(
@@ -619,6 +657,16 @@ class ManagedSessionStoreHttpClient {
               );
         break;
       } catch (error) {
+        if (
+          attempt === 0 &&
+          this.lifecycleAuthority &&
+          error instanceof ManagedSessionStoreHttpError &&
+          (error.status === 403 ||
+            (error.status === 409 &&
+              (error.remoteCode.startsWith('workspace_lifecycle_') ||
+                error.remoteCode === 'workspace_unavailable')))
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         const uncertain =
           (error instanceof ManagedSessionStoreHttpError &&
             (error.status === 429 || error.status >= 500)) ||
@@ -1093,6 +1141,15 @@ class ManagedSessionStoreHttpClient {
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
             this.writerToken,
+          ...(this.lifecycleAuthority
+            ? {
+                'X-Qwen-Lifecycle-Operation-Id':
+                  this.lifecycleAuthority.operationId,
+                'X-Qwen-Lifecycle-Claim-Generation': String(
+                  this.lifecycleAuthority.claimGeneration,
+                ),
+              }
+            : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),

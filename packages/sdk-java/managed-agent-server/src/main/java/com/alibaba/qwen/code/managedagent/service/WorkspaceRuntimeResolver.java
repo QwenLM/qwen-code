@@ -59,9 +59,27 @@ final class WorkspaceRuntimeResolver {
     }
 
     Resolved resolve(String sessionId) {
+        return resolve(sessionId, null);
+    }
+
+    Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+        return resolve(sessionId, lifecycle, false);
+    }
+
+    Resolved resolveHook(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+        return resolve(sessionId, lifecycle, true);
+    }
+
+    private Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
-        authority.authorize(session);
+        if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
+            authority.authorizeLegacyClose(session);
+        } else if (lifecycle == null) {
+            authority.authorize(session);
+        } else {
+            authority.authorizeLifecycle(session, lifecycle);
+        }
         ContextBinding binding = session.workspace();
         Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
         if (mount == null) {
@@ -78,7 +96,7 @@ final class WorkspaceRuntimeResolver {
         }
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
     }
 
     ContextBinding savedBinding(String sessionId) {

@@ -144,5 +144,9 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (
     harness_key VARCHAR(64) NOT NULL,
     tenant_id VARCHAR(512) NOT NULL,
     harness_session_id VARCHAR(512) NOT NULL,
+    phase VARCHAR(32) NOT NULL DEFAULT 'DRAINING',
+    operation_id VARCHAR(128),
+    claim_generation BIGINT NOT NULL DEFAULT 0,
+    claim_lease_until BIGINT,
     PRIMARY KEY (tenant_key, harness_key)
 );

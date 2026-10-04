@@ -13,6 +13,13 @@ import java.util.function.Supplier;
 /** Process-local Runtime binding repository for tests and single-node use. */
 public final class InMemoryRuntimeBindingRepository
         implements RuntimeBindingRepository {
+    @Override
+    public void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null) {
+            requireHarnessAdmission(scope, harnessSessionId, authority);
+        }
+    }
     private final java.util.Set<java.util.List<String>> draining = new java.util.HashSet<>();
     private final Clock clock;
     private final Supplier<String> idSupplier;

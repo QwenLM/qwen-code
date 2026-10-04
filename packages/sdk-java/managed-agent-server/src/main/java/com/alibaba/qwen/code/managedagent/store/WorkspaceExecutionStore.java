@@ -50,9 +50,38 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+        authorizePassiveAttachment(session, authority);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    public void authorizeLegacyClose(SessionRecord session) {
+        if (!WorkspaceLifecycleStore.legacyClose(jdbc, session.tenantId(), session.sessionId())) {
+            throw unavailable();
+        }
+        authorizePassiveAttachment(session, null, true);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
     public void authorizePassiveAttachment(SessionRecord session) {
+        authorizePassiveAttachment(session, null);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        authorizePassiveAttachment(session, authority, false);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean legacyClose) {
         ContextBinding binding = session.workspace();
-        if (binding == null || !"ACTIVE".equals(session.status())
+        String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
+        if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
+                : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
@@ -84,7 +113,7 @@ public class WorkspaceExecutionStore {
                 (row, index) -> session.tenantId().equals(row.getString("tenant_id"))
                         && session.sessionId().equals(row.getString("session_id"))
                         && "qwen-code".equals(row.getString("session_agent"))
-                        && "ACTIVE".equals(row.getString("session_status"))
+                        && expectedStatus.equals(row.getString("session_status"))
                         && row.getObject("session_deleted_at") == null
                         && binding.getWorkspaceId().equals(row.getString("session_workspace"))
                         && binding.getWorkspaceGeneration() == row.getLong("session_generation")

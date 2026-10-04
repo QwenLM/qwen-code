@@ -70,6 +70,55 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void lifecycleSettlementRetainsAttachmentAndDetachCarriesTheNewClaim() {
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{", "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,"), false));
+        createSessionRoute();
+        AtomicReference<Map<String, Object>> settlement = new AtomicReference<>();
+        AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            settlement.set(JsonSupport.parseObject(readBody(exchange), "lifecycle"));
+            sendSessionJson(exchange, 200, "{\"protocolVersion\":1,\"operationId\":\"delete-1\",\"kind\":\"delete\","
+                    + "\"sessionKey\":{\"tenantId\":\"tenant\",\"workspaceId\":\"workspace\",\"sessionId\":\"" + SESSION_ID + "\"},\"effects\":[]}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            detach.set(JsonSupport.parseObject(readBody(exchange), "detach"));
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            var request = Map.<String, Object>of("kind", "delete", "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace",
+                    "sessionId", SESSION_ID), "authority", authority);
+            assertEquals(1, client.capabilities().getLifecycleProtocolVersion());
+            assertEquals("delete-1", client.settleLifecycle(session, request).get("operationId"));
+            assertEquals(request, settlement.get());
+            assertNull(detach.get());
+            client.detachLifecycle(session, authority);
+            assertEquals(Map.of("authority", authority), detach.get());
+        }
+    }
+
+    @Test
+    void legacyHarnessCannotFallBackToDeleteForLifecycleSettlement() {
+        AtomicInteger requests = new AtomicInteger();
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            requests.incrementAndGet();
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertEquals(0, client.capabilities().getLifecycleProtocolVersion());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, Map.of()));
+            assertEquals(0, requests.get());
+        }
+    }
+
+    @Test
     void negotiatesAndFencesSessionCreation() {
         AtomicReference<String> authorization = new AtomicReference<>();
         AtomicReference<String> protocol = new AtomicReference<>();

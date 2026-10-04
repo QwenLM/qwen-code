@@ -761,6 +761,7 @@ export class HostedHookSession {
       await this.commit('hook_execution', occurrenceId, marker);
     }
     if (marker.run.execution === 'intent') {
+      await this.broker.authorizeLifecycle();
       marker = {
         ...marker,
         run: { ...marker.run, state: 'running', execution: 'dispatch_started' },
@@ -926,6 +927,7 @@ export class HostedHookSession {
           return cancelBeforeDispatch();
         if (hook.config.type === HookType.Prompt && !prompt)
           throw new Error('Hook model activation is unavailable.');
+        await this.broker.authorizeLifecycle();
         record = {
           ...record,
           run: {
@@ -1115,7 +1117,10 @@ export class HostedHookSession {
       this.recoveredBrokers.set(record.runtimeSessionId, broker);
     }
     if (current && !reacquire) await this.acquire();
-    else await broker.acquire();
+    else
+      await broker.acquire(
+        reacquire && record.run.runtime ? record.run.runtime : undefined,
+      );
     if (
       !broker.runtime ||
       this.executions().some(
@@ -1271,6 +1276,19 @@ export class HostedHookSession {
       this.children = { sequence, byOccurrence };
     }
     return this.children.byOccurrence.get(occurrenceId) ?? [];
+  }
+
+  async settleOccurrence(occurrenceId: string): Promise<void> {
+    const marker = await this.status(occurrenceId);
+    if (
+      !marker.resultRef ||
+      this.childrenOf(occurrenceId).some(
+        (child) =>
+          child.run.state === 'recovery_blocked' ||
+          (!child.resultRef && child.run.execution !== 'not_started_proven'),
+      )
+    )
+      throw new HostedHookRecoveryRequiredError();
   }
 
   async status(id: string, cancel = false): Promise<HookExecution> {
@@ -1498,8 +1516,16 @@ export class HostedHookSession {
       : output;
   }
 
-  async drain(): Promise<void> {
-    for (const record of this.executions()) {
+  async drain(
+    excludedOccurrences: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
+    const prior = () =>
+      this.executions().filter(
+        (record) =>
+          !excludedOccurrences.has(record.hookExecutionId) &&
+          !excludedOccurrences.has(record.occurrenceId),
+      );
+    for (const record of prior()) {
       if (!record.resultRef) await this.status(record.hookExecutionId, true);
     }
     await Promise.allSettled(
@@ -1508,7 +1534,7 @@ export class HostedHookSession {
     await Promise.allSettled(
       [...this.occurrences.values()].map((occurrence) => occurrence.result),
     );
-    for (const record of this.executions()) {
+    for (const record of prior()) {
       const latest = await this.status(record.hookExecutionId, true);
       if (!latest.resultRef && latest.run.execution !== 'not_started_proven')
         throw new HostedHookRecoveryRequiredError();

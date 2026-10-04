@@ -11,7 +11,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import supertest from 'supertest';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
 import * as hostedHistory from './hosted-file-history.js';
 import type { HostedFileHistoryState } from './hosted-file-history-protocol.js';
 import {
@@ -75,6 +83,8 @@ const state = vi.hoisted(() => ({
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
+  authorizeLifecycle: vi.fn(async () => undefined),
+  authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
   model: vi.fn(
     async (_input: {
       signal: AbortSignal;
@@ -120,6 +130,9 @@ vi.mock(
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
+        setLifecycleAuthority: () => undefined,
+        authorizeOrdinary: state.authorizeOrdinary,
+        authorizeLifecycle: state.authorizeLifecycle,
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
@@ -283,7 +296,7 @@ const hookPin = {
   catalogRevision: 1,
   definitionDigest: 'b'.repeat(64),
 };
-async function hookApp() {
+async function hookApp(asyncEnd = false) {
   const requests: ManagedHookControl[] = [];
   const catalog: ManagedHookCatalog = {
     ...hookPin,
@@ -295,7 +308,7 @@ async function hookApp() {
       hookId: eventName,
       eventName,
       sequential: false,
-      async: false,
+      async: asyncEnd && eventName === HookEventName.SessionEnd,
       failClosed: true,
       onceKey: null,
       config: { type: 'command' as const },
@@ -311,6 +324,10 @@ async function hookApp() {
       };
     },
   );
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'authorizeLifecycle',
+  ).mockResolvedValue();
   const release = vi
     .spyOn(HostedWorkspaceBroker.prototype, 'release')
     .mockResolvedValue();
@@ -365,6 +382,10 @@ describe('Hosted Harness no-tool session', () => {
     state.toolResults = null;
     state.assertWritable.mockReset();
     state.assertWritable.mockResolvedValue(undefined);
+    state.authorizeLifecycle.mockReset();
+    state.authorizeLifecycle.mockResolvedValue(undefined);
+    state.authorizeOrdinary.mockReset();
+    state.authorizeOrdinary.mockResolvedValue(undefined);
     state.model.mockReset();
     state.publicationRequest.mockReset();
     state.model.mockImplementation(async () => ({
@@ -375,6 +396,266 @@ describe('Hosted Harness no-tool session', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it.each(['close', 'delete'] as const)(
+    'settles %s lifecycle Hooks once and retains the attachment until detach',
+    async (kind) => {
+      const { server, authorize, requests, release } = await hookApp();
+      const operation = {
+        kind,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        authority: { operationId: 'op-l3', claimGeneration: 1 },
+      };
+      const first = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      ).send(operation);
+      expect(first.status).toBe(200);
+      expect(
+        first.body.effects.map((effect: { event: string }) => effect.event),
+      ).toEqual(
+        kind === 'close' ? ['SessionEnd'] : ['SessionEnd', 'SessionDelete'],
+      );
+      expect(release).not.toHaveBeenCalled();
+      const retry = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      ).send({
+        ...operation,
+        authority: { ...operation.authority, claimGeneration: 2 },
+      });
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(first.body);
+      expect(
+        requests
+          .filter((request) => request.kind === 'hook-execute')
+          .map((request) => request.input.hook_event_name),
+      ).toEqual(
+        kind === 'close' ? ['SessionEnd'] : ['SessionEnd', 'SessionDelete'],
+      );
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({})
+        .expect(409);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({ authority: { operationId: 'op-l3', claimGeneration: 2 } })
+        .expect(204);
+      expect(release).toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the legacy close admission for an attached protocol zero Session with Hooks', async () => {
+    const { server, authorize, requests } = await hookApp();
+    state.authorizeOrdinary.mockImplementation(async (kind) => {
+      if (kind !== 'legacy-close') throw new Error('Ordinary admission closed');
+    });
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({})
+      .expect(409);
+    await authorize(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+    expect(state.authorizeOrdinary).toHaveBeenLastCalledWith('legacy-close');
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd', 'SessionDelete']);
+  });
+
+  it('resumes the undispatched Delete Hook after revocation without cancelling or repeating End', async () => {
+    const { server, authorize, requests } = await hookApp();
+    let permitted = true;
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (request) => {
+      const result = await original(request);
+      if (request.kind === 'hook-execute') permitted = false;
+      return result;
+    });
+    vi.mocked(
+      HostedWorkspaceBroker.prototype.authorizeLifecycle,
+    ).mockImplementation(async () => {
+      if (!permitted) throw new Error('ACL revoked');
+    });
+    const operation = {
+      kind: 'delete',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'op-revoked', claimGeneration: 1 },
+    };
+    const first = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+    ).send(operation);
+    expect(first.status).toBe(503);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd']);
+    vi.mocked(
+      HostedWorkspaceBroker.prototype.authorizeLifecycle,
+    ).mockResolvedValue();
+    const retry = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+    ).send({
+      ...operation,
+      authority: { ...operation.authority, claimGeneration: 2 },
+    });
+    expect(retry.status).toBe(200);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd', 'SessionDelete']);
+    expect(
+      requests.filter((request) => request.kind === 'hook-cancel'),
+    ).toHaveLength(0);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'op-revoked', claimGeneration: 2 } })
+      .expect(204);
+  });
+
+  it('waits for an async End child to settle before dispatching Delete', async () => {
+    const { server, authorize, requests } = await hookApp(true);
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    let endSettled = false;
+    control.mockImplementation(async (request) => {
+      if (
+        !endSettled &&
+        (request.kind === 'hook-status' ||
+          (request.kind === 'hook-execute' &&
+            request.input.hook_event_name === HookEventName.SessionEnd))
+      ) {
+        requests.push(request);
+        return { operationId: request.operationId, state: 'running' };
+      }
+      return original(request);
+    });
+    const operation = {
+      kind: 'delete',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'async-end', claimGeneration: 1 },
+    };
+    try {
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send(operation)
+        .expect(503);
+      expect(
+        requests
+          .filter((request) => request.kind === 'hook-execute')
+          .map((request) => request.input.hook_event_name),
+      ).toEqual(['SessionEnd']);
+    } finally {
+      endSettled = true;
+    }
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        ...operation,
+        authority: { operationId: 'async-end', claimGeneration: 2 },
+      })
+      .expect(200);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd', 'SessionDelete']);
+    expect(
+      requests.filter((request) => request.kind === 'hook-cancel'),
+    ).toEqual([]);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'async-end', claimGeneration: 2 } })
+      .expect(204);
+  });
+
+  it('allows the valid operation after an invalid lifecycle claim is rejected', async () => {
+    const { server, authorize, requests } = await hookApp();
+    state.authorizeLifecycle.mockRejectedValueOnce(new Error('stale claim'));
+    const operation = {
+      kind: 'close',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'invalid', claimGeneration: 1 },
+    };
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send(operation)
+      .expect(503);
+    expect(requests).toHaveLength(0);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        ...operation,
+        kind: 'delete',
+        authority: { operationId: 'valid', claimGeneration: 2 },
+      })
+      .expect(200);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd', 'SessionDelete']);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
+      .expect(204);
+  });
+
+  it('keeps an unknown End blocked without cancelling or redispatching it on takeover', async () => {
+    const { server, authorize, requests } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (request) => {
+      if (request.kind === 'hook-catalog') return original(request);
+      requests.push(request);
+      return { operationId: request.operationId, state: 'outcome_unknown' };
+    });
+    const operation = {
+      kind: 'delete',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'unknown-delete', claimGeneration: 1 },
+    };
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send(operation)
+      .expect(503);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        ...operation,
+        authority: { ...operation.authority, claimGeneration: 2 },
+      })
+      .expect(503);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input.hook_event_name),
+    ).toEqual(['SessionEnd']);
+    expect(
+      requests.filter((request) => request.kind === 'hook-cancel'),
+    ).toHaveLength(0);
+    expect(state.model).not.toHaveBeenCalled();
+    control.mockImplementation(original);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({
+        authority: { operationId: 'unknown-delete', claimGeneration: 2 },
+      })
+      .expect(204);
   });
 
   it('refuses a new prompt while the journal close is still sealing', async () => {
@@ -7089,7 +7370,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   /** Captured per parked turn so tests can assert which loads acquire the
    * Runtime lease: a cold load never does, a passive takeover adopts it. */
-  let acquireSpy: ReturnType<typeof vi.spyOn>;
+  let acquireSpy: MockInstance<HostedWorkspaceBroker['acquire']>;
 
   beforeEach(async () => {
     resetManagedRuntimeDispatchGatesForTest();

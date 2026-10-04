@@ -243,7 +243,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Void> drainBinding(RuntimeBindingRecord saved) {
         if (saved.getState() == RuntimeBindingRecord.State.RELEASED) {
-            return CompletableFuture.completedFuture(null);
+            return saved.getDrainReceipt() != null || saved.hasStoppedWriters()
+                    ? CompletableFuture.completedFuture(null)
+                    : failed(conflict("workspace_close_identity_unverified", "Released binding has no original stop proof"));
         }
         if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop()
                 || saved.getState() == RuntimeBindingRecord.State.OPERATOR_RECOVERY
@@ -365,11 +367,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<RuntimeBindingRecord> warm(
             String harnessSessionId) {
+        return warm(harnessSessionId, null);
+    }
+
+    public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen();
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        return resolveScope(harnessId)
+        return resolveScope(harnessId, authority)
                 .thenCompose(scope -> ensureBinding(
                         provisionRequest(scope, harnessId)))
                 .thenApply(BindingContext::record);
@@ -378,6 +384,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<RuntimeSessionRecord> acquire(
             String harnessSessionId, String runtimeSessionId,
             String turnKind) {
+        return acquire(harnessSessionId, runtimeSessionId, turnKind, null);
+    }
+
+    public CompletionStage<RuntimeSessionRecord> acquire(String harnessSessionId, String runtimeSessionId,
+            String turnKind, RuntimeLifecycleAuthority authority) {
         requireOpen();
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
@@ -390,6 +401,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return current.thenApply(context -> {
                 context.lock();
                 try {
+                    bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessId, authority);
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
                     return requireReadySessionRecord(context);
@@ -398,15 +410,66 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
             });
         }
-        return resolveScope(harnessId).thenCompose(scope -> {
+        return resolveScope(harnessId, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
             return acquireSession(session);
         });
     }
 
+    public CompletionStage<RuntimeSessionRecord> acquireRecovery(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation) {
+        requireOpen();
+        RuntimeBindingRecord original = bindingRepository.findById(bindingId);
+        if (original == null || original.getGeneration() != generation
+                || !harnessSessionId.equals(original.getRequest().getIsolationKey())
+                || !"session".equals(original.getRequest().getScope().getIsolationClass())
+                || original.getState() != RuntimeBindingRecord.State.READY) {
+            return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is unavailable"));
+        }
+        RuntimeSessionRecord saved = sessionRepository.findById(original.getRequest().getScope(), runtimeSessionId);
+        if (saved == null || !harnessSessionId.equals(saved.getSession().getHarnessSessionId())
+                || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation
+                || saved.getState() != RuntimeSessionRecord.State.READY) {
+            return failed(conflict("workspace_close_identity_unverified", "Original Hook Session is unavailable"));
+        }
+        CompletionStage<RuntimeBindingRecord> recovered = matchingLiveBinding(original) == null
+                ? recoverBinding(bindingId, generation, true) : CompletableFuture.completedFuture(original);
+        return recovered.thenApply(record -> {
+            if (record.getState() != RuntimeBindingRecord.State.READY || !record.sameIdentity(original)) {
+                throw conflict("workspace_close_identity_unverified", "Original Hook Runtime cannot be recovered");
+            }
+            BindingContext live = requireLiveBinding(record);
+            var context = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), record, live.lease()));
+            var existing = sessions.putIfAbsent(runtimeSessionId, context);
+            if (existing != null) {
+                SessionContext current = existing.join();
+                requireSameSession(current.session(), saved.getSession());
+                if (!current.binding().sameIdentity(original)) {
+                    throw conflict("workspace_close_identity_unverified", "Hook Runtime identity changed");
+                }
+            }
+            return saved;
+        });
+    }
+
+    public CompletionStage<RuntimeScope> authorizeLifecycle(String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        if (authority == null) {
+            return failed(conflict("runtime_lifecycle_authority_required", "Lifecycle authority is required"));
+        }
+        return resolveScope(harnessSessionId, authority).thenApply(scope -> {
+            bindingRepository.requireHarnessAdmission(scope, harnessSessionId, authority);
+            return scope;
+        });
+    }
+
     public CompletionStage<Object> control(String harnessSessionId,
             String runtimeSessionId, Map<String, Object> operation) {
+        return control(harnessSessionId, runtimeSessionId, operation, null);
+    }
+
+    public CompletionStage<Object> control(String harnessSessionId,
+            String runtimeSessionId, Map<String, Object> operation, RuntimeLifecycleAuthority authority) {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
@@ -421,6 +484,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (ManagedHookProtocol.isOperation(immutable)) {
                         ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
+                    boolean recovery = ManagedMcpProtocol.isRecovery(immutable) || ManagedHookProtocol.isRecovery(immutable);
+                    if (!recovery) {
+                        if (authority != null && !ManagedHookProtocol.isOperation(immutable)) {
+                            throw conflict("runtime_lifecycle_operation_invalid", "Only Hook control may use lifecycle authority");
+                        }
+                        if (ManagedHookProtocol.isOperation(immutable)) {
+                            bindingRepository.requireHookAdmission(context.session().getScope(), harnessSessionId, authority);
+                        } else {
+                            bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, authority);
+                        }
+                    }
                     context.lock();
                     try {
                         requireReadySessionRecord(context);
@@ -433,7 +507,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         requireUsableLease(context);
                         result = mapFailure(safeStage(() ->
                                 transport.control(context.lease(),
-                                        context.session(), immutable)),
+                                        authority == null && context.session().getScope().getLifecycleAuthority() == null ? context.session()
+                                                : new RuntimeSession(context.session().getHarnessSessionId(), context.session().getRuntimeSessionId(),
+                                                        context.session().getTurnKind(), context.session().getScope().withLifecycleAuthority(authority)), immutable)),
                                 "runtime_control_failed",
                                 "Runtime control operation failed");
                     } catch (RuntimeException | Error failure) {
@@ -1607,6 +1683,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return selected.thenApply(context -> {
             context.lock();
             try {
+                bindingRepository.requireHarnessAdmission(session.getScope(), session.getHarnessSessionId(),
+                        session.getScope().getLifecycleAuthority());
                 requireSameSession(context.session(), session);
                 return requireReadySessionRecord(context);
             } finally {
@@ -1685,6 +1763,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<BindingContext> ensureBinding(
             RuntimeProvisionRequest request) {
         RuntimeBindingRecord record = bindingRepository.findOrCreate(request);
+        if (request.getScope().getLifecycleAuthority() != null
+                && (record.getState() == RuntimeBindingRecord.State.LOST
+                        || record.getState() == RuntimeBindingRecord.State.DRAINING
+                        || record.getState() == RuntimeBindingRecord.State.RELEASED)) {
+            return failed(conflict("workspace_close_identity_unverified", "Original lifecycle Runtime is unavailable"));
+        }
         if (record.getState() == RuntimeBindingRecord.State.READY) {
             CompletableFuture<BindingContext> finishing =
                     bindingOperations.get(record.getBindingId());
@@ -1760,7 +1844,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (existing != null) {
             return existing;
         }
-        safeStage(() -> provisionBinding(record)).whenComplete(
+        safeStage(() -> provisionBinding(record, request.getScope().getLifecycleAuthority())).whenComplete(
                 (context, error) -> {
                     bindingOperations.remove(record.getBindingId(), created);
                     if (error == null) {
@@ -1773,14 +1857,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<BindingContext> provisionBinding(
-            RuntimeBindingRecord record) {
-        RuntimeBindingRecord claimed = bindingRepository.claimOperation(
+            RuntimeBindingRecord record, RuntimeLifecycleAuthority authority) {
+        RuntimeBindingRecord savedClaim = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId,
                 operationLeaseDuration);
-        if (claimed == null) {
+        if (savedClaim == null) {
             return failed(unavailable("runtime_provisioning_in_progress",
                     "another Broker owns Runtime provisioning"));
         }
+        RuntimeBindingRecord claimed = savedClaim.withLifecycleAuthority(authority);
         if (claimed.getState()
                 != RuntimeBindingRecord.State.PROVISIONING) {
             if (claimed.getState() == RuntimeBindingRecord.State.READY
@@ -2598,6 +2683,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
     public CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration) {
+        return recoverBinding(bindingId, expectedGeneration, false);
+    }
+
+    private CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
         requireOpen();
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
         if (record == null || record.getGeneration() != expectedGeneration
@@ -2606,9 +2695,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         // Close owns retirement after journal settlement. Observing its retired
         // registration as journal loss would erase the clean-stop boundary.
-        if (record.getState() != RuntimeBindingRecord.State.LOST
+        if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST
                 && "session".equals(record.getRequest().getScope().getIsolationClass())
-                && bindingRepository.isHarnessDraining(record.getRequest().getScope().getTenantId(),
+                && bindingRepository.isHarnessAdmissionClosed(record.getRequest().getScope().getTenantId(),
                         record.getRequest().getIsolationKey())) {
             return CompletableFuture.completedFuture(record);
         }
@@ -2635,13 +2724,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (claimed == null || claimed.getGeneration() != expectedGeneration) {
                 return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
             }
-            if (claimed.getState() != RuntimeBindingRecord.State.LOST
+            if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST
                     && "session".equals(claimed.getRequest().getScope().getIsolationClass())
-                    && bindingRepository.isHarnessDraining(claimed.getRequest().getScope().getTenantId(),
+                    && bindingRepository.isHarnessAdmissionClosed(claimed.getRequest().getScope().getTenantId(),
                             claimed.getRequest().getIsolationKey())) {
                 return CompletableFuture.completedFuture(claimed);
             }
             if (claimed.getState() == RuntimeBindingRecord.State.LOST) {
+                if (lookupOnly) {
+                    return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is lost"));
+                }
                 return cleanupLost(claimed);
             }
             if (!canReconcile(claimed) && claimed.getState() != RuntimeBindingRecord.State.DRAINING) {
@@ -2653,6 +2745,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         RuntimeBindingRecord current = renewRecoveryClaim(claimed);
                         if (observed == null) {
                             return CompletableFuture.completedFuture(current);
+                        }
+                        if (lookupOnly && observed.getOutcome() != RuntimeObservation.Outcome.READY) {
+                            return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is unverified"));
                         }
                         if (observed.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
                                 && observed.getLossEvidence() != null) {
@@ -2887,6 +2982,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
+        bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
         if (payload == null && ("deferred".equals(prepared.getReference().get("dispatchMode"))
                 || "deferred_v3".equals(prepared.getReference().get("dispatchMode")))
                 && !prepared.isCancelRequested()) {
@@ -3629,10 +3725,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         provisioner.close();
     }
 
+    private CompletionStage<RuntimeScope> resolveScope(String harnessSessionId) {
+        return resolveScope(harnessSessionId, null);
+    }
+
     private CompletionStage<RuntimeScope> resolveScope(
-            String harnessSessionId) {
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
         return mapFailure(safeStage(
-                () -> sessionResolver.resolve(harnessSessionId)),
+                () -> sessionResolver.resolve(harnessSessionId, authority)),
                 "runtime_scope_resolution_failed",
                 "Runtime scope resolution failed").thenApply(scope -> {
                     if (scope == null) {

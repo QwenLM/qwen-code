@@ -288,7 +288,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
-            Context context = context(lease, session, !recovery);
+            Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -333,9 +333,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {
+        return context(lease, session, authorize, false);
+    }
+
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean hook) {
         ContextBinding binding;
         if (authorize) {
-            var resolved = resolver.resolve(session.getHarnessSessionId());
+            var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
+                    : resolver.resolve(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
             if (!resolved.scope().equals(session.getScope())) {
                 throw WorkspaceExecutionStore.unavailable();
             }

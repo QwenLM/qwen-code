@@ -130,6 +130,76 @@ public class ManagedSessionStore {
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
+    private WorkspaceExecutionStore lifecycleExecution;
+    private AgentStateStore lifecycleSessions;
+
+    @Autowired(required = false)
+    public void setLifecycleExecution(WorkspaceExecutionStore execution, AgentStateStore sessions) {
+        this.lifecycleExecution = execution;
+        this.lifecycleSessions = sessions;
+    }
+
+    @Transactional
+    public void authorizeLifecycle(String tenantId, String sessionId, String writerToken,
+            ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenantId, sessionId);
+        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        if (request.kind() != null) {
+            String kind = jdbc.queryForObject("SELECT operation_kind FROM managed_agent_operation WHERE tenant_id = ?"
+                    + " AND session_id = ? AND operation_id = ?", String.class, tenantId, sessionId, authority.operationId());
+            if (!kind.toLowerCase(java.util.Locale.ROOT).equals(request.kind())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
+            }
+        } else if (!"DRAINING".equals(jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain"
+                + " WHERE tenant_id = ? AND harness_session_id = ?", String.class, tenantId, sessionId))) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+        }
+        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+    }
+
+    private void checkLifecycleWriter(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        if (authority != null) {
+            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        }
+    }
+
+    @Transactional
+    public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
+            ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
+            requireOrdinaryAdmission(tenantId, sessionId);
+        }
+        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+    }
+
+    private void requireOrdinaryAdmission(String tenantId, String sessionId) {
+        if (lifecycleFenced(tenantId, sessionId)) {
+            throw conflict("managed_session_lifecycle_active", "Ordinary execution admission is closed.");
+        }
+    }
+
+    private boolean lifecycleFenced(String tenantId, String sessionId) {
+        return !jdbc.queryForList("SELECT phase FROM qwen_runtime_harness_drain WHERE tenant_id = ?"
+                + " AND harness_session_id = ? FOR UPDATE", tenantId, sessionId).isEmpty();
+    }
+
+    private boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
+        return !jdbc.queryForList("SELECT operation_id FROM qwen_runtime_harness_drain WHERE tenant_id = ?"
+                + " AND harness_session_id = ? AND operation_id IS NOT NULL FOR UPDATE", tenantId, sessionId).isEmpty();
+    }
+
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;
@@ -178,6 +248,18 @@ public class ManagedSessionStore {
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
+        return acquireWriter(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
+            AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        checkLifecycleWriter(tenantId, sessionId, authority);
+        if (authority != null) {
+            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
+        } else {
+            requireOrdinaryAdmission(tenantId, sessionId);
+        }
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -188,7 +270,7 @@ public class ManagedSessionStore {
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
                 (row, index) -> row.getString("status"), tenantId, sessionId);
-        if (!closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
+        if (authority == null && !closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
             throw conflict("managed_session_not_writable", "The Session is closing or closed.");
         }
         String tokenHash = tokenHash(writerToken);
@@ -272,6 +354,13 @@ public class ManagedSessionStore {
     @Transactional
     public WriterGrant renewWriter(String tenantId, String sessionId,
             String writerToken, RenewWriterRequest request) {
+        return renewWriter(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
+            RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -298,6 +387,13 @@ public class ManagedSessionStore {
     @Transactional
     public SealReceipt sealWriter(String tenantId, String sessionId,
             String writerToken, SealWriterRequest request) {
+        return sealWriter(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
+            SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -368,6 +464,13 @@ public class ManagedSessionStore {
     @Transactional
     public CommitReceipt commit(String tenantId, String sessionId,
             String writerToken, CommitTransactionRequest request) {
+        return commit(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public CommitReceipt commit(String tenantId, String sessionId, String writerToken,
+            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -392,6 +495,24 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
+        if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
+                resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId))) {
+            if (lifecycleExecution == null || lifecycleSessions == null) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            }
+            try {
+                lifecycleExecution.authorizeLifecycle(lifecycleSessions.requireSession(tenantId, sessionId), authority);
+            } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException refusal) {
+                if (refusal.getStatusCode() == 409 && "workspace_unavailable".equals(refusal.getCode())) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_authorization_revoked");
+                }
+                throw refusal;
+            }
+        }
+        if (authority == null && lifecycleProtocolFenced(tenantId, sessionId)) {
+            extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
+                    resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId));
+        }
         var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
