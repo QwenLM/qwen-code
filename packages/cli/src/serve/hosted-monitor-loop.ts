@@ -7,6 +7,7 @@
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import { monitorNotificationText } from './hosted-monitor-notification.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -16,7 +17,8 @@ import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-r
 // the idle timeout, or the watch ending. The executor is injected: the
 // managed-runtime worker's cgroup watch plugs in behind this interface, and
 // tests drive the loop with a fake executor and fake timers. Notification
-// composition and the wake it raises stay with the next increment. See
+// composition is the Legacy task-notification envelope; the embedded
+// scheduler that consumes the wake it raises is the next increment. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
 export const MONITOR_DEBOUNCE_FLOOR_MS = 1000;
@@ -266,13 +268,31 @@ export class HostedMonitorLoop {
     lines: readonly string[],
   ): Promise<ManagedSessionInputRequest> {
     const inputId = `${this.monitorId}:notify:${sequence}`;
+    const args = this.params?.args ?? {};
+    const description =
+      typeof args['description'] === 'string' && args['description'].trim()
+        ? (args['description'] as string)
+        : typeof args['command'] === 'string'
+          ? (args['command'] as string)
+          : this.monitorId;
     return {
       inputId,
       turnId: inputId,
       source: 'monitor',
       contentRef: await this.monitors.resourceStore.publish(
         'managed-input',
-        Buffer.from(JSON.stringify({ text: lines.join('\n') }), 'utf8'),
+        Buffer.from(
+          JSON.stringify({
+            text: monitorNotificationText({
+              monitorId: this.monitorId,
+              toolUseId: this.params?.executionCallId ?? null,
+              description,
+              eventCount: sequence,
+              lines,
+            }),
+          }),
+          'utf8',
+        ),
       ),
       deadline: null,
       admissionRef: await this.monitors.resourceStore.publish(

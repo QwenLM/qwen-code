@@ -272,7 +272,19 @@ describe('HostedMonitorLoop', () => {
           await harness.store.read(events[1].payload['contentRef'] as never)
         ).toString(),
       ),
-    ).toEqual({ text: 'built\ntested' });
+    ).toEqual({
+      text: [
+        '<task-notification>',
+        '<task-id>monitor-1</task-id>',
+        '<tool-use-id>call-monitor-1</tool-use-id>',
+        '<kind>monitor</kind>',
+        '<status>running</status>',
+        '<event-count>1</event-count>',
+        '<summary>Monitor "tail -f build.log" emitted event #1.</summary>',
+        '<result>built\ntested</result>',
+        '</task-notification>',
+      ].join('\n'),
+    });
     await closeLoop(rig);
   });
 
