@@ -3763,9 +3763,18 @@ describe('Session', () => {
     );
   });
 
-  it.each(['agent', 'task', core.ToolNames.TOOL_CALL])(
-    'forces the active todo reminder due when a %s tool result returns',
-    async (agentToolName) => {
+  it.each([
+    ['agent', 'success'],
+    ['task', 'success'],
+    [core.ToolNames.TOOL_CALL, 'success'],
+    [core.ToolNames.TOOL_CALL, 'cancelled'],
+    [core.ToolNames.TOOL_CALL, 'pre_execution_cancelled'],
+    [core.ToolNames.TOOL_CALL, 'validation_error'],
+  ] as const)(
+    'accounts for delegated work when a %s tool result returns (%s)',
+    async (agentToolName, outcome) => {
+      const notStarted =
+        outcome === 'validation_error' || outcome === 'pre_execution_cancelled';
       const reminder =
         '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
       // Mimic the real budget: nothing is due under the ordinary cadence
@@ -3773,9 +3782,10 @@ describe('Session', () => {
       vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
         (_promptId: string, force = false) => (force ? reminder : undefined),
       );
-      const execute = vi.fn().mockResolvedValue({
-        llmContent: 'agent done',
-        returnDisplay: 'agent done',
+      const cancellation = new AbortController();
+      const execute = vi.fn().mockImplementation(async () => {
+        if (outcome === 'cancelled') cancellation.abort();
+        return { llmContent: 'agent done', returnDisplay: 'agent done' };
       });
       const agentTool = {
         name:
@@ -3793,13 +3803,21 @@ describe('Session', () => {
         build: vi.fn().mockReturnValue({
           params: {},
           execute,
-          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDefaultPermission: vi.fn().mockImplementation(async () => {
+            if (outcome === 'pre_execution_cancelled') cancellation.abort();
+            return 'allow';
+          }),
           getDescription: vi.fn().mockReturnValue('Agent'),
           toolLocations: vi.fn().mockReturnValue([]),
         }),
         canUpdateOutput: false,
         isOutputMarkdown: true,
       };
+      if (outcome === 'validation_error') {
+        agentTool.build.mockImplementation(() => {
+          throw new Error('invalid delegation arguments');
+        });
+      }
       mockToolRegistry.getTool.mockReturnValue(agentTool);
       if (agentToolName === core.ToolNames.TOOL_CALL) {
         const { ToolCallTool } = await import(
@@ -3854,20 +3872,80 @@ describe('Session', () => {
         )
         .mockResolvedValueOnce(createEmptyStream());
 
+      if (outcome !== 'success') {
+        const internals = session as unknown as {
+          runToolCalls: Session['runToolCalls'];
+        };
+        const produced = await internals.runToolCalls(
+          cancellation.signal,
+          'producer-prompt',
+          [
+            {
+              id: 'call-agent-1',
+              name: agentToolName,
+              args: { name: core.ToolNames.AGENT, arguments: {} },
+            },
+          ],
+        );
+        const {
+          DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+          DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+        } = await import('@qwen-code/qwen-code-core/tools/tool-call.js');
+        const error = (
+          produced.parts[0]?.functionResponse?.response as
+            | { error?: string }
+            | undefined
+        )?.error;
+        expect(error).toEqual(expect.any(String));
+        expect(produced.repeatedToolFailureBatch?.observations).toEqual([
+          expect.objectContaining({
+            policyToolName: core.ToolNames.AGENT,
+            executionStatus: notStarted ? 'not_started' : 'cancelled',
+          }),
+        ]);
+        if (outcome === 'validation_error') {
+          expect(error).toBe(
+            `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}invalid delegation arguments`,
+          );
+        } else if (outcome === 'pre_execution_cancelled') {
+          expect(
+            error?.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX),
+          ).toBe(true);
+        } else {
+          expect(
+            error?.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX),
+          ).toBe(false);
+        }
+        // Feed the actual producer result through a fresh, un-aborted turn:
+        // parent cancellation otherwise ends the turn before this consumer.
+        vi.spyOn(internals, 'runToolCalls').mockResolvedValueOnce(produced);
+      }
+
       await session.prompt({
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'delegate the work' }],
       });
 
-      expect(execute).toHaveBeenCalledTimes(1);
-      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
-        'test-session-id########1',
-        true,
-      );
+      expect(execute).toHaveBeenCalledTimes(notStarted ? 0 : 1);
+      if (notStarted) {
+        expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalledWith(
+          'test-session-id########1',
+          true,
+        );
+      } else {
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'test-session-id########1',
+          true,
+        );
+      }
       const toolResultCall = vi
         .mocked(mockChat.sendMessageStream)
         .mock.calls.at(-1)?.[1] as { message: Part[] };
-      expect(textParts(toolResultCall.message)).toContain(reminder);
+      if (notStarted) {
+        expect(textParts(toolResultCall.message)).not.toContain(reminder);
+      } else {
+        expect(textParts(toolResultCall.message)).toContain(reminder);
+      }
     },
   );
 

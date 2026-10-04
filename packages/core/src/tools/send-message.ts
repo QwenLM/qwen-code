@@ -524,6 +524,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
         "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} ` +
+        'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
         'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.',
       Kind.Other,

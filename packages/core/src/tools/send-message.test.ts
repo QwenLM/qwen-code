@@ -125,6 +125,9 @@ describe('SendMessageTool — team mode', () => {
     expect(noTeamTool().description).toContain(
       'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
+    expect(noTeamTool().description).toContain(
+      'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id.',
+    );
   });
 
   it('describes text invisibility as peer-only for teammates', () => {

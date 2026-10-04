@@ -9243,14 +9243,7 @@ export class Session implements SessionContext {
       toolRun.repeatedToolFailureBatch?.observations.some(
         (observation) =>
           canonicalToolName(observation.policyToolName ?? '') ===
-            ToolNames.AGENT &&
-          // Match the core client's exclusion: a cancelled (or refused)
-          // bridged call means nothing was delegated, so it must not force
-          // the reminder. The observation carries no error text, so the
-          // prefix check is not available here; 'cancelled' is the
-          // observable half of it.
-          observation.executionStatus !== 'not_started' &&
-          observation.executionStatus !== 'cancelled',
+            ToolNames.AGENT && observation.executionStatus !== 'not_started',
       );
     const activeTodoReminder = carriesAgentToolResult
       ? this.config.takeActiveTodoReminder(promptId, true)
@@ -13594,11 +13587,13 @@ export class Session implements SessionContext {
     ) => {
       const durationMs = Date.now() - startTime;
       const modelFacingError =
-        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+        status === 'cancelled' &&
+        modelFacingToolName === ToolNames.TOOL_CALL &&
+        executionStatus === 'not_started'
           ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
           : status === 'error' &&
               modelFacingToolName === ToolNames.TOOL_CALL &&
-              toolName === ToolNames.TOOL_CALL &&
+              executionStatus === 'not_started' &&
               !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
             ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
             : error.message;
