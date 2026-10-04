@@ -68,6 +68,7 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
+  wakeHasPriorAttempt,
 } from './hosted-monitor-wake.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -886,10 +887,13 @@ async function recoverShellReceipts(
   const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
   let currentPrompt: string | null = null;
   for (const event of events) {
-    if (event.kind === 'input.accepted' && !isMonitorInput(event)) {
+    if (event.kind === 'input.accepted') {
       const turnId = event.payload['turnId'];
       if (typeof turnId === 'string') {
-        pending.add(turnId);
+        // A wake turn's receipts belong to its own turnId like any
+        // prompt's, even though the pending set deliberately never sees a
+        // monitor notification as a parked Turn.
+        if (!isMonitorInput(event)) pending.add(turnId);
         currentPrompt = turnId;
       }
     }
@@ -1748,6 +1752,24 @@ export function registerHostedHarnessSessionRoutes(
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
           runTurn: async (turn) => {
             if (wakeBusy() || session.blocked) return 'busy';
+            if (
+              wakeHasPriorAttempt(
+                await session.managed.sink.project(),
+                turn.turnId,
+              )
+            ) {
+              // The notification ran and died inside the turn it started.
+              // Re-driving it text-only would mint a second user record and
+              // an unanswered first call in the model's history, so it is
+              // for the recovery fleet, never for the pump.
+              session.blocked = true;
+              writeStderrLineSafe(
+                'qwen serve: Monitor wake turn ' +
+                  turn.turnId +
+                  ' needs recovery, not a re-drive.',
+              );
+              return 'settled';
+            }
             const abort = new AbortController();
             session.active = { promptId: turn.turnId, digest: '', abort };
             try {

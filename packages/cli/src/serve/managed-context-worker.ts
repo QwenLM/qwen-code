@@ -265,6 +265,9 @@ export function registerManagedContextRoutes(
     ? ManagedChildRunSupervisor.create({ cgroupRoot })
     : undefined;
   const backgroundRegistry = new ManagedBackgroundShellRegistry();
+  // One monitor registry shared by executor and maintenance routes: a
+  // private second instance could only ever answer unknown.
+  const monitorRegistry = new ManagedMonitorRegistry();
   const executor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -300,6 +303,7 @@ export function registerManagedContextRoutes(
     hooks,
     backgroundSupervisor,
     backgroundRegistry,
+    monitorRegistry,
   );
   registerManagedShellRoutes(
     app,
@@ -309,7 +313,7 @@ export function registerManagedContextRoutes(
   registerManagedMonitorRoutes(
     app,
     boot,
-    new ManagedMonitorRuntime(new ManagedMonitorRegistry()),
+    new ManagedMonitorRuntime(monitorRegistry),
   );
   registerManagedRuntimeProviderRoute(
     app,

@@ -29,6 +29,20 @@ export interface HostedMonitorWakeTurn {
 
 export type HostedMonitorWakeState = 'idle' | 'busy' | 'blocked';
 
+/**
+ * Whether the wake turn's id already carries durable history. A previous
+ * attempt that reached the transcript and died there left work behind —
+ * exactly what its recovery paths own — while a fresh text re-drive would
+ * mint a second user record and hand the model a transcript whose first
+ * attempt's call was never answered.
+ */
+export function wakeHasPriorAttempt(
+  entries: ReadonlyArray<{ readonly daemonPromptId?: string }>,
+  turnId: string,
+): boolean {
+  return entries.some((entry) => entry.daemonPromptId === turnId);
+}
+
 export interface HostedMonitorWakeDeps {
   /**
    * The oldest pending monitor notification with its envelope text, or

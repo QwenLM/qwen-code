@@ -17,6 +17,7 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
+  wakeHasPriorAttempt,
   type HostedMonitorWakeTurn,
 } from './hosted-monitor-wake.js';
 
@@ -201,6 +202,14 @@ describe('HostedMonitorWakeScheduler', () => {
     scheduler.close();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(ran).toEqual([]);
+  });
+});
+
+describe('wakeHasPriorAttempt', () => {
+  it('knows an attempt by its wake turn id', () => {
+    expect(wakeHasPriorAttempt([{ daemonPromptId: 'm:1' }], 'm:1')).toBe(true);
+    expect(wakeHasPriorAttempt([{ daemonPromptId: 'm:1' }], 'm:2')).toBe(false);
+    expect(wakeHasPriorAttempt([], 'm:1')).toBe(false);
   });
 });
 
