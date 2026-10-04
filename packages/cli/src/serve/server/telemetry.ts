@@ -730,6 +730,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
+        suffix === '/workspace/trust/grant' ||
         suffix === '/workspace/init' ||
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
@@ -841,6 +842,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/trust/request') {
     return { route: 'POST /workspace/trust/request' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/grant') {
+    return { route: 'POST /workspace/trust/grant' };
   }
   if (path === '/workspace/voice') {
     if (req.method === 'GET') return { route: 'GET /workspace/voice' };
