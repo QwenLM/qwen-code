@@ -146,6 +146,41 @@ describe('Feishu inbound file storage', () => {
     expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
   });
 
+  it.each([
+    { input: '../../a/b.pdf', expected: 'b.pdf' },
+    {
+      input: '..\\..\\win.pdf',
+      expected: process.platform === 'win32' ? 'win.pdf' : '__.._win.pdf',
+    },
+    { input: '.bashrc', expected: '_bashrc' },
+    { input: '///', expected: /^feishu_file_\d+$/ },
+    { input: 'report (final)\n.pdf', expected: 'report__final__.pdf' },
+    { input: 'report\0.pdf', expected: 'report.pdf' },
+  ])(
+    'stores $input inside its own message directory',
+    async ({ input, expected }) => {
+      receive({
+        content: JSON.stringify({ file_key: 'file_1', file_name: input }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
+      expect(attachment).toBeDefined();
+      if (typeof expected === 'string') {
+        expect(attachment!.fileName).toBe(expected);
+      } else {
+        expect(attachment!.fileName).toMatch(expected);
+      }
+      const filePath = attachment!.filePath!;
+      expect(dirname(filePath)).toBe(vi.mocked(mkdirSync).mock.calls[0]![0]);
+      expect(dirname(dirname(filePath))).toBe(join(directory, 'channel-files'));
+      expect(readFileSync(filePath)).toEqual(Buffer.from(bytes));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    },
+  );
+
   it.skipIf(process.platform === 'win32').each([0o022, 0o000])(
     'keeps stored files private under umask %i',
     async (umask) => {
@@ -199,28 +234,106 @@ describe('Feishu inbound file storage', () => {
     },
   );
 
-  it('still delivers the fallback when partial-file cleanup fails', async () => {
+  it.each(['mkdir', 'write'])(
+    'retries failed immediate cleanup after a partial %s failure',
+    async (stage) => {
+      const actualFs =
+        await vi.importActual<typeof import('node:fs')>('node:fs');
+      if (stage === 'mkdir') {
+        vi.mocked(mkdirSync).mockImplementationOnce((path, options) => {
+          actualFs.mkdirSync(path, options);
+          throw new Error('ENOSPC');
+        });
+      } else {
+        vi.mocked(writeFileSync).mockImplementationOnce(
+          (path, _data, options) => {
+            actualFs.writeFileSync(path, 'partial', options);
+            throw new Error('ENOSPC');
+          },
+        );
+      }
+      vi.mocked(rmSync).mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
+
+      receive();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(rmSync).toHaveBeenCalledTimes(1);
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('ENOSPC'));
+      expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('EBUSY'));
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch.mock.calls[0]![0]).toMatchObject({
+        text: '(User sent media but download failed)',
+        syntheticText: true,
+      });
+      expect(dispatch.mock.calls[0]![0].attachments).toBeUndefined();
+      const messageDir = vi.mocked(mkdirSync).mock.calls[0]![0];
+      expect(existsSync(messageDir)).toBe(true);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(rmSync).toHaveBeenCalledTimes(1);
+      expect(existsSync(messageDir)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(rmSync).toHaveBeenCalledTimes(2);
+      expect(rmSync).toHaveBeenLastCalledWith(messageDir, {
+        recursive: true,
+        force: true,
+      });
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    },
+  );
+
+  it('keeps cleanup ownership when a stopped failed store cannot be removed', async () => {
     const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
     vi.mocked(writeFileSync).mockImplementationOnce((path, _data, options) => {
       actualFs.writeFileSync(path, 'partial', options);
+      Object.assign(channel, { stoppedMessages: new Set(['inbound-file']) });
       throw new Error('ENOSPC');
     });
-    vi.mocked(rmSync).mockImplementationOnce(() => {
-      throw new Error('EBUSY');
+    vi.mocked(rmSync)
+      .mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
+
+    receive();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(rmSync).toHaveBeenCalledTimes(2);
+    expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(rmSync).toHaveBeenCalledTimes(3);
+    expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+  });
+
+  it('bounds and sanitizes local-store error diagnostics by code point', async () => {
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC\n\u001b[2K\r' + '😀'.repeat(2000));
     });
 
     receive();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(rmSync).toHaveBeenCalledTimes(1);
-    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('ENOSPC'));
-    expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('EBUSY'));
+    expect(stderr).toHaveBeenCalledTimes(1);
+    const prefix =
+      '[Feishu:test] Cannot store file, delivering the text without it: ';
+    const log = String(stderr.mock.calls[0]![0]);
+    expect(log.startsWith(prefix)).toBe(true);
+    expect(log.endsWith('\n')).toBe(true);
+    const diagnostic = log.slice(prefix.length, -1);
+    expect(diagnostic).toContain('ENOSPC\\n [2K ');
+    expect(diagnostic).not.toContain('\u001b');
+    expect(diagnostic).not.toContain('\r');
+    expect(diagnostic).not.toContain('\n');
+    expect(Array.from(diagnostic)).toHaveLength(301);
+    expect(diagnostic.endsWith('😀')).toBe(true);
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch.mock.calls[0]![0]).toMatchObject({
-      text: '(User sent media but download failed)',
-      syntheticText: true,
-    });
-    expect(dispatch.mock.calls[0]![0].attachments).toBeUndefined();
+    expect(dispatch.mock.calls[0]![0].text).toBe(
+      '(User sent media but download failed)',
+    );
   });
 
   it('preserves quoted text when replacing the failed file placeholder', async () => {
@@ -255,7 +368,7 @@ describe('Feishu inbound file storage', () => {
     expect(dispatch.mock.calls[0]![0].attachments).toBeUndefined();
   });
 
-  it('leaves user-authored text unchanged', async () => {
+  it('does not touch the file store for a plain text message', async () => {
     receive({
       message_type: 'text',
       content: JSON.stringify({ text: 'Please summarize the report.' }),

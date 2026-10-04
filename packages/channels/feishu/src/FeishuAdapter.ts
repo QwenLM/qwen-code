@@ -2779,7 +2779,7 @@ export class FeishuChannel extends ChannelBase {
                     try {
                       rmSync(dir, { recursive: true, force: true });
                     } catch {
-                      /* best-effort cleanup */
+                      downloadedFileDir = dir;
                     }
                     process.stderr.write(
                       `[Feishu:${this.name}] Cannot store file, delivering the text without it: ${sanitizeLogText(
@@ -2807,10 +2807,10 @@ export class FeishuChannel extends ChannelBase {
               if (downloadedFileDir) {
                 try {
                   rmSync(downloadedFileDir, { recursive: true, force: true });
+                  downloadedFileDir = undefined;
                 } catch {
                   /* best-effort cleanup */
                 }
-                downloadedFileDir = undefined;
               }
               return false;
             }
