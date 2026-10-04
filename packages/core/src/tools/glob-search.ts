@@ -42,13 +42,40 @@ export async function searchGlobDirectory(
   signal: AbortSignal,
 ): Promise<{ entries: GlobPath[]; hitLimit: boolean }> {
   const {
-    searchDir,
+    searchDir: requestedSearchDir,
     pattern,
     entryLimit,
-    projectRoot,
+    projectRoot: requestedProjectRoot,
     fileFilteringOptions,
     containmentRoot,
   } = options;
+  const realpaths = new Map<string, string | null>();
+  const realpathOf = (target: string): string | null => {
+    let real = realpaths.get(target);
+    if (real === undefined) {
+      try {
+        real = fs.realpathSync(target);
+      } catch {
+        real = null;
+      }
+      realpaths.set(target, real);
+    }
+    return real;
+  };
+  const root =
+    containmentRoot === undefined
+      ? undefined
+      : (realpathOf(containmentRoot) ?? containmentRoot);
+  // Start below the real directory: `follow: false` cannot recursively walk
+  // a search root that is itself a symlink. Keep the caller's output spelling.
+  const searchDir =
+    root === undefined
+      ? requestedSearchDir
+      : (realpathOf(requestedSearchDir) ?? requestedSearchDir);
+  const projectRoot =
+    root === undefined
+      ? requestedProjectRoot
+      : (realpathOf(requestedProjectRoot) ?? requestedProjectRoot);
   let effectivePattern = pattern;
   const fullPath = path.join(searchDir, effectivePattern);
   if (fs.existsSync(fullPath)) {
@@ -94,24 +121,9 @@ export async function searchGlobDirectory(
   // lexical path leaves the root, and a file reached through a symlinked
   // directory has a parent whose realpath does. Pruning both keeps an
   // outside entry from being walked, reported or counted.
-  const root = containmentRoot;
-  const realpaths = new Map<string, string | null>();
-  const realpathOf = (target: string): string | null => {
-    let real = realpaths.get(target);
-    if (real === undefined) {
-      try {
-        real = fs.realpathSync(target);
-      } catch {
-        real = null;
-      }
-      realpaths.set(target, real);
-    }
-    return real;
-  };
   const escapesRoot = (full: string, self: boolean): boolean => {
     if (root === undefined) return false;
     if (!isPathWithinRoot(full, root)) return true;
-    const realRoot = realpathOf(root) ?? root;
     // Judge a listed entry by its parent's realpath, so a merely listed
     // outward symlink (a venv's `bin/python`) stays visible; judge a
     // directory about to be entered by its own.
@@ -123,7 +135,7 @@ export async function searchGlobDirectory(
             ? null
             : path.join(parent, path.basename(full));
         })();
-    return real === null || !isPathWithinRoot(real, realRoot);
+    return real === null || !isPathWithinRoot(real, root);
   };
 
   const isAllowedByFileFilters = (entry: GlobPath): boolean => {
@@ -160,7 +172,18 @@ export async function searchGlobDirectory(
       hitLimit = true;
       break;
     }
-    entries.push(entry);
+    entries.push(
+      searchDir === requestedSearchDir
+        ? entry
+        : {
+            fullpath: () =>
+              path.join(
+                requestedSearchDir,
+                path.relative(searchDir, entry.fullpath()),
+              ),
+            mtimeMs: entry.mtimeMs,
+          },
+    );
   }
   if (hitLimit) {
     stream.destroy?.();

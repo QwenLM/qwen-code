@@ -91,6 +91,32 @@ describe('bounded Glob search (real worker)', () => {
       executionTimeoutMs,
     });
 
+  it('finds the same files through real and symlinked search paths', async () => {
+    const realRoot = await fs.realpath(root);
+    const alias = path.join(temporary, 'session-alias');
+    await fs.symlink(realRoot, alias, 'junction');
+    const aliasTool = new GlobTool(
+      {
+        ...config,
+        getTargetDir: () => alias,
+        getWorkspaceContext: () => createMockWorkspaceContext(realRoot),
+        getFileService: () => new FileDiscoveryService(alias),
+      } as unknown as Config,
+      { containmentRoot: alias, executionTimeoutMs: 10_000 },
+    );
+    for (const searchPath of [undefined, alias]) {
+      const result = await aliasTool
+        .build({ pattern: '**/safe.ts', path: searchPath })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(
+        await Promise.all(
+          (result.collectedFilePaths ?? []).map((file) => fs.realpath(file)),
+        ),
+      ).toEqual([path.join(realRoot, 'safe.ts')]);
+    }
+  });
+
   it.each(['+(?|?|?)Z', '*?'.repeat(20) + 'Z'])(
     'terminates expensive matching for %s and permits the next search',
     async (pattern) => {

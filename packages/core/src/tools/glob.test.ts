@@ -795,6 +795,34 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain(path.join(session, 'peek'));
     });
 
+    it.each([false, true])(
+      'finds files with a symlinked root (explicit path: %s)',
+      async (explicitPath) => {
+        const realSession = await fs.realpath(session);
+        const alias = path.join(tempRootDir, 'session-alias');
+        await fs.symlink(realSession, alias, 'junction');
+        const tool = new GlobTool(
+          {
+            ...mockConfig,
+            getTargetDir: () => alias,
+            getWorkspaceContext: () => createMockWorkspaceContext(realSession),
+            getFileService: () => new FileDiscoveryService(alias),
+          } as unknown as Config,
+          { containmentRoot: alias },
+        );
+        const result = await run(
+          { pattern: '**/*.ts', ...(explicitPath ? { path: alias } : {}) },
+          tool,
+        );
+        expect(result.error).toBeUndefined();
+        expect(
+          await Promise.all(
+            (result.collectedFilePaths ?? []).map((file) => fs.realpath(file)),
+          ),
+        ).toEqual([path.join(realSession, 'src/index.ts')]);
+      },
+    );
+
     it('leaves the ordinary tool able to search outside', async () => {
       const result = await run({
         pattern: '[.][.]/web/secret.txt',
