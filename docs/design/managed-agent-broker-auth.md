@@ -266,7 +266,7 @@ New configuration `qwen.managed-agent.internal-server`:
 
 ### 4.4 Durable Session ownership for approvals (G4)
 
-- Flyway `V35__managed_session_creator.sql`:
+- Flyway `V36__managed_session_creator.sql`:
   `ALTER TABLE managed_agent_session ADD COLUMN creator_actor_key
 VARBINARY(2048) NULL;` (same type as
   `managed_workspace_create_command.actor_id`).
@@ -329,7 +329,7 @@ for loopback deployments without a binding key.
 - Rolling out `signed` mode on the public surface requires a proxy or
   sidecar that holds the signing key in front of browser traffic; the
   signature recipe is the three-header form pinned in §4.1.
-- Existing databases migrate with V35; pre-migration Sessions keep working
+- Existing databases migrate with V36; pre-migration Sessions keep working
   through the legacy ownership fallback.
 
 ## 6. Risks and mitigations
@@ -386,7 +386,7 @@ for loopback deployments without a binding key.
    broker refuses to start.
 4. A hosted Session's approval can be answered over HTTP by its creator
    and by no other actor; a Session with no recorded creator (anonymous
-   open-mode creation, or created before V35) answers to any caller in its
+   open-mode creation, or created before V36) answers to any caller in its
    tenant, matching its read ACL; pre-migration workspace Sessions keep
    their current behavior.
 5. `createHttpManagedSessionStores({ baseUrl: 'http://<non-loopback>' })`
