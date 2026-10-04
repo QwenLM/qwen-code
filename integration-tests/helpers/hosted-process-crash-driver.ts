@@ -164,7 +164,7 @@ const proxy = createServer(async (req, res) => {
         // writer fence rejecting it is the designed outcome, not a failure.
         if (store && killedWriters.has(fields.writerId)) {
           assert.equal(
-            json.code,
+            json?.error?.code,
             'managed_session_writer_conflict',
             `${url}: ${bytes}`,
           );
