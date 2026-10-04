@@ -354,10 +354,9 @@ export class ToolRegistry {
    */
   getPermissionAliases(name: string): readonly string[] | undefined {
     const tool = this.tools.get(name);
-    if (tool instanceof DiscoveredMCPTool && tool.permissionAliases.length) {
-      return tool.permissionAliases;
-    }
-    return undefined;
+    if (!(tool instanceof DiscoveredMCPTool)) return undefined;
+    const aliases = tool.permissionAliases;
+    return aliases.length ? aliases : undefined;
   }
 
   /**
@@ -400,23 +399,16 @@ export class ToolRegistry {
     serverName: string;
     serverToolName: string;
   }> {
-    const identities = new Map<
-      string,
-      { serverName: string; serverToolName: string }
-    >();
-    for (const tool of [...this.tools.values(), ...this.mcpAppTools.values()]) {
+    const tools = new Map(this.mcpAppTools);
+    for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredMCPTool) {
-        const identity = {
-          serverName: tool.serverName,
-          serverToolName: tool.serverToolName,
-        };
-        identities.set(
-          JSON.stringify([identity.serverName, identity.serverToolName]),
-          identity,
-        );
+        tools.set(JSON.stringify([tool.serverName, tool.serverToolName]), tool);
       }
     }
-    return [...identities.values()];
+    return Array.from(tools.values(), ({ serverName, serverToolName }) => ({
+      serverName,
+      serverToolName,
+    }));
   }
 
   /**

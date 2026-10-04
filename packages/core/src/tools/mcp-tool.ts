@@ -1241,19 +1241,12 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * all.
    */
   get permissionAliases(): readonly string[] {
-    const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
-    const legacyName = generateLegacyMcpToolName(rawName);
-    const legacyVouchesForServer =
-      legacyName.length === rawName.length ||
-      legacyReductionVouchesForServer(this.serverName);
-    return [
-      ...(rawName === this.name ? [] : [rawName]),
-      ...(legacyName === this.name ||
-      legacyName === rawName ||
-      !legacyVouchesForServer
-        ? []
-        : [legacyName]),
-    ];
+    const rawLength = `mcp__${this.serverName}__${this.serverToolName}`.length;
+    return this.disabledToolAliases.filter(
+      (alias) =>
+        alias.length === rawLength ||
+        legacyReductionVouchesForServer(this.serverName),
+    );
   }
 
   /**
@@ -1265,7 +1258,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * over-match there is the documented, permitted fail-closed side (see
    * docs/design/mcp-tool-name-provider-compatibility.md) — so withholding
    * the reduction would silently re-register tools a pre-normalization
-   * entry disabled (R4-2 e2). This channel never feeds permission matching.
+   * entry disabled (R4-2 e2). Permission aliases filter this base list through
+   * the provenance gate above.
    */
   get disabledToolAliases(): readonly string[] {
     const rawName = `mcp__${this.serverName}__${this.serverToolName}`;

@@ -667,15 +667,14 @@ export class AgentCore {
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
 
-    const isDisallowed = (name: string): boolean =>
-      this.toolConfig?.disallowedTools?.some((pattern) =>
-        matchesToolPattern(
-          pattern,
-          name,
-          toolRegistry.getPermissionAliases?.(name),
-          toolRegistry.getMcpToolIdentity?.(name),
-        ),
-      ) === true;
+    const isDisallowed = (name: string): boolean => {
+      if (!this.toolConfig?.disallowedTools?.length) return false;
+      const aliases = toolRegistry.getPermissionAliases?.(name);
+      const identity = toolRegistry.getMcpToolIdentity?.(name);
+      return this.toolConfig.disallowedTools.some((pattern) =>
+        matchesToolPattern(pattern, name, aliases, identity),
+      );
+    };
 
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
       const stringTools =
@@ -818,18 +817,7 @@ export class AgentCore {
 
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
-      const disallowed = this.toolConfig.disallowedTools;
-      return toolsList.filter((t) => {
-        if (!t.name) return true;
-        return !disallowed.some((pattern) =>
-          matchesToolPattern(
-            pattern,
-            t.name!,
-            toolRegistry.getPermissionAliases?.(t.name!),
-            toolRegistry.getMcpToolIdentity?.(t.name!),
-          ),
-        );
-      });
+      return toolsList.filter((t) => !t.name || !isDisallowed(t.name));
     }
 
     return toolsList;

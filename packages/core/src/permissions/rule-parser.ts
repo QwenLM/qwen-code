@@ -1669,8 +1669,7 @@ export interface McpToolIdentity {
  * from a flattened tool name, which cannot tell server `foo` from `foo_`
  * (R4-2).
  */
-function mcpSegmentSpellings(serverName: string, rawOnly = false): string[] {
-  if (rawOnly) return [serverName];
+function mcpSegmentSpellings(serverName: string): string[] {
   return [
     serverName,
     serverName.replace(/[^A-Za-z0-9_-]/g, '_'),
@@ -1702,8 +1701,7 @@ function mcpSegmentSpellings(serverName: string, rawOnly = false): string[] {
  * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
  * registered spelling a literal comparison runs against *is* that reduction.
  * PermissionManager rejects ambiguous grants against the live registry via
- * `hasAmbiguousMcpGrant`; raw-only matching here identifies rules that do not
- * depend on a lossy spelling. Restrictive callers keep the compatibility match.
+ * `hasAmbiguousMcpGrant`. Restrictive callers keep the compatibility match.
  * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
  * `disallowedTools`, which is why the gates thread the alias channel (the
  * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
@@ -1714,7 +1712,6 @@ export function matchesMcpPattern(
   rawToolName?: string,
   toolAliases?: readonly string[],
   mcpIdentity?: McpToolIdentity,
-  rawOnly = false,
 ): boolean {
   if (pattern === toolName) {
     return true;
@@ -1771,10 +1768,7 @@ export function matchesMcpPattern(
       // `foo`) are the same string family under startsWith, and a tool whose
       // name starts with '_' reads as separator continuation there. The rule
       // may name its server in any of that key's own spellings.
-      const serverSpellings = mcpSegmentSpellings(
-        mcpIdentity.serverName,
-        rawOnly,
-      );
+      const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
       const segments = prefix.split('__');
       const boundary = serverSpellings
         .map((spelling) => `mcp__${spelling}__`)
@@ -1802,8 +1796,8 @@ export function matchesMcpPattern(
       if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
         return (
           serverSpellings.includes(segments[1] ?? '') &&
-          mcpSegmentSpellings(mcpIdentity.serverToolName, rawOnly).some(
-            (spelling) => spelling.startsWith(toolPrefix),
+          mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
+            spelling.startsWith(toolPrefix),
           )
         );
       }
@@ -1822,8 +1816,8 @@ export function matchesMcpPattern(
         toolPrefix === '' ||
         (registeredToolSegment !== undefined &&
           registeredToolSegment.startsWith(toolPrefix)) ||
-        mcpSegmentSpellings(mcpIdentity.serverToolName, rawOnly).some(
-          (spelling) => spelling.startsWith(toolPrefix),
+        mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
+          spelling.startsWith(toolPrefix),
         )
       );
     }
@@ -1849,7 +1843,7 @@ export function matchesMcpPattern(
       // server `foo` can never reach server `foo_`'s tools and vice versa.
       // The rule may name the server in any of that key's own spellings — the
       // config key, the registered provider-safe rendering, or the legacy one.
-      return mcpSegmentSpellings(mcpIdentity.serverName, rawOnly).includes(
+      return mcpSegmentSpellings(mcpIdentity.serverName).includes(
         patternParts[1] ?? '',
       );
     }
@@ -1878,35 +1872,16 @@ export function hasAmbiguousMcpGrant(
   registeredIdentities: readonly McpToolIdentity[],
 ): boolean {
   const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
-  if (matchesMcpPattern(pattern, rawName, rawName, undefined, identity, true)) {
-    return false;
-  }
-
-  // A unique exact registration is already an authority; a shortened alias is not.
-  if (
-    pattern === normalizeMcpToolName(rawName) &&
-    !registeredIdentities.some(
-      (other) =>
-        (other.serverName !== identity.serverName ||
-          other.serverToolName !== identity.serverToolName) &&
-        normalizeMcpToolName(
-          `mcp__${other.serverName}__${other.serverToolName}`,
-        ) === pattern,
-    )
-  ) {
-    return false;
-  }
-
+  const rawGrant = matchesMcpPattern(pattern, rawName, rawName);
+  const registeredName = normalizeMcpToolName(rawName);
+  const rawBoundary = `mcp__${identity.serverName}__`;
   const prefix = pattern.endsWith('*') ? pattern.slice(0, -1) : undefined;
   const matchesSpelling = (spelling: string): boolean =>
     prefix === undefined ? pattern === spelling : spelling.startsWith(prefix);
   const serverAliases = mcpSegmentSpellings(identity.serverName).filter(
     (spelling) => spelling !== identity.serverName,
   );
-  const toolSpellings = [
-    normalizeMcpToolName(rawName),
-    generateLegacyMcpToolName(rawName),
-  ];
+  const toolSpellings = [registeredName, generateLegacyMcpToolName(rawName)];
 
   return registeredIdentities.some((other) => {
     if (
@@ -1914,6 +1889,24 @@ export function hasAmbiguousMcpGrant(
       other.serverToolName === identity.serverToolName
     ) {
       return false;
+    }
+    if (rawGrant) {
+      // A lettered tool prefix can flatten foo's leading underscores into
+      // foo_'s server boundary. A whole-server rule keeps its own authority.
+      return (
+        prefix !== undefined &&
+        prefix !== rawBoundary &&
+        prefix.startsWith(rawBoundary) &&
+        prefix.startsWith(`mcp__${other.serverName}__`) &&
+        identity.serverName.startsWith(other.serverName) &&
+        /^_+$/.test(identity.serverName.slice(other.serverName.length))
+      );
+    }
+    const otherRawName = `mcp__${other.serverName}__${other.serverToolName}`;
+    const otherRegisteredName = normalizeMcpToolName(otherRawName);
+    // A unique exact registration is an authority; a shortened alias is not.
+    if (pattern === registeredName) {
+      return otherRegisteredName === pattern;
     }
     if (
       other.serverName !== identity.serverName &&
@@ -1929,10 +1922,9 @@ export function hasAmbiguousMcpGrant(
     ) {
       return true;
     }
-    const otherRawName = `mcp__${other.serverName}__${other.serverToolName}`;
     const otherSpellings = [
       otherRawName,
-      normalizeMcpToolName(otherRawName),
+      otherRegisteredName,
       generateLegacyMcpToolName(otherRawName),
     ];
     return toolSpellings.some(
@@ -2191,22 +2183,25 @@ export function matchesRule(
       toolAliases,
     );
     const matchesMcpName =
-      matchesMcpPattern(
-        rule.toolName,
-        canonicalCtxToolName,
-        rawMcpToolName,
-        toolAliases,
-        mcpIdentity,
-      ) ||
-      matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName) ||
-      (restrictive &&
-        canonicalCtxToolName.startsWith('mcp__') &&
-        (matchesRestrictiveMcpName(rule.toolName, mcpIdentity) ||
-          matchesRestrictiveRegisteredPrefix(
+      restrictive && canonicalCtxToolName.startsWith('mcp__')
+        ? matchesToolPattern(
             rule.toolName,
             canonicalCtxToolName,
+            toolAliases,
             mcpIdentity,
-          )));
+          )
+        : matchesMcpPattern(
+            rule.toolName,
+            canonicalCtxToolName,
+            rawMcpToolName,
+            toolAliases,
+            mcpIdentity,
+          ) ||
+          matchesAdvertisedExactName(
+            rule.toolName,
+            toolAliases,
+            rawMcpToolName,
+          );
     if (!matchesMcpName) {
       return false;
     }
