@@ -33,7 +33,8 @@
     "config.bound",
     "lifecycle.changed",
     "domain.committed",
-    "message.delta"
+    "message.delta",
+    "message.retracted"
   ],
   "sessionKey": {
     "tenantId": "tenant-fixture",
