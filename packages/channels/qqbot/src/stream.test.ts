@@ -2972,7 +2972,7 @@ describe('send path route reporting', () => {
     vi.useRealTimers();
   });
 
-  it('flushAndTrack drops an unresolvable route with only the resolveRoute diagnostic', async () => {
+  it('reports an unresolvable route through the permanent-failure arm, not as a delivered send', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
@@ -2986,12 +2986,22 @@ describe('send path route reporting', () => {
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
     expect(streamState(ch).has('s1')).toBe(false);
-    // flushAndTrack itself stays silent (no delivery-failure log, no retry):
-    // the one line is resolveRoute's, so the drop remains traceable.
-    expect(stderrSpy).toHaveBeenCalledTimes(1);
-    expect(String(stderrSpy.mock.calls[0]![0])).toContain(
-      'resolveRoute: no chat type for test-chat, dropping message',
-    );
+    // The block is permanent, so flushAndTrack takes its permanent-failure
+    // teardown instead of recording the send as delivered. resolveRoute's own
+    // diagnostic stays, so the drop is traceable either way.
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      logged.some((c) =>
+        c.includes(
+          'resolveRoute: no chat type for test-chat, dropping message',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      logged.some((c) =>
+        c.includes('idleFlush delivery failed (FALLBACK_FAILED)'),
+      ),
+    ).toBe(true);
     stderrSpy.mockRestore();
   });
 });
@@ -7971,6 +7981,49 @@ describe('round-1 robustness pins', () => {
       'dropping 9 chars of sealed head',
     );
     stderrSpy.mockRestore();
+  });
+
+  it('re-buffers a transiently blocked idle flush and delivers it on the retry', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    const realResolveRoute = chp['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    // The first idle flush hits a route that a later token refresh can clear;
+    // it resolves to a block instead of throwing (resolveRoute's transient
+    // class). The retry then resolves a usable route.
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls === 1) return { block: 'transient' };
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    onResponseChunk(ch, 'test-chat', 'blocked payload', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // The blocked flush never reached the wire, so it must not be recorded as
+    // delivered; the payload stays buffered for the retry.
+    expect(routeCalls).toBe(1);
+    expect(flushedSessions.has('s1')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const state = streamState(ch).get('s1');
+    expect(state?.buffer).toBe('blocked payload');
+    expect((state as unknown as { retryCount: number }).retryCount).toBe(1);
+
+    // The retry's route resolves, so the text reaches the wire.
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'blocked payload' } },
+    );
   });
 
   it('bounds a completion send by its own ceiling when maxFlushRetries is unlimited', async () => {

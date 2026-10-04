@@ -4598,6 +4598,151 @@ describe('replyMsgId cleanup timer', () => {
       vi.useRealTimers();
     });
 
+    it('re-buffers a route-blocked flush instead of marking the session flushed (transient)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      chp['accessToken'] = 'test-token';
+
+      // An idle flush drains the buffer, so the payload exists only in the
+      // in-flight send. A blocked route resolves without throwing, and the
+      // delivered arm would delete the entry and record the payload as sent.
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+        // The live turn's generation (turnCounter is empty → 0), so
+        // onResponseComplete takes the residual-buffer path rather than the
+        // stale-entry path.
+        turn: 0,
+      };
+      const streamState = chp['streamState'] as Map<string, typeof state>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      streamState.set('sess-1', state);
+
+      // A failed token refresh resolves as 'transient' (resolveRoute does not
+      // throw); the completion attempt below then resolves a real route.
+      let routeCalls = 0;
+      chp['resolveRoute'] = async () => {
+        routeCalls++;
+        if (routeCalls === 1) return { block: 'transient' };
+        return {
+          base: 'https://api.sgroup.qq.com',
+          path: '/v2/users/test-chat-id/messages',
+        };
+      };
+      mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // (a) The payload never reached the wire, so the session must not be
+      // recorded as flushed — flushedSessions is what makes
+      // onResponseComplete skip its fullText fallback.
+      expect(flushedSessions.has('sess-1')).toBe(false);
+      // (b) The payload is re-buffered for the retry instead of being lost.
+      expect(streamState.get('sess-1')!.buffer).toBe('FULL-REPLY-TEXT');
+      expect(state.retryCount).toBe(1);
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      // (c) The completion therefore still delivers the payload.
+      await (
+        chp['onResponseComplete'] as (
+          chatId: string,
+          fullText: string,
+          sessionId: string,
+        ) => Promise<void>
+      )('test-chat-id', '', 'sess-1');
+
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendQQMessage).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        '/v2/users/test-chat-id/messages',
+        'test-token',
+        { msg_type: 2, markdown: { content: 'FULL-REPLY-TEXT' } },
+      );
+
+      vi.useRealTimers();
+    });
+
+    it('takes the permanent teardown for a route-blocked flush (permanent)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+        turn: 0,
+        // The only other copy of the sealed head: the boundary cleared the
+        // bridge's collection, so a silent wipe loses it for good.
+        sealedPre: 'HEAD',
+      };
+      const streamState = chp['streamState'] as Map<string, typeof state>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { text: string; pre?: string }
+      >;
+      streamState.set('sess-1', state);
+      // A live turn, so handOffSealedPre re-stashes the head for this turn's
+      // completion instead of taking the deliver-now path.
+      (chp['activePromptSessions'] as Set<string>).add('sess-1');
+
+      chp['resolveRoute'] = async () => ({ block: 'permanent' });
+      const handOffSpy = vi.spyOn(
+        QQChannel.prototype as unknown as {
+          handOffSealedPre: (...args: unknown[]) => void;
+        },
+        'handOffSealedPre',
+      );
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The permanent class drops the entry with a loss log; no retry is armed
+      // and the session is not recorded as flushed.
+      expect(streamState.has('sess-1')).toBe(false);
+      expect(state.retryCount).toBe(0);
+      expect(state.timer).toBeNull();
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('test delivery failed (FALLBACK_FAILED)');
+      expect(logged).toContain(
+        'outgoing route permanently blocked for test-chat-id',
+      );
+      // The sealed head is handed off (not silently wiped) before the delete.
+      expect(handOffSpy).toHaveBeenCalledTimes(1);
+      expect(orphanBuffer.get('sess-1')?.pre).toBe('HEAD');
+      expect(flushedSessions.has('sess-1')).toBe(false);
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      handOffSpy.mockRestore();
+      stderrSpy.mockRestore();
+      vi.useRealTimers();
+    });
+
     // These rows assert against the private maps `flushAndTrack` owns
     // (streamState, sessionReplyMsgId, msgSeqMap, inFlightMsgSeqSends) and spy
     // on its send point, rather than driving a full protocol turn: the

@@ -479,6 +479,98 @@ describe('cronTextHandler', () => {
     expect(calls.some((c) => c.includes('Cron flush retry failed'))).toBe(true);
     stderrSpy.mockRestore();
   });
+
+  it('re-buffers a route-blocked cron flush instead of silently dropping it (transient)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // A failed token refresh resolves as 'transient' (resolveRoute does not
+    // throw); the retry attempt then resolves a usable route.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls === 1) return { block: 'transient' };
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-blocked', 'blocked cron text');
+    await flushSetImmediate();
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      {
+        buffer: string;
+        timer: unknown;
+        pendingRetry?: string;
+        retryCount?: number;
+      }
+    >;
+    expect(cronBuffer.has('sess-blocked')).toBe(true);
+
+    // The flush timer fires; the blocked send must not delete the entry (the
+    // success body would, because the buffer was already cleared) — the
+    // payload must be parked for retry.
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(cronBuffer.has('sess-blocked')).toBe(true);
+    expect(cronBuffer.get('sess-blocked')!.pendingRetry).toBe(
+      'blocked cron text',
+    );
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush send error',
+    );
+
+    // 5s retry delay; the retry's route resolves and the text reaches the wire.
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(cronBuffer.has('sess-blocked')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'blocked cron text' } },
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a route-blocked cron flush with a loss log, not silently (permanent)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+    pvt['resolveRoute'] = async () => ({ block: 'permanent' });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-perm', 'permanent blocked text');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    // Permanent: the entry is dropped, but through the .catch() arm that names
+    // the loss instead of the success body's silent delete.
+    expect(cronBuffer.has('sess-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush send error');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------

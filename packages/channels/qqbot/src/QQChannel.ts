@@ -109,8 +109,9 @@ interface QQReplyContext {
  * (channel disposed, unusable chatId, no chat type for the chat). Reported by
  * sendMessageWithReplyContext, which returns undefined when the text did reach
  * the wire (including a deliberate `<noreply>` suppression). Callers that
- * cannot treat "no exception" as delivered act on it; the streaming path
- * ignores it, preserving its silent-drop behaviour.
+ * cannot treat "no exception" as delivered act on it; the streaming and cron
+ * flush paths route a block through their delivery-failure arms, so a
+ * route-blocked send is never recorded as delivered.
  */
 type SendBlock = 'transient' | 'permanent';
 
@@ -676,7 +677,20 @@ export class QQChannel extends ChannelBase {
           const target = this.router.getTarget(sessionId);
           if (target) {
             this.sendMessageWithReplyContext(target.chatId, toFlush)
-              .then(() => {
+              .then((blocked) => {
+                // A route-blocked send resolves without reaching the wire (see
+                // resolveRoute), so the success body below would delete the
+                // entry and silently lose toFlush. Route the block into the
+                // .catch() below, which already retries a transient block and
+                // drops a permanent one with a log.
+                if (blocked !== undefined) {
+                  throw blocked === 'permanent'
+                    ? new DeliveryError(
+                        'FALLBACK_FAILED',
+                        `outgoing route permanently blocked for ${target.chatId}`,
+                      )
+                    : new Error('outgoing route unresolved');
+                }
                 if (!entry!.buffer && this.cronBuffer.get(sessionId) === entry)
                   this.cronBuffer.delete(sessionId);
               })
@@ -2194,7 +2208,24 @@ export class QQChannel extends ChannelBase {
       state.msgId,
       state.msgIdTimestamp,
     )
-      .then(() => {
+      .then((blocked) => {
+        // A route-blocked send resolves without throwing and never reached the
+        // wire (resolveRoute classifies a failed token refresh as 'transient'),
+        // so running the delivery arm below would record this payload as
+        // delivered: flushedSessions would make onResponseComplete skip its
+        // fullText fallback, the sealed head would be cleared, and the operator
+        // would get no reply and no loss log. Route the block through the same
+        // arms a thrown DeliveryError uses — 'transient' re-buffers/retries
+        // under maxFlushRetries, 'permanent' takes the permanent-failure
+        // teardown. Neither may mark the session flushed.
+        if (blocked !== undefined) {
+          throw blocked === 'permanent'
+            ? new DeliveryError(
+                'FALLBACK_FAILED',
+                `outgoing route permanently blocked for ${state.chatId}`,
+              )
+            : new Error('outgoing route unresolved');
+        }
         // This send carried the sealed pre-boundary head (the drain folded it
         // into this buffer), so it must not be re-stashed by a later permanent
         // failure — onResponseComplete would prepend it and deliver a second
