@@ -61,22 +61,37 @@ const matchesRuleWith = (rule: string, tool: DiscoveredMCPTool) =>
     tool.permissionAliases,
   );
 
-function makeConfig(
+function makePm(
   opts: Partial<{
     permissionsAllow: string[];
     permissionsAsk: string[];
     permissionsDeny: string[];
   }> = {},
-): PermissionManagerConfig {
-  return {
+): PermissionManager {
+  const pm = new PermissionManager({
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
     getProjectRoot: () => '/project',
     getCwd: () => '/project',
     getApprovalMode: () => 'default',
-  } as PermissionManagerConfig;
+  } as PermissionManagerConfig);
+  pm.initialize();
+  return pm;
 }
+
+const aliasContext = (tool: DiscoveredMCPTool) => ({
+  toolName: tool.name,
+  toolAliases: tool.permissionAliases,
+});
+
+const producerContext = (tool: DiscoveredMCPTool) => ({
+  ...aliasContext(tool),
+  mcpIdentity: {
+    serverName: tool.serverName,
+    serverToolName: tool.serverToolName,
+  },
+});
 
 describe('MCP server rule collision (#10199 variant 1)', () => {
   it('does not match a foo_bar tool against a server-level foo.bar rule', () => {
@@ -88,10 +103,8 @@ describe('MCP server rule collision (#10199 variant 1)', () => {
   });
 
   it('still matches the dotted server own tools', () => {
-    // The raw identity arrives through the tool's advertised
-    // `permissionAliases`; with no alias channel a legacy unsafe spelling
-    // cannot be distinguished from a different server that merely sanitizes
-    // into the same prefix (#10199).
+    // Dotted rules need the raw alias to distinguish the configured key from
+    // its provider-safe sibling.
     expect(
       matchesMcpPattern(
         'mcp__foo.bar',
@@ -110,12 +123,7 @@ describe('MCP server rule collision (#10199 variant 1)', () => {
   });
 });
 
-// A bare `*` is not an MCP pattern. Dropping the `sanitizeToolNameForProvider`
-// reduction also dropped its letter-guard, which turned the empty prefix into
-// `tool_` -- a prefix no `mcp__` name starts with -- so `*` used to match no
-// MCP tool. Without the empty-prefix guard it matches every one of them, while
-// built-ins keep prompting, i.e. `permissions.allow: ['*']` silently
-// auto-approves exactly the tool class whose own default is `ask`.
+// Only `mcp__*` is an MCP match-all; an empty wildcard prefix must not grant.
 describe('bare "*" does not become an MCP match-all', () => {
   it('does not match MCP tools at any layer', () => {
     expect(matchesMcpPattern('*', SAFE_SERVER_TOOL)).toBe(false);
@@ -131,10 +139,7 @@ describe('bare "*" does not become an MCP match-all', () => {
   });
 });
 
-// The alias channel carries the exact raw identity the registered name lost,
-// ahead of the legacy spelling. These rows resolve the aliases through the
-// producer (`DiscoveredMCPTool.permissionAliases`), the way every production
-// caller receives them.
+// Use the real producer so alias publication is part of the contract.
 describe('the alias channel', () => {
   it('publishes the exact raw identity ahead of the legacy spelling', () => {
     const colonServerTool = prodTool('foo:bar', 'a'.repeat(45));
@@ -167,16 +172,9 @@ describe('the alias channel', () => {
     // spelling lost the `+`.
     expect(matchesRuleWith('mcp__foo.bar', tool)).toBe(true);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo.bar'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: ['mcp__foo.bar'] });
+
+    expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
   });
 
   it('threads aliases through matchesToolPattern (the blocklist predicate)', () => {
@@ -192,10 +190,7 @@ describe('the alias channel', () => {
 
   it('lets getToolRegistrationStatus disable a legacy-denied tool when the alias is supplied', async () => {
     const tool = prodTool('zybio.db', 'literature.search_pubmed');
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__zybio.db'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsDeny: ['mcp__zybio.db'] });
 
     expect(
       await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
@@ -207,20 +202,11 @@ describe('the alias channel', () => {
   });
 });
 
-// Every witness below was measured against the pre-fix matcher: each is a
-// rule written for one MCP server that the old reconstruction machinery let
-// a *different* server's tool satisfy (or vice versa). The fix publishes the
-// tool's exact raw identity through `permissionAliases` and compares
-// literally; nothing is hashed and nothing is reconstructed.
+// Different forgery shapes exercise hash imitation and a truncated server key.
 describe('cross-server forgery witnesses', () => {
   it('denies a verbatim registration whose tail imitates the hash of a dotted exact rule', async () => {
-    // Victim: `permissions.allow: ['mcp__foo.bar__evil']`, persisted before
-    // provider-safe names. Attacker: a server keyed `foo_bar` whose peer
-    // names its tool `evil_1oxrpi0`, where the tail is
-    // `stableToolNameHash('mcp__foo.bar__evil')` — one offline FNV-1a
-    // evaluation. The raw name is provider-safe, so it registers verbatim,
-    // byte-identical to the victim server's own registration, and advertises
-    // no alias.
+    // A safe server can choose a tool suffix equal to another raw name's hash.
+    // It then registers as the dotted victim without advertising a raw alias.
     const attacker = prodTool('foo_bar', 'evil_1oxrpi0');
     expect(attacker.name).toBe('mcp__foo_bar__evil_1oxrpi0');
     expect(attacker.name).toBe(DOTTED_SERVER_TOOL);
@@ -231,16 +217,9 @@ describe('cross-server forgery witnesses', () => {
       false,
     );
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__foo.bar__evil'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsAllow: ['mcp__foo.bar__evil'] });
+
+    expect(await pm.evaluate(aliasContext(attacker))).toBe('default');
   });
 
   it('denies a colon-keyed server imitating a dotted server', async () => {
@@ -258,24 +237,14 @@ describe('cross-server forgery witnesses', () => {
 
     expect(matchesRuleWith('mcp__foo.bar', attacker)).toBe(false);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__foo.bar'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsAllow: ['mcp__foo.bar'] });
+
+    expect(await pm.evaluate(aliasContext(attacker))).toBe('default');
   });
 
   it('does not let a middle-truncated alias reach a shorter server rule', async () => {
-    // `generateLegacyMcpToolName` cuts at slice(0, 28), so for any server key
-    // of 24+ characters the legacy alias's server segment is the key's first
-    // 23 characters and the injected `___` supplies the `__` separator a
-    // prefix match needs: a rule for `weather-forecast-server` used to reach
-    // this DIFFERENT server's tool through that alias.
+    // The legacy head window cuts the premium key down to the shorter key and
+    // injects a separator. That alias must not establish the shorter identity.
     const premium = prodTool(
       'weather-forecast-server-premium',
       'get_extended_forecast_for_next_week',
@@ -307,14 +276,8 @@ describe('cross-server forgery witnesses', () => {
       ),
     ).toBe(false);
 
-    // The rows above pass the production array, whose first element IS the exact
-    // raw identity, so `resolveRawMcpIdentity`'s `.find` answers with it and the
-    // lossy legacy alias is never considered — they cannot tell the vouching
-    // guard apart from taking the first alias blindly. Hand over a legacy-only
-    // array, which is what a caller publishing no exact raw identity would
-    // produce, and the guard becomes the only thing that can reject it: the
-    // alias does not vouch, and its injected `___` is exactly the `__` separator
-    // a prefix match needs. Under `return toolAliases?.[0]` both flip to true.
+    // Legacy-only input reaches the vouching guard rather than the first raw
+    // alias. Blindly accepting aliases[0] would admit the shorter server.
     expect(normalizeMcpToolName(legacyAlias)).not.toBe(premium.name);
     expect(legacyAlias.startsWith('mcp__weather-forecast-server__')).toBe(true);
     const legacyOnly = [legacyAlias];
@@ -339,16 +302,9 @@ describe('cross-server forgery witnesses', () => {
       ),
     ).toBe(false);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__weather-forecast-server'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: premium.name,
-        toolAliases: premium.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsAllow: ['mcp__weather-forecast-server'] });
+
+    expect(await pm.evaluate(aliasContext(premium))).toBe('default');
 
     // The tool's OWN server rule keeps matching.
     expect(
@@ -356,25 +312,15 @@ describe('cross-server forgery witnesses', () => {
     ).toBe(true);
   });
 
-  // Deny mirrors of the two witnesses above, pinning the cost side of the
-  // #10199 fix (R3-3): a forged registration that advertises no alias is out
-  // of reach of a legacy-spelled `permissions.deny` — the match is fail-open
-  // on the restrictive side. The mitigation is to write the deny in the
-  // registered spelling, which the control rows assert still bites.
+  // Legacy restrictions cannot identify a forged registration without a raw
+  // alias; the registered/raw controls pin the supported restriction path.
   it('pins the deny posture: a legacy-spelled deny does not reach a forged verbatim registration', async () => {
     const attacker = prodTool('foo_bar', 'evil_1oxrpi0');
     expect(attacker.permissionAliases).toEqual([]);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo.bar__evil'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsDeny: ['mcp__foo.bar__evil'] });
+
+    expect(await pm.evaluate(aliasContext(attacker))).toBe('default');
     expect(
       await pm.getToolRegistrationStatus(
         attacker.name,
@@ -383,57 +329,28 @@ describe('cross-server forgery witnesses', () => {
     ).toBe('registered');
 
     // Control: the same deny in the registered spelling still blocks it.
-    const registeredPm = new PermissionManager(
-      makeConfig({ permissionsDeny: [attacker.name] }),
-    );
-    registeredPm.initialize();
-    expect(
-      await registeredPm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('deny');
+    const registeredPm = makePm({ permissionsDeny: [attacker.name] });
+
+    expect(await registeredPm.evaluate(aliasContext(attacker))).toBe('deny');
   });
 
   it('pins the deny posture: a legacy-spelled server deny does not reach a colon-keyed forgery', async () => {
     const attacker = prodTool('foo:bar', 'evil[a b#c#d"e~f|x');
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo.bar'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsDeny: ['mcp__foo.bar'] });
+
+    expect(await pm.evaluate(aliasContext(attacker))).toBe('default');
 
     // Control: the deny written against the attacker's own raw identity
     // spelling still blocks it.
-    const rawPm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo:bar'] }),
-    );
-    rawPm.initialize();
-    expect(
-      await rawPm.evaluate({
-        toolName: attacker.name,
-        toolAliases: attacker.permissionAliases,
-      }),
-    ).toBe('deny');
+    const rawPm = makePm({ permissionsDeny: ['mcp__foo:bar'] });
+
+    expect(await rawPm.evaluate(aliasContext(attacker))).toBe('deny');
   });
 
-  // Known residual (variant 2, R2-6): a length-preserving legacy alias that
-  // reduces onto a DIFFERENT server's spelling still satisfies an exact
-  // 3-part entry. `foo:bar`'s tool registers with a hash suffix, but its
-  // advertised legacy spelling `mcp__foo_bar__evil_a_b_c_d_e_f_x` is the
-  // verbatim registered name of server `foo_bar`'s same-named tool — an
-  // entry naming that spelling matches both. The exact arm accepts any
-  // advertised alias; only the truncation gate (R12-1) restricts
-  // publication, and this reduction is lossless. Documented as accepted in
-  // the design doc's Rule-matching section; this row must go red if the arm
-  // is ever removed.
-  it('pins the lossy exact-alias cross-server match as a known residual (variant 2)', () => {
+  // The pure blocklist predicate retains shared legacy spellings. Grants
+  // separately check ambiguity against the live registry.
+  it('preserves shared exact legacy spellings for blocklist compatibility', () => {
     const attacker = prodTool('foo:bar', 'evil[a b#c#d"e~f|x');
     const sharedLegacySpelling = 'mcp__foo_bar__evil_a_b_c_d_e_f_x';
     expect(attacker.permissionAliases).toContain(sharedLegacySpelling);
@@ -464,16 +381,9 @@ describe('legacy-spelled deny coverage', () => {
       matchesToolPattern('mcp__foo:bar', tool.name, tool.permissionAliases),
     ).toBe(true);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo:bar'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: ['mcp__foo:bar'] });
+
+    expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
     expect(
       await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
     ).toBe('disabled');
@@ -491,37 +401,20 @@ describe('legacy-spelled deny coverage', () => {
     const rule = 'mcp__zybio.db__literature.search_*';
     expect(matchesRuleWith(rule, tool)).toBe(true);
 
-    const pm = new PermissionManager(makeConfig({ permissionsDeny: [rule] }));
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: [rule] });
+
+    expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
   });
 
   it('pins the coverage boundary: a colon-keyed server is denied at every raw length', async () => {
-    // The old hash reconstruction stopped verifying at raw length 56 (the
-    // sanitized body is sliced to 63 - 8 = 55) and never recovered; the
-    // legacy alias middle-truncates past 63. This sweep varies the raw length
-    // through the TOOL segment under a short server key, so the registered
-    // name always keeps its `__` separator; the long-server-key case, where
-    // truncation cuts the separator out of the registration, is pinned
-    // separately below.
+    // Cross the registered 55-character body cut and legacy 63-character budget
+    // while keeping the server boundary intact.
     for (const rawLength of [15, 44, 55, 56, 59, 63, 64, 69, 74, 80]) {
       const toolNameLength = rawLength - 'mcp__foo:bar__'.length;
       const tool = prodTool('foo:bar', 'x'.repeat(toolNameLength));
-      const pm = new PermissionManager(
-        makeConfig({ permissionsDeny: ['mcp__foo:bar'] }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-        }),
-      ).toBe('deny');
+      const pm = makePm({ permissionsDeny: ['mcp__foo:bar'] });
+
+      expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
       expect(
         await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
       ).toBe('disabled');
@@ -529,10 +422,8 @@ describe('legacy-spelled deny coverage', () => {
   });
 
   it('lets matchesToolPattern consume an exact alias-spelled entry (deny/disallowedTools agreement)', () => {
-    // `get+data` registers as `mcp__srv__get_data_04b75xd`; the legacy
-    // spelling `mcp__srv__get_data` is what a pre-normalization agent file
-    // holds. matchesRule already matched it via the legacy-exact arm; the
-    // blocklist predicate now shares that arm.
+    // Persisted spellings replace the tool's `+` with `_`; both restriction
+    // predicates must keep matching that exact alias.
     const tool = prodTool('srv', 'get+data');
     expect(tool.name).toBe('mcp__srv__get_data_04b75xd');
     const entry = 'mcp__srv__get_data';
@@ -552,11 +443,8 @@ describe('legacy-spelled deny coverage', () => {
   });
 
   it('refuses a foreign exact entry the tool never advertised', async () => {
-    // The exact arm must compare the entry against the gated legacy
-    // reduction itself: while the comparison was missing, every 3-part
-    // entry matched every tool that publishes a lossless legacy alias, so
-    // `permissionsAllow: ['mcp__attacker__evil']` auto-approved this tool
-    // (R8-1).
+    // A foreign exact entry must match the alias itself, not just a tool that
+    // happens to advertise an alias.
     const tool = prodTool('srv', 'get+data');
     const foreign = 'mcp__attacker__evil';
 
@@ -565,25 +453,13 @@ describe('legacy-spelled deny coverage', () => {
     );
     expect(matchesRuleWith(foreign, tool)).toBe(false);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: [foreign] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsAllow: [foreign] });
+
+    expect(await pm.evaluate(aliasContext(tool))).toBe('default');
   });
 
-  // A server key long enough to push the registered name past the 63-character
-  // budget loses its `__` separator to truncation, so the registration has only
-  // two parts. Judging "does this tool name have a tool segment" by the
-  // registered name alone then failed the bare `mcp__<server>` spelling of a
-  // whole-server rule while the `mcp__<server>__*` spelling of the same rule
-  // still matched through the raw identity — two forms the docs present as
-  // equivalent, disagreeing, with the bare one a silent fail-open on deny.
+  // Truncation can remove the registered separator. Both whole-server forms
+  // must still agree through the raw alias.
   it.each([
     ['a long provider-safe key', 'k'.repeat(53)],
     ['a long legacy-unsafe key', 'a.b-' + 'k'.repeat(50)],
@@ -601,16 +477,9 @@ describe('legacy-spelled deny coverage', () => {
           matchesToolPattern(spelling, tool.name, tool.permissionAliases),
         ).toBe(true);
 
-        const pm = new PermissionManager(
-          makeConfig({ permissionsDeny: [spelling] }),
-        );
-        pm.initialize();
-        expect(
-          await pm.evaluate({
-            toolName: tool.name,
-            toolAliases: tool.permissionAliases,
-          }),
-        ).toBe('deny');
+        const pm = makePm({ permissionsDeny: [spelling] });
+
+        expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
         expect(
           await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
         ).toBe('disabled');
@@ -619,11 +488,8 @@ describe('legacy-spelled deny coverage', () => {
   );
 
   it('keeps a legacy-spelled tool-segment wildcard effective past the 63-character budget', async () => {
-    // The reduction middle-truncates past 63 characters; under a short
-    // legacy-safe server key the cut lands entirely in the TOOL segment, so
-    // the server segment survives byte-identically and the reduction still
-    // vouches for its server. Refusing it silently retired this persisted
-    // deny the day the tool's name grew past the budget (R6-1).
+    // The truncated alias still preserves this short server key. A persisted
+    // tool prefix must retain its restriction past the legacy length budget.
     const tool = prodTool('foo.bar', 'get+data' + 'x'.repeat(50));
     const raw = 'mcp__foo.bar__get+data' + 'x'.repeat(50);
     expect(raw.length).toBeGreaterThan(63);
@@ -635,25 +501,17 @@ describe('legacy-spelled deny coverage', () => {
     );
     expect(matchesRuleWith(rule, tool)).toBe(true);
 
-    const pm = new PermissionManager(makeConfig({ permissionsDeny: [rule] }));
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: [rule] });
+
+    expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
     expect(
       await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
     ).toBe('disabled');
   });
 });
 
-// A persisted legacy prefix whose characters the reduction rewrote still has to
-// cover its own tool, or a `deny` silently stops denying — for deny/ask as well
-// as allow (maintainer ruling on this PR, 2026-09-25). The wildcard arm reads
-// `generateLegacyMcpToolName`'s reduction of the tool's own vouched raw
-// identity; every positive row here was `false` / `default` before that.
+// Persisted legacy prefixes retain own-tool coverage in all three policies
+// (maintainer ruling, 2026-09-25).
 describe('legacy-spelled wildcard prefixes keep covering their own server', () => {
   // `get+data` on the dotted server: the raw identity carries the `+`, the
   // legacy reduction turns it into `_`, and the registered name carries a hash
@@ -702,14 +560,9 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
       ).toBe(true);
       expect(matchesRuleWith(rewrittenServerRule, mixed)).toBe(true);
 
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: mixed.name,
-          toolAliases: mixed.permissionAliases,
-        }),
-      ).toBe(expected);
+      const pm = makePm(lists);
+
+      expect(await pm.evaluate(aliasContext(mixed))).toBe(expected);
     },
   );
 
@@ -720,14 +573,9 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
   ])(
     'keeps a legacy-spelled %s prefix effective end to end',
     async (_label, lists, expected) => {
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: dotted.name,
-          toolAliases: dotted.permissionAliases,
-        }),
-      ).toBe(expected);
+      const pm = makePm(lists);
+
+      expect(await pm.evaluate(aliasContext(dotted))).toBe(expected);
     },
   );
 
@@ -755,22 +603,14 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
       { permissionsDeny: [prefixRule] },
       { permissionsAllow: [prefixRule] },
     ]) {
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: safe.name,
-          toolAliases: safe.permissionAliases,
-        }),
-      ).toBe('default');
+      const pm = makePm(lists);
+
+      expect(await pm.evaluate(aliasContext(safe))).toBe('default');
     }
   });
 
   it('does not let a middle-truncated reduction supply the separator to a shorter server wildcard', () => {
-    // `generateLegacyMcpToolName` cuts at slice(0, 28), so for a server key of
-    // 24+ characters the reduction shortens the key and injects the `__` a
-    // prefix match needs. The server-provenance guard is what rejects it; this
-    // is the wildcard sibling of the server-level row pinned above.
+    // A cut through the server key must not fabricate a shorter server wildcard.
     const premium = prodTool(
       'weather-forecast-server-premium',
       'get_extended_forecast_for_next_week',
@@ -806,11 +646,8 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
   });
 
   it('keeps a >28-char legacy prefix effective when the advertised reduction is truncated (R14-2)', async () => {
-    // Raw identity is 71 chars, so the published legacy reduction is the
-    // middle-truncated one; the persisted prefix is 37 chars — past the
-    // 28-char head window the prefix arms may read of it. The registered
-    // name diverges at the `.` and the raw identity at the `+`, so only the
-    // length-preserving legacy rendering can vouch for this entry.
+    // This prefix exceeds the truncated alias's head window. Only the
+    // length-preserving legacy spelling can cover it.
     const longDotted = prodTool(
       'foo.bar',
       'get+data_for_a_specific_location_and_date_range_extended',
@@ -821,14 +658,9 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
     ).toBe(true);
     expect(matchesRuleWith(rule, longDotted)).toBe(true);
 
-    const pm = new PermissionManager(makeConfig({ permissionsDeny: [rule] }));
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: longDotted.name,
-        toolAliases: longDotted.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: [rule] });
+
+    expect(await pm.evaluate(aliasContext(longDotted))).toBe('deny');
 
     // Negative control: the same prefix must not reach a different server.
     const other = prodTool(
@@ -841,15 +673,8 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
   });
 });
 
-// A bare `mcp__<server>` rule is the `__*` prefix without the glob, so it
-// lives in the server-level arm — which used to compare only the registered
-// name and the raw identity, never the legacy reduction the entry was
-// persisted in. For a server key the reduction rewrote (`/`, `:`, `+` …) the
-// bare form failed open while its `__*` twin still denied: `evaluate`
-// answered `default` where the pre-normalization matcher answered `deny`.
-// The reduction now joins `spellings`, so both prefix arms see it — this is
-// the server-level half of the maintainer ruling this file's wildcard
-// describe already covers (R4-1).
+// Bare server rules and their `__*` forms must agree even when legacy
+// substitution changes the configured server key.
 describe('legacy-spelled bare server rules keep covering their own server', () => {
   // `github.com/octocat` reduces to `mcp__github.com_octocat` — the `/` is
   // out of the legacy set, the `.` is not — length-preserving, so the
@@ -876,16 +701,9 @@ describe('legacy-spelled bare server rules keep covering their own server', () =
         ).toBe(true);
         expect(matchesRuleWith(spelling, tool)).toBe(true);
 
-        const denyPm = new PermissionManager(
-          makeConfig({ permissionsDeny: [spelling] }),
-        );
-        denyPm.initialize();
-        expect(
-          await denyPm.evaluate({
-            toolName: tool.name,
-            toolAliases: tool.permissionAliases,
-          }),
-        ).toBe('deny');
+        const denyPm = makePm({ permissionsDeny: [spelling] });
+
+        expect(await denyPm.evaluate(aliasContext(tool))).toBe('deny');
         expect(
           await denyPm.getToolRegistrationStatus(
             tool.name,
@@ -893,30 +711,16 @@ describe('legacy-spelled bare server rules keep covering their own server', () =
           ),
         ).toBe('disabled');
 
-        const askPm = new PermissionManager(
-          makeConfig({ permissionsAsk: [spelling] }),
-        );
-        askPm.initialize();
-        expect(
-          await askPm.evaluate({
-            toolName: tool.name,
-            toolAliases: tool.permissionAliases,
-          }),
-        ).toBe('ask');
+        const askPm = makePm({ permissionsAsk: [spelling] });
+
+        expect(await askPm.evaluate(aliasContext(tool))).toBe('ask');
       }
     },
   );
 
   it('keeps a bare legacy deny effective when truncation cut only the tool segment', async () => {
-    // The reduction rewrote the server segment's `/` AND middle-truncated:
-    // the raw name is 78 characters, but the 28-character head window kept
-    // the whole 18-character key, so the cut landed entirely in the tool
-    // segment and the reduction still vouches for its server. Deriving the
-    // boundary from the flattened spelling instead compared the substituted
-    // legacy chunk `github.com_octocat` against the raw `github.com/octocat`
-    // and dropped the reduction — this server's own persisted legacy deny
-    // stopped denying the day the tool name grew past the budget, a
-    // regression against main (R6-1).
+    // The slash-keyed server survives the head window even when its tool is
+    // truncated; legacy server rules must retain coverage.
     const tool = prodTool(
       'github.com/octocat',
       'search_repository_issues_and_pull_requests_by_keyword',
@@ -933,16 +737,9 @@ describe('legacy-spelled bare server rules keep covering their own server', () =
       ).toBe(true);
       expect(matchesRuleWith(spelling, tool)).toBe(true);
 
-      const pm = new PermissionManager(
-        makeConfig({ permissionsDeny: [spelling] }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-        }),
-      ).toBe('deny');
+      const pm = makePm({ permissionsDeny: [spelling] });
+
+      expect(await pm.evaluate(aliasContext(tool))).toBe('deny');
       expect(
         await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
       ).toBe('disabled');
@@ -959,16 +756,8 @@ describe('legacy-spelled bare server rules keep covering their own server', () =
   });
 });
 
-// Past 63 characters `generateLegacyMcpToolName` middle-truncates at
-// slice(0, 28) + '___' + slice(-32), which keeps only the first 23 characters
-// of the server key — so two different long keys publish one byte-identical
-// legacy alias. Whether that shared spelling may match a tool is decided per
-// server by the same provenance the prefix arms require: the own server's
-// 23-character key survives slice(0, 28) byte-identically, so its cut stayed
-// inside its TOOL segment and its copy of the reduction still vouches for its
-// server; the sibling's key is cut down to that same window, so its copy
-// vouches for nothing. Pre-fix the ungated arm matched BOTH servers, and a
-// deny entry written for one stripped the other's tool (R8-1).
+// These two keys share a truncated legacy spelling, but only the shorter
+// key's complete server boundary survives the publication gate.
 describe('exact entries in a truncated legacy spelling shared by two servers', () => {
   const sharedTool = 'get_extended_forecast_for_next_week';
   const own = prodTool('weather-forecast-server', sharedTool);
@@ -985,11 +774,7 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
         `mcp__weather-forecast-server-premium__${sharedTool}`,
       ),
     );
-    // …but only the own server advertises it: its 23-character key fits the
-    // 28-character head window, while the sibling's 31-character key was cut
-    // by it — a reduction that lost server characters vouches for no server,
-    // so the sibling publishes no legacy alias at all. That absence is what
-    // denies the sibling every arm below.
+    // Only the short key keeps its boundary inside the head window.
     expect(own.permissionAliases).toContain(sharedLegacy);
     expect(sibling.permissionAliases).toEqual([
       `mcp__weather-forecast-server-premium__${sharedTool}`,
@@ -1002,16 +787,9 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
     ).toBe(true);
     expect(matchesRuleWith(sharedLegacy, own)).toBe(true);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: [sharedLegacy] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: own.name,
-        toolAliases: own.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: [sharedLegacy] });
+
+    expect(await pm.evaluate(aliasContext(own))).toBe('deny');
     expect(
       await pm.getToolRegistrationStatus(own.name, own.permissionAliases),
     ).toBe('disabled');
@@ -1023,16 +801,9 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
     ).toBe(false);
     expect(matchesRuleWith(sharedLegacy, sibling)).toBe(false);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: [sharedLegacy] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: sibling.name,
-        toolAliases: sibling.permissionAliases,
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsDeny: [sharedLegacy] });
+
+    expect(await pm.evaluate(aliasContext(sibling))).toBe('default');
     expect(
       await pm.getToolRegistrationStatus(
         sibling.name,
@@ -1057,16 +828,8 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
   });
 
   it('matches no entry in a spelling shared by two keys that both contain the separator', async () => {
-    // Both keys contain `__` and both push the raw name past the
-    // 63-character budget, so the reductions are byte-identical AND the
-    // 28-character head window cut both keys at the same character — the
-    // divergence is past the window, so no predicate over the flattened
-    // spelling can tell the two tools apart, and "matches its own server
-    // but not the sibling" is not a distinction this reduction can carry:
-    // it vouches for no server and both refuse. The gate this replaces
-    // derived the boundary with `split('__', 2)[1]`, which answered `a` on
-    // both sides of the comparison, so it vouched for BOTH servers — a deny
-    // written for one stripped the other's tool (R6-1).
+    // Both keys lose their divergent suffix beyond the head window. Splitting
+    // the common rendering cannot recover either producer's server boundary.
     const alpha = prodTool('a__very_long_server_key_name_alpha', sharedTool);
     const beta = prodTool('a__very_long_server_key_name_beta', sharedTool);
     const sharedSpelling = generateLegacyMcpToolName(
@@ -1084,16 +847,9 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
       ).toBe(false);
       expect(matchesRuleWith(sharedSpelling, tool)).toBe(false);
 
-      const denyPm = new PermissionManager(
-        makeConfig({ permissionsDeny: [sharedSpelling] }),
-      );
-      denyPm.initialize();
-      expect(
-        await denyPm.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-        }),
-      ).toBe('default');
+      const denyPm = makePm({ permissionsDeny: [sharedSpelling] });
+
+      expect(await denyPm.evaluate(aliasContext(tool))).toBe('default');
       expect(
         await denyPm.getToolRegistrationStatus(
           tool.name,
@@ -1101,29 +857,16 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
         ),
       ).toBe('registered');
 
-      const allowPm = new PermissionManager(
-        makeConfig({ permissionsAllow: [sharedSpelling] }),
-      );
-      allowPm.initialize();
-      expect(
-        await allowPm.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-        }),
-      ).toBe('default');
+      const allowPm = makePm({ permissionsAllow: [sharedSpelling] });
+
+      expect(await allowPm.evaluate(aliasContext(tool))).toBe('default');
     }
   });
 });
 
-// The truncation gate in `permissionAliases` is what stands between two
-// SHORT provider-safe keys and one shared reduction: `slice(0, 28)` keeps
-// `mcp__` + the first 23 key characters, and `_` is legal in both segments,
-// so keys that differ only around the separator — `x` vs `x_`, `foo` vs
-// `foo__bar` — used to publish one byte-identical legacy alias that
-// `matchesAdvertisedExactName` then accepted for BOTH tools: one allow/deny
-// entry decided two servers (R12-1). Each construction below is pinned at
-// the producer: at most one side may advertise the shared spelling.
-describe('a truncated legacy reduction is attributable to exactly one server (R12-1)', () => {
+// Underscores inside keys or at their ends can imitate the separator.
+// Only the key with a preserved boundary may publish these reductions.
+describe('truncated legacy reductions retain the complete server boundary (R12-1)', () => {
   // Both reductions are still computable and still byte-identical…
   const expectSharedReduction = (
     own: DiscoveredMCPTool,
@@ -1155,14 +898,9 @@ describe('a truncated legacy reduction is attributable to exactly one server (R1
       { permissionsAllow: [shared] },
       { permissionsDeny: [shared] },
     ]) {
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: sibling.name,
-          toolAliases: sibling.permissionAliases,
-        }),
-      ).toBe('default');
+      const pm = makePm(lists);
+
+      expect(await pm.evaluate(aliasContext(sibling))).toBe('default');
     }
   };
 
@@ -1185,14 +923,9 @@ describe('a truncated legacy reduction is attributable to exactly one server (R1
     expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
       true,
     );
-    const pm = new PermissionManager(makeConfig({ permissionsDeny: [shared] }));
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: own.name,
-        toolAliases: own.permissionAliases,
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: [shared] });
+
+    expect(await pm.evaluate(aliasContext(own))).toBe('deny');
   });
 
   it('separates a short key from a key that contains the separator (github vs github__create_reposito)', async () => {
@@ -1240,15 +973,8 @@ describe('a truncated legacy reduction is attributable to exactly one server (R1
   });
 });
 
-// A middle-truncated reduction is `slice(0, 28) + '___' + slice(-32)`: the
-// injected `___` sits where a prefix comparison cannot tell it apart from a
-// real `__` separator. Before the boundary was enforced, a whole-server rule
-// written for one key (`mcp__weather-forecast-serve_`,
-// `mcp__weather-forecast-serve___*`) matched a DIFFERENT server's tool
-// through that fabricated boundary (R12-2). Two postures are pinned:
-// a key the window cuts mid-separator publishes no reduction at all, and a
-// published reduction vouches for prefix matching only inside its head
-// window — the exact arm still reads the whole spelling.
+// Injected `___` cannot establish a server boundary. Keep both the
+// withheld-alias and published-alias prefix controls.
 describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2)', () => {
   const toolName = 't'.repeat(40);
 
@@ -1271,14 +997,9 @@ describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2
         { permissionsAllow: [foreign] },
         { permissionsDeny: [foreign] },
       ]) {
-        const pm = new PermissionManager(makeConfig(lists));
-        pm.initialize();
-        expect(
-          await pm.evaluate({
-            toolName: tool.name,
-            toolAliases: tool.permissionAliases,
-          }),
-        ).toBe('default');
+        const pm = makePm(lists);
+
+        expect(await pm.evaluate(aliasContext(tool))).toBe('default');
       }
     }
 
@@ -1293,11 +1014,9 @@ describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2
     }
   });
 
-  it('bounds prefix matching to the head window of a published reduction', async () => {
-    // This key ends exactly at the window edge, so the reduction IS
-    // published — and must still refuse any prefix whose match rests on the
-    // injected `___`. Dropping the head-window bound in the matcher reds
-    // this row.
+  it('refuses prefixes supplied by an injected separator in a published reduction', async () => {
+    // An alias is published at the window edge, but its injected separator
+    // must not supply a foreign prefix.
     const tool = prodTool('weather-forecast-server', toolName);
     const legacy = generateLegacyMcpToolName(
       `mcp__weather-forecast-server__${toolName}`,
@@ -1315,14 +1034,9 @@ describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2
         { permissionsAllow: [foreign] },
         { permissionsDeny: [foreign] },
       ]) {
-        const pm = new PermissionManager(makeConfig(lists));
-        pm.initialize();
-        expect(
-          await pm.evaluate({
-            toolName: tool.name,
-            toolAliases: tool.permissionAliases,
-          }),
-        ).toBe('default');
+        const pm = makePm(lists);
+
+        expect(await pm.evaluate(aliasContext(tool))).toBe('default');
       }
     }
 
@@ -1341,14 +1055,8 @@ describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2
   });
 });
 
-// A tool whose name starts with a sanitized underscore (server `foo`, tool
-// `_internal`, registered verbatim `mcp__foo___internal`, no alias channel)
-// reads as `mcp__foo_` + `_internal` under a `${pattern}__` prefix compare:
-// a whole-server rule written for the DIFFERENT key `foo_` matched it, so
-// `permissions.allow: ['mcp__foo_']` auto-approved a tool of a server the
-// entry does not name — the #10199 defect class re-opened through the
-// registered name (R4-2 e1). The server-level arm therefore compares the
-// server SEGMENT of each spelling, never a flattened prefix.
+// A leading tool underscore must not extend the key into a different
+// whole-server rule. Server segments are compared as whole segments.
 describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', () => {
   it('refuses a whole-server rule whose key is the server plus a leading underscore', async () => {
     const tool = prodTool('foo', '_internal');
@@ -1364,14 +1072,9 @@ describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', 
       { permissionsAllow: ['mcp__foo_'] },
       { permissionsDeny: ['mcp__foo_'] },
     ]) {
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-        }),
-      ).toBe('default');
+      const pm = makePm(lists);
+
+      expect(await pm.evaluate(aliasContext(tool))).toBe('default');
     }
 
     // Positive control: the tool's OWN whole-server rule still matches.
@@ -1381,18 +1084,16 @@ describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', 
   });
 
   it('refuses a bare server rule against a non-MCP tool named X__<server>__Y (R14-1)', async () => {
-    // `matchesRule` enters the MCP arm when the RULE starts with `mcp__`, so
-    // a discovered non-MCP tool named `x__github__deploy` reaches the
-    // server-level arm with no `mcp__` anywhere on the tool side; the arm
-    // must constrain the tool side's first segment, not only the rule's.
+    // The rule can enter MCP matching while the tool is non-MCP; constrain
+    // both sides rather than trusting the rule's prefix alone.
     const toolName = 'x__github__deploy';
     expect(matchesRule(parseRule('mcp__github'), toolName)).toBe(false);
     for (const lists of [
       { permissionsAllow: ['mcp__github'] },
       { permissionsDeny: ['mcp__github'] },
     ]) {
-      const pm = new PermissionManager(makeConfig(lists));
-      pm.initialize();
+      const pm = makePm(lists);
+
       expect(await pm.evaluate({ toolName })).toBe('default');
     }
 
@@ -1423,13 +1124,8 @@ describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', 
   });
 });
 
-// The flatten-and-resplit collision the spelling layer cannot solve: server
-// `foo_`'s tool `_internal` registers verbatim as `mcp__foo____internal`
-// (`mcp__` + `foo_` + `__` + `_internal`), and re-deriving the boundary by
-// split('__') reads its server segment as `foo`
-// (R4-2/R13-1). The matcher therefore takes the boundary from the producer
-// (DiscoveredMCPTool.serverName/serverToolName, carried on the invocation and
-// resolvable from the registry) whenever the caller supplies it.
+// Flattening `foo_` plus `_internal` loses the boundary. These cases check
+// the producer identity channel separately from alias-only compatibility.
 describe('the producer-carried identity channel (R4-2)', () => {
   const FOO_UNDERSCORE_TOOL = 'mcp__foo____internal';
   const fooUnderscoreIdentity = {
@@ -1516,10 +1212,7 @@ describe('the producer-carried identity channel (R4-2)', () => {
   });
 
   it('does not over-restrict mid-name underscores: a foo_bar tool answers only its own server rule', () => {
-    // `split('__')` keeps `foo_bar` as one segment (single underscores are
-    // not separators), so the spelling layer already refuses `mcp__foo`
-    // here; the pin is that the identity compare stays exactly as strict —
-    // no `startsWith` on either side — while `mcp__foo_bar` keeps matching.
+    // A single mid-key underscore must not be treated as a server boundary.
     const fooBarIdentity = { serverName: 'foo_bar', serverToolName: 'baz' };
     expect(
       matchesMcpPattern(
@@ -1557,10 +1250,8 @@ describe('the producer-carried identity channel (R4-2)', () => {
       serverToolName: tool.serverToolName,
     };
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__foo'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsAllow: ['mcp__foo'] });
+
     expect(
       await pm.evaluate({
         toolName: tool.name,
@@ -1570,10 +1261,8 @@ describe('the producer-carried identity channel (R4-2)', () => {
     ).toBe('default');
     // Registration-level check agrees: the foo_ tool is not disabled by a
     // deny written for foo either.
-    const pmDeny = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo'] }),
-    );
-    pmDeny.initialize();
+    const pmDeny = makePm({ permissionsDeny: ['mcp__foo'] });
+
     expect(
       await pmDeny.getToolRegistrationStatus(
         tool.name,
@@ -1584,16 +1273,7 @@ describe('the producer-carried identity channel (R4-2)', () => {
 
     // Positive control: server foo's own tool is still covered by the rule.
     const ownTool = prodTool('foo', 'deploy');
-    expect(
-      await pm.evaluate({
-        toolName: ownTool.name,
-        toolAliases: ownTool.permissionAliases,
-        mcpIdentity: {
-          serverName: ownTool.serverName,
-          serverToolName: ownTool.serverToolName,
-        },
-      }),
-    ).toBe('allow');
+    expect(await pm.evaluate(producerContext(ownTool))).toBe('allow');
     expect(
       await pmDeny.getToolRegistrationStatus(
         ownTool.name,
@@ -1689,10 +1369,8 @@ describe('the producer-carried identity channel (R4-2)', () => {
       ),
     ).toBe(true);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__foo_bar'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsDeny: ['mcp__foo_bar'] });
+
     expect(
       await pm.evaluate({
         toolName: tool.name,
@@ -1722,29 +1400,14 @@ describe('the producer-carried identity channel (R4-2)', () => {
     // The guard that keeps a sibling key out stays: `mcp__foo____*` was
     // written for server `foo`, so it must not auto-approve `foo_`'s tool.
     const sibling = prodTool('foo_', '_internal');
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__foo____*'] }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: sibling.name,
-        toolAliases: sibling.permissionAliases,
-        mcpIdentity: {
-          serverName: sibling.serverName,
-          serverToolName: sibling.serverToolName,
-        },
-      }),
-    ).toBe('default');
+    const pm = makePm({ permissionsAllow: ['mcp__foo____*'] });
+
+    expect(await pm.evaluate(producerContext(sibling))).toBe('default');
   });
 });
 
-// The three wildcard-arm refinements from the round-17 review: the tool side
-// of a boundary-matched prefix also reads the registered name's own tool
-// segment (R13-1), the separator-continuation guard requires the tool name to
-// actually start with those underscores (R17-1), and coarse-vs-foreign is
-// decided by the producer's own renderings instead of a segment count of the
-// flattened rule (R17-2).
+// Keep registered tool suffixes, real leading underscores and coarse
+// prefixes distinct when matching against the producer boundary.
 describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/R17-2)', () => {
   it.each([
     ['github', 'search.repositories', 'mcp__github__search_repositories_*'],
@@ -1754,14 +1417,7 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
     'matches the registered tool suffix for %s / %s',
     async (server, name, rule) => {
       const tool = prodTool(server, name);
-      const ctx = {
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-        mcpIdentity: {
-          serverName: tool.serverName,
-          serverToolName: tool.serverToolName,
-        },
-      };
+      const ctx = producerContext(tool);
       expect(
         matchesToolPattern(
           rule,
@@ -1771,14 +1427,12 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
         ),
       ).toBe(true);
       for (const expected of ['deny', 'ask'] as const) {
-        const pm = new PermissionManager(
-          makeConfig(
-            expected === 'deny'
-              ? { permissionsDeny: [rule] }
-              : { permissionsAsk: [rule] },
-          ),
+        const pm = makePm(
+          expected === 'deny'
+            ? { permissionsDeny: [rule] }
+            : { permissionsAsk: [rule] },
         );
-        pm.initialize();
+
         expect(await pm.evaluate(ctx)).toBe(expected);
         expect(await evaluatePermissionRules(pm, 'allow', ctx)).toMatchObject({
           finalPermission: expected,
@@ -1789,10 +1443,7 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
   );
 
   it('refuses a sibling-key whole-server spelling that lands as separator continuation (R17-1)', async () => {
-    // `mcp__foo___*` is server `foo_`'s whole-server wildcard spelling; the
-    // rule's own segment reads `foo` once the separator absorbs the trailing
-    // underscore, so the guard must also require the tool name to start with
-    // the underscores — server `foo`'s `deploy` does not.
+    // A sibling's separator continuation must not match `foo`'s `deploy` tool.
     const tool = prodTool('foo', 'deploy');
     expect(tool.name).toBe('mcp__foo__deploy');
     expect(
@@ -1802,10 +1453,8 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
       }),
     ).toBe(false);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['mcp__foo___*'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsAllow: ['mcp__foo___*'] });
+
     expect(
       await pm.evaluate({
         toolName: tool.name,
@@ -1852,10 +1501,8 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
       ),
     ).toBe(true);
 
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__my__svc*'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsDeny: ['mcp__my__svc*'] });
+
     expect(
       await pm.evaluate({
         toolName: doubleUnderscoreKey.name,
@@ -1877,18 +1524,9 @@ describe('restrictive rules retain exact truncated legacy spellings (R15-1)', ()
     const tool = prodTool(server, name);
     const legacy = generateLegacyMcpToolName(`mcp__${server}__${name}`);
     expect(tool.permissionAliases).not.toContain(legacy);
-    const ctx = {
-      toolName: tool.name,
-      toolAliases: tool.permissionAliases,
-      mcpIdentity: {
-        serverName: tool.serverName,
-        serverToolName: tool.serverToolName,
-      },
-    };
-    const deny = new PermissionManager(
-      makeConfig({ permissionsDeny: [legacy] }),
-    );
-    deny.initialize();
+    const ctx = producerContext(tool);
+    const deny = makePm({ permissionsDeny: [legacy] });
+
     expect(await deny.evaluate(ctx)).toBe('deny');
     expect(deny.findMatchingDenyRule(ctx)).toBe(legacy);
     expect(deny.hasRelevantRules(ctx)).toBe(true);
@@ -1908,39 +1546,26 @@ describe('restrictive rules retain exact truncated legacy spellings (R15-1)', ()
       ),
     ).toBe(true);
 
-    const ask = new PermissionManager(
-      makeConfig({ permissionsAsk: [legacy], permissionsAllow: [tool.name] }),
-    );
-    ask.initialize();
+    const ask = makePm({
+      permissionsAsk: [legacy],
+      permissionsAllow: [tool.name],
+    });
+
     expect(await ask.evaluate(ctx)).toBe('ask');
     expect(ask.hasMatchingAskRule(ctx)).toBe(true);
 
-    const allow = new PermissionManager(
-      makeConfig({ permissionsAllow: [legacy] }),
-    );
-    allow.initialize();
+    const allow = makePm({ permissionsAllow: [legacy] });
+
     expect(await allow.evaluate(ctx)).toBe('default');
     expect(allow.hasRelevantRules(ctx)).toBe(false);
     const unrelated = prodTool('unrelated', name);
-    expect(
-      await deny.evaluate({
-        toolName: unrelated.name,
-        toolAliases: unrelated.permissionAliases,
-        mcpIdentity: {
-          serverName: unrelated.serverName,
-          serverToolName: unrelated.serverToolName,
-        },
-      }),
-    ).toBe('default');
+    expect(await deny.evaluate(producerContext(unrelated))).toBe('default');
   });
 });
 
 describe('a restrictive wildcard that is a literal prefix of the registered name keeps covering its own key (R17-1)', () => {
-  // `prefix.split('__')` cannot name a key whose own spelling contains `__`
-  // (or ends in `_`), so the identity arm's pure-underscore branch refuses the
-  // key's OWN rule: `segments[1]` is the fragment `a` for key `a__b`, and `foo`
-  // for key `foo_`. Restrictive rules keep main's literal-prefix match through
-  // the registered-prefix fallback; `allow` must not widen with them.
+  // For underscore-containing keys, restrictive registered prefixes retain
+  // coverage even when the identity split cannot attribute them. Never grant.
   const shapes: Array<[string, string, string]> = [
     ['a__b', '_hidden', 'mcp__a__b___*'],
     ['my__svc', '_internal', 'mcp__my__svc___*'],
@@ -1961,10 +1586,8 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
         true,
       );
 
-      const deny = new PermissionManager(
-        makeConfig({ permissionsDeny: [rule] }),
-      );
-      deny.initialize();
+      const deny = makePm({ permissionsDeny: [rule] });
+
       expect(
         await deny.evaluate({
           toolName: tool.name,
@@ -1976,10 +1599,8 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
         await deny.isToolEnabled(tool.name, tool.permissionAliases, identity),
       ).toBe(false);
 
-      const allow = new PermissionManager(
-        makeConfig({ permissionsAllow: [rule] }),
-      );
-      allow.initialize();
+      const allow = makePm({ permissionsAllow: [rule] });
+
       expect(
         await allow.evaluate({
           toolName: tool.name,
@@ -2009,10 +1630,8 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
       serverName: tool.serverName,
       serverToolName: tool.serverToolName,
     };
-    const deny = new PermissionManager(
-      makeConfig({ permissionsDeny: ['mcp__a__b___hid*'] }),
-    );
-    deny.initialize();
+    const deny = makePm({ permissionsDeny: ['mcp__a__b___hid*'] });
+
     expect(
       await deny.evaluate({
         toolName: tool.name,
@@ -2020,5 +1639,96 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
         mcpIdentity: identity,
       }),
     ).toBe('deny');
+  });
+});
+
+const URL52 = 'https://mcp.services.example.internal/sse?team=infra';
+const URL60 = 'https://mcp.services.example.internal/sse?team=infra-staging';
+
+describe('wildcards copied from a budget-cut registration (R18-1)', () => {
+  it.each([
+    [URL52, 'deploy'],
+    // Raw name is 60 characters (<= 63) but unsafe, so it is still cut at 55.
+    ['https://mcp.services.example.internal/sse?team=inf', 'run'],
+    ['k'.repeat(53), 'tool'],
+    ['a.b-' + 'k'.repeat(50), 'tool'],
+  ])('deny/ask keep covering %s / %s', async (server, name) => {
+    const tool = prodTool(server, name);
+    expect(tool.name).toHaveLength(63);
+    const ctx = producerContext(tool);
+    for (const rule of [tool.name + '*', tool.name.slice(0, 56) + '*']) {
+      expect(
+        matchesToolPattern(
+          rule,
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(true);
+      const deny = makePm({ permissionsDeny: [rule] });
+
+      expect(await deny.evaluate(ctx)).toBe('deny');
+      expect(
+        await deny.isToolEnabled(
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(false);
+      const ask = makePm({ permissionsAsk: [rule] });
+
+      expect(await ask.evaluate(ctx)).toBe('ask');
+    }
+  });
+
+  it('never grants: allow on a cut prefix reaches neither the tool nor a sibling key', async () => {
+    const own = prodTool(URL52, 'deploy');
+    const sibling = prodTool(URL60, 'deploy');
+    expect(sibling.name.slice(0, 56)).toBe(own.name.slice(0, 56));
+    const allow = makePm({ permissionsAllow: [own.name.slice(0, 56) + '*'] });
+
+    expect(await allow.evaluate(producerContext(own))).toBe('default');
+    expect(await allow.evaluate(producerContext(sibling))).toBe('default');
+  });
+
+  it.each([
+    // Verbatim registration (R17-2).
+    ['foo', '_internal', 'mcp__foo_*'],
+    // Normalized (`_<hash>` suffix) but the separator survived the cut.
+    ['foo', '_in.ternal', 'mcp__foo_*'],
+    ['foo.bar', '_in.ternal', 'mcp__foo_bar_*'],
+  ])(
+    'an uncut registration never enters the fallback: %s / %s',
+    async (server, name, rule) => {
+      const tool = prodTool(server, name);
+      const ctx = producerContext(tool);
+      expect(
+        matchesToolPattern(
+          rule,
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(false);
+      const deny = makePm({ permissionsDeny: [rule] });
+
+      expect(await deny.evaluate(ctx)).toBe('default');
+    },
+  );
+
+  it.each([
+    ['a bare `*`', () => '*'],
+    // An exact entry for a different hash suffix is not a prefix rule.
+    ['an exact foreign suffix', (name: string) => name.slice(0, -1) + 'Z'],
+  ])('%s does not enter the fallback for a cut registration', (_, rule) => {
+    const tool = prodTool(URL52, 'deploy');
+    expect(
+      matchesToolPattern(
+        rule(tool.name),
+        tool.name,
+        tool.permissionAliases,
+        producerContext(tool).mcpIdentity,
+      ),
+    ).toBe(false);
   });
 });

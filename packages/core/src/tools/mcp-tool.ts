@@ -1161,39 +1161,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * Whether a middle-truncated legacy reduction (`slice(0, 28) + '___' +
- * slice(-32)`) can still be attributed to one server key — the provenance
- * gate for advertising the legacy spelling of a name that lost characters
- * to the 63-character budget (R12-1).
- *
- * The head window keeps `mcp__` plus the key's first 23 characters, and `_`
- * is legal on both sides of the `__` separator, so fitting the window is
- * not enough: the reduction is only attributable when the window also pins
- * down where the key ENDS. Three shapes make that unprovable, and each is
- * refused here rather than matched cross-server later:
- *
- * - The window cuts through the separator itself (`mcp__<key>` fits but
- *   `mcp__<key>__` does not, and the key does not end exactly at the edge):
- *   one real `_` beside the injected `___` reads as a longer key's own
- *   character — `acme-weather-forecast` and `acme-weather-forecast_`
- *   flatten to one byte-identical reduction.
- * - The key's legacy image contains `__`: a longer key materializes the
- *   boundary a shorter key's rule pretends to have — `foo` serving
- *   `bar__…` and `foo__bar` serving `…` share one reduction.
- * - The key's legacy image ends with `_`: it extends a shorter key into
- *   that key's separator — `foo` serving `_…` and `foo_` serving `…`
- *   share one reduction.
- *
- * Keys that legacy-substitute onto each other (`foo:bar` vs `foo/bar`)
- * remain indistinguishable by design — that is the disclosed variant-2
- * residual, reachable only through length-preserving reductions.
+ * A truncated alias keeps 28 characters up front. Require a preserved server
+ * boundary: internal `__` or a trailing `_` can imitate its separator.
+ * Different keys can still share this spelling; grants use the registry guard.
  */
 function legacyReductionVouchesForServer(serverName: string): boolean {
   const serverPrefixLength = 'mcp__'.length + serverName.length;
-  if (serverPrefixLength > LEGACY_REDUCTION_HEAD_LENGTH) {
-    // The window cut server characters away (R6-1).
-    return false;
-  }
   if (
     serverPrefixLength + 2 > LEGACY_REDUCTION_HEAD_LENGTH &&
     serverPrefixLength !== LEGACY_REDUCTION_HEAD_LENGTH
@@ -1216,29 +1189,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   }
 
   /**
-   * Keeps pre-normalization permission entries effective. (Pre-normalization
-   * `disabledTools` entries ride {@link disabledToolAliases}, the ungated
-   * fail-closed channel.)
-   *
-   * Publishes the exact raw identity `mcp__<server>__<tool>` first — the only
-   * spelling the permission matcher accepts as provenance for legacy unsafe
-   * rules — then the legacy `generateLegacyMcpToolName` reduction for
-   * settings persisted in that spelling, but only while that reduction still
-   * vouches for its server. Past the 63-character budget the reduction
-   * middle-truncates at slice(0, 28), and `_` is legal in both segments of
-   * `mcp__<server>__<tool>`, so surviving the window is necessary but not
-   * sufficient: two short keys that differ only around the separator
-   * (`acme-weather-forecast` vs `acme-weather-forecast_`, `github` vs
-   * `github__create_reposito`, `foo` vs `foo_`) flatten to one byte-identical
-   * reduction that a flattened comparison cannot attribute — the vouch must
-   * also prove the window kept a separator the key cannot imitate
-   * (R12-1; see `legacyReductionVouchesForServer`). A cut that reached the
-   * server segment keeps only its first 23 characters, so two different long
-   * keys land in one byte-identical reduction — advertised by neither
-   * (R6-1). Publication is the provenance every consumer gates on; the
-   * flattened spelling cannot re-derive the boundary. A verbatim
-   * provider-safe registration lost nothing, so it advertises no alias at
-   * all.
+   * Raw identity first; keep truncated legacy aliases only with a preserved
+   * server boundary. The registry checks grants for competing claimants.
    */
   get permissionAliases(): readonly string[] {
     const rawLength = `mcp__${this.serverName}__${this.serverToolName}`.length;
@@ -1250,16 +1202,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   }
 
   /**
-   * The spellings `ToolRegistry.isToolDisabled` matches `disabledTools`
-   * entries against — the same list {@link permissionAliases} would publish
-   * WITHOUT the provenance gate on the legacy reduction. That gate keeps a
-   * truncation-collided reduction out of the `allow`/`deny` channel, where a
-   * lost match is fail-open; `disabledTools` is the opposite direction — an
-   * over-match there is the documented, permitted fail-closed side (see
-   * docs/design/mcp-tool-name-provider-compatibility.md) — so withholding
-   * the reduction would silently re-register tools a pre-normalization
-   * entry disabled (R4-2 e2). Permission aliases filter this base list through
-   * the provenance gate above.
+   * Disabled entries retain ungated spellings: withholding a lossy alias
+   * would re-enable a previously disabled tool. Over-matching fails closed.
    */
   get disabledToolAliases(): readonly string[] {
     const rawName = `mcp__${this.serverName}__${this.serverToolName}`;

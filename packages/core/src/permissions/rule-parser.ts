@@ -1660,15 +1660,7 @@ export interface McpToolIdentity {
   serverToolName: string;
 }
 
-/**
- * The spellings a rule may use for one segment of an MCP name — a server key
- * or a server tool name: the operator's own string, the provider-safe
- * rendering the UI and the model show, and the legacy substitution a
- * pre-normalization entry was persisted in. Each is the character half of a
- * registration rendering, read off the producer's own field — never re-split
- * from a flattened tool name, which cannot tell server `foo` from `foo_`
- * (R4-2).
- */
+/** Raw, provider-safe and legacy character spellings of a producer segment. */
 function mcpSegmentSpellings(serverName: string): string[] {
   return [
     serverName,
@@ -1935,25 +1927,8 @@ export function hasAmbiguousMcpGrant(
 }
 
 /**
- * Pick the advertised alias that serves as the tool's raw identity for
- * matching, or `undefined` when no alias can vouch for it.
- *
- * `DiscoveredMCPTool.permissionAliases` publishes the exact raw
- * `mcp__<server>__<tool>` spelling first, then the legacy
- * `generateLegacyMcpToolName` reduction for pre-normalization settings. An
- * alias vouches for the registered name only when its own normalization IS
- * that name — the exact raw spelling's always is, while a legacy spelling
- * that lost characters (an unsafe server segment, a middle-truncated long
- * name) is not — so a different server's tool can never supply the raw
- * identity a rule is matched against (#10199). Note the vouch covers only
- * the identity THIS resolver returns: exact 3-part entries additionally
- * match the advertised legacy reduction through `matchesAdvertisedExactName`
- * without this normalization check, so a length-preserving legacy alias that
- * reduces onto another server's spelling still satisfies this compatibility
- * predicate. PermissionManager's registry guard prevents an ambiguous grant;
- * publication gating in
- * `DiscoveredMCPTool.permissionAliases` is what keeps a *truncated*
- * reduction attributable to one server, R12-1).
+ * Raw aliases must normalize to the registered name. A truncated or foreign
+ * legacy spelling cannot supply the producer identity.
  */
 function resolveRawMcpIdentity(
   canonicalCtxToolName: string,
@@ -1965,28 +1940,8 @@ function resolveRawMcpIdentity(
 }
 
 /**
- * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
- * for a rule persisted in that spelling — or `undefined` when the tool did
- * not advertise that reduction.
- *
- * `DiscoveredMCPTool.permissionAliases` publishes the reduction only while
- * it still vouches for its server: character substitution is
- * length-preserving, and a truncation cut that stayed inside the tool
- * segment leaves the server segment intact, so both keep a persisted
- * `deny`/`ask`/`disallowedTools` entry covering its own tool. A cut that
- * reached the server segment keeps only its first 23 characters *and*
- * injects the very `__` separator a prefix match needs: two different long
- * keys land in one byte-identical window, so that reduction vouches for no
- * server and is never advertised. Short keys are gated too: the window must
- * pin down where the key ends (contain the whole `__` separator or end
- * exactly at the key, whose legacy image must not contain `__` or end with
- * `_`), or two keys that differ only around the separator flatten to one
- * byte-identical reduction both sides would advertise (R12-1). Publication
- * is the only provenance available here — `__` is reserved in neither
- * segment of `mcp__<server>__<tool>` and the reduction rewrites characters,
- * so the server boundary cannot be re-derived from the flattened spelling: a
- * gate that tried vouched for two servers at once while refusing a rewritten
- * key its own tool (R6-1).
+ * Read only the producer's published legacy spelling: a flattened reduction
+ * cannot establish its own server boundary. Grants also need the registry guard.
  */
 function resolveLegacyMcpSpelling(
   rawToolName: string | undefined,
@@ -2002,17 +1957,7 @@ function resolveLegacyMcpSpelling(
   return toolAliases?.includes(legacy) ? legacy : undefined;
 }
 
-/**
- * Whether a 3-part entry names the tool in the legacy spelling, so an exact
- * rule persisted before provider-safe names still covers the tool. The entry
- * is compared against the advertised legacy reduction of the tool's vouched
- * raw identity: publication is the provenance, because two different server
- * keys can reduce to one byte-identical spelling — a middle-truncated
- * reduction whose head window does not pin down the key boundary is never
- * advertised (R12-1), and a length-preserving reduction shared by keys that
- * substitute onto each other remains a compatibility match; ambiguous
- * allow grants are refused by PermissionManager's live registry guard.
- */
+/** Match a whole published legacy spelling; wildcard matching is separate. */
 function matchesAdvertisedExactName(
   pattern: string,
   toolAliases: readonly string[] | undefined,
@@ -2025,43 +1970,23 @@ function matchesAdvertisedExactName(
   return legacySpelling !== undefined && pattern === legacySpelling;
 }
 
-// A lossy legacy name may identify several tools. Restrictive exact rules
-// must keep covering all of them; this fallback must never grant permission.
+// Lossy exact aliases and registered prefixes may restrict multiple tools.
+// This fallback belongs only to deny/ask/blocklist matching, never grants.
 function matchesRestrictiveMcpName(
-  pattern: string,
-  identity: McpToolIdentity | undefined,
-): boolean {
-  return (
-    identity !== undefined &&
-    pattern ===
-      generateLegacyMcpToolName(
-        `mcp__${identity.serverName}__${identity.serverToolName}`,
-      )
-  );
-}
-
-// A restrictive wildcard that is a literal prefix of the tool's registered
-// name keeps main's match wherever the identity arm cannot place it:
-// - `normalizeToolNameForProvider` keeps 55 characters + `_<hash>`, so a long
-//   or unsafe key loses its `__` separator and a rule copied from the
-//   registered name has no boundary at all (R18-1);
-// - a rule that starts at this key's own boundary with a pure-underscore tool
-//   side (`mcp__foo____*` for key `foo_`, `mcp__a__b___*` for key `a__b`) is
-//   read as the split's server (`foo`, `a`), so an `allow` written for that
-//   other key never reaches this one (R17-1).
-// Like the exact fallback above, this must never grant permission.
-function matchesRestrictiveRegisteredPrefix(
   pattern: string,
   toolName: string,
   identity: McpToolIdentity | undefined,
 ): boolean {
+  if (identity === undefined) return false;
   if (
-    identity === undefined ||
-    !pattern.startsWith('mcp__') ||
-    !pattern.endsWith('*')
+    pattern ===
+    generateLegacyMcpToolName(
+      `mcp__${identity.serverName}__${identity.serverToolName}`,
+    )
   ) {
-    return false;
+    return true;
   }
+  if (!pattern.startsWith('mcp__') || !pattern.endsWith('*')) return false;
   const prefix = pattern.slice(0, -1);
   const registeredServerPrefix = `mcp__${identity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
   return (
@@ -2106,8 +2031,7 @@ export function matchesToolPattern(
       mcpIdentity,
     ) ||
     matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName) ||
-    matchesRestrictiveMcpName(pattern, mcpIdentity) ||
-    matchesRestrictiveRegisteredPrefix(pattern, toolName, mcpIdentity)
+    matchesRestrictiveMcpName(pattern, toolName, mcpIdentity)
   );
 }
 
