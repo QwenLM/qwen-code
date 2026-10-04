@@ -29931,6 +29931,91 @@ describe('createServeApp', () => {
       expect(requestWorkspaceTrustChange).not.toHaveBeenCalled();
     });
 
+    it('POST /workspace/trust/grant requires strict mutation permission', async () => {
+      const grantWorkspaceTrust = vi.fn();
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+          grantWorkspaceTrust,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await request(app)
+        .post('/workspace/trust/grant')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(grantWorkspaceTrust).not.toHaveBeenCalled();
+    });
+
+    it('POST /workspaces/:workspace/trust/request requires strict mutation permission', async () => {
+      const requestWorkspaceTrustChange = vi.fn();
+      const primaryBridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      });
+      primary.workspaceService = {
+        getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+        requestWorkspaceTrustChange,
+      } as unknown as DaemonWorkspaceService;
+
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
+        bridge: primaryBridge,
+        boundWorkspace: WS_BOUND,
+        workspaceRegistry: createWorkspaceRegistry([primary]),
+      });
+
+      const res = await request(app)
+        .post('/workspaces/primary-id/trust/request')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ desiredState: 'untrusted' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(requestWorkspaceTrustChange).not.toHaveBeenCalled();
+    });
+
+    it('POST /workspaces/:workspace/trust/grant requires strict mutation permission', async () => {
+      const grantWorkspaceTrust = vi.fn();
+      const primaryBridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      });
+      primary.workspaceService = {
+        getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+        grantWorkspaceTrust,
+      } as unknown as DaemonWorkspaceService;
+
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
+        bridge: primaryBridge,
+        boundWorkspace: WS_BOUND,
+        workspaceRegistry: createWorkspaceRegistry([primary]),
+      });
+
+      const res = await request(app)
+        .post('/workspaces/primary-id/trust/grant')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(grantWorkspaceTrust).not.toHaveBeenCalled();
+    });
+
     it('publishes trust_change_requested on trusted loopback without a token', async () => {
       const atomicWriteSpy = vi.spyOn(qwenCore, 'atomicWriteFileSync');
       const requestWorkspaceTrustChange = vi.fn(async () => ({
