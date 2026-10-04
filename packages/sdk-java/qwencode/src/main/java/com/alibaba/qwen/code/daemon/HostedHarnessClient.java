@@ -267,9 +267,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             }
             throw e;
         } catch (IOException | InterruptedException e) {
+            candidate.admissionSettled = true;
             restoreInterrupt(e);
             throw new PromptAdmissionUnknownException(e);
         }
+        // The send attempt concluded, so a status answer received from here
+        // on no longer predates this submission's admission window.
+        candidate.admissionSettled = true;
         try {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
@@ -322,7 +326,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                             candidate);
                 }
                 throw new PromptAlreadyActiveException(
-                        "Hosted Harness session already has a running turn");
+                        "POST /session/:id/prompt", response.getStatusCode(),
+                        refusalCode(response.getBody()));
             }
             // A definitive non-409 refusal releases only the marker this
             // call owns: refusals produced before the route's promptId
@@ -535,9 +540,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         HarnessSessionRef ref = requireSessionRef(session);
         // Snapshot before the remote read: the response describes the point
         // in time when the server evaluated it, so it may only clear the
-        // registration that was present when the request was sent.
+        // registration that was present when the request was sent. A marker
+        // whose submission is still in flight has not settled: the server
+        // may admit it after evaluating the status answer, so the snapshot
+        // says nothing about it.
         ActivePrompt observed = activePrompts.get(
                 ref.getHarnessSessionId());
+        boolean observedSettled = observed != null
+                && observed.admissionSettled;
         String operation = "GET /session/:id/status";
         HttpSupport.Response response = sendRead(
                 sessionPath(ref.getHarnessSessionId()) + "/status", ref,
@@ -554,7 +564,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean active = JsonSupport.requiredBoolean(json,
                 "hasActivePrompt", "status");
-        if (!active && observed != null) {
+        if (!active && observedSettled) {
             activePrompts.remove(ref.getHarnessSessionId(), observed);
         }
         return new HarnessSessionStatus(responseSessionId, active, json);
@@ -736,6 +746,10 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     void unregisterStream(HarnessEventStream stream) {
         streams.remove(stream);
+    }
+
+    int registeredStreamCount() {
+        return streams.size();
     }
 
     Duration sseIdleTimeout() {
@@ -1055,6 +1069,21 @@ public final class HostedHarnessClient implements AutoCloseable {
                             response.getStatusCode(), response.getBody()));
         }
         return response;
+    }
+
+    // The machine-readable code of a definitive prompt refusal, when the
+    // wire answer carries one from the refusal vocabulary.
+    private static String refusalCode(String body) {
+        String code;
+        try {
+            code = JsonSupport.optionalString(JsonSupport.parseObject(body,
+                    "prompt refusal response"), "code");
+        } catch (DaemonProtocolException parseFailure) {
+            return null;
+        }
+        return code != null && REFUSAL_CODE_PATTERN.matcher(code).matches()
+                ? code
+                : null;
     }
 
     // A load that fails with a refusal code on the wire is fail-closed, not
@@ -1389,6 +1418,10 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final class ActivePrompt {
         private final String promptId;
         private final String payloadDigest;
+        // Flipped when the owning submitTurn call's send attempt concludes
+        // (answered or failed); while it is clear, a status answer may
+        // predate the admission and must not clear the marker.
+        private volatile boolean admissionSettled;
 
         ActivePrompt(String promptId, String payloadDigest) {
             this.promptId = promptId;
@@ -1479,16 +1512,21 @@ public final class HostedHarnessClient implements AutoCloseable {
          * Bounds how long a consumer parked in {@code next()} waits without
          * any bytes from the peer before the client force-closes the stream
          * and {@code next()} fails with a {@link DaemonTransportException}.
-         * Time between {@code next()} calls is not charged, so a caller
-         * that pauses consumption (an approval wait handled outside the
-         * stream, a slow event handler) does not lose a healthy stream. The
-         * bound relies on the peer proving liveness during long silent
-         * phases, the way the hosted events route's keepalive comments do
-         * every 15 seconds, so a custom bound should stay comfortably above
-         * that interval; against a peer that stays quiet while a consumer
-         * is waiting, legitimate silence is treated as a dead connection.
-         * {@link Duration#ZERO} disables the watchdog for callers that own
-         * the deadline themselves.
+         * Time between {@code next()} calls is not charged: this watchdog
+         * never aborts a caller that pauses consumption (an approval wait
+         * handled outside the stream, a slow event handler). The peer does
+         * not share that patience — the hosted events route ends the SSE
+         * response once its write buffer stays full, which this client can
+         * only observe as a clean end of stream, so a consumer that stops
+         * reading must bound the pause itself and re-open from {@code
+         * getLastEventId()}/{@code getEventEpoch()} if the stream ends
+         * early. The bound relies on the peer proving liveness during long
+         * silent phases, the way the hosted events route's keepalive
+         * comments do every 15 seconds, so a custom bound should stay
+         * comfortably above that interval; against a peer that stays quiet
+         * while a consumer is waiting, legitimate silence is treated as a
+         * dead connection. {@link Duration#ZERO} disables the watchdog for
+         * callers that own the deadline themselves.
          */
         public Builder sseIdleTimeout(Duration sseIdleTimeout) {
             if (sseIdleTimeout == null || sseIdleTimeout.isNegative()) {

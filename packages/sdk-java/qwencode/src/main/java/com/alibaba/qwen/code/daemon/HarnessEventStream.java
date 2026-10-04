@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.daemon;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -151,25 +152,37 @@ public final class HarnessEventStream implements AutoCloseable {
                 client.sseIdleTimeout());
         long intervalMillis = Math.max(100L, idleMillis / 2L);
         long idleNanos = TimeUnit.MILLISECONDS.toNanos(idleMillis);
-        idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {
-            if (closed.get()) {
-                ScheduledFuture<?> watchdog = idleWatchdog;
-                if (watchdog != null) {
-                    watchdog.cancel(false);
+        try {
+            idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {
+                if (closed.get()) {
+                    ScheduledFuture<?> watchdog = idleWatchdog;
+                    if (watchdog != null) {
+                        watchdog.cancel(false);
+                    }
+                    return;
                 }
-                return;
-            }
-            // Only a consumer parked in next() is waiting on the peer; a
-            // stream nobody is pulling stays open until close().
-            if (!consumerWaiting.get()) {
-                return;
-            }
-            if (System.nanoTime() - lastActivity.get() >= idleNanos
-                    && idleTimedOut.compareAndSet(false, true)) {
-                // Closes the raw input without any stream monitor, so the
-                // single-thread scheduler never blocks behind the reader.
-                closeQuietly();
-            }
-        }, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
+                // Only a consumer parked in next() is waiting on the peer;
+                // a stream nobody is pulling stays open until close().
+                if (!consumerWaiting.get()) {
+                    return;
+                }
+                if (System.nanoTime() - lastActivity.get() >= idleNanos
+                        && idleTimedOut.compareAndSet(false, true)) {
+                    // Closes the raw input without any stream monitor, so
+                    // the single-thread scheduler never blocks behind the
+                    // reader.
+                    closeQuietly();
+                }
+            }, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // A racing client.close() already shut the scheduler down: map
+            // the local rejection the way send() does, and drop the
+            // registration streamEvents just added so the unarmed stream
+            // is not stranded in the client's set.
+            client.unregisterStream(this);
+            throw new DaemonTransportException(
+                    "Hosted Harness SSE idle watchdog could not be scheduled",
+                    e);
+        }
     }
 }
