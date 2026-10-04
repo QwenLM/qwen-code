@@ -8,7 +8,6 @@ import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
-import wrapAnsi from 'wrap-ansi';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -18,7 +17,11 @@ import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
-import { MAX_STATUS_LINES, useStatusLine } from '../hooks/useStatusLine.js';
+import {
+  MAX_STATUS_LINES,
+  statusLineWrappedRows,
+  useStatusLine,
+} from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -116,11 +119,7 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
           statusLineLines.reduce(
             (rows, line) =>
               rows +
-              wrapAnsi(
-                line,
-                Math.max(1, statusLineWidth ?? terminalWidth - 4),
-                { trim: false, hard: true },
-              ).split('\n').length,
+              statusLineWrappedRows(line, statusLineWidth, terminalWidth - 4),
             0,
           ),
         )

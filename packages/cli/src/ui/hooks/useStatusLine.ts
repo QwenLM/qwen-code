@@ -145,6 +145,22 @@ const debugLog = createDebugLogger('STATUS_LINE');
 // Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
 // line gets at most 2 to keep the total footer height at 3 rows max.
 export const MAX_STATUS_LINES = 2;
+
+/**
+ * Number of terminal rows a single status line occupies once soft-wrapped.
+ * Shared by the footer's armed-height budget and the context-indicator
+ * decision below so the two never disagree about how many rows are rendered.
+ */
+export function statusLineWrappedRows(
+  line: string,
+  width: number | undefined,
+  fallbackWidth: number,
+): number {
+  return wrapAnsi(line, Math.max(1, width ?? fallbackWidth), {
+    trim: false,
+    hard: true,
+  }).split('\n').length;
+}
 const PULL_REQUEST_LOOKUP_COMMAND = 'gh pr view --json number --jq .number';
 
 function parsePullRequestNumber(stdout: string): string | undefined {
@@ -790,10 +806,8 @@ export function useStatusLine(
       keepAutomaticContextIndicator ||
         output.some(
           (line) =>
-            wrapAnsi(line, Math.max(1, availableWidth ?? terminalWidth - 4), {
-              trim: false,
-              hard: true,
-            }).split('\n').length > MAX_STATUS_LINES,
+            statusLineWrappedRows(line, availableWidth, terminalWidth - 4) >
+            MAX_STATUS_LINES,
         ),
     ),
   };
