@@ -1348,7 +1348,91 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
-    if (sessions.has(sessionId) || opening.has(sessionId)) {
+    // One shape for every successful open/load answer — a takeover load
+    // redriven after a lost reply must be indistinguishable from the answer
+    // it replaces, so all three sites build it here.
+    const attachmentReply = (
+      session: HostedSession,
+      recovery?: HostedRuntimeRecoveryReport,
+    ) => ({
+      sessionId,
+      clientId: session.clientId,
+      workspaceCwd: cwd,
+      lastEventId: session.managed.authority.committedSequence,
+      eventEpoch: epoch,
+      ...(session.approval ? { approvalMode: session.approval.mode } : {}),
+      ...(session.blocked || session.hooks?.hasPendingOperations
+        ? { recoveryRequired: true }
+        : {}),
+      ...(recovery
+        ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
+        : {}),
+    });
+    const attached = sessions.get(sessionId);
+    if (attached !== undefined && !create) {
+      const passive = body?.['passiveManagedRuntimeRecovery'] === true;
+      if (
+        !attached.hooks &&
+        (passive || body?.['driveRuntimeRecovery'] === true)
+      ) {
+        // A takeover load whose reply was lost is redriven against the
+        // Session it already attached — the writer fence above proves this
+        // load targets this generation, and no continue/cancel can have been
+        // admitted since (its identities ride the lost reply), so the
+        // attached state is still exactly what the first load left behind.
+        // Answer again from that state instead of wedging the Turn on a 409
+        // loop; the re-run is read-only apart from the Broker acquire, which
+        // is idempotent under the same Runtime Session identity.
+        const parked = unsettledPromptId(attached);
+        if (parked !== undefined) {
+          if (
+            attached.active !== undefined ||
+            attached.toolProfile === undefined ||
+            !brokerOptions
+          ) {
+            error(res, 409, 'hosted_session_already_attached');
+            return;
+          }
+          let recovery: HostedRuntimeRecoveryReport;
+          try {
+            const recovered = await recoverHostedRuntimeTurn({
+              session: attached.managed,
+              sessionId,
+              cwd,
+              promptId: parked,
+              brokerOptions,
+              passive,
+              leaseAlreadyHeld: attached.runtimeLeaseHeld !== undefined,
+            });
+            if (recovered === undefined) {
+              error(res, 409, 'hosted_session_already_attached');
+              return;
+            }
+            recovery = recovered.report;
+            if (recovered.acquiredRuntime)
+              attached.runtimeLeaseHeld =
+                recovered.report.executions[0]?.runtimeSessionId ??
+                recovered.promptId;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${String(cause)}`,
+            );
+            // Retry-inviting, like the first load's recovery failure; the
+            // attached Session keeps its owed lease for the next redrive.
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+          res.status(200).json(attachmentReply(attached, recovery));
+          return;
+        }
+        // No single parked Turn: the first load's answer still holds, so the
+        // redrive gets the same attachment restated — including a blocked
+        // Session, whose recoveryRequired the coordinator already handles.
+        res.status(200).json(attachmentReply(attached));
+        return;
+      }
+    }
+    if (attached !== undefined || opening.has(sessionId)) {
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
@@ -1793,21 +1877,9 @@ export function registerHostedHarnessSessionRoutes(
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
       refusedAdoptions.delete(sessionId);
-      res.status(200).json({
-        sessionId,
-        clientId: session.clientId,
-        workspaceCwd: cwd,
-        lastEventId: managed.authority.committedSequence,
-        eventEpoch: epoch,
-        // A Harness older than approvals omits this, so a caller can tell.
-        ...(pinned ? { approvalMode: pinned.mode } : {}),
-        ...(session.blocked || session.hooks?.hasPendingOperations
-          ? { recoveryRequired: true }
-          : {}),
-        ...(recovery
-          ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
-          : {}),
-      });
+      // A Harness older than approvals omits approvalMode, so a caller can
+      // tell.
+      res.status(200).json(attachmentReply(session, recovery));
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
         const abort = new AbortController();

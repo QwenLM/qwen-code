@@ -6759,6 +6759,213 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('re-answers a redriven takeover load whose reply was lost', async () => {
+    await parkToolTurn();
+    const execute = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+      .mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+      executions: Array<Record<string, unknown>>;
+    };
+    expect(recovery.phase).toBe('results_ready');
+    expect(execute).toHaveBeenCalledTimes(1);
+    // The load reply is lost: the coordinator redrives the identical load
+    // against the already-attached Session, which must re-answer the
+    // recovery snapshot instead of wedging the Turn on a 409 loop.
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(200);
+    expect(redriven.body.clientId).toBe(loaded.body.clientId);
+    expect(redriven.body.lastEventId).toBe(loaded.body.lastEventId);
+    const redrivenRecovery = redriven.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as Record<string, unknown>;
+    expect(redrivenRecovery).toEqual(recovery);
+    // The redrive dispatches nothing: the parked execution stays settled
+    // exactly once.
+    expect(execute).toHaveBeenCalledTimes(1);
+    // The redriven snapshot admits the continuation.
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', redriven.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: redrivenRecovery['checkpointId'],
+        activationId: redrivenRecovery['activationId'],
+      });
+    expect(continued.status).toBe(200);
+    expect(continued.body.accepted).toBe(true);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', redriven.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', redriven.body.clientId as string);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
+      ]),
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('re-answers a redriven passive takeover load whose reply was lost', async () => {
+    await parkToolTurn();
+    let stopConfirmed = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => ({ state: stopConfirmed ? 'settled' : 'prepared' }),
+    );
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockImplementation(async () => {
+        stopConfirmed = true;
+      });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+      executions: Array<Record<string, unknown>>;
+    };
+    expect(recovery.phase).toBe('await_runtime');
+    // The passive load reply is lost; the redrive re-reads the Broker state
+    // and re-answers the snapshot rather than refusing with a 409.
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(200);
+    expect(redriven.body.clientId).toBe(loaded.body.clientId);
+    const redrivenRecovery = redriven.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as Record<string, unknown>;
+    expect(redrivenRecovery).toEqual(recovery);
+    // The redriven snapshot admits the cancellation.
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', redriven.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: redrivenRecovery['checkpointId'],
+        activationId: redrivenRecovery['activationId'],
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('66666666-6666-4666-8666-666666666666');
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('keeps the held Runtime lease when a redriven load fails transiently', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    release.mockClear();
+    // A transient Broker failure inside the re-answer must refuse with the
+    // retry-inviting code — and must NOT release the lease the attached
+    // Session already holds: a release persists RELEASED and every later
+    // redrive would wedge on runtime_session_not_acquirable.
+    acquireSpy.mockRejectedValueOnce(new Error('broker hiccup'));
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(release).not.toHaveBeenCalled();
+    // The next redrive recovers: same attachment, same recovery snapshot.
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(200);
+    expect(redriven.body.clientId).toBe(loaded.body.clientId);
+    expect(redriven.body._meta?.['qwen.daemon.managedRuntimeRecovery']).toEqual(
+      loaded.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('re-answers a redriven takeover load of a Session without a parked Turn', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(created.status).toBe(200);
+    const closed = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(closed.status).toBe(204);
+    const { server: replacement, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    expect(loaded.body._meta).toBeUndefined();
+    // Same lost-reply redrive, but the Session has no parked Turn: the
+    // attachment is re-stated as-is.
+    const redriven = await replacementHeaders(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(200);
+    expect(redriven.body.clientId).toBe(loaded.body.clientId);
+    expect(redriven.body._meta).toBeUndefined();
+    await replacementHeaders(
+      supertest(replacement).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
     let stopConfirmed = false;
