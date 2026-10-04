@@ -1323,6 +1323,9 @@ export class LocalManagedSessionAuthority {
     return this.runSerial(async () => {
       assertExtensionActor(actor.class);
       assertCommandIdentity(command);
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(

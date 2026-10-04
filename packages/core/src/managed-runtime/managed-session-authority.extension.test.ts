@@ -689,6 +689,16 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/inputId/);
+      await expect(
+        authority.commitDomainRecord(
+          { ...command('rename:stale-sequence'), expectedSequence: 99 },
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'stale' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/expectedSequence 99 does not match/);
       // Refused before publishing: no monitor or goal-state body landed.
       expect(await publishedBodies(harness)).toBe(0);
       expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
@@ -1007,6 +1017,9 @@ describe('managed session authority Stage H records', () => {
       unknown
     >;
     bodies['goal_state'] = MANAGED_EXTENSION_RECORD_BODIES['monitor_run'];
+    // The registry is mutable here only because this file's vi.mock of
+    // './managed-extension-projection.js' returns a plain object literal.
+    const reads = vi.spyOn(harness.store, 'read');
     try {
       await withAuthority(
         harness,
@@ -1014,6 +1027,7 @@ describe('managed session authority Stage H records', () => {
           // The envelope is skipped as a pre-registration record; nothing
           // materializes from it.
           expect(authority.taskViews()).toEqual([]);
+          expect(reads).toHaveBeenCalledTimes(1);
         },
         { create: false },
       );
