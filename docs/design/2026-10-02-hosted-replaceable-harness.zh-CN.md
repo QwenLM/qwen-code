@@ -195,19 +195,19 @@ Java：除一个调用点外保持 code 不可辨别。connector 的
 
 ### D6 —— 接管 load 幂等
 
-TS 把恢复报告保留在已附着的 session 上，直到该 prompt 的
-continue/cancel 准入把它消费掉。满足以下全部条件的重复 load：(a) 指向已
-附着 session，(b) 带 takeover 标志，(c) 与铸造该快照的请求同形——
-passive 只回放给 passive、drive 只回放给 drive，因为 passive 报告停靠的
-正是 drive load 本该结算的状态，永远不会 continuation-ready——
-(d) 恢复仍未完成——返回 200 与同一份快照，而不是 409
-`hosted_session_already_attached`。重复的普通 load、以及换成另一形态的
-重复 takeover，都保持 409。这关闭了 2026-09-30 设计记录的丢回复
-follow-up——以重试保持原形态为界。仍留一格开口：形态由 Turn 状态派生
-且运行中可变，drive 回复丢失后落入取消（CANCELLING→passive）时，保留
-的 drive 快照在回放守卫下不可消费（被动回放对 drive 铸造的快照被拒为
-already-attached）——这段交接属于回放放宽切片，刻意不并入 D6。
-`opening.has(sessionId)` 的拒绝（一次接管正在进行中）不变，仍可重试。
+回复丢失的 takeover load 叠重发到已附着的 session 上：路由当场重算
+恢复，并从附着状态重新作答。没有任何东西会被消费——未确认的
+continue/cancel 不破坏下一次重答：丢回复家族按构造闭合，不再需要
+快照（也无需对称回滚）。重答重新验明正身：调用方必须报出附着时使
+用的 tenant/workspace（该键就放在附着 session 自己的 sessionKey
+上）——光有 harness token 不再能驱动陌生人的 session。回复正是丢失
+的那一份的 continue/cancel 仍然处于未消费态：它重跑而非回放。判定
+逐字复用：drive 叠重发遇上不可驱动 Turn 照旧 typed decline；无工具
+或取消侧的叠重发则按 plain attach 作答（kernel 的 inapplicable 形
+态）。2026-09-30 设计记录的丢回复 follow-up 就此关闭——包括
+drive 回复丢失后落入取消那一格：重发时按取消形态重算，无需再放宽
+什么回放。`opening.has(sessionId)` 的拒绝（一次接管正在进行中）不
+变，仍可重试。
 
 ### D7 —— Q2 门禁：冻结变体（纯测试，除非测出缺陷）
 
@@ -327,7 +327,7 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 | Java managed-agent-server | `SessionLifecycleCoordinator.java`                                                          | 仅注释：capability 不匹配为何继续重试而不终结（生命周期 outbox 没有 FAILED 词表）                     |
 | Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` 标志访问器（D9b）                                                           |
 | Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）                                                                                 |
-| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、快照保留与幂等重复 load（D6）                                                |
+| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、基于附着 Session 的重算重答幂等叠重发（D6）                                  |
 | TS CLI                    | `hosted-runtime-recovery.ts`                                                                | 可判别的 decline 结果（D5），复用 core 的 `HARNESS_MODEL_START_PHASES`                                |
 | TS CLI                    | `capabilities.ts`、`routes/capabilities.ts`、`qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token（D9c）                                               |
 | Java qwencode             | `HostedHarnessClient.java`（协商处）                                                        | 硬编码的 `managed_session_journal_delta_v1` feature 检查（D9c）——刻意不设配置旋钮                     |
@@ -365,9 +365,10 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 - TS：除 `await_action` 外每种 decline reason 都有从 journal 状态产出的
   测试（`await_action` 夹具与路由级 202-replay 水印的测试钉同属
   Step 3 欠账）；瞬时 blocked 的 authorization（`missing_state`）抛出
-  而非 decline，耐久判定（`opaque_state`）走终态；重复接管 load 在被
-  消费前返回同一快照 200，普通重复 load 返回 409
-  `hosted_session_already_attached`。
+  而非 decline，耐久判定（`opaque_state`）走终态；叠重发的接管 load
+  从附着状态重新作答（200 + 重算报告，普通重复 load 依旧
+  `hosted_session_already_attached`），丢回复的取消报告也无法再楔住
+  下一次重答（没有任何东西被消费）。
 
 E2E（runner 支路，全部对着打包后的栈）：
 

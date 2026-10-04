@@ -221,23 +221,23 @@ asks for. No global HTTP-code table is introduced.
 
 ### D6 — The takeover load is idempotent
 
-TS retains the recovery report on the attached session until a
-continue/cancel admission for that prompt consumes it. A repeated load that
-(a) names an attached session, (b) sets a takeover flag, (c) asks in the
-same shape that minted the snapshot — passive replays to passive, drive to
-drive, because a passive report parks what a drive load would settle and
-would never be continuation-ready — and (d) finds the recovery still
-pending returns 200 with the stored snapshot instead of 409
-`hosted_session_already_attached`. Repeated plain loads, and a repeated
-takeover in the other shape, keep the 409. This closes the lost-reply
-follow-up recorded by the 2026-09-30 design — scoped to retries that keep
-their shape. One cell stays open: the shape is derived from the Turn's
-status, so a cancellation landing after a lost DRIVE reply finds the
-retained snapshot permanently unconsumable (passive replay against a
-drive-minted snapshot refuses already-attached); that handoff is the
-replay-widening slice, deliberately not folded into D6. The
-`opening.has(sessionId)` refusal (a takeover currently in flight) is
-unchanged and stays retriable.
+A takeover load whose reply was lost is redriven against the Session it
+already attached: the route re-runs the recovery and re-answers from the
+attached state. Nothing is ever consumed, so an unconfirmed continue or
+cancel cannot damage the next re-answer either — the lost-reply family is
+closed by construction, without a snapshot to roll back symmetrically. The
+re-answer re-proves identity: the caller must name the tenant/workspace
+the attachment was opened with (held on the attached session's own key),
+so the harness token alone no longer drives a stranger's session. A
+continue/cancel whose reply was the lost one is still unconsumed: it
+re-runs, not replays. The verdicts apply verbatim: a drive redrive of an
+immovable Turn declines with its typed reason, and a no-tool or
+cancellation-side redrive answers the plain attach (the kernel's
+inapplicable shape). The lost-reply follow-up recorded by the 2026-09-30
+design is closed — including the drive-reply-lost-then-cancel cell, which
+recomputes the cancellation-shape answer on the redrive instead of
+requiring a widened replay. The `opening.has(sessionId)` refusal (a
+takeover currently in flight) is unchanged and stays retriable.
 
 ### D7 — Q2 gate: the freeze variant (test-only unless it finds a defect)
 
@@ -376,7 +376,7 @@ tracker proves it, so closing waits on both.
 | Java managed-agent-server | `SessionLifecycleCoordinator.java`                                                          | comment only: why a capability mismatch keeps retrying instead of completing (the lifecycle outbox has no FAILED vocabulary)                    |
 | Java qwencode             | `LoadHarnessSession.java`                                                                   | `isRuntimeRecoveryLoad()` flag accessor (D9b)                                                                                                   |
 | Java managed-agent-server | `ManagedAgentProperties.java`, `application.yml`                                            | `load-timeout` (D9b)                                                                                                                            |
-| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline-code mapping (D5), retained snapshot + idempotent repeat load (D6)                                                                      |
+| TS CLI                    | `hosted-harness-session.ts`                                                                 | decline-code mapping (D5), recompute-and-re-answer idempotent redrive on the attached Session (D6)                                              |
 | TS CLI                    | `hosted-runtime-recovery.ts`                                                                | discriminated decline result (D5), reusing core's `HARNESS_MODEL_START_PHASES`                                                                  |
 | TS CLI                    | `capabilities.ts`, `routes/capabilities.ts`, `qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token (D9c)                                                                                          |
 | Java qwencode             | `HostedHarnessClient.java` (negotiation)                                                    | hardcoded `managed_session_journal_delta_v1` feature check (D9c) — no config knob by design                                                     |
@@ -420,9 +420,11 @@ Unit tests (collocated):
   journal state by a test (the `await_action` fixture and the
   route-level 202-replay watermark pin stay Step 3 debts); a transiently
   blocked authorization (`missing_state`) throws rather than declining
-  while a durable verdict (`opaque_state`) goes terminal; a repeated
-  takeover load returns the same snapshot 200 until consumed and 409
-  `hosted_session_already_attached` for plain repeats.
+  while a durable verdict (`opaque_state`) goes terminal; a redriven
+  takeover load re-answers from the attached state (200 with the
+  recomputed report; plain repeats still meet
+  `hosted_session_already_attached`), and a lost cancellation report
+  cannot wedge the next re-answer (nothing is consumed).
 
 E2E (runner arms, all against the packaged stack):
 

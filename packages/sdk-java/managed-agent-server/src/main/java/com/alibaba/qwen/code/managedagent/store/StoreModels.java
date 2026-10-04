@@ -17,7 +17,8 @@ public final class StoreModels {
             String status, String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
-            Long deletedAt, long version, ContextBinding workspace) {
+            Long deletedAt, long version, ContextBinding workspace,
+            String toolProfile) {
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -26,7 +27,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null);
+                    null, null);
         }
     }
 

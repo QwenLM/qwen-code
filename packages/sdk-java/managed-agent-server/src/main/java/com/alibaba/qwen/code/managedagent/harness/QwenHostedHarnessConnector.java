@@ -94,6 +94,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Managed Session Store and"
                     + " Runtime Broker workspace IDs must match");
         }
+        Duration turnDeadline = this.properties.getTurnDeadline();
+        if (turnDeadline == null
+                || turnDeadline.compareTo(Duration.ofMillis(1)) < 0
+                || turnDeadline.compareTo(
+                        Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalStateException("Hosted Harness turn deadline must"
+                    + " be between 1 and 2147483647 milliseconds");
+        }
         this.approvalMode = parseApprovalMode(
                 this.properties.getApprovalMode());
     }
@@ -182,7 +190,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
-                .payloadDigest(payloadDigest);
+                .payloadDigest(payloadDigest)
+                .deadline(properties.getTurnDeadline());
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
         return new Admission(receipt.getLastEventId(),
@@ -434,9 +443,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery) {
+        String profile = toolProfile(session);
         ManagedSessionStoreConnection store = managedSessionStore(session);
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
-                passiveManagedRuntimeRecovery, toolProfile(session),
+                passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery));
     }
 
@@ -513,7 +523,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private static String toolProfile(SessionRecord session) {
-        return session.workspace() == null ? null : "hosted-workspace-files/1";
+        if (session.workspace() == null) {
+            return null;
+        }
+        if (session.toolProfile() == null || session.toolProfile().isBlank()) {
+            throw new IllegalStateException("Hosted Workspace Session tool profile is missing");
+        }
+        return session.toolProfile();
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

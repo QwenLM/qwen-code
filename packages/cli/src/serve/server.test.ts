@@ -866,6 +866,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_voice',
   'workspace_voice_transcription',
   'workspace_trust',
+  'workspace_trust_grant',
   'workspace_trust_hot_reload',
   'workspace_init',
   'workspace_github_setup',
@@ -4010,7 +4011,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_trust_hot_reload') {
+        if (
+          feature === 'workspace_trust_hot_reload' ||
+          feature === 'workspace_trust_grant'
+        ) {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
           );

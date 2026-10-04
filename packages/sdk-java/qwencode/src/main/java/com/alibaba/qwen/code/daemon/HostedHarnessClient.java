@@ -47,6 +47,11 @@ public final class HostedHarnessClient implements AutoCloseable {
             "^sha256:[0-9a-f]{64}$");
     private static final Pattern CLIENT_ID_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
+    // The refusal-code vocabulary the Harness writes (snake_case, bounded by
+    // the consumers' persistence column) — anything else on the wire is not
+    // a named refusal.
+    private static final Pattern REFUSAL_CODE_PATTERN = Pattern.compile(
+            "[a-z0-9_]{1,128}");
     private static final Pattern EVENT_EPOCH_PATTERN = Pattern.compile(
             "^[A-Za-z0-9_-]{1,64}$");
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
@@ -172,8 +177,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         // (it also runs under ConcurrentHashMap bin locks in the connector).
         Duration timeout = request.isRuntimeRecoveryLoad()
                 ? loadTimeout : requestTimeout;
-        HttpSupport.Response response = sendMutation(path,
-                request.toJson(), null, "POST /session/:id/load", timeout);
+        HttpSupport.Response response;
+        try {
+            response = sendMutation(path, request.toJson(), null,
+                    "POST /session/:id/load", timeout);
+        } catch (MutationOutcomeUnknownException error) {
+            throw namedLoadRefusal(error);
+        }
         try {
             DaemonClient.requireStatus(response, 200,
                     "POST /session/:id/load");
@@ -947,6 +957,31 @@ public final class HostedHarnessClient implements AutoCloseable {
                             response.getStatusCode(), response.getBody()));
         }
         return response;
+    }
+
+    // A load that fails with a refusal code on the wire is fail-closed, not
+    // ambiguous: the Harness answers with a code only after the failed open
+    // was cleaned up. Transport failures and code-less error bodies keep the
+    // outcome-unknown classification.
+    private static RuntimeException namedLoadRefusal(
+            MutationOutcomeUnknownException error) {
+        if (!(error.getCause() instanceof DaemonHttpException)) {
+            return error;
+        }
+        DaemonHttpException http = (DaemonHttpException) error.getCause();
+        String code;
+        try {
+            code = JsonSupport.optionalString(JsonSupport.parseObject(
+                    http.getResponseBody(), "load refusal response"),
+                    "code");
+        } catch (DaemonProtocolException parseFailure) {
+            return error;
+        }
+        if (code == null || !REFUSAL_CODE_PATTERN.matcher(code).matches()) {
+            return error;
+        }
+        return new HarnessSessionRefusedException(error.getOperation(),
+                http.getStatusCode(), code, error);
     }
 
     private HttpResponse<HttpSupport.Body> send(String path, String method,
