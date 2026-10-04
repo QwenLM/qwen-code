@@ -2869,7 +2869,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return result.wasNull() ? null : value;
     }
 
-    // The cwd columns arrive with V35; an operation read against an
+    // The cwd columns arrive with V36; an operation read against an
     // additive-upgrade schema that predates them (the pinned-schema upgrade
     // ITs construct exactly that) must treat them as absent instead of
     // erroring the whole query.

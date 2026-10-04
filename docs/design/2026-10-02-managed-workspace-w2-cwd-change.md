@@ -3,7 +3,7 @@
 [English](2026-10-02-managed-workspace-w2-cwd-change.md) | [简体中文](2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md)
 
 Status: implemented in this change. Part of [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380) ("W2 same-Workspace cwd change: controlled directory-change admission and settlement; public/WebShell routes remain `planned`" in the 2026-10-02 delivery snapshot).
-Research baseline: main `d5c22d336b` (2026-10-02); integrated onto the later merges #13138 (W1b, V31), #13135 + #13223 (bound close, V32), #13142 (D8a, contract v1.29.0, V33), #13194 (bound archive/delete) and #13112 (bound later turns) — the PR merges origin/main past all of them, and the migration renumbered to V35 after #13090 took V34.
+Research baseline: main `d5c22d336b` (2026-10-02); integrated onto the later merges #13138 (W1b, V31), #13135 + #13223 (bound close, V32), #13142 (D8a, contract v1.29.0, V33), #13194 (bound archive/delete) and #13112 (bound later turns) — the PR merges origin/main past all of them, and the migration renumbered to V36 after #13090 took V34 and the tool profile took V35.
 The target contract is [Workspace v1.12, section 4](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) and the in-repo reviewed OpenAPI contract v1.27.0, which already pins the two `planned` routes and their schemas.
 
 ## Problem
@@ -29,7 +29,7 @@ Paths are under `packages/sdk-java/managed-agent-server/src/main/java/com/alibab
 One PR, four parts:
 
 1. **Contract v1.30.0.** Flip the two routes and the five planned schemas to `implemented`; add `session_context_busy` where the conflict vocabulary is pinned; document the `session.context.changed` event type carried by the free-form `PublicEvent.data`; bump the version. (#13112 landed in between and recorded its later Turns as v1.28 in the upstream header, so this slice ships v1.30.0.)
-2. **Store.** `V35__managed_cwd_operation.sql` adds nullable `target_cwd_relative VARCHAR(2048)`, `expected_context_revision BIGINT`, `result_context_revision BIGINT` to `managed_agent_operation` (the research baseline was at V30; V31–V33 landed meanwhile — the W1b recovery bundle (#13138), the bound close (#13135, renumbered by #13223) and the agent definitions (#13142); #13090 then took V34, so this slice ships V35. V15/V29 exist as Java migrations under `src/main/java/db/migration`). New `OperationKind.CWD_CHANGE` with its own admission, settlement and failure methods; no change to the lifecycle-status machinery or to `ACTION_RESPONSE`.
+2. **Store.** `V36__managed_cwd_operation.sql` adds nullable `target_cwd_relative VARCHAR(2048)`, `expected_context_revision BIGINT`, `result_context_revision BIGINT` to `managed_agent_operation` (the research baseline was at V30; V31–V33 landed meanwhile — the W1b recovery bundle (#13138), the bound close (#13135, renumbered by #13223) and the agent definitions (#13142); #13090 then took V34 and V35\_\_managed_session_tool_profile took V35, so this slice ships V36. V15/V29 exist as Java migrations under `src/main/java/db/migration`). New `OperationKind.CWD_CHANGE` with its own admission, settlement and failure methods; no change to the lifecycle-status machinery or to `ACTION_RESPONSE`.
 3. **Service/coordinator/routes.** Admission service for both surfaces, a kind branch in `SessionLifecycleCoordinator.deliver`, settlement methods, the two route handlers and kind-aware operation read-backs (the existing `ACTION_RESPONSE` branch is the precedent).
 4. **Tests and docs.** Store/coordinator/controller/contract tests, the design pair, and README notes.
 
@@ -119,7 +119,7 @@ WebShell requests carry `sessionId`, `idempotencyKey`, `cwdRelative`, `expectedC
 
 ## Files affected
 
-- `…/db/migration/V35__managed_cwd_operation.sql` (new).
+- `…/db/migration/V36__managed_cwd_operation.sql` (new).
 - `…/openapi/managed-agent-public-api.openapi.json` (status flips, `session_context_busy`, event documentation, version 1.30.0).
 - `store/StoreModels.java` (kind, record fields for the new columns), `store/ManagedAgentStore.java` (admission/settlement/failure methods, event constant, the bound later-turn busy handshake in `insertTurnCommand`, additive-column-tolerant operation reads), `store/AgentStateStore.java` (interface), `store/WorkspaceExecutionStore.java` (`verifyMount`) and `service/WorkspaceRuntimeResolver.java` (`verifyInstallable`, the shared `requireDirectory`).
 - `service/SessionLifecycleService.java` (public/web-shell admit + read-back branches), `service/SessionLifecycleCoordinator.java` (kind branch and its scoped class contract), `service/RuntimeWarmer.java` (probe interface with a throwing default) and `service/EmbeddedRuntimeBroker.java` (probe override delegating to the resolver), `service/WorkspaceRuntimeTransport.java` (`requireDirectory` moved to the resolver).
