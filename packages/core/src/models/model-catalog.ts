@@ -175,6 +175,19 @@ function readCache(cachePath: string): ModelCatalog | undefined {
 }
 
 /**
+ * A minor version is at most two digits, so a run of three or more is a release
+ * date rather than a version: models.dev publishes dated ids such as
+ * `grok-4.20-0309-non-reasoning`, whose last dash-then-digits boundary is the
+ * date. Respelling that boundary commits a spelling no vendor or mirror
+ * publishes while still missing the one a proxy plausibly sends
+ * (`grok-4-20-0309-reasoning`), so a date fails closed instead. A leading zero
+ * is not part of the test — `doubao-seed-2.0-code` is a real dotted minor.
+ */
+function isMinorVersionRun(run: string): boolean {
+  return run.length <= 2;
+}
+
+/**
  * The same version with its minor separator respelled: `qwen2-5-72b-instruct`
  * <-> `qwen2.5-72b-instruct`, `glm-5.3-flash` <-> `glm-5-3-flash`. Vendors and
  * the proxies in front of them accept either spelling, and `normalize()` folds
@@ -187,18 +200,27 @@ function readCache(cachePath: string): ModelCatalog | undefined {
  * catalog's own 131,072, and the vision twin degraded to text-only.
  *
  * Only a version boundary is respelled. The digit run before the separator has
- * to be the last one in the prefix and the run after it has to be a whole
- * segment, so a size suffix is never mistaken for a minor version
- * (`gemma-4-26b-a4b-it` gets no alias). Returns undefined when the key carries
- * no version to respell.
+ * to be the last one in the prefix, the run after it has to be a whole segment,
+ * and that run has to be short enough to be a minor version, so neither a size
+ * suffix (`gemma-4-26b-a4b-it`) nor a release date
+ * (`grok-4.20-0309-non-reasoning`) gets an alias. Returns undefined when the
+ * key carries no version to respell.
  */
 export function versionSpellingAlias(key: string): string | undefined {
-  const dotted = key.replace(/^(.*\d)-(\d+(?=-|$))/, '$1.$2');
-  if (dotted !== key) {
-    return dotted;
+  const dotted = /^(.*\d)-(\d+)(?=-|$)/.exec(key);
+  if (dotted) {
+    // A date run returns here instead of falling through to the dashed branch
+    // below: that branch respells the *other* boundary of the same id, so
+    // falling through would trade one unreachable key for a second one
+    // (`grok-4.20-0309-non-reasoning` -> `grok-4-20-0309-non-reasoning`).
+    return isMinorVersionRun(dotted[2])
+      ? `${dotted[1]}.${dotted[2]}${key.slice(dotted[0].length)}`
+      : undefined;
   }
-  const dashed = key.replace(/^(.*\d)\.(\d+(?=-|$))/, '$1-$2');
-  return dashed === key ? undefined : dashed;
+  const dashed = /^(.*\d)\.(\d+)(?=-|$)/.exec(key);
+  return dashed && isMinorVersionRun(dashed[2])
+    ? `${dashed[1]}-${dashed[2]}${key.slice(dashed[0].length)}`
+    : undefined;
 }
 
 /**

@@ -586,4 +586,31 @@ describe('model catalog', () => {
     expect(tokenLimit('qwen3.5-max', 'output')).toBe(65_536);
     expect(lookupModelCatalog('glm-5.3-flash')?.modalities?.image).toBe(true);
   });
+
+  it('keeps a release date off the alias machinery', () => {
+    // models.dev publishes dated ids whose last dash-then-digits boundary is
+    // the release date, not a minor version. Respelling it commits a spelling
+    // no vendor publishes while the one a proxy plausibly sends
+    // (`grok-4-20-0309-reasoning`) stays uncovered, so the run has to be too
+    // long to be a minor version for the alias to fail closed. Pinned on the
+    // committed grok ids rather than a synthetic one, and on both spellings:
+    // the guard must not fall through to the id's other boundary and respell
+    // that instead.
+    expect(
+      versionSpellingAlias('grok-4.20-0309-non-reasoning'),
+    ).toBeUndefined();
+    expect(
+      versionSpellingAlias('grok-4.20.0309-non-reasoning'),
+    ).toBeUndefined();
+    expect(versionSpellingAlias('kimi-k2-0905')).toBeUndefined();
+    // The guard stays narrow enough to keep respelling real minor versions,
+    // including a leading-zero one (`0` is a date digit but not a date run).
+    expect(versionSpellingAlias('qwen2-5-72b-instruct')).toBe(
+      'qwen2.5-72b-instruct',
+    );
+    expect(versionSpellingAlias('glm-5.3-flash')).toBe('glm-5-3-flash');
+    expect(versionSpellingAlias('doubao-seed-2-0-code')).toBe(
+      'doubao-seed-2.0-code',
+    );
+  });
 });
