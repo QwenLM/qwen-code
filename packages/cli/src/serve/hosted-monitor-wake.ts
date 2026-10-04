@@ -137,9 +137,14 @@ export async function settlePendingMonitorInputs(params: {
   readonly sessionId: string;
   readonly cwd: string;
 }): Promise<number> {
-  const pending = pendingSessionInputs(params.authority.readEvents()).filter(
-    (input) => input.source === 'monitor',
-  );
+  // The whole committed prefix, not a bounded page: a notification input
+  // lands late in the log, and `readEvents()` alone would stop at the
+  // default page and leave the Session's owed inputs unsettled — which is
+  // exactly the wedge this close-path settle exists to prevent.
+  const authority = params.authority;
+  const pending = pendingSessionInputs(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+  ).filter((input) => input.source === 'monitor');
   for (const input of pending) {
     const settle: ChatRecord = {
       uuid: randomUUID(),

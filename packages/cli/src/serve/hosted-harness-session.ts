@@ -1721,8 +1721,12 @@ export function registerHostedHarnessSessionRoutes(
           (session.hooks?.hasPendingOperations ?? false);
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
+            // The whole committed prefix, not a bounded page: a notification
+            // input lands late in the log, and a default-sized read would
+            // hide every one of them once the Session passes that page.
+            const authority = session.managed.authority;
             const first = pendingSessionInputs(
-              session.managed.authority.readEvents(),
+              authority.eventsInSequenceRange(1, authority.committedSequence),
             ).find((input) => input.source === 'monitor');
             if (first === undefined) return undefined;
             const ref = assertManagedSessionDurableRef(

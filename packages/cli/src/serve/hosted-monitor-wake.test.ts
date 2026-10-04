@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { MANAGED_SESSION_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import {
@@ -346,6 +347,122 @@ describe('settlePendingMonitorInputs', () => {
       expect(
         pendingSessionInputs(authority.readEvents()).map((i) => i.turnId),
       ).toEqual(['prompt-1']);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('settles a notification that landed beyond the default event page', async () => {
+    // A real Session's log runs past the bounded read's default page long
+    // before its first Monitor notification arrives. Settling only what a
+    // default-sized read returns would leave that notification owed, and an
+    // owed input parks the Session as hosted_turn_recovery_required at its
+    // next open — the wedge this path exists to prevent.
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-page-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    try {
+      const resourceStore = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir,
+        sessionKey,
+      });
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId,
+        transcriptPath,
+        sessionKey,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'worker-test',
+        activationLeaseDurationMs: 60_000,
+        lease,
+        resourceStore,
+        create: {
+          definitionRef: await resourceStore.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await resourceStore.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      const authority = session.authority;
+      const monitors = new HostedMonitorSession(
+        { authority, resources: session.resources },
+        sessionKey,
+      );
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-1',
+        args: { command: 'du -sh .' },
+        maxEvents: 10_000,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1000,
+      });
+      await monitors.dispatchStarted('monitor-1', BINDING);
+      await monitors.attach('monitor-1', BINDING, { watch: 'started' });
+      // One revision per accepted observation pushes the log well past the
+      // default page before the notification rides a late revision.
+      for (let index = 0; index < 110; index++) {
+        await monitors.observe('monitor-1', { size: index });
+      }
+      await monitors.observe(
+        'monitor-1',
+        { size: 110 },
+        {
+          input: {
+            inputId: 'monitor-1:notify:111',
+            turnId: 'monitor-1:notify:111',
+            source: 'monitor',
+            contentRef: await session.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            deadline: null,
+            admissionRef: await session.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            wakeReason: 'input',
+          },
+        },
+      );
+      expect(authority.committedSequence).toBeGreaterThan(
+        MANAGED_SESSION_LIMITS.defaultReadEvents,
+      );
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ).map((input) => input.turnId),
+      ).toEqual(['monitor-1:notify:111']);
+
+      expect(
+        await settlePendingMonitorInputs({
+          authority,
+          sink: session.sink,
+          sessionId,
+          cwd: '/workspace',
+        }),
+      ).toBe(1);
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toEqual([]);
     } finally {
       await lease.release().catch(() => undefined);
     }
