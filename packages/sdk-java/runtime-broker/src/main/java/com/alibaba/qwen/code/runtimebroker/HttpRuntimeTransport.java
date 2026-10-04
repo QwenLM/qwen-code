@@ -575,13 +575,14 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 if (!(capture instanceof Map<?, ?> data)
                         || !data.keySet().equals(V3_CAPTURE_FIELDS)
                         || !(data.get("captureStatus") instanceof String captureStatus)
-                        || !Set.of("complete", "partial", "unavailable")
-                                .contains(captureStatus)
+                        || !Set.of("complete", "partial", "unavailable",
+                                "detached").contains(captureStatus)
                         || !(data.get("previewTruncated") instanceof Boolean)
                         || !(data.get("deliveryStatus") instanceof String deliveryStatus)
                         || !Set.of("pending", "committed", "blocked")
                                 .contains(deliveryStatus)
-                        || "complete".equals(captureStatus)
+                        || ("complete".equals(captureStatus)
+                                || "detached".equals(captureStatus))
                             != (data.get("captureReason") == null)
                         || data.get("captureReason") != null
                             && (!(data.get("captureReason") instanceof String reason)
@@ -590,8 +591,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                                         "cancelled").contains(reason))
                         || data.get("manifest") == null
                             && !"unavailable".equals(captureStatus)
+                            && !"detached".equals(captureStatus)
                         || data.get("manifest") != null
-                            && !validV3ManifestRef(data.get("manifest"))) {
+                            && ("detached".equals(captureStatus)
+                                || !validV3ManifestRef(data.get("manifest")))) {
                     throw protocol("Managed Runtime " + operation
                             + " capture is invalid.");
                 }
