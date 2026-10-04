@@ -467,6 +467,14 @@ function resolveLeafSymlink(inputPath: string): string {
  * resolving it would let a checked-in symlink relocate the boundary.
  */
 export function realpathNearestExisting(inputPath: string): string {
+  try {
+    // The filesystem must resolve traversal inside symlink targets; lexically
+    // collapsing a relative target's `..` can classify a different inode.
+    const realpath = fs.realpathSync.native ?? fs.realpathSync;
+    return realpath(path.resolve(inputPath));
+  } catch {
+    // Missing targets still need the nearest-existing-prefix fallback below.
+  }
   // Resolve a leading (possibly dangling) symlink first so a dangling link into
   // an allowed root is classified by its target, not treated as a missing file.
   const resolved = resolveLeafSymlink(inputPath);
@@ -526,6 +534,11 @@ async function resolveLeafSymlinkAsync(inputPath: string): Promise<string> {
 export async function realpathNearestExistingAsync(
   inputPath: string,
 ): Promise<string> {
+  try {
+    return await fs.promises.realpath(path.resolve(inputPath));
+  } catch {
+    // Match the sync fallback for missing or unreadable targets.
+  }
   const resolved = await resolveLeafSymlinkAsync(inputPath);
   const missingSegments: string[] = [];
   let current = resolved;

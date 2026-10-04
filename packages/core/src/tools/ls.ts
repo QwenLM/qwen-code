@@ -377,6 +377,7 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }
+    params.path = path.resolve(params.path);
 
     return null;
   }
