@@ -537,7 +537,7 @@ function providerFitNotice(omitted: number, budgetBytes: number): string {
   return `\n[Managed Runtime provider omitted ${omitted} characters here to fit the ${budgetBytes}-byte wire limit.]\n`;
 }
 
-const PROVIDER_RESULT_STUB =
+export const PROVIDER_RESULT_STUB =
   '[Managed Runtime provider omitted this tool result to fit the wire limit.]';
 
 interface ProviderFitSlot {
@@ -622,8 +622,9 @@ function confirmationFitSlots(
   };
   switch (target['type']) {
     case 'edit':
-      collect('fileDiff');
-      collect('originalContent');
+      if (target['fileDiff'] !== PROVIDER_RESULT_STUB) collect('fileDiff');
+      if (target['originalContent'] !== PROVIDER_RESULT_STUB)
+        collect('originalContent');
       collect('newContent');
       break;
     case 'exec':
@@ -781,6 +782,15 @@ export function fitManagedRuntimeProviderResult(
           : []),
         `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial.`,
       ];
+      // Display-only fields are replaced with a stub string first so
+      // newContent (the actual bytes written on approval) survives intact.
+      if (typeof root['fileDiff'] === 'string') {
+        root['fileDiff'] = PROVIDER_RESULT_STUB;
+      }
+      if (!fits() && typeof root['originalContent'] === 'string') {
+        root['originalContent'] = PROVIDER_RESULT_STUB;
+      }
+      if (fits()) return value;
     }
     const slots = confirmationFitSlots(root).map((slot) => ({
       slot,

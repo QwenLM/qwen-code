@@ -88,13 +88,16 @@ first evicts oldest progress events (announced through
 with an inline notice and sets `truncated` on shell displays. For
 `confirmation` results, bulk text fields are collected per variant (`fileDiff`,
 `originalContent` and `newContent` for `edit`, `command` for `exec`, and `prompt`
-for `info`) while variant-required fields and variant structures are never
+for `info`); for `edit` confirmations, display-only fields (`fileDiff` first, then
+`originalContent` if a string) are replaced with a stub string to preserve
+`newContent` intact, and remaining bulk fields are cut head-and-tail if still over budget;
+variant-required fields and variant structures are never
 removed, `originalContent: null` survives, and a fitted `edit` confirmation is
 returned with `hideModify: true` and an omission notice in `warnings`; unlike
 observations, confirmations undergo no progress eviction and set no `truncated`
 flag.
-When even fully cut text could not fit beside what the cut cannot reach, a
-structured display (such as an edit's file diff, which only feeds the UI), then
+For observations, when even fully cut text could not fit beside what the cut cannot reach, a
+structured display, then
 artifacts, which also only feed a client surface, and then hook results are
 dropped before any text is cut, and content the cut
 cannot reach at all (inline media) turns the model content into an explicit

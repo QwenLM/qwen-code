@@ -12,6 +12,7 @@ import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  PROVIDER_RESULT_STUB,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
@@ -956,7 +957,75 @@ describe('managed-runtime-provider/1', () => {
       expect(status.firstAvailableSeq).toBe(status.lastSeq + 1);
     });
 
-    it('cuts bulk edit confirmation fields head-and-tail and sets hideModify', () => {
+    it('stubs display fields and preserves newContent intact when overflow is absorbable by display fields alone', () => {
+      const inputNewContent = 'n'.repeat(budget / 2);
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: null,
+        newContent: inputNewContent,
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.hideModify).toBe(true);
+      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.newContent).toBe(inputNewContent);
+      expect(editDetails.originalContent).toBeNull();
+      expect(Array.isArray(editDetails.warnings)).toBe(true);
+      expect(
+        editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves pre-existing warnings when fitting an over-budget edit confirmation', () => {
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: null,
+        newContent: 'n'.repeat(budget / 2),
+        hideModify: false,
+        warnings: ['review protected file'],
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(editDetails.warnings).toEqual([
+        'review protected file',
+        expect.stringMatching(/truncat/),
+      ]);
+    });
+
+    it('stubs display fields and cuts bulk newContent head-and-tail when over budget', () => {
       const editDetails: {
         type: string;
         title: string;
@@ -991,15 +1060,13 @@ describe('managed-runtime-provider/1', () => {
       expect(
         editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
       ).toBe(true);
-      expect(editDetails.fileDiff.startsWith('d')).toBe(true);
-      expect(editDetails.fileDiff.endsWith('d')).toBe(true);
-      expect(editDetails.fileDiff).toContain(
-        'Managed Runtime provider omitted',
-      );
-      expect(editDetails.originalContent.startsWith('o')).toBe(true);
-      expect(editDetails.originalContent.endsWith('o')).toBe(true);
+      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.originalContent).toBe(PROVIDER_RESULT_STUB);
       expect(editDetails.newContent.startsWith('n')).toBe(true);
       expect(editDetails.newContent.endsWith('n')).toBe(true);
+      expect(editDetails.newContent).toContain(
+        'Managed Runtime provider omitted',
+      );
       expect(
         parseManagedRuntimeProviderResult(confirmation, editDetails, session),
       ).toEqual(editDetails);
@@ -1021,6 +1088,7 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
       ).toBeLessThanOrEqual(budget);
       expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
       expect(editDetails.hideModify).toBe(true);
       expect(
         parseManagedRuntimeProviderResult(confirmation, editDetails, session),

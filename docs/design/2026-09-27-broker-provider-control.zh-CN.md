@@ -63,12 +63,12 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 拒绝：对于执行与状态等观察类结果，worker 先淘汰最旧的 progress 事件（通过
 `firstAvailableSeq`/`progressGap` 告知），再把大文本字段按首尾截断并内联标记，shell
 展示置 `truncated`；对于 `confirmation` 结果，按变体收集大文本字段（`edit` 收集 `fileDiff`、
-`originalContent` 和 `newContent`，`exec` 收集 `command`，`info` 收集 `prompt`），各变体必填
+`originalContent` 和 `newContent`，`exec` 收集 `command`，`info` 收集 `prompt`）；对于 `edit` 确认，先将仅供展示的字段（先 `fileDiff`，
+若仍超长再处理为字符串的 `originalContent`）替换为占位存根字符串以优先完整保留 `newContent`，若仍超出预算再对大文本字段进行首尾截断；各变体必填
 字段与变体结构永不移除，新建文件的 `originalContent: null` 得以保留，被裁剪的 `edit` 确认会带回
 `hideModify: true` 并在 `warnings` 中提示内容被截断；与观察类结果不同，confirmation 不进行
 progress 淘汰，也不设置 `truncated` 标记。
-若大文本全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
-（例如 edit 的文件 diff，它只供界面使用），再丢弃同样只供客户端界面使用的 artifacts，
+对于观察类结果，若大文本全部截到最短仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示，再丢弃同样只供客户端界面使用的 artifacts，
 最后丢弃 hook 结果；截断完全够不到的内容
 （内联媒体）会让模型内容变为明确的占位存根。截断按 JSON
 编码后的 UTF-8 字节计量，与线上限制的单位一致；删除时以完整码点为单位，因此不会拆开
