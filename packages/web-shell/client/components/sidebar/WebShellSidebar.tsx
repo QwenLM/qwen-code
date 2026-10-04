@@ -2705,8 +2705,17 @@ export function WebShellSidebar({
   ]);
 
   useEffect(() => {
+    if (!statusSurfaceHidden) {
+      // The secondary queries only run while the surface is hidden, so the
+      // baseline would otherwise freeze at its last hidden snapshot: a
+      // completion the user watched while the Home column is visible would be
+      // compared against that frozen running snapshot on the next hidden
+      // cycle and repainted as an unread completion. Nulling the baseline
+      // makes the first hidden cycle after a visible period baseline-only.
+      previousSecondaryRunningBySourceRef.current[sessionSource] = null;
+      return;
+    }
     if (
-      !statusSurfaceHidden ||
       secondaryActiveSnapshots.length !== secondaryActiveQueries.length ||
       secondaryActiveSnapshots.some(
         (snapshot) => snapshot.loading || snapshot.error,

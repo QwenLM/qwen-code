@@ -605,6 +605,65 @@ describe('LiveVoiceSettingsCard', () => {
     expect(save().disabled).toBe(false);
   });
 
+  it('re-baselines the request keys after a partially landed save', async () => {
+    const setup = setupResult({
+      enabled: false,
+      keyConfigured: false,
+      nativeHost: false,
+    });
+    setup.update.mockRejectedValueOnce(new Error('setEnabled failed'));
+    const container = mount(setup);
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+        'K',
+      ),
+    );
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.click(),
+    );
+    expect(save().disabled).toBe(false);
+
+    // The daemon persisted the key and only failed setEnabled after that,
+    // so the request rejects while the write stands.
+    await act(async () => save().click());
+
+    // The refresh comes back with keyConfigured/storedKey flipped by the
+    // card's own write. The re-baseline must run against this new status —
+    // asserting here, before the refresh promise chain rewinds, would race
+    // the effect.
+    act(() =>
+      mounted.at(-1)!.root.render(
+        <LiveVoiceSettingsCard
+          setup={{
+            ...setup,
+            status: {
+              ...setup.status!,
+              keyConfigured: true,
+              storedKey: true,
+            },
+          }}
+        />,
+      ),
+    );
+
+    // The card's own write must never be the elsewhere a conflict is
+    // reported against: no conflict message, Save stays usable for the
+    // enable retry, and the retry carries the same staged fields.
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    expect(setup.refresh).toHaveBeenCalled();
+
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenLastCalledWith({
+      enabled: true,
+      apiKey: { operation: 'replace', value: 'K' },
+    });
+  });
+
   it('keeps the shortcut capture disabled until the status loads', () => {
     const setup = { ...setupResult({}), status: undefined };
     const container = mount(setup);

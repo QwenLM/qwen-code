@@ -667,6 +667,65 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('does not badge a completion the user watched while the Home column was visible', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    let running = true;
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-session', {
+              workspaceCwd: '/tmp/other',
+              hasActivePrompt: running,
+            }),
+          ],
+        },
+        loading: false,
+      },
+    ]);
+
+    // A full page records the secondary session as running in the baseline.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+
+    // Back Home the queries stop, and the session finishes while visible.
+    renderSidebar(false, { layout: 'rail', activePage: 'home' });
+    await flushSidebar();
+    running = false;
+    renderSidebar(false, { layout: 'rail', activePage: 'home' });
+    await flushSidebar();
+
+    // Returning to a full page must not compare the refetched idle session
+    // against the frozen running baseline: the completion happened on
+    // screen, so there is nothing unread to show.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+  });
+
   it('includes secondary workspace attention on the rail Home button while the Live section is open', async () => {
     const multiWorkspaceCapabilities = {
       ...organizationCapabilities,

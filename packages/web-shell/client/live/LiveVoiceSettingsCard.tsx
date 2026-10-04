@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FlaskConicalIcon } from 'lucide-react';
 import type {
   DaemonLiveRequirementState,
@@ -123,17 +123,20 @@ export function LiveVoiceSettingsCard({
   const nativeHost = status?.nativeHost !== false;
   const shortcut = draft.shortcut ?? status?.shortcut ?? 'Command+E';
 
-  const savedValue = (key: keyof DaemonLiveSetupUpdate) =>
-    key === 'apiKey'
-      ? JSON.stringify([
-          status?.keyConfigured,
-          status?.keySource,
-          status?.storedKey,
-          status?.keyEnv,
-        ])
-      : key === 'endpoint'
-        ? JSON.stringify([status?.keySource, savedEndpoint])
-        : status?.[key];
+  const savedValue = useCallback(
+    (key: keyof DaemonLiveSetupUpdate) =>
+      key === 'apiKey'
+        ? JSON.stringify([
+            status?.keyConfigured,
+            status?.keySource,
+            status?.storedKey,
+            status?.keyEnv,
+          ])
+        : key === 'endpoint'
+          ? JSON.stringify([status?.keySource, savedEndpoint])
+          : status?.[key],
+    [savedEndpoint, status],
+  );
   const stage = <K extends keyof DaemonLiveSetupUpdate>(
     key: K,
     value: DaemonLiveSetupUpdate[K],
@@ -167,6 +170,18 @@ export function LiveVoiceSettingsCard({
   // changed saved value, not a changed object identity; a 1s install poll
   // returning unchanged data must not converge a draft mid-typing either.
   const lastSettleStatus = useRef<UseLiveVoiceSetupResult['status']>(undefined);
+  // A rejected save may still have landed partially on the daemon: its
+  // settings writes persist before setEnabled is attempted, and only
+  // `enabled` is rolled back when that call fails. The NEXT status refresh
+  // must re-baseline the keys that request carried, or the card's own write
+  // is reported back as a settings.liveSetup.conflict — and since the settle
+  // effect below never converges the apiKey baseline, Save would stay
+  // blocked until the whole typed draft is discarded. Held in state (not a
+  // ref) so the re-baseline provokes the render that clears the conflict.
+  const [rebaselineAfterFailedSave, setRebaselineAfterFailedSave] = useState<{
+    keys: Set<keyof DaemonLiveSetupUpdate>;
+    at: UseLiveVoiceSetupResult['status'];
+  } | null>(null);
   useEffect(() => {
     const previous = lastSettleStatus.current;
     lastSettleStatus.current = status;
@@ -204,11 +219,22 @@ export function LiveVoiceSettingsCard({
     });
   }, [status, draft]);
 
+  // Runs only once a refresh actually lands a new status identity after a
+  // failed save — never against the pre-refresh values.
+  useEffect(() => {
+    if (rebaselineAfterFailedSave === null) return;
+    if (!status || status === rebaselineAfterFailedSave.at) return;
+    for (const key of rebaselineAfterFailedSave.keys)
+      draftBaseline.current.set(key, savedValue(key));
+    setRebaselineAfterFailedSave(null);
+  }, [rebaselineAfterFailedSave, savedValue, status]);
+
   useEffect(() => {
     if (!status) {
       setDraft({});
       setCustomModel(false);
       setConfirmOpen(false);
+      setRebaselineAfterFailedSave(null);
     }
   }, [status]);
 
@@ -237,9 +263,16 @@ export function LiveVoiceSettingsCard({
     update.shortcut = shortcut;
   const dirty = Object.keys(update).length > 0;
   const invalid = update.model === '' || update.voice === '';
+  // Keys queued for a failed-save re-baseline cannot conflict yet: their
+  // baseline predates a write the card itself made, and the refresh that
+  // re-anchors them is the one that failed save just triggered.
   const conflict = (
     Object.keys(update) as Array<keyof DaemonLiveSetupUpdate>
-  ).some((key) => draftBaseline.current.get(key) !== savedValue(key));
+  ).some(
+    (key) =>
+      !rebaselineAfterFailedSave?.keys.has(key) &&
+      draftBaseline.current.get(key) !== savedValue(key),
+  );
 
   // Validate the entire candidate configuration in one daemon request; retain
   // the draft on failure so a rejected field can be corrected and retried.
@@ -251,7 +284,18 @@ export function LiveVoiceSettingsCard({
       setDraft({});
       setCustomModel(false);
     } catch {
-      // The hook exposes the sanitized daemon error in the card.
+      // The hook exposes the sanitized daemon error in the card. The daemon
+      // applies a request's writes before setEnabled and rolls back only
+      // `enabled` when that fails, so part of this save may have landed:
+      // queue a re-baseline of the keys it carried, then refresh — the card's
+      // own write must never be the elsewhere a conflict is reported against.
+      setRebaselineAfterFailedSave({
+        keys: new Set(
+          Object.keys(update) as Array<keyof DaemonLiveSetupUpdate>,
+        ),
+        at: status,
+      });
+      await setup.refresh();
     } finally {
       setSaving(false);
     }
