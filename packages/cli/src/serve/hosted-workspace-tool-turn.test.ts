@@ -3953,6 +3953,7 @@ it.each([
   'incomplete-results',
   'changed-snapshots',
   'missing-runtime',
+  'stranger-turn',
 ])('does not clear pending history for %s', async (failure) => {
   broker.fileHistory.mockImplementation(async (operation) => {
     if (operation.action === 'snapshot') throw new Error('response lost');
@@ -3969,6 +3970,7 @@ it.each([
   if (failure === 'previous-batch')
     saved.pendingMessageId = await commit('assistant', parts, 'model');
   if (failure === 'missing-message-id') delete saved.pendingMessageId;
+  if (failure === 'stranger-turn') saved.pendingTurn = 'stranger';
   if (failure === 'incomplete-results') {
     const project = session.sink.project.bind(session.sink);
     vi.spyOn(session.sink, 'project').mockImplementation(async (...args) => {
@@ -3994,15 +3996,37 @@ it.each([
     );
   broker.fileHistory.mockClear();
   const recovered = createTurn();
-  await expect(recovered.resumeCommittedResults()).rejects.toBeInstanceOf(
-    HostedToolRecoveryRequiredError,
+  const rejection: unknown = await recovered
+    .resumeCommittedResults()
+    .catch((cause: unknown) => cause);
+  expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The settle ground must reach the cause message, or the one site that
+  // blocks a live Turn drops the sub-cause it had in hand.
+  const grounds: Record<string, string> = {
+    'previous-batch': 'pending_message_not_ready',
+    'missing-message-id': 'no_pending_message',
+    'incomplete-results': 'tool_results_mismatch',
+    'stranger-turn': 'pending_turn_mismatch',
+  };
+  const ground = grounds[failure];
+  if (ground !== undefined) {
+    const cause = (rejection as HostedToolRecoveryRequiredError).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toContain(
+      `Hosted file history requires recovery: ${ground}.`,
+    );
+  }
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe(
+    failure === 'stranger-turn' ? 'stranger' : 'prompt',
   );
-  expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
   expect(broker.release).not.toHaveBeenCalled();
   if (
-    ['previous-batch', 'missing-message-id', 'incomplete-results'].includes(
-      failure,
-    )
+    [
+      'previous-batch',
+      'missing-message-id',
+      'incomplete-results',
+      'stranger-turn',
+    ].includes(failure)
   )
     expect(broker.fileHistory).not.toHaveBeenCalled();
 });

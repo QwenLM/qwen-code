@@ -240,7 +240,6 @@ export type HostedRefusalReason =
   | 'hook_operations_pending'
   | 'mcp_operations_pending'
   | 'not_runnable'
-  | 'not_writable'
   | 'publication_incomplete'
   | 'recovery_unsupported'
   | 'restore_blocked'
@@ -269,19 +268,12 @@ export type HostedActionResolution =
       readonly reason?: HostedRefusalReason;
     };
 
-const recoveryRequired = (
-  session: ManagedSession,
-  blocked: boolean,
-): HostedActionResolution => ({
+const recoveryRequired = (session: ManagedSession): HostedActionResolution => ({
   status: 409,
   code: 'hosted_turn_recovery_required',
   // A stopped writer is the narrower state, so it is named even when the
   // Session is also recovery-blocked.
-  reason: session.authority.writesStopped
-    ? 'writes_stopped'
-    : blocked
-      ? 'turn_blocked'
-      : 'not_writable',
+  reason: session.authority.writesStopped ? 'writes_stopped' : 'turn_blocked',
 });
 
 const ENDED_CODES = {
@@ -351,13 +343,13 @@ export async function resolveHostedAction(
     }
     if (writable()) throw cause;
     waiters.notify(requestId);
-    return recoveryRequired(session, isBlocked());
+    return recoveryRequired(session);
   };
   if (
     authority.action(requestId)!.state === 'requested' &&
     Date.now() >= options.expiresAt
   ) {
-    if (!writable()) return recoveryRequired(session, isBlocked());
+    if (!writable()) return recoveryRequired(session);
     try {
       await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
@@ -367,7 +359,7 @@ export async function resolveHostedAction(
   }
   const current = recorded();
   if (current) return current;
-  if (!writable()) return recoveryRequired(session, isBlocked());
+  if (!writable()) return recoveryRequired(session);
   const decisionRef = await session.resources.publish(
     'managed-action-decision',
     bytes,
@@ -375,7 +367,7 @@ export async function resolveHostedAction(
   // Another answer, the expiry or a cancel may have landed meanwhile.
   const landed = recorded();
   if (landed) return landed;
-  if (!writable()) return recoveryRequired(session, isBlocked());
+  if (!writable()) return recoveryRequired(session);
   try {
     await authority.resolveAction(
       {

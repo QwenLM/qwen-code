@@ -19,7 +19,10 @@ import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
-import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  parseHarnessCheckpointV1,
+  type HarnessRunAuthorization,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
@@ -236,6 +239,20 @@ function hostedTurnBusyReason(session: HostedSession): HostedRefusalReason {
     return 'activation_inactive';
   if (session.mcp?.hasPendingOperations()) return 'mcp_operations_pending';
   return 'hook_operations_pending';
+}
+
+/**
+ * Renders the sub-cause of an unusable run authorization for stderr: the
+ * five-way blocked reason plus, when core recorded one, the specific message.
+ * The response body's reason stays inside the closed refusal vocabulary.
+ */
+function harnessAuthorizationDetail(
+  authorization: Exclude<HarnessRunAuthorization, { status: 'runnable' }>,
+): string {
+  if (authorization.status !== 'blocked') return authorization.status;
+  return authorization.message === undefined
+    ? authorization.reason
+    : `${authorization.reason}: ${authorization.message}`;
 }
 
 function identity(
@@ -2698,9 +2715,7 @@ export function registerHostedHarnessSessionRoutes(
       releaseRecoveredRuntime(session);
       const unusable = continueAuthorization.authorization;
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${req.params['id']} run authorization not runnable: ${
-          unusable.status === 'blocked' ? unusable.reason : unusable.status
-        }`,
+        `qwen serve: Hosted Session ${req.params['id']} run authorization not runnable: ${harnessAuthorizationDetail(unusable)}`,
       );
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
     }
@@ -2996,9 +3011,7 @@ export function registerHostedHarnessSessionRoutes(
     if (cancelAuthorization.authorization.status !== 'runnable') {
       const unusable = cancelAuthorization.authorization;
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${sessionId} run authorization not runnable: ${
-          unusable.status === 'blocked' ? unusable.reason : unusable.status
-        }`,
+        `qwen serve: Hosted Session ${sessionId} run authorization not runnable: ${harnessAuthorizationDetail(unusable)}`,
       );
       // Retry-inviting refusal: keep the adopted lease owed (see the
       // blocked refusal above).

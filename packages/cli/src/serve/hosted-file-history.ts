@@ -6,6 +6,10 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import type {
+  HarnessCheckpointPhase,
+  HarnessRunAuthorization,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
@@ -92,20 +96,45 @@ export async function readHostedFileHistory(
   );
 }
 
+type HarnessRunAuthorizationBlockedReason = Extract<
+  HarnessRunAuthorization,
+  { status: 'blocked' }
+>['reason'];
+
+/** One name per conjunct that can keep the pending turn from settling. */
+export type HostedFileHistorySettleBlocker =
+  | 'undo_pending'
+  | 'no_pending_turn'
+  | 'no_pending_message'
+  | 'authorization_initial'
+  | `authorization_blocked_${HarnessRunAuthorizationBlockedReason}`
+  | 'checkpoint_identity_mismatch'
+  | `phase_${HarnessCheckpointPhase}`
+  | 'pending_message_not_ready'
+  | 'tool_item_unsettled'
+  | 'assistant_mismatch'
+  | 'no_pending_tool_calls'
+  | 'unexpected_tail_item'
+  | 'duplicate_tool_call_id'
+  | 'tool_results_mismatch';
+
 /**
  * Null when the pending turn settles clean; a terse ground the cold-load
  * refusal may log when it does not. The grounds are the same conjuncts the
- * boolean version evaluated, in the same order.
+ * boolean version evaluated, in the same order, each with its own name.
  */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
-): Promise<string | null> {
-  if (!record.pendingTurn || !record.pendingMessageId || record.pendingUndo)
-    return 'no_pending_turn';
+): Promise<HostedFileHistorySettleBlocker | null> {
+  if (record.pendingUndo) return 'undo_pending';
+  if (!record.pendingTurn) return 'no_pending_turn';
+  if (!record.pendingMessageId) return 'no_pending_message';
   const authorization = await session.authority.harnessRunAuthorization();
   if (authorization.status !== 'runnable')
-    return `authorization_${authorization.status}`;
+    return authorization.status === 'blocked'
+      ? `authorization_blocked_${authorization.reason}`
+      : `authorization_${authorization.status}`;
   const checkpoint = authorization.checkpoint;
   const items = checkpoint.tools?.items ?? [];
   if (
@@ -136,12 +165,13 @@ export async function canSettleHostedFileHistory(
         part.functionResponse?.id ? [part.functionResponse.id] : [],
       ) ?? [],
   );
-  const settles =
-    calls.length > 0 &&
-    tail.every((item) => item.type === 'tool_result') &&
-    new Set(calls).size === calls.length &&
-    isDeepStrictEqual(calls.sort(), results.sort());
-  return settles ? null : 'tool_results_mismatch';
+  if (calls.length === 0) return 'no_pending_tool_calls';
+  if (!tail.every((item) => item.type === 'tool_result'))
+    return 'unexpected_tail_item';
+  if (new Set(calls).size !== calls.length) return 'duplicate_tool_call_id';
+  return isDeepStrictEqual(calls.sort(), results.sort())
+    ? null
+    : 'tool_results_mismatch';
 }
 
 export async function commitHostedFileHistory(

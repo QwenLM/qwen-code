@@ -6513,10 +6513,18 @@ describe('Hosted Harness refusal reasons', () => {
 
   it('names a blocked restore bundle on a cold load', async () => {
     await createAndDetach({ profile: true });
+    // A blocked bundle without a basis must carry both refs null
+    // (assertManagedSessionRestoreBundle), so the cause line prints the
+    // value production would emit.
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'restoreBundle',
-    ).mockResolvedValue({ recoveryStatus: 'blocked' } as never);
+    ).mockResolvedValue({
+      recoveryStatus: 'blocked',
+      restoreBasis: null,
+      checkpointRef: null,
+      restoreProofRef: null,
+    } as never);
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
       .mockImplementation(() => {});
@@ -6527,10 +6535,10 @@ describe('Hosted Harness refusal reasons', () => {
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
     expect(loaded.body.reason).toBe('restore_blocked');
-    // The bundle is mocked whole, so restoreBasis is absent — the cause line
-    // must still carry the gate with the discriminator it had in hand.
     expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('recovery blocked'),
+      expect.stringContaining(
+        'restore refused: recovery blocked (restoreBasis=null)',
+      ),
     );
     log.mockRestore();
   });
@@ -6690,10 +6698,9 @@ describe('Hosted Harness refusal reasons', () => {
 
   it('names pending MCP operations on a prompt refusal', async () => {
     const { server, authorize } = await mcpApp();
-    vi.spyOn(
-      HostedMcpSession.prototype,
-      'hasPendingOperations',
-    ).mockReturnValue(true);
+    const pending = vi
+      .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
+      .mockReturnValue(true);
     const prompt = [{ type: 'text', text: 'hello' }];
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -6705,15 +6712,17 @@ describe('Hosted Harness refusal reasons', () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('mcp_operations_pending');
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    pending.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('names pending MCP operations on the operations gate', async () => {
     const { server, authorize } = await mcpApp();
-    vi.spyOn(
-      HostedMcpSession.prototype,
-      'hasPendingOperations',
-    ).mockReturnValue(true);
+    const pending = vi
+      .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
+      .mockReturnValue(true);
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
     ).send({
@@ -6724,16 +6733,17 @@ describe('Hosted Harness refusal reasons', () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('mcp_operations_pending');
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    pending.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('names pending Hook operations on prompt and rewind refusals', async () => {
     const { server, authorize } = await hookApp();
-    vi.spyOn(
-      HostedHookSession.prototype,
-      'hasPendingOperations',
-      'get',
-    ).mockReturnValue(true);
+    const pending = vi
+      .spyOn(HostedHookSession.prototype, 'hasPendingOperations', 'get')
+      .mockReturnValue(true);
     const prompt = [{ type: 'text', text: 'hello' }];
     const refused = await authorize(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -6751,7 +6761,10 @@ describe('Hosted Harness refusal reasons', () => {
     expect(rewound.status).toBe(409);
     expect(rewound.body.code).toBe('hosted_turn_recovery_required');
     expect(rewound.body.reason).toBe('hook_operations_pending');
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    pending.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('leaves reason off the Hook busy code on a rewind refusal', async () => {
@@ -8501,7 +8514,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
       'harnessRunAuthorization',
     ).mockResolvedValue({
       status: 'blocked',
-      reason: 'missing_checkpoint',
+      reason: 'invalid_state',
+      message: 'checkpoint record ckpt-1 is not valid JSON.',
     } as never);
     for (const route of ['continue', 'cancel'] as const) {
       log.mockClear();
@@ -8516,9 +8530,40 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
       expect(refused.body.reason).toBe('not_runnable');
       expect(log).toHaveBeenCalledWith(
-        expect.stringContaining('missing_checkpoint'),
+        expect.stringContaining(
+          'invalid_state: checkpoint record ckpt-1 is not valid JSON.',
+        ),
       );
     }
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('omits the absent authorization message on a not-runnable refusal', async () => {
+    const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'missing_checkpoint',
+    } as never);
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, ...recovery });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('not_runnable');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('not runnable: missing_checkpoint'),
+    );
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('undefined'));
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

@@ -313,11 +313,18 @@ export class HostedWorkspaceToolTurn {
     if (saved?.pendingTurn) {
       this.uncertain = true;
       try {
-        if (
-          saved.pendingTurn !== this.promptId ||
-          (await canSettleHostedFileHistory(this.session, saved)) !== null
-        )
-          throw new Error('Hosted file history requires recovery.');
+        if (saved.pendingTurn !== this.promptId)
+          throw new Error(
+            'Hosted file history requires recovery: pending_turn_mismatch.',
+          );
+        const settleBlocker = await canSettleHostedFileHistory(
+          this.session,
+          saved,
+        );
+        if (settleBlocker !== null)
+          throw new Error(
+            `Hosted file history requires recovery: ${settleBlocker}.`,
+          );
         const authorization =
           await this.session.authority.harnessRunAuthorization();
         if (authorization.status !== 'runnable')
