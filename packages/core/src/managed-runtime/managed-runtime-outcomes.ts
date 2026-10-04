@@ -104,9 +104,16 @@ export class LocalManagedRuntimeOutcomes {
     const inputDigest = managedToolDigest(input.params);
     // Results committed but the closing steps never ran — a close or crash
     // between the batch's commits and its consumption — join them now:
-    // every outcome is already committed, so closing is not replaying.
+    // every outcome is already committed, so closing is not replaying. The
+    // close must never fire mid-turn: the live turn's own results_ready is
+    // closed by the batch-end finalization after the records are flushed,
+    // so only another turn's (or a restored activation's) leftover closes
+    // here.
+    const leftover = await this.latestCheckpoint();
     if (
-      (await this.latestCheckpoint())?.continuation.phase === 'results_ready'
+      leftover?.continuation.phase === 'results_ready' &&
+      (leftover.identity.turnId !== promptId ||
+        leftover.identity.activationId !== session.activation.activationId)
     ) {
       await this.finalizeBatch();
     }

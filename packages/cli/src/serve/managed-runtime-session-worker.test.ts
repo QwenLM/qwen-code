@@ -812,6 +812,12 @@ describe.skipIf(process.platform === 'win32')(
           toolName: 'write_file',
           params: { file_path: file, content: 'x' },
           workerIncarnation: entries.find((entry) => entry.boot)?.boot,
+          toolDefinition: {
+            name: 'write_file',
+            parametersJsonSchema: expect.objectContaining({
+              type: 'object',
+            }),
+          },
         }),
       ]);
       // It settled with a success the recorder saw, and the worker then

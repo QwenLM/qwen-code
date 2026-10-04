@@ -31,6 +31,7 @@ import { createManagedEngineChannelFactory } from './managed-engine-channel-fact
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { localManagedSessionKey } from '@qwen-code/qwen-code-core/utils/sessionStorageUtils.js';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
@@ -450,11 +451,9 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     });
     const checkpoints: HarnessCheckpointV1[] = [];
     for (const ref of checkpointRefs) {
-      checkpoints.push(
-        JSON.parse(
-          (await resources.read(ref)).toString(),
-        ) as HarnessCheckpointV1,
-      );
+      // parse, not JSON.parse: the decoded body must satisfy the schema, so
+      // a renamed or dropped field fails here rather than passing vacuously.
+      checkpoints.push(parseHarnessCheckpointV1(await resources.read(ref)));
     }
     const closed = checkpoints
       .reverse()

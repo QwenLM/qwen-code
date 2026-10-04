@@ -245,6 +245,11 @@ export class ManagedSessionRuntimeWorker {
    * not start resolves `not_started`; a call whose outcome cannot be learned
    * rejects with {@link ManagedRuntimeOutcomeUnknownError}. `callId`, the
    * host's id for the call, names it in the worker's journal too.
+   *
+   * Journal-free convenience for tests: the dispatched session's calls run
+   * through `createManagedRuntimeEnvironment`, which admits and settles
+   * durably around this same path. Nobody may dispatch a Managed session's
+   * call through this method — nothing it writes proves the call ran.
    */
   async execute(
     toolName: string,

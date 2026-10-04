@@ -630,6 +630,44 @@ describe('restored runtime block', () => {
     }
   });
 
+  it('lets the same turn close its own results at the batch end, never mid-round', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const { session } = await openSession(root, 'session-live-turn');
+    try {
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      });
+      // The same prompt's next call joins the open batch: the live turn's
+      // own results_ready must not be closed by another admission — its
+      // close is the batch end, after the recorder's records are flushed,
+      // so a sealed log never claims the model saw results it did not.
+      await outcomes.admit(admission('call-b'));
+      const checkpoint = (await checkpointOf(session))!;
+      expect(checkpoint.continuation.phase).toBe('await_runtime');
+      const items = checkpoint.tools?.items ?? [];
+      expect(items).toMatchObject([
+        { executionCallId: 'call-a', state: 'settled', consumed: false },
+        { executionCallId: 'call-b', state: 'in_progress', consumed: false },
+      ]);
+      const phases: string[] = [];
+      for (const event of events(session, 'checkpoint.committed')) {
+        phases.push(
+          parseHarnessCheckpointV1(
+            await session.resources.read(event.payload['stateRef'] as never),
+          ).continuation.phase,
+        );
+      }
+      expect(phases).not.toContain('turn_settled');
+    } finally {
+      await session.close();
+    }
+  });
+
   it('answers nothing for a log at results_ready across a reopen', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);
