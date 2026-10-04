@@ -2263,8 +2263,14 @@ interface EvaluationScope {
  * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
  * best-effort: only the first heredoc on a line is handled, which is the
  * shape a model emits, and anything unrecognised is left untouched.
+ *
+ * Returns null when a body cannot be stripped safely: with an UNQUOTED
+ * delimiter bash expands `$(…)`, backticks and `${…}` in the body at read
+ * time, so those lines can execute commands the stripped text would hide
+ * from every later stage. Quoted-delimiter bodies stay inert and strip
+ * cleanly.
  */
-function stripHeredocBodies(command: string): string {
+function stripHeredocBodies(command: string): string | null {
   const lines = command.split('\n');
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
@@ -2272,6 +2278,7 @@ function stripHeredocBodies(command: string): string {
     out.push(line);
     const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
     if (!match) continue;
+    const quoted = match[1] !== '';
     const delimiter = match[2]!;
     const stripTabs = line.includes('<<-');
     // Consume the body up to the delimiter line, dropping it from the output.
@@ -2280,6 +2287,12 @@ function stripHeredocBodies(command: string): string {
       const body = lines[index]!;
       const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
       if (trimmed === delimiter) break;
+      if (
+        !quoted &&
+        (body.includes('$(') || body.includes('`') || body.includes('${'))
+      ) {
+        return null;
+      }
     }
   }
   return out.join('\n');
@@ -2526,6 +2539,12 @@ async function evaluateCommandWithCwd(
   // line's body lines are separate commands, so stripping them would hide
   // commands the executed text really runs.
   const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  if (strippedCommand === null) {
+    return {
+      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
