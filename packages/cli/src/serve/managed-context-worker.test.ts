@@ -52,6 +52,46 @@ import {
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
 
+const globWorkerAssets = vi.hoisted(() => ({ directory: '' }));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/bundlePaths.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/bundlePaths.js')
+    >()),
+    resolveBundleDir: () => globWorkerAssets.directory,
+  }),
+);
+
+// CLI tests alias Core to source; give each suite its own real JS worker asset.
+beforeAll(async () => {
+  globWorkerAssets.directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'managed-glob-asset-'),
+  );
+  const { build } = await import('esbuild');
+  await build({
+    entryPoints: [
+      path.resolve(
+        import.meta.dirname,
+        '../../../core/src/tools/glob-search-worker.ts',
+      ),
+    ],
+    outfile: path.join(globWorkerAssets.directory, 'glob-search-worker.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    banner: {
+      js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+    },
+  });
+}, 30_000);
+
+afterAll(() => {
+  if (globWorkerAssets.directory)
+    fs.rmSync(globWorkerAssets.directory, { recursive: true, force: true });
+});
+
 interface Expected {
   readonly status: number;
   readonly code?: string;

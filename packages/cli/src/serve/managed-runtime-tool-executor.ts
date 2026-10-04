@@ -1176,7 +1176,10 @@ export function createManagedToolSet(
         new WriteFileTool(config),
         new EditTool(config),
         // The walk never leaves the Session, whatever the pattern spells.
-        new GlobTool(config, { containmentRoot: directory }),
+        new GlobTool(config, {
+          containmentRoot: directory,
+          executionTimeoutMs: 5_000,
+        }),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
