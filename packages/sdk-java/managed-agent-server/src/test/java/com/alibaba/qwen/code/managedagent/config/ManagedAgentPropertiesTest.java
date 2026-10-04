@@ -109,6 +109,62 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void relaxationDefaultsMatchTheShippedConfiguration() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        assertThat(properties.getEvents().getReadGrantRecheckInterval())
+                .isEqualTo(java.time.Duration.ofSeconds(5));
+        assertThat(properties.getArtifacts().getReadRevalidationInterval())
+                .isEqualTo(java.time.Duration.ofSeconds(5));
+        assertThat(properties.getToolPublication()
+                .isJournalHeadAuthorization()).isFalse();
+        // ... and the shipped application.yml mirrors the same values.
+        var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml",
+                        new org.springframework.core.io.ClassPathResource(
+                                "application.yml"));
+        // The flattened keys must exist: a renamed or dropped key would
+        // bind nothing, and the value assertions below would pass on the
+        // Java defaults.
+        assertThat(yaml).anySatisfy(source -> {
+            assertThat(source.containsProperty("qwen.managed-agent.events"
+                    + ".read-grant-recheck-interval")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.artifacts"
+                    + ".read-revalidation-interval")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent"
+                    + ".tool-publication.journal-head-authorization"))
+                    .isTrue();
+        });
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withInitializer(ctx -> {
+                    // The yaml's ${QWEN_*} placeholders must resolve to
+                    // their shipped defaults regardless of the ambient shell.
+                    java.util.Map<String, Object> ambient =
+                            new java.util.LinkedHashMap<>(System.getenv());
+                    ambient.keySet().removeIf(name -> name
+                            .startsWith("QWEN_MANAGED_AGENT_"));
+                    ctx.getEnvironment().getPropertySources().replace(
+                            "systemEnvironment",
+                            new org.springframework.core.env.MapPropertySource(
+                                    "systemEnvironment", ambient));
+                    yaml.forEach(ctx.getEnvironment().getPropertySources()
+                            ::addLast);
+                })
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    ManagedAgentProperties bound = started
+                            .getBean(ManagedAgentProperties.class);
+                    assertThat(bound.getEvents().getReadGrantRecheckInterval())
+                            .isEqualTo(java.time.Duration.ofSeconds(5));
+                    assertThat(bound.getArtifacts()
+                            .getReadRevalidationInterval())
+                            .isEqualTo(java.time.Duration.ofSeconds(5));
+                    assertThat(bound.getToolPublication()
+                            .isJournalHeadAuthorization()).isFalse();
+                });
+    }
+
+    @Test
     void fileAdmissionRequiresTheCompleteTrustedLocalDeployment() {
         assertThatCode(() -> new ManagedAgentProperties().validateWorkspaceFiles()).doesNotThrowAnyException();
         List<Consumer<ManagedAgentProperties>> invalid = List.of(

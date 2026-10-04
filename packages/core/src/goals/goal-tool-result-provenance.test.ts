@@ -95,6 +95,18 @@ describe('goalToolResultProvenance', () => {
     ).toEqual({ goalContext: permit });
   });
 
+  it.each([
+    { name: ToolNames.EXEC },
+    { name: ToolNames.TOOL_CALL, args: { name: 'EXEC', arguments: {} } },
+  ])('classifies script output independently of its content: %j', (request) => {
+    expect(
+      goalToolResultProvenance({ ...request, goalContext: permit }),
+    ).toEqual({
+      goalContext: permit,
+      provenance: 'execution_output',
+    });
+  });
+
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();
   });
