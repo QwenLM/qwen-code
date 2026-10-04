@@ -186,16 +186,16 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
         }
         complete(exchange, acquisition, record -> {
-                    Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
-                            runtimeSessionId, "acquired", true));
-                    RuntimeScope scope = record.getSession().getScope();
-                    response.put("scope", Map.of("tenantId", scope.getTenantId(),
-                            "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
-                            "capabilityDigest", scope.getCapabilityDigest()));
-                    response.put("runtime", Map.of("bindingId", record.getBindingId(),
-                            "generation", Long.toString(record.getRuntimeGeneration())));
-                    return response;
-                });
+            Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
+                    runtimeSessionId, "acquired", true));
+            RuntimeScope scope = record.getSession().getScope();
+            response.put("scope", Map.of("tenantId", scope.getTenantId(),
+                    "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                    "capabilityDigest", scope.getCapabilityDigest()));
+            response.put("runtime", Map.of("bindingId", record.getBindingId(),
+                    "generation", Long.toString(record.getRuntimeGeneration())));
+            return response;
+        });
     }
 
     private void toolSession(HttpExchange exchange, String suffix)
