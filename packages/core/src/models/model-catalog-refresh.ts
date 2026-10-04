@@ -139,7 +139,10 @@ function servesAgentTurns(model: ModelsDevModel): boolean {
   );
 }
 
-/** `toLimits` builds its keys in a fixed order, so this compares by value. */
+/**
+ * `toLimits` and the modality union below both build their keys in a fixed
+ * order, so this compares whole entries by value.
+ */
 function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -239,7 +242,18 @@ export function trimModelsDevCatalog(
     }
     const allModalities = modalityCandidates.get(key);
     if (allModalities) {
-      const merged = Object.assign({}, ...allModalities);
+      // Union in CATALOG_MODALITIES order. `Object.assign` would order the keys
+      // by provider iteration instead, so two spelling twins of one model —
+      // which by construction arrive from different providers — could agree on
+      // every fact yet serialize differently and be judged a disagreement by
+      // the alias pass below, silently dropping the alias.
+      const present = new Set(allModalities.flatMap((m) => Object.keys(m)));
+      const merged: InputModalities = {};
+      for (const modality of CATALOG_MODALITIES) {
+        if (present.has(modality)) {
+          merged[modality] = true;
+        }
+      }
       // A declared-text-only record ({}) is kept only on entries that ship
       // limits: there it is fidelity the union can later narrow against. On
       // its own it carries no usable fact, so it must not create an entry —

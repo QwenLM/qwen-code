@@ -494,6 +494,53 @@ describe('trimModelsDevCatalog', () => {
     });
   });
 
+  it('keeps an alias two spellings claim with the same facts from different providers', () => {
+    // The twins agree on limits and on the modality set, but that set arrives
+    // from different providers in a different order: `1.1-x1-1` gets pdf from
+    // zai then image from alibaba, `1-1-x1.1` gets image from alibaba then pdf
+    // from volcengine. Merging in provider order would let sameEntry read the
+    // two as a disagreement and drop the alias — the #13209 regex fallback this
+    // pass exists to remove, with nothing actually disagreeing.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }, [
+              'text',
+              'pdf',
+            ]),
+          },
+        },
+        alibaba: {
+          models: {
+            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }, [
+              'text',
+              'image',
+            ]),
+            '1-1-x1.1': chat('1-1-x1.1', { context: 111000, output: 1000 }, [
+              'text',
+              'image',
+            ]),
+          },
+        },
+        volcengine: {
+          models: {
+            '1-1-x1.1': chat('1-1-x1.1', { context: 111000, output: 1000 }, [
+              'text',
+              'pdf',
+            ]),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['1.1-x1.1']).toEqual({
+      context: 111000,
+      output: 1000,
+      modalities: { image: true, pdf: true },
+    });
+  });
+
   it('adds no alias for a spelling normalize() already folds', () => {
     // Claude's dotted minor is rewritten to dashes by normalize(), so the
     // dotted key is unreachable by its own spelling and isModelCatalogKey
