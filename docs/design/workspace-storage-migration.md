@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-Implemented locally and integrated with main `5130c1a73`, including W1b, reliable Session close, durable-process defaults and output collection. Production Linux acceptance remains pending. One trusted Linux host, accessible original storage, settled `hosted-workspace-files/1` Sessions, and an unchanged absolute `QWEN_HOME`/file-history volume. Only the Workspace root moves. Shell/O2, MCP/Hook, external Memory roots, opaque absolute-path dependencies, cross-host and source-lost recovery are excluded. All retained storage members participate, including closed, archived and deleted records. Unsupported or unprovable members block the entire operation.
+Implemented locally and integrated with main `bf3ab0723`, including W1b, reliable Session close, durable-process defaults, output collection and persisted Session tool profiles. Production Linux acceptance remains pending. One trusted Linux host, accessible original storage, settled `hosted-workspace-files/1` Sessions, and an unchanged absolute `QWEN_HOME`/file-history volume. Only the Workspace root moves. Shell/O2, MCP/Hook, external Memory roots, opaque absolute-path dependencies, cross-host and source-lost recovery are excluded. All retained storage members participate, including closed, archived and deleted records. Unsupported or unprovable members block the entire operation.
 
 Logical storage, all ContextBinding fields, private Session Store keys, original creation receipts, journal, messages and resource references remain immutable. Migration does not close public Sessions or reopen closed Sessions.
 
@@ -24,7 +24,7 @@ The only target-tree exception is the exact root `.qwen-managed-storage.json`: i
 
 The final SQL transaction checks operation ownership, original revision/fence, complete source cut and old-placement stop evidence, installs target root/identity/new registration UUID, increments revision once, persists completion and clears migration admission. Failed precommit steps preserve the original fenced registration. Marker publication before SQL is resumable with the same operation. Abort preserves retired facts and W1a fence; it neither deletes the target nor reopens service. If an aborted or invalidated operation left a marker or temporary file, a new operation needs an externally rebuilt target copy matching its new capture; it never accepts or deletes another operation's artifacts. Reverse migration requires a fresh operation/capture and a higher revision.
 
-Long file scans hold no database locks. Final conditional reads follow existing lock ordering and use a fresh locked authority check. Add new Flyway migrations only, retaining V31 W1b, V32 close and V33–V34 definition/collection bytes; W1c adds V35 for migration state and fences; V36 adds lookup indexes for historical Sessions and completed migrations.
+Long file scans hold no database locks. Final conditional reads follow existing lock ordering and use a fresh locked authority check. Add new Flyway migrations only, retaining V31 W1b, V32 close, V33–V34 definition/collection and V35 Session tool-profile bytes; W1c adds V36 for migration state and fences; V37 adds lookup indexes for historical Sessions and completed migrations.
 
 ## Deployment and Runtime routing
 
