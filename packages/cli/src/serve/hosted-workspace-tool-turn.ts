@@ -315,7 +315,7 @@ export class HostedWorkspaceToolTurn {
       try {
         if (
           saved.pendingTurn !== this.promptId ||
-          !(await canSettleHostedFileHistory(this.session, saved))
+          (await canSettleHostedFileHistory(this.session, saved)) !== null
         )
           throw new Error('Hosted file history requires recovery.');
         const authorization =

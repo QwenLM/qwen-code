@@ -111,6 +111,7 @@ import {
   readHostedApprovalDefinition,
   resolveHostedAction,
   type HostedApprovalSettings,
+  type HostedRefusalReason,
 } from './hosted-tool-approval.js';
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
@@ -207,7 +208,7 @@ function error(
   res: Response,
   status: number,
   code: string,
-  reason?: string,
+  reason?: HostedRefusalReason,
 ): void {
   const locals = res.locals as Record<string, unknown> | undefined;
   if (locals) {
@@ -229,7 +230,7 @@ function error(
  * Activation needs re-acquiring, and pending MCP or Hook operations settle
  * and retry clean. Call it only after one of the predicates is known true.
  */
-function hostedTurnBusyReason(session: HostedSession): string {
+function hostedTurnBusyReason(session: HostedSession): HostedRefusalReason {
   if (session.blocked) return 'turn_blocked';
   if (session.managed.authority.currentActivation?.phase !== 'active')
     return 'activation_inactive';
@@ -1567,26 +1568,35 @@ export function registerHostedHarnessSessionRoutes(
         (body?.['passiveManagedRuntimeRecovery'] === true ||
           body?.['driveRuntimeRecovery'] === true);
       const fileHistory = await readHostedFileHistory(managed);
-      if (
-        fileHistory?.pendingUndo ||
-        (fileHistory?.pendingTurn &&
-          !(takeover && fileHistory.pendingTurn === unsettled) &&
-          !(await canSettleHostedFileHistory(managed, fileHistory)))
-      ) {
+      const settleBlocker =
+        !fileHistory?.pendingUndo &&
+        fileHistory?.pendingTurn &&
+        !(takeover && fileHistory.pendingTurn === unsettled)
+          ? await canSettleHostedFileHistory(managed, fileHistory)
+          : null;
+      if (fileHistory?.pendingUndo || settleBlocker !== null) {
         await managed.close();
+        if (settleBlocker !== null)
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} file history cannot settle: ${settleBlocker}`,
+          );
+        const pendingUndo = fileHistory?.pendingUndo != null;
         error(
           res,
           409,
-          fileHistory.pendingUndo
+          pendingUndo
             ? 'hosted_file_history_recovery_required'
             : 'hosted_turn_recovery_required',
-          fileHistory.pendingUndo ? 'undo_unsettled' : 'file_history_unsettled',
+          pendingUndo ? 'undo_unsettled' : 'file_history_unsettled',
         );
         return;
       }
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
         await managed.close();
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} restore refused: recovery blocked (restoreBasis=${String(restore.restoreBasis)})`,
+        );
         error(res, 409, 'hosted_turn_recovery_required', 'restore_blocked');
         return;
       }
@@ -1748,7 +1758,7 @@ export function registerHostedHarnessSessionRoutes(
               ...fileHistory,
               pendingTurn: promptId,
               pendingMessageId: current[lastAssistant].uuid,
-            })))
+            })) === null)
         )
           resume = { promptId, text: prompt, parts };
         if (
@@ -2686,6 +2696,12 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (continueAuthorization.authorization.status !== 'runnable') {
       releaseRecoveredRuntime(session);
+      const unusable = continueAuthorization.authorization;
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} run authorization not runnable: ${
+          unusable.status === 'blocked' ? unusable.reason : unusable.status
+        }`,
+      );
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
     }
     if (
@@ -2978,6 +2994,12 @@ export function registerHostedHarnessSessionRoutes(
       );
     }
     if (cancelAuthorization.authorization.status !== 'runnable') {
+      const unusable = cancelAuthorization.authorization;
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${sessionId} run authorization not runnable: ${
+          unusable.status === 'blocked' ? unusable.reason : unusable.status
+        }`,
+      );
       // Retry-inviting refusal: keep the adopted lease owed (see the
       // blocked refusal above).
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');

@@ -183,6 +183,48 @@ function store() {
   };
 }
 
+/**
+ * Parks a Turn that drove nothing durable: the model refuses before any
+ * file-history prepare, leaving only the unsettled input in the journal.
+ */
+async function parkBlockedTextTurn(
+  profile: boolean,
+  toolProfile = 'hosted-workspace-files/1',
+) {
+  const server = await app(true);
+  const created = await headers(supertest(server).post('/session')).send({
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    ...(profile ? { toolProfile } : {}),
+  });
+  expect(created.status).toBe(200);
+  const clientId = created.body.clientId as string;
+  state.model.mockRejectedValueOnce(
+    new HostedToolRecoveryRequiredError(new Error('store gone')),
+  );
+  const prompt = [{ type: 'text', text: 'hello' }];
+  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+    .set('X-Qwen-Client-Id', clientId)
+    .send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    })
+    .expect(202);
+  await vi.waitFor(
+    async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.recoveryBlocked).toBe(true);
+      expect(status.body.hasActivePrompt).toBe(false);
+    },
+    { timeout: 10_000 },
+  );
+  await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+}
+
 async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -5069,6 +5111,9 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({
@@ -5078,6 +5123,14 @@ describe('Hosted Harness no-tool session', () => {
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
     expect(loaded.body.reason).toBe('file_history_unsettled');
+    // The pending turn parked at await_runtime, so the refusal names its
+    // blocking conjunct, not only the gate.
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'file history cannot settle: phase_await_runtime',
+      ),
+    );
+    log.mockRestore();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
@@ -5794,7 +5847,7 @@ describe('Hosted Harness tool approvals', () => {
     const refused = await answer('allow');
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
-    expect(refused.body.reason).toBe('session_blocked');
+    expect(refused.body.reason).toBe('turn_blocked');
     expect(log).toHaveBeenCalledWith(expect.stringContaining('fenced'));
   });
 
@@ -6464,6 +6517,9 @@ describe('Hosted Harness refusal reasons', () => {
       LocalManagedSessionAuthority.prototype,
       'restoreBundle',
     ).mockResolvedValue({ recoveryStatus: 'blocked' } as never);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -6471,46 +6527,13 @@ describe('Hosted Harness refusal reasons', () => {
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
     expect(loaded.body.reason).toBe('restore_blocked');
+    // The bundle is mocked whole, so restoreBasis is absent — the cause line
+    // must still carry the gate with the discriminator it had in hand.
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('recovery blocked'),
+    );
+    log.mockRestore();
   });
-
-  /**
-   * Parks a Turn whose model drove nothing durable: no file history
-   * prepare ran, so only the unsettled input remains at the cold load.
-   */
-  async function parkBlockedTextTurn(profile: boolean) {
-    const server = await app(true);
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-      ...(profile ? { toolProfile: 'hosted-workspace-files/1' } : {}),
-    });
-    expect(created.status).toBe(200);
-    const clientId = created.body.clientId as string;
-    state.model.mockRejectedValueOnce(
-      new HostedToolRecoveryRequiredError(new Error('store gone')),
-    );
-    const prompt = [{ type: 'text', text: 'hello' }];
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        prompt,
-        promptId: PROMPT_ID,
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-      })
-      .expect(202);
-    await vi.waitFor(
-      async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.recoveryBlocked).toBe(true);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  }
 
   it('names an unsettled turn on a bare cold load', async () => {
     await parkBlockedTextTurn(true);
@@ -6678,6 +6701,25 @@ describe('Hosted Harness refusal reasons', () => {
       prompt,
       promptId: PROMPT_ID,
       payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('mcp_operations_pending');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('names pending MCP operations on the operations gate', async () => {
+    const { server, authorize } = await mcpApp();
+    vi.spyOn(
+      HostedMcpSession.prototype,
+      'hasPendingOperations',
+    ).mockReturnValue(true);
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    ).send({
+      operationId: randomUUID(),
+      serverId: 'demo',
+      request: { kind: 'resource_read', uri: 'memory://note' },
     });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
@@ -7637,6 +7679,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(cancelled.status).toBe(409);
     expect(cancelled.body.code).toBe('hosted_turn_recovery_required');
+    expect(cancelled.body.reason).toBe('turn_blocked');
     // The blocked refusal must not hand back an owed lease: the workspace
     // outlives this refusal, and a RELEASED identity can never be
     // re-acquired by the retirement-time retry.
@@ -8328,45 +8371,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
-  /**
-   * Parks a Turn that drove nothing durable: the model refuses before any
-   * file-history prepare, leaving only the unsettled input in the journal.
-   */
-  async function parkBlockedTextTurn(profile: boolean) {
-    const server = await app(true);
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-      ...(profile ? { toolProfile: FILE_PROFILE } : {}),
-    });
-    expect(created.status).toBe(200);
-    const clientId = created.body.clientId as string;
-    state.model.mockRejectedValueOnce(
-      new HostedToolRecoveryRequiredError(new Error('store gone')),
-    );
-    const prompt = [{ type: 'text', text: 'hello' }];
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        prompt,
-        promptId: PROMPT_ID,
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-      })
-      .expect(202);
-    await vi.waitFor(
-      async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.recoveryBlocked).toBe(true);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  }
-
   it('refuses a takeover on a Session without any tool profile', async () => {
     await parkBlockedTextTurn(false);
     const server = replacementApp();
@@ -8432,7 +8436,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
-  it('names a lost authorization read on continue and cancel', async () => {
+  it('names a lost authorization read on continue and hands the lease back', async () => {
     const { server, clientId, recovery } = await loadParkedRecovery();
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
@@ -8441,19 +8445,47 @@ describe('Hosted Harness Runtime turn takeover', () => {
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
     ).mockRejectedValue(new Error('journal gone'));
-    for (const route of ['continue', 'cancel'] as const) {
-      const refused = await replacementHeaders(
-        supertest(server).post(
-          `/session/${SESSION_ID}/managed-runtime/${route}`,
-        ),
-      )
-        .set('X-Qwen-Client-Id', clientId)
-        .send({ promptId: PROMPT_ID, ...recovery });
-      expect(refused.status).toBe(409);
-      expect(refused.body.code).toBe('hosted_turn_recovery_required');
-      expect(refused.body.reason).toBe('authorization_unreadable');
-      expect(log).toHaveBeenCalledWith(expect.stringContaining('journal gone'));
-    }
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const releasesBefore = release.mock.calls.length;
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, ...recovery });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('authorization_unreadable');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('journal gone'));
+    await vi.waitFor(
+      () => expect(release.mock.calls.length).toBeGreaterThan(releasesBefore),
+      { timeout: 10_000 },
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('names a lost authorization read on cancel and keeps the lease owed', async () => {
+    const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockRejectedValue(new Error('journal gone'));
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const releasesBefore = release.mock.calls.length;
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, ...recovery });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('authorization_unreadable');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('journal gone'));
+    expect(release.mock.calls.length).toBe(releasesBefore);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -8461,6 +8493,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   it('names a not-runnable authorization on continue and cancel', async () => {
     const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
@@ -8469,6 +8504,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       reason: 'missing_checkpoint',
     } as never);
     for (const route of ['continue', 'cancel'] as const) {
+      log.mockClear();
       const refused = await replacementHeaders(
         supertest(server).post(
           `/session/${SESSION_ID}/managed-runtime/${route}`,
@@ -8479,6 +8515,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(refused.status).toBe(409);
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
       expect(refused.body.reason).toBe('not_runnable');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('missing_checkpoint'),
+      );
     }
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),

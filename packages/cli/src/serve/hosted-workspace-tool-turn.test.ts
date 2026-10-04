@@ -2290,7 +2290,7 @@ it('answers what a blocked Session already recorded but writes nothing', async (
   ).resolves.toEqual({
     status: 409,
     code: 'hosted_turn_recovery_required',
-    reason: 'session_blocked',
+    reason: 'turn_blocked',
   });
   expect(publish).not.toHaveBeenCalled();
   expect(session.authority.action(waiting)?.state).toBe('requested');
@@ -2543,7 +2543,7 @@ it('writes nothing once the Turn blocks during an answer', async () => {
   ).resolves.toEqual({
     status: 409,
     code: 'hosted_turn_recovery_required',
-    reason: 'session_blocked',
+    reason: 'turn_blocked',
   });
   expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('allow'));
@@ -2691,7 +2691,7 @@ it('writes nothing once the Turn blocks while the decision is published', async 
   ).resolves.toEqual({
     status: 409,
     code: 'hosted_turn_recovery_required',
-    reason: 'session_blocked',
+    reason: 'turn_blocked',
   });
   expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
@@ -2794,7 +2794,7 @@ it.each(['decision', 'expiry'])(
     await expect(answering).resolves.toEqual({
       status: 409,
       code: 'hosted_turn_recovery_required',
-      reason: 'session_blocked',
+      reason: 'turn_blocked',
     });
     expect(session.authority.action(requestId)?.state).toBe('requested');
     expect(session.authority.writesStopped).toBe(false);

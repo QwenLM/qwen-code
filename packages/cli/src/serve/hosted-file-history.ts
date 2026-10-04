@@ -92,30 +92,39 @@ export async function readHostedFileHistory(
   );
 }
 
+/**
+ * Null when the pending turn settles clean; a terse ground the cold-load
+ * refusal may log when it does not. The grounds are the same conjuncts the
+ * boolean version evaluated, in the same order.
+ */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
-): Promise<boolean> {
+): Promise<string | null> {
   if (!record.pendingTurn || !record.pendingMessageId || record.pendingUndo)
-    return false;
+    return 'no_pending_turn';
   const authorization = await session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return false;
+  if (authorization.status !== 'runnable')
+    return `authorization_${authorization.status}`;
   const checkpoint = authorization.checkpoint;
   const items = checkpoint.tools?.items ?? [];
   if (
     checkpoint.identity.promptId !== record.pendingTurn ||
-    checkpoint.identity.turnId !== record.pendingTurn ||
-    checkpoint.continuation.phase !== 'results_ready' ||
-    !items.some((item) => item.modelMessageId === record.pendingMessageId) ||
-    items.some((item) => item.state !== 'settled' || !item.outcomeRef)
+    checkpoint.identity.turnId !== record.pendingTurn
   )
-    return false;
+    return 'checkpoint_identity_mismatch';
+  if (checkpoint.continuation.phase !== 'results_ready')
+    return `phase_${checkpoint.continuation.phase}`;
+  if (!items.some((item) => item.modelMessageId === record.pendingMessageId))
+    return 'pending_message_not_ready';
+  if (items.some((item) => item.state !== 'settled' || !item.outcomeRef))
+    return 'tool_item_unsettled';
   const current = (await session.sink.project()).filter(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
   const index = current.findLastIndex((item) => item.type === 'assistant');
   const assistant = current[index];
-  if (assistant?.uuid !== record.pendingMessageId) return false;
+  if (assistant?.uuid !== record.pendingMessageId) return 'assistant_mismatch';
   const calls =
     assistant.message?.parts?.flatMap((part) =>
       part.functionCall?.id ? [part.functionCall.id] : [],
@@ -127,12 +136,12 @@ export async function canSettleHostedFileHistory(
         part.functionResponse?.id ? [part.functionResponse.id] : [],
       ) ?? [],
   );
-  return (
+  const settles =
     calls.length > 0 &&
     tail.every((item) => item.type === 'tool_result') &&
     new Set(calls).size === calls.length &&
-    isDeepStrictEqual(calls.sort(), results.sort())
-  );
+    isDeepStrictEqual(calls.sort(), results.sort());
+  return settles ? null : 'tool_results_mismatch';
 }
 
 export async function commitHostedFileHistory(
