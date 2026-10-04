@@ -375,14 +375,19 @@ export function assess(prs, options = {}) {
   // ANOTHER PR clears the barrier and closes the tracker over a run still
   // in flight, which is what decide() says it refuses. Bounded on purpose:
   // the veto only ever refuses a close, so expiring it is the safe
-  // direction, and an unedited check keeps a comment edited into request
-  // shape out of it. The price is that a request the producer REFUSED in
-  // silence holds the veto for this long too — the two are not tellable
-  // apart while no ack has landed — so a legitimate close can be delayed by
-  // up to `inFlightMinutes` after such a request. Delayed, never lost: the
-  // bound expires on its own.
+  // direction. The arm deliberately does not require an unedited comment —
+  // the loose predicate reads the way the barrier's does: a comment whose
+  // body is still request-shaped either was one at creation or was edited
+  // into one, and counting it only ever REFUSES a close. An edit cannot
+  // move `created_at`, so an old comment can never arm the bound, and a
+  // fresh one edited over its own request forfeits nothing — every other
+  // arm of this gate errs toward refusing the close, and an unedited check
+  // would be the one arm erring toward permitting it. The price is that a
+  // request the producer REFUSED in silence holds the veto for this long
+  // too — the two are not tellable apart while no ack has landed — so a
+  // legitimate close can be delayed by up to `inFlightMinutes` after such
+  // a request. Delayed, never lost: the bound expires on its own.
   const isInFlight = (c) =>
-    c.updated_at === c.created_at &&
     now.getTime() - Date.parse(c.created_at) < opts.inFlightMinutes * 60_000;
   // The per-request signal goes blind exactly where the watch needs it
   // most: a lane that never ran produces no acknowledgements either, so the
@@ -523,6 +528,15 @@ export function assess(prs, options = {}) {
         )
         .map(([id, , at]) => ({ id, at })),
     ].sort((a, b) => a.at.localeCompare(b.at) || a.id - b.id);
+    // The dry-run result comments this PR's record already names, so the
+    // roster's edited arm below cannot spend one on the request it served
+    // nothing — even after an edit rewrote the sentence away, which is
+    // exactly the case `classifyResult`'s term can no longer see.
+    const dryRunIds = new Set(
+      (recordedResultsByPr.get(pr.number) ?? [])
+        .filter((e) => e.length > 3 && e[3] === 'dry_run')
+        .map((e) => e[0]),
+    );
     // The recorded deficit carries forward while its request is still live,
     // unedited, in-window and result-less — whatever state its PR is in. The
     // roster below skips closed PRs by design, so without the carry one tick
@@ -711,10 +725,19 @@ export function assess(prs, options = {}) {
       // un-serves the request it answered, and on a lane that never filed
       // an issue (no record to carry the answer) three annotated pushes
       // file "0 consecutive failures, 3 unanswered requests" against a
-      // lane that demonstrably served them. The reading is safe where it
-      // stands: suppressing a roster entry this way needs a bot comment
-      // that already postdates the request, and a genuinely starved
-      // request has none to edit.
+      // lane that demonstrably served them. The reading needs TWO guards.
+      // Suppressing a roster entry this way needs a bot comment that
+      // already postdates the request, and "a genuinely starved request
+      // has none to edit" is false for exactly one kind: a dry-run comment
+      // is a bot marker comment posted by a dispatch, not by the request,
+      // so it postdates requests it served nothing — and an annotated one
+      // would spend it as an answer, erasing the deficit it never retired.
+      // The kind exclusion is why ANSWERING exists twice elsewhere (:102,
+      // :522); here `classifyResult` covers the annotate-only edit (the
+      // sentence survives, so the body still classifies) and `dryRunIds`
+      // an edit that rewrote the sentence away after a tick recorded the
+      // kind. Every other kind keeps answering through this arm, edited or
+      // not — that tolerance is the point of it.
       const answered =
         gateResults.some((r) => r.at > req.created_at) ||
         comments.some(
@@ -722,7 +745,9 @@ export function assess(prs, options = {}) {
             c.user === opts.bot &&
             c.created_at > req.created_at &&
             c.updated_at !== c.created_at &&
-            c.body.includes(RESULT_MARKER),
+            c.body.includes(RESULT_MARKER) &&
+            !dryRunIds.has(c.id) &&
+            classifyResult(c.body) !== 'dry_run',
         );
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {

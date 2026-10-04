@@ -1628,6 +1628,67 @@ describe('resolve-health: assessment', () => {
       { now },
     );
     assert.equal(refused.unanswered.length, 0);
+
+    // The same arm when the dry-run comment was EDITED after posting —
+    // annotated, so its first line still classifies as a dry run. The
+    // roster's edited arm used to test only the marker, which spent this
+    // comment as an answer: the starved request left the roster and, with
+    // no record to carry its deficit, the alarm went silent — the
+    // direction the whole file exists to prevent, at one annotation per
+    // PR during a mute window.
+    const editedDryRun = { ...dryRun, updated_at: '2026-08-26T05:00:00Z' };
+    const carried = assess(
+      [{ number: 41, state: 'open', comments: [starved, editedDryRun] }],
+      { now, deficit: [starved.id] },
+    );
+    assert.deepEqual(
+      carried.unanswered.map((u) => u.id),
+      [starved.id],
+      'an annotated dry run still answers nothing',
+    );
+    assert.equal(carried.unserved, starved.created_at);
+    // And with the roster as the only path: no deficit option, no record.
+    // The request is admitted on its own 👀, and the edited dry run must
+    // not serve it there either. (The edited comment also gives the lane
+    // no life, so this is the mute-window case as well.)
+    const acked = request(
+      '2026-08-26T03:00:00Z',
+      42,
+      'maintainer',
+      undefined,
+      'COLLABORATOR',
+      1,
+    );
+    const rosterOnly = assess(
+      [{ number: 42, state: 'open', comments: [acked, editedDryRun] }],
+      { now },
+    );
+    assert.deepEqual(
+      rosterOnly.unanswered.map((u) => u.id),
+      [acked.id],
+      'an annotated dry run answers nothing on the roster-only path',
+    );
+    // And when the edit rewrote the dry-run sentence away entirely, the
+    // record's kind is the only thing left that can say what the comment
+    // was — the recorded path's own ANSWERING filter refuses it the same
+    // way, so the edited arm reads the same record.
+    const renamed = {
+      ...editedDryRun,
+      body: `${RESULT_MARKER}\nRepurposed by whoever annotated it.`,
+    };
+    const recordedKind = assess(
+      [{ number: 41, state: 'open', comments: [starved, renamed] }],
+      {
+        now,
+        deficit: [starved.id],
+        recordedResults: [[renamed.id, 41, '2026-08-26T04:00:00Z', 'dry_run']],
+      },
+    );
+    assert.deepEqual(
+      recordedKind.unanswered.map((u) => u.id),
+      [starved.id],
+      'a recorded dry run edited past recognition still answers nothing',
+    );
   });
 });
 
@@ -3224,6 +3285,39 @@ describe('resolve-health: decisions', () => {
       decide(lane, existing).map((a) => a.type),
       ['comment'],
       'a queued run is not a served one',
+    );
+    // The same hole through the editor: the requester editing their own
+    // comment (a note appended, the body still starting with the command)
+    // must not drop the veto — `created_at` is unmoved, so the queue has
+    // not suddenly been served. An unedited requirement here was the one
+    // arm of this gate erring toward permitting the close.
+    const editedQueued = request(
+      '2026-08-27T10:00:00Z',
+      101,
+      'maintainer',
+      '2026-08-27T10:00:01Z',
+      'COLLABORATOR',
+      0,
+    );
+    const editedLane = assess(
+      [
+        { number: 101, state: 'open', comments: [editedQueued] },
+        {
+          number: 102,
+          state: 'open',
+          comments: [
+            request('2026-08-27T09:00:00Z', 102),
+            result('2026-08-27T11:30:00Z', PUSHED, 102),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(editedLane.unserved, editedQueued.created_at);
+    assert.deepEqual(
+      decide(editedLane, existing).map((a) => a.type),
+      ['comment'],
+      'editing the request comment cannot serve the queued run',
     );
     // The bound is the producer's own budget, not forever: past it the arm
     // expires and the veto lets go, which is the safe direction for a bound
