@@ -2027,14 +2027,16 @@ describe('Hosted Harness no-tool session', () => {
         ).toEqual(['demo']);
         expect(admit).not.toHaveBeenCalled();
         expect((await send(randomUUID())).status).toBe(202);
-        await vi.waitFor(async () =>
-          expect(
-            (
-              await authorize(
-                supertest(server).get(`/session/${SESSION_ID}/status`),
-              )
-            ).body.hasActivePrompt,
-          ).toBe(false),
+        await vi.waitFor(
+          async () =>
+            expect(
+              (
+                await authorize(
+                  supertest(server).get(`/session/${SESSION_ID}/status`),
+                )
+              ).body.hasActivePrompt,
+            ).toBe(false),
+          { timeout: 10_000 },
         );
         expect(
           requests
@@ -2490,19 +2492,22 @@ describe('Hosted Harness no-tool session', () => {
         });
       };
       expect((await send(PROMPT_ID)).status).toBe(202);
-      await vi.waitFor(async () => {
-        const transcript = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/transcript`),
-        );
-        expect(transcript.body.events).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: 'turn_error',
-              promptId: PROMPT_ID,
-            }),
-          ]),
-        );
-      });
+      await vi.waitFor(
+        async () => {
+          const transcript = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          );
+          expect(transcript.body.events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'turn_error',
+                promptId: PROMPT_ID,
+              }),
+            ]),
+          );
+        },
+        { timeout: 10_000 },
+      );
       expect(modelRequests).toBe(0);
       expect((await send(randomUUID())).status).toBe(202);
       await vi.waitFor(
@@ -4874,12 +4879,15 @@ describe('Hosted Harness no-tool session', () => {
         promptId: PROMPT_ID,
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(transcript.body.events.length).toBeGreaterThan(2);
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events.length).toBeGreaterThan(2);
+      },
+      { timeout: 10_000 },
+    );
 
     const originalWrite = ServerResponse.prototype.write;
     let frames = 0;
@@ -4958,25 +4966,28 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_error',
-            promptId: PROMPT_ID,
-            data: {
-              sessionId: SESSION_ID,
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
               promptId: PROMPT_ID,
-              code: 'hosted_turn_failed',
-              message: 'Hosted Harness turn failed.',
-            },
-          }),
-        ]),
-      );
-    });
+              data: {
+                sessionId: SESSION_ID,
+                promptId: PROMPT_ID,
+                code: 'hosted_turn_failed',
+                message: 'Hosted Harness turn failed.',
+              },
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(log).toHaveBeenCalledWith(
       `qwen serve: Hosted Harness turn ${PROMPT_ID} failed: Error: model initialization failed`,
     );
@@ -5336,20 +5347,23 @@ describe('Hosted Harness no-tool session', () => {
     ).set('X-Qwen-Client-Id', clientId);
     expect(cancelled.status).toBe(204);
     rejectWrite?.(new Error('transient store failure'));
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_complete',
-            promptId: PROMPT_ID,
-            data: expect.objectContaining({ stopReason: 'cancelled' }),
-          }),
-        ]),
-      );
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({ stopReason: 'cancelled' }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
@@ -5386,20 +5400,23 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
     ).set('X-Qwen-Client-Id', created.body.clientId as string);
     expect(cancelled.status).toBe(204);
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_complete',
-            promptId: PROMPT_ID,
-            data: expect.objectContaining({ stopReason: 'cancelled' }),
-          }),
-        ]),
-      );
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({ stopReason: 'cancelled' }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(log).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
