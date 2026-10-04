@@ -30,6 +30,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -1021,8 +1022,10 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!rows.isEmpty() && ((Number) rows.getFirst().get("lifecycle_protocol_version")).intValue() == 1) {
             var row = rows.getFirst();
             jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = ?, claim_lease_until = ?"
-                    + " WHERE tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
-                    row.get("claim_generation"), row.get("lease_until"), tenantId, sessionId, operationId);
+                    + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                    + " AND operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    row.get("claim_generation"), row.get("lease_until"), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
         }
     }
 
@@ -1039,8 +1042,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
                 failureCode, Math.addExact(now, Math.max(0, availableAt - clock.millis())),
                 now, tenantId, sessionId, operationId, owner, generation, now);
-        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_id = ?"
+        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                 + " AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId, sessionId, operationId, generation);
     }
 
@@ -1062,8 +1066,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
                 availableAt, now, tenantId, sessionId,
                 operationId, owner, claimGeneration, now);
-        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_id = ?"
+        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                 + " AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                 tenantId, sessionId, operationId, claimGeneration);
     }
 

@@ -21,6 +21,16 @@ mutation 仍要求当前可读的创建者。已接纳、运行中、取消中�
 返回 `409 turn_active`。幂等、actor 隔离和墓碑可见性沿用 L2。
 运行一次指复用已提交结果，不重新派发可能已开始的尝试，不承诺最终一定完成。
 
+### 为什么不能先 close 再执行 L2 delete
+
+可靠 close 结算 SessionEnd 后永久停止原 Runtime；CLOSED/ARCHIVED 的 L2 删除
+明确不运行 Hook。组合两步无法在 End 之后、停机之前，用原 Runtime 结算
+SessionDelete。启动替代 worker 补跑 Delete 又会违反禁止重放的边界。L3 复用
+可靠 close 的停机机制和 L2 的原子退役事务，在永久 draining 前结算两个所需
+事件。单个 delete operation 在恢复期间持续保持 DELETING，不先公开完成一个
+CLOSE，再尝试无关的 L2 operation。effects receipt 让接管者跳过已提交 Hook
+结果，不把 Harness 消失或 HTTP 应答当成完成证明。
+
 ## 2. 协议与证据
 
 新增私有 `POST /session/:id/lifecycle`，携带 Session scope、operationId、
@@ -46,6 +56,17 @@ session_delete/sessionDelete，不联动 archive/unarchive。capability 表示�
 acquire、工具执行、输入和其他控制 mutation。仅当前 operation 与有效 claim
 可以在原 Workspace scope 获取生命周期 writer 和执行权限。该权限仍要求
 私有认证和当前执行授权。使用既有锁层级消除授权与执行准入之间的竞态。
+
+placement guard 先于 retention、Session 和 journal 锁。仅检查 journal head
+或尚不存在的围栏行不能排除并发插入围栏；writer 变更和普通执行授权必须共用
+准入的锁顺序。L3 之前的 Store 已经通过 Session 锁 helper 获取 publication
+租户锁；新增的是 placement guard 和普通授权请求，其增量竞争和请求开销需要
+测量。围栏查询和变更使用既有哈希主键，同时保留原身份检查，避免锁定读取扫描
+其他租户的围栏；键编码与 Broker 共用，不新增索引。
+这保护所有 hosted attachment 的持久会话准入，包括没有本地 lifecycle
+状态的 attachment，不代表所有会话都支持 L3 删除。明确的 Store 生命周期围栏
+拒绝返回 409；意外 Store、传输或 writer 权限故障返回 503，均不放行执行。
+protocol-zero close 保留限定的例外。
 
 先结算此前操作，通用取消不得包含本 operation 的生命周期 occurrence。
 稳定 occurrence ID 由 Session、operation、事件派生，复用 H2 的 catalog、plan、
@@ -80,6 +101,12 @@ claim 被拒绝时保留 attachment 及其原权限。普通 detach 仍须通过
 head 排他，证明无已完成 bootstrap、有效 writer、journal 或 Hook 派发记录，
 再保存 never-initialized 无 Hook 证据。有 header 时核对原 definition/catalog。
 两种情况都必须在永久围栏之后检查完整 Runtime binding 集合。
+
+准入扫描并解析完整 journal，证明不存在已接纳但未结算的 Turn。成本随保留历史
+增长，事务期间持锁；尚未证明准入延迟存在固定上界。当前产品仅将 compaction
+watermark 初始化为零，没有推进它的生产路径。既有冷恢复也不支持非零 watermark；
+L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
+提供持久 idle-state 证据后，L3 才能接纳这些会话；本 PR 不实现压缩后的恢复。
 
 ## 4. 兼容与启用
 

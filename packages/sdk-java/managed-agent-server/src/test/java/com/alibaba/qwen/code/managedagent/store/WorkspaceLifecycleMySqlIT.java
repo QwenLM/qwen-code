@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -80,6 +81,50 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThat(queued.get().get(5, TimeUnit.SECONDS)).isInstanceOf(ApiException.class);
         }
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Integer.class)).isZero();
+    }
+
+    @Test
+    void ordinaryAuthorizationKeepsFenceLocksInsideTheTenant() throws Exception {
+        var fixture = fixture();
+        var journal = new ManagedSessionStore(fixture.jdbc);
+        String token = "w".repeat(32);
+        String otherTenant = "other-tenant";
+        String otherSession = "other-session";
+        var original = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                token, new AcquireWriterRequest("workspace", "writer", 60_000L)));
+        var neighbor = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", "neighbor-session",
+                token, new AcquireWriterRequest("workspace", "writer", 60_000L)));
+        var other = fixture.transactions.execute(ignored -> journal.acquireWriter(otherTenant, otherSession,
+                token, new AcquireWriterRequest("workspace", "writer", 60_000L)));
+        fixture.bindings.requestHarnessDrain("unrelated-tenant", "unrelated-session");
+        var originalRequest = new AuthorizeLifecycleRequest("workspace", "writer", original.writerGeneration());
+        var neighborRequest = new AuthorizeLifecycleRequest("workspace", "writer", neighbor.writerGeneration());
+        var otherRequest = new AuthorizeLifecycleRequest("workspace", "writer", other.writerGeneration());
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var entered = new CountDownLatch(2);
+            var sameTenant = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
+            fixture.transactions.executeWithoutResult(ignored -> {
+                journal.authorizeOrdinary("tenant", fixture.session, token, originalRequest);
+                sameTenant.set(pool.submit(() -> {
+                    entered.countDown();
+                    fixture.transactions.executeWithoutResult(transaction ->
+                            journal.authorizeOrdinary("tenant", "neighbor-session", token, neighborRequest));
+                }));
+                var differentTenant = pool.submit(() -> {
+                    entered.countDown();
+                    fixture.transactions.executeWithoutResult(transaction ->
+                            journal.authorizeOrdinary(otherTenant, otherSession, token, otherRequest));
+                });
+                try {
+                    assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+                    assertThrows(TimeoutException.class, () -> sameTenant.get().get(100, TimeUnit.MILLISECONDS));
+                    differentTenant.get(5, TimeUnit.SECONDS);
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            });
+            sameTenant.get().get(5, TimeUnit.SECONDS);
+        }
     }
 
     @Test

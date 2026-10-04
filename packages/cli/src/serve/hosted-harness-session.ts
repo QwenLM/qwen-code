@@ -30,6 +30,7 @@ import {
 import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
   type HttpManagedSessionStores,
   type ManagedSessionLifecycleAuthority,
@@ -263,6 +264,16 @@ function error(
         ? { error: code, code }
         : { error: code, code, message },
     );
+}
+
+function ordinaryAuthorizationError(res: Response, cause: unknown): void {
+  if (
+    cause instanceof ManagedSessionStoreHttpError &&
+    cause.status === 409 &&
+    cause.remoteCode === 'managed_session_lifecycle_active'
+  )
+    return error(res, 409, 'hosted_lifecycle_operation_active');
+  error(res, 503, 'hosted_execution_authorization_unavailable');
 }
 
 function identity(
@@ -2146,8 +2157,8 @@ export function registerHostedHarnessSessionRoutes(
             ? 'legacy-close'
             : undefined,
         );
-      } catch {
-        return error(res, 409, 'hosted_lifecycle_operation_active');
+      } catch (cause) {
+        return ordinaryAuthorizationError(res, cause);
       }
     }
     next();
@@ -3702,8 +3713,8 @@ export function registerHostedHarnessSessionRoutes(
       } else if (req.method === 'POST') {
         try {
           await session.stores!.authorizeOrdinary();
-        } catch {
-          return error(res, 409, 'hosted_lifecycle_operation_active');
+        } catch (cause) {
+          return ordinaryAuthorizationError(res, cause);
         }
       }
       if (req.method === 'DELETE' && session.hooks) {

@@ -25,6 +25,19 @@ running, cancelling or approval-waiting Turn rejects admission with
 their L2 semantics. Once means reusing committed outcomes and never redispatching
 an attempt that might have begun, not guaranteed eventual completion.
 
+### Why close followed by L2 delete is insufficient
+
+Reliable close settles SessionEnd and permanently stops the original Runtime.
+L2 deletion of CLOSED/ARCHIVED Sessions intentionally runs no Hooks. Composing
+those operations therefore cannot settle SessionDelete on the original Runtime
+after End and before shutdown. Restoring a replacement worker to run Delete
+would violate the no-replay boundary. L3 reuses reliable close's stop machinery
+and L2's atomic retirement transaction, but settles both required events before
+permanent draining. One delete operation remains DELETING throughout recovery;
+it does not publish a separate successful CLOSE and later attempt an unrelated
+L2 operation. The effects receipt lets successors skip committed Hook outcomes
+without treating a missing Harness or an HTTP response as completion evidence.
+
 ## 2. Protocol and evidence
 
 Add private `POST /session/:id/lifecycle`, carrying Session scope, operationId,
@@ -56,6 +69,21 @@ excluded. Only the current operation and live claim may obtain lifecycle writer
 and execution authority in the original Workspace scope. This authority still
 requires private authentication and current execution authorization. Use the
 existing lock hierarchy to prevent authorization/admission races.
+
+The placement guard precedes retention, Session and journal locks. Checking only
+the journal head or a missing fence row cannot exclude concurrent fence
+insertion; writer mutations and ordinary execution authorization must share
+admission's lock order. The pre-L3 Store already obtains the publication tenant
+lock through its Session lock helper. L3 adds the placement guard and ordinary
+authorization request, so its incremental contention and request cost require
+measurement. Drain lookups and mutations use the existing hashed primary key,
+with original identity checks, so their locking reads do not scan other tenants'
+fences. The key encoding is shared with the Broker; no new index is required.
+This protects persisted Session admission on every hosted
+attachment, including one without local lifecycle state; it does not grant
+every Session L3 delete support. A definite Store lifecycle-fence rejection
+returns 409. Unexpected Store, transport or writer-authority failures return
+503 and admit no execution. Protocol-zero close retains its scoped exception.
 
 Settle earlier operations, excluding this operation's lifecycle occurrences from
 generic cancellation. Stable occurrence IDs derive from Session, operation and
@@ -101,6 +129,15 @@ journal-head exclusion in writer order, and prove no completed bootstrap, live
 writer, journal or Hook dispatch records. Save never-initialized no-Hook evidence.
 With a header, inspect the original definition/catalog instead. Either case
 still checks the complete Runtime binding set after the permanent fence.
+
+Admission scans and JSON-parses the complete journal to prove there are no
+accepted, unsettled Turns. Its cost grows with retained history while the
+transaction holds its locks; bounded admission latency is not established.
+The current product initializes the compaction watermark to zero and has no
+production path that advances it. Existing cold recovery also rejects nonzero
+watermarks; L3 rejects them with `workspace_lifecycle_journal_unverified`.
+Future compaction requires durable idle-state evidence before L3 can
+accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 

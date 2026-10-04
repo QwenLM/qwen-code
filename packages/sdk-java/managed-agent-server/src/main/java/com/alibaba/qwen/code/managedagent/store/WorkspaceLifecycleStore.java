@@ -29,7 +29,9 @@ public class WorkspaceLifecycleStore {
                 + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_kind = 'CLOSE'"
                 + " AND o.lifecycle_protocol_version = 0 AND o.delivery_state = 'LEASED'"
                 + " AND o.lease_until > ? AND s.status = 'CLOSING'"
-                + " AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now).isEmpty();
+                + " AND f.tenant_key = ? AND f.harness_key = ?"
+                + " AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session)).isEmpty();
     }
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
@@ -59,7 +61,9 @@ public class WorkspaceLifecycleStore {
                 + " s.status, f.phase, f.operation_id FROM managed_agent_operation o"
                 + " JOIN managed_agent_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
                 + " JOIN qwen_runtime_harness_drain f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? FOR UPDATE", tenant, session, authority.operationId());
+                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?"
+                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", tenant, session, authority.operationId(),
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
         if (rows.size() != 1) {
@@ -175,7 +179,8 @@ public class WorkspaceLifecycleStore {
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND claim_generation = ?",
                 receipt.toString(), operation.tenantId(), operation.sessionId(), operation.operationId(), operation.claimGeneration());
         jdbc.update("UPDATE qwen_runtime_harness_drain SET phase = 'DRAINING', claim_lease_until = NULL"
-                + " WHERE tenant_id = ? AND harness_session_id = ? AND operation_id = ?",
+                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()), JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), operation.operationId());
     }
 

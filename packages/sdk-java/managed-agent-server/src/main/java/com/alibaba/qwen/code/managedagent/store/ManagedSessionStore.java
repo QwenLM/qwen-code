@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.ByteBuffer;
 import java.io.IOException;
@@ -154,7 +155,9 @@ public class ManagedSessionStore {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
             }
         } else if (!"DRAINING".equals(jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain"
-                + " WHERE tenant_id = ? AND harness_session_id = ?", String.class, tenantId, sessionId))) {
+                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?", String.class,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId))) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
@@ -191,13 +194,17 @@ public class ManagedSessionStore {
     }
 
     private boolean lifecycleFenced(String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT phase FROM qwen_runtime_harness_drain WHERE tenant_id = ?"
-                + " AND harness_session_id = ? FOR UPDATE", tenantId, sessionId).isEmpty();
+        return !jdbc.queryForList("SELECT phase FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?"
+                + " AND tenant_id = ? AND harness_session_id = ? FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId).isEmpty();
     }
 
     private boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT operation_id FROM qwen_runtime_harness_drain WHERE tenant_id = ?"
-                + " AND harness_session_id = ? AND operation_id IS NOT NULL FOR UPDATE", tenantId, sessionId).isEmpty();
+        return !jdbc.queryForList("SELECT operation_id FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?"
+                + " AND tenant_id = ? AND harness_session_id = ? AND operation_id IS NOT NULL FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId).isEmpty();
     }
 
     @Autowired(required = false)
