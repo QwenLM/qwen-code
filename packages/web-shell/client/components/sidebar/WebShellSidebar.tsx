@@ -2571,11 +2571,26 @@ export function WebShellSidebar({
   );
   const statusSessions = useMemo(() => {
     const byIdentity = new Map<string, DaemonSessionSummary>();
-    for (const session of [...sessions, ...secondaryActiveSessions]) {
+    // Secondary status is loaded and polled only while the status surface
+    // is hidden; with the Home column visible the retained catalog page
+    // stops refreshing. Folding it in here would paint approvals/questions
+    // the daemon may already have resolved, on both rail render sites at
+    // once (the dot and the accessible name). Only a contribution that is
+    // actively refreshed may certify. On live-state daemons the secondary
+    // catalog path is unloaded regardless, so nothing fresh is hidden.
+    const eligibleSecondarySessions = secondaryStatusQueriesActive
+      ? secondaryActiveSessions
+      : [];
+    for (const session of [...sessions, ...eligibleSecondarySessions]) {
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
-  }, [getIdentityForSession, secondaryActiveSessions, sessions]);
+  }, [
+    getIdentityForSession,
+    secondaryActiveSessions,
+    secondaryStatusQueriesActive,
+    sessions,
+  ]);
   const collapsedSessionStatus = useMemo(() => {
     if (statusSessions.some((session) => session.isWaitingForPermission)) {
       return 'approval' as const;

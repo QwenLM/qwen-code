@@ -726,6 +726,78 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBeNull();
   });
 
+  it('does not certify secondary workspace status while it is not being refreshed', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-approval', {
+              workspaceCwd: '/tmp/other',
+              isWaitingForPermission: true,
+            }),
+          ],
+        },
+        loading: false,
+      },
+    ]);
+    const homeTrigger = () =>
+      container.querySelector<HTMLElement>('[data-web-shell-home-trigger]')!;
+
+    // While a full page hides the Home column, the secondary catalog is
+    // refreshed and the dot plus accessible name carry the waiting state.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+    expect(homeTrigger().getAttribute('aria-label')).toContain(
+      'Waiting for approval',
+    );
+
+    // With the Home column visible the secondary catalog is unloaded and
+    // unpolled: the retained page may resolve elsewhere, so neither the dot
+    // nor the accessible name may keep certifying it.
+    renderSidebar(false, { layout: 'rail', activePage: 'home' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+    expect(homeTrigger().getAttribute('aria-label')).not.toContain(
+      'Waiting for approval',
+    );
+
+    // Hiding the Home column re-arms the queries: the still-waiting
+    // session must come back — supplementing it would over-gate.
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      homeTrigger().querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it('includes secondary workspace attention on the rail Home button while the Live section is open', async () => {
     const multiWorkspaceCapabilities = {
       ...organizationCapabilities,
