@@ -723,44 +723,58 @@ class ManagedSessionStoreHttpClient {
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
     await this.ensureWriter();
-    const response = await this.request(
-      `/resources/${encodeURIComponent(ref.resourceId)}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
-      'GET',
-      undefined,
-      'application/octet-stream, application/json',
-    );
-    if (!response.body) throw corrupt('resource response has no body.');
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let length = 0;
-    try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        length += chunk.value.byteLength;
-        if (length > ref.byteLength) {
-          await reader.cancel();
-          throw corrupt('resource response exceeds its declared length.');
-        }
-        chunks.push(chunk.value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    const bytes = Buffer.concat(chunks);
-    if (
-      response.headers.get('X-Qwen-Resource-Kind') !== ref.kind ||
-      response.headers.get('X-Qwen-Resource-Schema-Version') !==
-        String(ref.schemaVersion) ||
-      response.headers.get('X-Qwen-Resource-Digest') !== ref.digest ||
-      bytes.byteLength !== ref.byteLength ||
-      sha256(bytes) !== ref.digest
-    ) {
-      throw corrupt(
-        `resource ${ref.resourceId} failed integrity verification.`,
+    const path = `/resources/${encodeURIComponent(ref.resourceId)}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
+    return this.withRetry(true, 'GET', path, async (timeoutMs) => {
+      const response = await this.request(
+        path,
+        'GET',
+        undefined,
+        timeoutMs,
+        'application/octet-stream, application/json',
       );
-    }
-    return bytes;
+      if (!response.body) throw corrupt('resource response has no body.');
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (error) {
+            if (error instanceof TypeError || error instanceof DOMException) {
+              throw new ManagedSessionStoreTransportError(
+                `Managed Session Store response failed: ${error.message}.`,
+              );
+            }
+            throw error;
+          }
+          if (chunk.done) break;
+          length += chunk.value.byteLength;
+          if (length > ref.byteLength) {
+            await reader.cancel();
+            throw corrupt('resource response exceeds its declared length.');
+          }
+          chunks.push(chunk.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const bytes = Buffer.concat(chunks);
+      if (
+        response.headers.get('X-Qwen-Resource-Kind') !== ref.kind ||
+        response.headers.get('X-Qwen-Resource-Schema-Version') !==
+          String(ref.schemaVersion) ||
+        response.headers.get('X-Qwen-Resource-Digest') !== ref.digest ||
+        bytes.byteLength !== ref.byteLength ||
+        sha256(bytes) !== ref.digest
+      ) {
+        throw corrupt(
+          `resource ${ref.resourceId} failed integrity verification.`,
+        );
+      }
+      return bytes;
+    });
   }
 
   async assertWritable(): Promise<void> {
@@ -947,22 +961,86 @@ class ManagedSessionStoreHttpClient {
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
   ): Promise<unknown> {
-    const response = await this.request(path, method, body);
-    try {
-      return (await response.json()) as unknown;
-    } catch (error) {
-      if (
-        error instanceof TypeError ||
-        (error instanceof DOMException &&
-          ['AbortError', 'TimeoutError'].includes(error.name))
-      ) {
-        throw new ManagedSessionStoreTransportError(
-          `Managed Session Store response failed: ${error.message}.`,
+    return this.withRetry(
+      method === 'GET' || path === '/writers:renew',
+      method,
+      path,
+      async (timeoutMs) => {
+        const response = await this.request(path, method, body, timeoutMs);
+        try {
+          return (await response.json()) as unknown;
+        } catch (error) {
+          if (
+            error instanceof TypeError ||
+            (error instanceof DOMException &&
+              ['AbortError', 'TimeoutError'].includes(error.name))
+          ) {
+            throw new ManagedSessionStoreTransportError(
+              `Managed Session Store response failed: ${error.message}.`,
+            );
+          }
+          throw corrupt(
+            `Managed Session Store returned invalid JSON: ${error instanceof Error ? error.message : String(error)}.`,
+          );
+        }
+      },
+    );
+  }
+
+  /**
+   * Reads are idempotent and the lease renewal is fenced by generation, so
+   * a dropped connection or a transient 5xx there — at any point of the
+   * exchange, body streaming included — must not masquerade as missing
+   * history on a cold restore. Those calls retry the whole exchange twice
+   * with a short jittered backoff, all inside one `requestTimeoutMs`
+   * budget, so a wedged endpoint blocks no longer than before. Commits are
+   * deliberately not retried here; their callers handle the outcome
+   * themselves, and anything else refuses on the first failure exactly as
+   * before.
+   */
+  private async withRetry<T>(
+    retryable: boolean,
+    method: 'GET' | 'POST',
+    path: string,
+    run: (timeoutMs: number) => Promise<T>,
+  ): Promise<T> {
+    const deadline = Date.now() + this.requestTimeoutMs;
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      try {
+        return await run(Math.max(1, deadline - Date.now()));
+      } catch (error) {
+        const transient =
+          error instanceof ManagedSessionStoreTransportError ||
+          (error instanceof ManagedSessionStoreHttpError &&
+            [500, 502, 503, 504].includes(error.status));
+        if (
+          !retryable ||
+          !transient ||
+          attempt >= 3 ||
+          Date.now() >= deadline
+        ) {
+          if (transient && attempt > 1) {
+            const detail = `Managed Session Store ${method} ${path} failed after ${attempt} attempts: ${error instanceof Error ? error.message : String(error)}`;
+            if (error instanceof ManagedSessionStoreHttpError)
+              throw new ManagedSessionStoreHttpError(
+                error.status,
+                error.remoteCode,
+                detail,
+              );
+            if (error instanceof ManagedSessionStoreTransportError)
+              throw new ManagedSessionStoreTransportError(detail);
+          }
+          throw error;
+        }
+        debugLogger.debug(
+          `Managed Session Store ${method} ${path} attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying.`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
         );
       }
-      throw corrupt(
-        `Managed Session Store returned invalid JSON: ${error instanceof Error ? error.message : String(error)}.`,
-      );
     }
   }
 
@@ -970,77 +1048,44 @@ class ManagedSessionStoreHttpClient {
     path: string,
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
+    timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
-    // Reads are idempotent and the lease renewal is fenced by generation, so
-    // a dropped connection or a transient 5xx there must not masquerade as
-    // missing history on a cold restore. Commits are deliberately not
-    // retried here; their callers handle the outcome themselves.
-    const retryable = method === 'GET' || path === '/writers:renew';
-    let attempt = 0;
-    for (;;) {
-      let response: Response;
-      try {
-        response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
-          method,
-          redirect: 'error',
-          headers: {
-            Accept: accept,
-            [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
-              this.sessionKey.tenantId,
-            [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
-              this.writerToken,
-            ...(body === undefined
-              ? {}
-              : { 'Content-Type': 'application/json' }),
-          },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          signal: AbortSignal.timeout(this.requestTimeoutMs),
-        });
-      } catch (error) {
-        attempt++;
-        if (!retryable || attempt >= 3) {
-          throw new ManagedSessionStoreTransportError(
-            `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
-          );
-        }
-        debugLogger.debug(
-          `Managed Session Store ${method} ${path} attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}; retrying.`,
-        );
-        await new Promise((resolve) =>
-          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
-        );
-        continue;
-      }
-      if (!response.ok) {
-        const error = await readHttpError(response);
-        attempt++;
-        if (
-          !retryable ||
-          attempt >= 3 ||
-          ![500, 502, 503, 504].includes(response.status)
-        ) {
-          throw new ManagedSessionStoreHttpError(
-            response.status,
-            error.code,
-            error.message,
-          );
-        }
-        debugLogger.debug(
-          `Managed Session Store ${method} ${path} attempt ${attempt} answered ${response.status} (${error.code}); retrying.`,
-        );
-        await new Promise((resolve) =>
-          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
-        );
-        continue;
-      }
-      if (response.headers.get('Cache-Control') !== 'no-store') {
-        throw corrupt(
-          'Managed Session Store response is missing Cache-Control: no-store.',
-        );
-      }
-      return response;
+    let response: Response;
+    try {
+      response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
+        method,
+        redirect: 'error',
+        headers: {
+          Accept: accept,
+          [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+            this.sessionKey.tenantId,
+          [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+            this.writerToken,
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      throw new ManagedSessionStoreTransportError(
+        `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
+      );
     }
+    if (!response.ok) {
+      const error = await readHttpError(response);
+      throw new ManagedSessionStoreHttpError(
+        response.status,
+        error.code,
+        error.message,
+      );
+    }
+    if (response.headers.get('Cache-Control') !== 'no-store') {
+      throw corrupt(
+        'Managed Session Store response is missing Cache-Control: no-store.',
+      );
+    }
+    return response;
   }
 
   private sessionUrl(): string {

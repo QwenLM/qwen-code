@@ -992,7 +992,45 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it('answers a third consecutive transient read failure without further attempts', async () => {
+  it.each([500, 502, 503, 504])(
+    'recovers a journal read through two transient %i answers',
+    async (status) => {
+      const server = new FakeManagedSessionStore();
+      let dropped = 2;
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        if (requestUrl(input).includes('/restore?') && dropped > 0) {
+          dropped--;
+          return jsonResponse(
+            { error: { code: 'boom', message: 'stored' } },
+            status,
+          );
+        }
+        return server.fetch(input, init);
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        const handle = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        await handle.read();
+        expect(
+          fetchFn.mock.calls.filter(([input]) =>
+            requestUrl(input).includes('/restore?'),
+          ),
+        ).toHaveLength(3);
+      } finally {
+        await stores.close();
+      }
+    },
+  );
+
+  it('answers the last consecutive transient read failure with the path and attempt count', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
       if (requestUrl(input).includes('/restore?'))
@@ -1013,12 +1051,133 @@ describe('HTTP Managed Session store', () => {
       const handle = await stores.journalStore.open({
         sessionKey: SESSION_KEY,
       });
-      await expect(handle.read()).rejects.toThrow(ManagedSessionStoreHttpError);
+      await expect(handle.read()).rejects.toThrow(
+        /GET \/restore\?[^ ]* failed after 3 attempts/,
+      );
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).includes('/restore?'),
         ),
       ).toHaveLength(3);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('answers the last consecutive transport failure with the path and attempt count', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        throw new TypeError('fetch failed');
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).rejects.toThrow(
+        ManagedSessionStoreTransportError,
+      );
+      await expect(handle.read()).rejects.toThrow(
+        /GET \/restore\?[^ ]* failed after 3 attempts/,
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a journal read whose response body drops mid-stream', async () => {
+    const server = new FakeManagedSessionStore();
+    let dropped = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (dropped && requestUrl(input).includes('/restore?')) {
+        dropped = false;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"part'));
+              controller.error(new TypeError('terminated'));
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'Cache-Control': 'no-store',
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await handle.read();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('blocks a wedged read for no longer than one requestTimeoutMs', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>((input, init) =>
+      requestUrl(input).includes('/restore?')
+        ? new Promise<Response>((_resolve, reject) => {
+            const signal = (init as RequestInit | undefined)?.signal;
+            signal?.addEventListener('abort', () =>
+              reject(signal.reason as Error),
+            );
+          })
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      requestTimeoutMs: 60,
+      fetchFn,
+    });
+    try {
+      const started = Date.now();
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).rejects.toThrow(
+        ManagedSessionStoreTransportError,
+      );
+      expect(Date.now() - started).toBeLessThan(400);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(1);
     } finally {
       await stores.close();
     }
