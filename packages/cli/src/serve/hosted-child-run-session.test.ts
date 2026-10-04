@@ -208,6 +208,12 @@ describe('HostedChildRunSession', () => {
         orchestrator.advanceOutput('shell-1', manifestA),
       ).rejects.toThrow('may only advance forward');
       expect(committed(authority).body.outputRef).toEqual(manifestB);
+      // A replay of the very same reference is not a refusal: a redelivered
+      // advance must never wedge the Shell's exit leg. It still commits one
+      // liveness step, because the live run line alternates by design.
+      await orchestrator.advanceOutput('shell-1', manifestB);
+      expect(committed(authority).body.outputRef).toEqual(manifestB);
+      expect(committed(authority).revision).toBe(6);
       // Live revisions step the run line: waiting after the running before it.
       expect(advanced.body.run.state).toBe('waiting');
 
@@ -217,7 +223,7 @@ describe('HostedChildRunSession', () => {
         exitSignal: null,
       });
       const settled = committed(authority);
-      expect(settled.revision).toBe(6);
+      expect(settled.revision).toBe(7);
       expect(settled.body).toMatchObject({
         stopReason: 'exited',
         exitCode: 0,

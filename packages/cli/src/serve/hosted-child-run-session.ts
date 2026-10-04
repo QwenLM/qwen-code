@@ -160,7 +160,14 @@ export class HostedChildRunSession {
     outputRef: ManagedSessionDurableRef,
   ): Promise<void> {
     return this.reviseAsync(shellId, async (previous) => {
-      if (previous.outputRef !== null) {
+      // A replay of the very same reference is the no-op the deep-equal
+      // skip already owns; any other reference must be a strictly newer
+      // revision, so a lost or reordered delivery can never walk the
+      // output back.
+      if (
+        previous.outputRef !== null &&
+        !isDeepStrictEqual(previous.outputRef, outputRef)
+      ) {
         const before = manifestRevision(
           await this.store.resources.read(previous.outputRef),
           'Shell output manifest',

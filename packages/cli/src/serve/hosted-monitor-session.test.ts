@@ -238,6 +238,12 @@ describe('HostedMonitorSession', () => {
         orchestrator.advanceOutput('monitor-1', manifest),
       ).rejects.toThrow('may only advance forward');
       expect(committed(authority).body.outputRef).toEqual(manifestTwo);
+      // A replay of the very same reference is a no-op, not a refusal: a
+      // redelivered advance must never wedge the watch's exit leg.
+      const revisionBeforeReplay = committed(authority).revision;
+      await orchestrator.advanceOutput('monitor-1', manifestTwo);
+      expect(committed(authority).revision).toBe(revisionBeforeReplay);
+      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
 
       harness.now = 7_000;
       await orchestrator.settleQuiet('monitor-1', 'exited');
