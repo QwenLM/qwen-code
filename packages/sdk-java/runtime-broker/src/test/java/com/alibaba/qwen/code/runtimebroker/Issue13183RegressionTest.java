@@ -152,8 +152,9 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * Dispatch lease renewals run on the dedicated renewal pool too, so a
-     * stalled binding renewal cannot starve them either.
+     * Dispatch lease renewals run on the dedicated renewal pool too, so one
+     * stalled binding renewal does not starve them. The pool has two
+     * threads, which bounds that to two simultaneous stalls and no more.
      */
     @Test
     void dispatchRenewalsRunOnTheRenewalPool() throws Exception {
