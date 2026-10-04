@@ -72,12 +72,9 @@ retirement ownership and the CSI provisioning gate remain unchanged.
 
 **ACK-2: trusted original provenance, then durable evidence.** First establish and
 review how the coordinator obtains trustworthy persisted original Pod identity.
-Only then implement the private authority plan, two-stage RPC/final transaction,
-append-only migration and real single-publication caller described below. These
-parts remain NOT_IMPLEMENTED. Do not add an unreachable public method,
+The [ACK-2 follow-up](2026-10-03-csi-durable-worker-ack.md) now implements the private authority plan, two-stage RPC/final transaction, append-only migration and real single-publication caller described below. Those parts were NOT_IMPLEMENTED in the historical ACK-1 baseline. Do not add an unreachable public method,
 unsupported-only command/table stub or package-private fake-authority positive
-and call it production persistence. D1–D6 are future acceptance groups, separate
-from ACK-1 results.
+and call it production persistence. D1–D6 are ACK-2 acceptance groups, separate from ACK-1 results; their current evidence and remaining qualification limits are recorded in the follow-up.
 
 ## Closed wire contract
 
@@ -240,14 +237,12 @@ The protocol takes the explicit original boot/storage/Pod expectation required
 for exact comparison. Its native HTTP fixture may supply synthetic boot/Pod
 identity, but that demonstrates the protocol boundary only. ACK-1 does not
 resolve that expectation from authoritative production CSI placement or expose a
-new durable retirement command. The future coordinator must supply qualified
+new durable retirement command. The ACK-2 coordinator must supply qualified
 identity; a returned Pod tuple cannot serve as its own expectation.
 
-## Future Java authority and two-stage persistence (ACK-2)
+## Java authority and two-stage persistence (ACK-2)
 
-This entire authority/persistence section is gated future design, not an ACK-1
-implementation task. After trusted provenance is available, add a private single-publication coordinator, with store operations internal to
-that coordinator. Its command accepts only original retirement and Session/
+This authority/persistence section was outside ACK-1 scope and is now implemented by the linked ACK-2 follow-up. Its private single-publication coordinator keeps store operations internal and requires trusted provenance. Its command accepts only original retirement and Session/
 publication selectors; it loads registration, binding, original lease, receipt
 and expected worker identity from trusted records. It accepts no endpoint, token,
 Pod tuple, response JSON or success boolean from command input.
@@ -269,10 +264,8 @@ update verification/quarantine state; do not call this read-only snapshot work.
 Before networking, finish and release all database transactions/locks.
 
 The expected Pod tuple must come from trustworthy, persisted original CSI
-placement/attestation provenance. Current `WorkspaceCsiRuntimeProvisioner`
-deliberately cannot provide that provenance. A null pre-create handle, K1 scratch
-handle or worker-supplied Pod UID cannot qualify. Until that boundary exists and
-is reviewed, do not create the real ACK command or evidence insert path. Component fixtures do not open production admission, and no optional
+placement/attestation provenance. The historical ACK-1 `WorkspaceCsiRuntimeProvisioner` could not provide that provenance; the ACK-2 follow-up adds trusted original identity without opening aggregate retirement. A null pre-create handle, K1 scratch
+handle or worker-supplied Pod UID cannot qualify. The real ACK command and evidence insert path require that persisted boundary and its review. Component fixtures do not open production admission, and no optional
 proof provider or caller approval flag bypasses this gap.
 
 After a positive exact response, open a new short transaction and reacquire the
@@ -301,11 +294,9 @@ without ACK evidence. A successful RPC followed by a failed commit is retried
 against the same original worker and receipt. Worker memory may already be
 acknowledged; that does not let Java skip the final authority checks.
 
-## Future migration and immutable idempotency (ACK-2)
+## Migration and immutable idempotency (ACK-2)
 
-NOT_IMPLEMENTED; create no ACK table or schema stub in ACK-1. Once ACK-2
-provenance is qualified, use the next unused migration number for `workspace_csi_worker_ack`; confirm it
-at implementation time. Do not rewrite the retirement identity (V36 here, V29 in the earlier snapshot), other applied
+ACK-1 did not create an ACK table or schema stub. ACK-2 adds `workspace_csi_worker_ack` in V39 after the October 4 renumbering; reconfirm the next unused number before landing. Do not rewrite the retirement identity (V37 here, V29 in the earlier snapshot), other applied
 migrations, or existing rows. Add one table, `managed_workspace_csi_worker_ack`:
 
 | Column                     | Meaning                                                           |
@@ -362,8 +353,7 @@ Do not backfill ACK rows from old REFERENCED publications.
 | ACK-2 persistence                      | One new migration and its actual schema/migration test entry; new `WorkspaceCsiWorkerAckStoreTest.java`                                                                                                                   |
 | ACK-1 shared contract                  | A bounded ACK fixture adjacent to the existing CSI fixtures, consumed independently by Java and TypeScript; no generic Tool v3 schema change                                                                              |
 
-Only ACK-1 rows are current implementation scope. ACK-2 file names are future
-design locations; do not create placeholder files now. In ACK-2, keep the
+ACK-1 rows describe this historical increment. ACK-2 locations are now implemented by the linked follow-up, with real authority and evidence checks rather than placeholder files. In ACK-2, keep the
 coordinator/store together unless an actual second consumer requires a
 separate abstraction. Review all new read sites, the owned-route registry and
 transport wrappers. No checkpoint parser, extra publisher proof interface or
@@ -404,12 +394,12 @@ negatives against each, including fractional numeric identities, duplicate keys,
 invalid UTF-8/Unicode, trailing tokens and byte bounds. Neither the POM scope
 change nor a test-only classpath establishes production qualification by itself.
 
-ACK-2 D1–D6 remain pending after trustworthy provenance is available. They must
+ACK-2 D1–D6 qualification requires trustworthy provenance; current outcomes are recorded in the linked follow-up. They must
 prove late expiry/quarantine and authority conflicts install zero rows, exact
 retries, independent-process reload, concurrent insertion and rollback after an
 actual ACK. MySQL tests must observe real lock waits and current rows under
 repeatable read; H2 alone does not qualify that behavior. Check UTC/non-UTC clock
-bounds. Do not substitute package-private fake authority for the future real
+bounds. Do not substitute package-private fake authority for the real
 coordinator's positive chain. Each phase preserves its own raw assertions,
 source/class/dependency hashes, actual exits and owned cleanup.
 

@@ -53,7 +53,7 @@ retirement, binding/generation, publication grant, execution and Session writer.
 
 ## Compatibility and affected files
 
-Managed-server Flyway V37 (V30 in the earlier development snapshot) adds the
+Managed-server Flyway V38 (V30 in the earlier development snapshot) adds the
 nullable columns without backfill. The private
 Broker schema and its additive initializer support both fresh and existing
 databases. Old rows remain readable with absent evidence; CSI original-only

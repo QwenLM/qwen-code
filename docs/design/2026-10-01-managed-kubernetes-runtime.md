@@ -101,7 +101,7 @@ inside a trusted test network. Production TLS/workload identity is a K3 gate.
 The hidden worker command adds `--container-boot <path>`. It reads the existing
 bounded boot-v1 JSON envelope from the Secret file and explicitly listens on
 `0.0.0.0:43190`. Ordinary stdin startup keeps loopback and its current ready record.
-Container mode accepts Session isolation only and rejects managed-context boot.
+The non-CSI boot-v1 container mode accepts Session isolation only and rejects managed-context boot. The private CSI boot-v3 increment instead validates its nested workspace context and original mount before listening.
 Container cwd validation uses POSIX lexical rules independently of the Broker host.
 No private protocol schema is widened. Boot bytes and bearer credentials are not
 printed. The worker image must supply Node.js 22+, the built CLI and required

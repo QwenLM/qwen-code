@@ -2,8 +2,7 @@
 
 [English](2026-10-02-csi-receipt-checkpoint-evidence.md) | [简体中文](2026-10-02-csi-receipt-checkpoint-evidence.zh-CN.md)
 
-状态：私有只读组件已实现并通过本地验证，包括真实 MySQL 接线；持久 worker ACK、
-MCP 及物理/云端资格验证仍待完成。这是已通过本地验证的
+状态：私有只读组件已实现并通过历史基线的本地验证，包括真实 MySQL 接线。[ACK-2 后续设计](2026-10-03-csi-durable-worker-ack.zh-CN.md)现已实现持久 worker ACK；MCP 及聚合物理/云端资格验证仍待完成。这是已通过本地验证的
 [原 publication 结算 consumer](2026-10-02-csi-original-publication-settlement.zh-CN.md)
 之后的 [K2c](2026-10-01-managed-kubernetes-k2.zh-CN.md) 分片。
 
@@ -21,7 +20,7 @@ MCP 及物理/云端资格验证仍待完成。这是已通过本地验证的
 
 原 worker ACK 已允许 parent 为 DRAINING，同时要求原 READY Runtime Session、
 原 lease 和 publication receipt。Worker 将 acknowledgement 保存在内存中；
-现有 ACK 路径不持久保存确认。Session receipt 不能替代该确认。MCP 的最新
+本历史组件中的 ACK 路径当时不持久保存确认；ACK-2 后续增量利用可信原 provenance 加入该持久化。Session receipt 不能替代该确认。MCP 的最新
 `released` 状态也不能证明严格 drain：兼容路径可能未经正常持久化的 `drained`
 转换便到达该状态。
 

@@ -275,18 +275,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     for (const prior of revisions.values()) requireSameRef(prior, ref);
     revisions.set(revision, ref);
     references.set(ref.resourceId, revisions);
-    let nested: ManagedSessionDurableRef[] = [];
-    if (ref.kind === 'managed-checkpoint') {
-      const parsed = tryParseHarnessCheckpointV1(stored.bytes);
-      if (parsed.ok) nested = collectRefs([parsed.checkpoint]);
-    } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
-      nested = collectRefs([
-        parseManagedSessionRecordJson(
-          stored.bytes.toString('utf8'),
-          MANAGED_SESSION_LIMITS.maxEventBytes,
-        ),
-      ]);
-    }
+    const nested = nestedResourceRefs(ref, stored.bytes);
     pending.push(...nested.map((ref) => ({ revision, ref })));
   }
   if (resources.size !== references.size) {
@@ -472,23 +461,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        if (ref.kind === 'managed-checkpoint') {
-          const parsed = tryParseHarnessCheckpointV1(staged.bytes);
-          if (parsed.ok) pending.push(...collectRefs([parsed.checkpoint]));
-        } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
-          // A Stage H record commits the resources its closed body names.
-          pending.push(...collectRefs([JSON.parse(staged.bytes.toString())]));
-        } else if (ref.kind === 'managed-hook-plan') {
-          const plan = JSON.parse(staged.bytes.toString()) as {
-            messagesRef?: ManagedSessionDurableRef;
-          };
-          pending.push(...collectRefs([plan.messagesRef]));
-        } else if (ref.kind === 'managed-hook-message-chunks') {
-          const manifest = JSON.parse(staged.bytes.toString()) as {
-            parts: ManagedSessionDurableRef[];
-          };
-          pending.push(...collectRefs(manifest.parts));
-        }
+        pending.push(...nestedResourceRefs(ref, staged.bytes));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -1522,6 +1495,32 @@ function parseRestoreHead(value: unknown): RestoreHead {
       'recoveryDetailCode',
     ),
   };
+}
+
+function nestedResourceRefs(
+  ref: ManagedSessionDurableRef,
+  bytes: Buffer,
+): ManagedSessionDurableRef[] {
+  if (ref.kind === 'managed-checkpoint') {
+    const parsed = tryParseHarnessCheckpointV1(bytes);
+    return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
+  }
+  if (
+    EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-hook-plan' ||
+    ref.kind === 'managed-hook-message-chunks'
+  ) {
+    const record = parseManagedSessionRecordJson(
+      bytes.toString('utf8'),
+      MANAGED_SESSION_LIMITS.maxEventBytes,
+    );
+    if (ref.kind === 'managed-hook-plan')
+      return collectRefs([(record as { messagesRef?: unknown }).messagesRef]);
+    if (ref.kind === 'managed-hook-message-chunks')
+      return collectRefs((record as { parts: unknown[] }).parts);
+    return collectRefs([record]);
+  }
+  return [];
 }
 
 function requireSameRef(

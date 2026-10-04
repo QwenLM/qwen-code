@@ -45,6 +45,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import org.springframework.dao.DataAccessException;
+import org.springframework.transaction.TransactionException;
 
 /** Private CSI placement; ambiguous creation never authorizes adoption or replacement. */
 public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner {
@@ -219,6 +221,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             } catch (RuntimeException error) {
                 placements.remove(seed);
                 return error instanceof RuntimeBrokerException failure && failure.isRetryable()
+                        || error instanceof DataAccessException || error instanceof TransactionException
                         ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
             }
         });

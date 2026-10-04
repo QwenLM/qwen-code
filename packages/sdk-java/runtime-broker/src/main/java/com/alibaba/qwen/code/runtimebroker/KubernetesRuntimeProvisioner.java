@@ -286,10 +286,14 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 throw conflict();
             }
             Map<?, ?> container = object(((List<?>) spec.get("containers")).getFirst());
+            Map<?, ?> security = object(container.get("securityContext"));
             if (!absentOrEmpty(container.get("args")) || !absentOrEmpty(container.get("envFrom"))
                     || container.get("lifecycle") != null
-                    || Boolean.TRUE.equals(object(container.get("securityContext")).get("privileged"))
-                    || !absentOrEmpty(object(object(container.get("securityContext")).get("capabilities")).get("add"))) {
+                    || Boolean.TRUE.equals(security.get("privileged"))
+                    || security.get("seccompProfile") != null
+                            && !Map.of("type", "RuntimeDefault").equals(security.get("seccompProfile"))
+                    || security.get("procMount") != null && !"Default".equals(security.get("procMount"))
+                    || !absentOrEmpty(object(security.get("capabilities")).get("add"))) {
                 throw conflict();
             }
         }

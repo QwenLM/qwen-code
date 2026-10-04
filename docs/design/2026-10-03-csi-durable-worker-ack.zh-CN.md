@@ -128,3 +128,5 @@ Ready 状态。16:45:29 UTC 自动扩容节点仍存在；17:02:41 UTC 的另一
 查询返回零个匹配实例。没有手动删除节点，也不宣称最终计费已结清。仍需
 maintainer 整合审查；聚合 drain/release/NodeUnpublish
 保持在本操作范围之外。
+
+10 月 4 日评审因 main 已占用 V35，将四个未合入 CSI migration 顺延为 V36–V39。上述 V34→V38 MySQL 结果属于原编号和提交，不能作为新 V35→V39 升级的验证。已应用的私有历史须显式核对或使用新数据库，不自动执行 Flyway repair。

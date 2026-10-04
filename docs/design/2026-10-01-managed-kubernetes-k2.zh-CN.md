@@ -210,12 +210,13 @@ ID、CAS revision、phase 和证据引用。phase 为 `RESERVED`、`ACTIVE`、`D
 `RELEASED`。效果不确定时保留 holder 并记录阻塞原因；coordinator lease 过期只改变
 调查责任，绝不改变物理所有权。
 
-| 转换                | 必需事实                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------ |
-| RELEASED → RESERVED | 已授权注册、相同物理键、原 provisioning 身份、与 released revision 原子比较          |
-| RESERVED → ACTIVE   | 原 Pod/Secret 与注册身份完全匹配、可信 mount 证据、worker 准入成功及原 holder CAS    |
-| ACTIVE → DRAINING   | 对该 generation 持久封闭派发；在审批、结果、history 和 checkpoint 结算期间保留所有权 |
-| DRAINING → RELEASED | 原执行结算、worker/后代停止、可信 unmount 证据、全部 receipt 持久化、精确 holder CAS |
+| 转换                | 必需事实                                                                                            |
+| ------------------- | --------------------------------------------------------------------------------------------------- |
+| RELEASED → RESERVED | 已授权注册、相同物理键、原 provisioning 身份、与 released revision 原子比较                         |
+| RESERVED → ACTIVE   | 原 Pod/Secret 与注册身份完全匹配、可信 mount 证据、worker 准入成功及原 holder CAS                   |
+| RESERVED → DRAINING | reservation revision 1 的精确原 holder 及持久派发 seal；原 Pod 创建或挂载可能已发生，继续保留所有权 |
+| ACTIVE → DRAINING   | 对该 generation 持久封闭派发；在审批、结果、history 和 checkpoint 结算期间保留所有权                |
+| DRAINING → RELEASED | 原执行结算、worker/后代停止、可信 unmount 证据、全部 receipt 持久化、精确 holder CAS                |
 
 在任何 Pod 或 init container 可能挂载或读取卷之前提交 RESERVED。SQL 事务不能跨
 Kubernetes API 或 worker RPC。创建应答丢失时保留 reservation，只观测确定性的原资源。
@@ -314,10 +315,10 @@ handle 缺失表示未记录 scheduler 身份，绝不能证明从未挂载。�
 和 Session release 仍可使用。事务失败同时回滚 journal 与 seal。私有离线命令不新增
 listener 或云操作。
 
-整合主线时逐字保留上游 V27–V34，包括 Java V29 Hook backfill。未提交的 CSI
-reservation 顺延为 V35、retirement journal 为 V36、dispatch authorization 为 V37、
-持久 worker ACK 为 V38。此前 CSI V26→V27 和 V27→V28/V29 的检查仅为旧快照历史证据；
-新整合须另验真实 V34→V38 升级，不能重写已应用数据库的 Flyway 历史。
+整合主线时逐字保留上游 V27–V35，包括 Java V29 Hook backfill 及 main 的 V35 Session tool profile。未合入的 CSI
+reservation 顺延为 V36、retirement journal 为 V37、dispatch authorization 为 V38、
+持久 worker ACK 为 V39。此前 CSI V26→V27 和 V27→V28/V29 的检查仅为旧快照历史证据；
+新整合须另验真实 V35→V39 升级，不能重写已应用数据库的 Flyway 历史。
 验证覆盖 V27 数据保留、独立 MySQL JVM 派发竞争、重启精确重试、alias 冲突、损坏、
 回滚与 LOCAL 回归。本片不授权 ACTIVE、worker drain、物理 stop/unpublish、RELEASED
 或持久 CREATE/selector。
@@ -408,7 +409,7 @@ tenant placement guard 串行，并要求新事务；拒绝外层事务，防止
 消费者拒绝 CSI alias，并将所有权读写限定为 `LOCAL`。K2a 不支持转换存储 profile。
 
 实现已对齐上游 `a7deb01bc`。上游 V26 用于公开工具结果 projection，未提交的 CSI
-migration 当时为 V27（此次整合为 V35，见上文）。新的独立 MySQL 8.4.11 验证确认 V26 升级 V27 后，原 LOCAL holder、
+migration 当时为 V27（此次整合为 V36，见上文）。新的独立 MySQL 8.4.11 验证确认 V26 升级 V27 后，原 LOCAL holder、
 binding/session、projection 样本、表与索引均保持不变，并通过当前 CSI 竞争与派发回归。
 此前 V25 升级 CSI V26 的测试记录继续作为历史证据；对已应用的 migration 改名不能证明
 升级有效。交付前须再次核对下一个可用版本号。

@@ -107,6 +107,9 @@ class KubernetesRuntimeProvisionerTest {
                 api -> container(api).put("command", List.of("another-worker")),
                 api -> container(api).put("envFrom", List.of(Map.of("secretRef", Map.of("name", "other")))),
                 api -> container(api).put("args", List.of("extra-argument")),
+                api -> map(container(api).get("securityContext")).put("seccompProfile", Map.of("type", "Unconfined")),
+                api -> map(container(api).get("securityContext")).put("seccompProfile", Map.of("type", "Localhost", "localhostProfile", "custom")),
+                api -> map(container(api).get("securityContext")).put("procMount", "Unmasked"),
                 api -> map(api.object("pods").get("spec")).put("initContainers", List.of(Map.of("name", "other"))),
                 api -> map(api.object("pods").get("spec")).put("automountServiceAccountToken", true));
         for (var mutate : mutations) {
@@ -122,6 +125,34 @@ class KubernetesRuntimeProvisionerTest {
                 assertFalse(provisioner.isUsable(lease));
                 assertEquals(2, api.creates);
             }
+        }
+    }
+
+    @Test
+    void refusesContainerSecurityOverridesInTheCreateResponse() {
+        for (var override : List.of(Map.<String, Object>of("seccompProfile", Map.of("type", "Unconfined")),
+                Map.<String, Object>of("procMount", "Unmasked"))) {
+            var api = new FakeKubernetesRuntimeClient();
+            api.podCreated = pod -> map(container(api).get("securityContext")).putAll(override);
+            try (var provisioner = provisioner(api)) {
+                failure(provisioner.ensureResource(request(provisioner, "/workspace"), SEED, null));
+                assertEquals(2, api.creates);
+            }
+        }
+    }
+
+    @Test
+    void acceptsExplicitRuntimeDefaultContainerSecurityControls() {
+        var api = new FakeKubernetesRuntimeClient();
+        api.podCreated = pod -> map(container(api).get("securityContext")).putAll(Map.of(
+                "seccompProfile", Map.of("type", "RuntimeDefault"), "procMount", "Default"));
+        try (var provisioner = provisioner(api)) {
+            var request = request(provisioner, "/workspace");
+            var handle = join(provisioner.ensureResource(request, SEED, null));
+            var lease = join(provisioner.provision(request, SEED));
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    join(provisioner.reconcile(request, SEED, handle, lease)).getOutcome());
+            assertTrue(provisioner.isUsable(lease));
         }
     }
 

@@ -3,7 +3,10 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
@@ -42,9 +45,11 @@ import java.util.function.Consumer;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.CannotCreateTransactionException;
 
 class WorkspaceCsiRuntimeIdentityTest {
     private static final String IMAGE = "registry.example/worker@sha256:" + "a".repeat(64);
@@ -184,6 +189,36 @@ class WorkspaceCsiRuntimeIdentityTest {
                 assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, null)).getOutcome())
                         .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
                 assertThat(api.creates).isEqualTo(2);
+            }
+        }
+    }
+
+    @Test
+    void storageObservationOutagesStayUnknownAndRecoverWithoutReplacingThePod() {
+        for (RuntimeException outage : List.of(
+                new DataAccessResourceFailureException("temporary SQL outage"),
+                new CannotCreateTransactionException("temporary connection outage"))) {
+            setUp();
+            storage = spy(storage);
+            try (var provider = provider()) {
+                provider.reserveResource(original);
+                var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+                original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+                var lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+                var reservation = storage.inspect(registration);
+                doThrow(outage).when(storage).inspect(registration);
+                for (int retry = 0; retry < 2; retry++) {
+                    assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, lease)).getOutcome())
+                            .isEqualTo(RuntimeObservation.Outcome.UNKNOWN);
+                    assertThat(provider.isUsable(lease)).isFalse();
+                }
+                doCallRealMethod().when(storage).inspect(registration);
+                assertThat(storage.inspect(registration)).isEqualTo(reservation);
+                assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, lease)).getOutcome())
+                        .isEqualTo(RuntimeObservation.Outcome.READY);
+                join(provider.confirm(original.getRequest(), lease));
+                assertThat(api.creates).isEqualTo(2);
+                assertThat(bindings.findById(original.getBindingId()).getVersion()).isEqualTo(original.getVersion());
             }
         }
     }

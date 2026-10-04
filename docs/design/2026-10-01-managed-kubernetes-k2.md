@@ -279,12 +279,13 @@ The phases are `RESERVED`, `ACTIVE`, `DRAINING` and `RELEASED`. Ambiguous effect
 retain the holder and record the blocking reason; an expired coordinator lease
 changes investigation responsibility, never physical ownership.
 
-| Transition          | Required facts                                                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| RELEASED → RESERVED | Authorized registration, matching physical key, original provisioning identity, atomic comparison against the released revision |
-| RESERVED → ACTIVE   | Exact original Pod/Secret and registration identities, trusted mount proof, successful worker admission and original-holder CAS |
-| ACTIVE → DRAINING   | Durable dispatch seal for the exact generation; retain ownership through approval, result, history and checkpoint settlement    |
-| DRAINING → RELEASED | Original executions settled, worker/descendants stopped, trusted unmount proof, all receipts durable, exact-holder CAS          |
+| Transition          | Required facts                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| RELEASED → RESERVED | Authorized registration, matching physical key, original provisioning identity, atomic comparison against the released revision                              |
+| RESERVED → ACTIVE   | Exact original Pod/Secret and registration identities, trusted mount proof, successful worker admission and original-holder CAS                              |
+| RESERVED → DRAINING | Exact original holder at reservation revision 1 and durable dispatch seal; retain ownership because original Pod creation or mount may already have occurred |
+| ACTIVE → DRAINING   | Durable dispatch seal for the exact generation; retain ownership through approval, result, history and checkpoint settlement                                 |
+| DRAINING → RELEASED | Original executions settled, worker/descendants stopped, trusted unmount proof, all receipts durable, exact-holder CAS                                       |
 
 Commit RESERVED before any Pod or init container can mount or read the volume.
 SQL transactions never span Kubernetes API or worker RPC calls. Creation with a
@@ -413,11 +414,11 @@ DRAINING, including under a fresh operation claim. Original result/cancel and
 Session release remain available. Transaction failure rolls back journal and seal
 together. The private offline command adds no listener or cloud operation.
 
-The integration preserves upstream V27–V34 byte for byte, including the Java V29
-Hook backfill. Unsubmitted CSI reservation moves to V35, retirement journal to
-V36, dispatch authorization to V37 and durable worker ACK to V38. Earlier CSI
+The integration preserves upstream V27–V35 byte for byte, including the Java V29
+Hook backfill and main’s V35 Session tool profile migration. Unmerged CSI reservation moves to V36, retirement journal to
+V37, dispatch authorization to V38 and durable worker ACK to V39. Earlier CSI
 V26-to-V27 and V27-to-V28/V29 runs remain historical source-snapshot evidence;
-the integration needs a fresh V34-to-V38 upgrade test without rewriting any
+the integration needs a fresh V35-to-V39 upgrade test without rewriting any
 already-applied database Flyway history. Verification covers V27 data preservation,
 independent MySQL JVM dispatch races, exact restart retry, conflicting aliases,
 corruption, rollback and LOCAL regression. This slice does not authorize ACTIVE,
@@ -530,7 +531,7 @@ refuse a CSI alias and constrain ownership reads/writes to `LOCAL`. K2a does not
 convert storage profiles.
 
 The implementation is aligned to upstream `a7deb01bc`. Upstream V26 owns the
-public tool-result projection; the CSI migration was then V27 (V35 in this integration, as described above). A new
+public tool-result projection; the CSI migration was then V27 (V36 in this integration, as described above). A new
 independent MySQL 8.4.11 run established V26-to-V27 preservation of the original
 LOCAL holder, binding/session, projection samples, tables and indexes, together
 with current CSI contention and dispatch regressions. Historical V25-to-CSI-V26

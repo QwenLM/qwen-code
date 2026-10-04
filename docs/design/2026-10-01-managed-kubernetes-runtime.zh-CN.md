@@ -78,7 +78,7 @@ TLS/workload identity 属于 K3 门禁。
 
 隐藏 worker 命令增加 `--container-boot <path>`，从 Secret 文件读取现有有界 boot-v1
 JSON envelope，并显式监听 `0.0.0.0:43190`。普通 stdin 启动继续使用 loopback 和
-现有 ready record。容器模式仅接受 Session isolation，拒绝 managed-context boot。
+现有 ready record。非 CSI 的 boot-v1 容器模式仅接受 Session isolation，拒绝 managed-context boot。私有 CSI boot-v3 增量则在监听前校验内嵌 workspace context 和原挂载。
 容器 cwd 按 POSIX 词法校验，不依赖 Broker 主机操作系统。
 不扩展私有协议 schema，不打印 boot 内容或 bearer。镜像须提供 Node.js 22+、已构建
 CLI 及运行依赖。K1 Pod 使用 non-root、drop capabilities、禁止提权、RuntimeDefault

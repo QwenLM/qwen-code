@@ -330,8 +330,8 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true, 10);
             RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
-            RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(
-                    connection, binding.getRequest().getScope(), expected.getRuntimeSessionId(), true), expected);
+            RuntimeAdmission.requireSession(jdbcSessions.findByIdForUpdate(
+                    connection, binding.getRequest().getScope(), expected.getRuntimeSessionId()), expected);
             return JdbcToolExecutionRepository.authorizeDispatch(connection, expected,
                     owner, dispatchGeneration, binding.getVersion());
         });

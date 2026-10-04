@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 
 /** Read-only corroboration of registered objects; not proof of an authorization boundary. */
@@ -56,9 +57,9 @@ public final class WorkspaceCsiResourceGuard {
                 return CompletableFuture.allOf(pvc, pv, namespace).thenApply(done ->
                         verifyStorage(pvc.join(), pv.join(), namespace.join()));
             }).thenCompose(receipt -> verifyProtection().thenApply(ignored -> receipt))
-                    .exceptionallyCompose(error -> CompletableFuture.failedFuture(unavailable()));
+                    .exceptionallyCompose(error -> CompletableFuture.failedFuture(verificationFailure(error)));
         } catch (RuntimeException failure) {
-            return CompletableFuture.failedFuture(unavailable());
+            return CompletableFuture.failedFuture(verificationFailure(failure));
         }
     }
 
@@ -202,5 +203,16 @@ public final class WorkspaceCsiResourceGuard {
     private static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_csi_protection_unavailable",
                 "Workspace CSI resource protection is unavailable.", false);
+    }
+
+    private static RuntimeBrokerException verificationFailure(Throwable error) {
+        while (error instanceof CompletionException && error.getCause() != null) {
+            error = error.getCause();
+        }
+        if (error instanceof RuntimeBrokerException failure && failure.isRetryable()) {
+            return new RuntimeBrokerException(503, "workspace_csi_protection_unavailable",
+                    "Workspace CSI resource protection is temporarily unavailable.", true);
+        }
+        return unavailable();
     }
 }

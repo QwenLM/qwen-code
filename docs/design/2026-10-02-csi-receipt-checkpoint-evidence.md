@@ -3,8 +3,7 @@
 [English](2026-10-02-csi-receipt-checkpoint-evidence.md) | [简体中文](2026-10-02-csi-receipt-checkpoint-evidence.zh-CN.md)
 
 Status: private read-only component implemented and locally verified, including
-real MySQL integration; durable worker ACK, MCP and physical/cloud qualification
-remain pending. This follows the locally verified
+real MySQL integration in its historical baseline. Durable worker ACK is now implemented in the [ACK-2 follow-up](2026-10-03-csi-durable-worker-ack.md); MCP and aggregate physical/cloud qualification remain pending. This follows the locally verified
 [original publication settlement consumer](2026-10-02-csi-original-publication-settlement.md)
 within [K2c](2026-10-01-managed-kubernetes-k2.md).
 
@@ -24,8 +23,7 @@ Reuse the native authority rather than add a second checkpoint format or parser.
 
 Original worker ACK already permits a DRAINING parent while requiring the original
 READY Runtime Session, original lease and publication receipt. The worker records
-the acknowledgement in memory; the existing ACK path does not persist a durable
-confirmation. A Session receipt cannot substitute for that confirmation. MCP
+the acknowledgement in memory; the ACK path in this historical component did not persist a durable confirmation. The ACK-2 follow-up adds that persistence using trusted original provenance. A Session receipt cannot substitute for that confirmation. MCP
 latest `released` state also does not establish strict drain: compatibility paths
 can reach it without the normal persisted `drained` transition.
 

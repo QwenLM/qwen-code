@@ -88,6 +88,33 @@ class WorkspaceCsiResourceGuardTest {
         refused(denied);
     }
 
+    @Test
+    void preservesRetryabilityWithoutExposingUpstreamFailure() {
+        for (boolean synchronous : List.of(false, true)) {
+            for (int status : List.of(429, 503)) {
+                var api = new Api();
+                api.synchronousFailure = synchronous;
+                api.failure = new RuntimeBrokerException(status, "runtime_kubernetes_api_failed",
+                        "sensitive body opaque-handle", true, new IllegalStateException("sensitive cause"));
+                assertThatThrownBy(() -> guard(api).verify().toCompletableFuture().join())
+                        .hasCauseInstanceOf(RuntimeBrokerException.class).satisfies(error -> {
+                            var cause = (RuntimeBrokerException) error.getCause();
+                            assertThat(cause.getStatusCode()).isEqualTo(503);
+                            assertThat(cause.getCode()).isEqualTo("workspace_csi_protection_unavailable");
+                            assertThat(cause.isRetryable()).isTrue();
+                            assertThat(cause.getCause()).isNull();
+                            assertThat(cause.getDetails()).isEmpty();
+                            assertThat(cause.toString()).doesNotContain("sensitive body", "opaque-handle", "sensitive cause");
+                        });
+                assertThat(api.creates).isZero();
+            }
+            var denied = new Api();
+            denied.synchronousFailure = synchronous;
+            denied.failure = new RuntimeBrokerException(403, "denied", "sensitive body", false);
+            refused(denied);
+        }
+    }
+
     private WorkspaceCsiResourceGuard guard(Api api) {
         return new WorkspaceCsiResourceGuard(api, "cluster", registration, protection);
     }
@@ -117,6 +144,7 @@ class WorkspaceCsiResourceGuardTest {
         private int bindingReads;
         private Runnable afterStorage = () -> { };
         private RuntimeBrokerException failure;
+        private boolean synchronousFailure;
 
         private Api() {
             objects.put("persistentvolumeclaims", object("PersistentVolumeClaim", "claim", "runtime", "pvc-uid",
@@ -164,6 +192,9 @@ class WorkspaceCsiResourceGuardTest {
 
         private CompletionStage<Map<String, Object>> read(String resource) {
             reads++;
+            if (failure != null && synchronousFailure) {
+                throw failure;
+            }
             return failure == null ? CompletableFuture.completedFuture(objects.get(resource))
                     : CompletableFuture.failedFuture(failure);
         }

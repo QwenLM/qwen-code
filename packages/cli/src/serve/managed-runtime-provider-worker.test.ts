@@ -20,6 +20,7 @@ import {
 } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { FileHistoryService } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
@@ -255,6 +256,112 @@ describe('Managed Runtime provider admission seal', () => {
       'BLOCKED',
     );
   });
+
+  it.each([false, true])(
+    'settles execution queued behind a checkpoint when admission sealed=%s',
+    async (sealed) => {
+      fs.writeFileSync(path.join(workspace, 'input.txt'), 'provider bytes');
+      await provider.control(SESSION, { kind: 'acquire' });
+      const manifest = (await provider.control(SESSION, {
+        kind: 'manifest',
+      })) as ReturnType<ManagedToolRuntime['manifest']>;
+      const identity: ManagedToolCallIdentity = {
+        sessionId: SESSION.runtimeSessionId,
+        promptId: 'turn-a',
+        callId: 'call-a',
+        capabilityDigest: manifest.capabilityDigest,
+        policyRevision: manifest.policyRevision,
+      };
+      await provider.control(SESSION, {
+        kind: 'bind-history',
+        binding: {
+          ownerSessionId: SESSION.harnessSessionId,
+          ownerRuntimeSessionId: SESSION.runtimeSessionId,
+          executionCwd: workspace,
+          snapshots: [],
+        },
+      });
+      await provider.control(SESSION, { kind: 'begin-turn', identity });
+      let enterCheckpoint!: () => void;
+      let enterExecute!: () => void;
+      let resume!: () => void;
+      const checkpointEntered = new Promise<void>((resolve) => {
+        enterCheckpoint = resolve;
+      });
+      const executeEntered = new Promise<void>((resolve) => {
+        enterExecute = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const makeSnapshot = FileHistoryService.prototype.makeSnapshot;
+      vi.spyOn(FileHistoryService.prototype, 'makeSnapshot').mockImplementation(
+        async function (this: FileHistoryService, promptId) {
+          if (promptId === 'held-turn') {
+            enterCheckpoint();
+            await held;
+          }
+          return makeSnapshot.call(this, promptId);
+        },
+      );
+      const execute = ManagedToolRuntime.prototype.execute;
+      vi.spyOn(ManagedToolRuntime.prototype, 'execute').mockImplementation(
+        function (this: ManagedToolRuntime, ref) {
+          const pending = execute.call(this, ref);
+          enterExecute();
+          return pending;
+        },
+      );
+      const checkpoint = provider.control(SESSION, {
+        kind: 'checkpoint',
+        promptId: 'held-turn',
+      });
+      try {
+        await checkpointEntered;
+        const prepared = (await provider.control(SESSION, {
+          kind: 'prepare',
+          identity,
+          toolName: 'read_file',
+          input: { file_path: path.join(workspace, 'input.txt') },
+        })) as ManagedToolPrepareResponse;
+        const ref = reference(prepared);
+        await provider.control(SESSION, { kind: 'preflight', reference: ref });
+        const pending = provider.control(SESSION, {
+          kind: 'execute',
+          reference: ref,
+        });
+        const outcome = pending.catch((error: unknown) => error);
+        await executeEntered;
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({ state: 'executing' });
+        if (sealed) executor.sealAdmission(retirementId);
+        resume();
+        await checkpoint;
+        if (sealed)
+          expect(await outcome).toBeInstanceOf(ManagedToolUnavailableError);
+        else
+          expect(await outcome).toMatchObject({ executionStatus: 'success' });
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({
+          state: 'settled',
+          result: { executionStatus: sealed ? 'not_started' : 'success' },
+        });
+        expect(provider.getDrainInspection().pendingInvocations).toBe(0);
+        expect(provider.hasActiveSession(SESSION.runtimeSessionId)).toBe(false);
+        expect(
+          await provider.control(SESSION, { kind: 'cancel', reference: ref }),
+        ).toMatchObject({ state: 'settled' });
+        await expect(
+          provider.control(SESSION, { kind: 'release' }),
+        ).resolves.toBe(true);
+      } finally {
+        resume();
+        await checkpoint;
+      }
+    },
+  );
 
   it('rechecks admission after the context lookup before beginning a new turn', async () => {
     let enter!: () => void;

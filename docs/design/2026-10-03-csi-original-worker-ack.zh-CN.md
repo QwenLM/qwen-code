@@ -59,11 +59,8 @@ coordinator、command 或所谓 durable evidence。现有 retirement 所有权�
 门禁保持不变。
 
 **ACK-2：先解决可信原 provenance，再实现持久证据。** 首先建立并审查 coordinator 如何
-获取可信、已持久化的原 Pod identity，然后才实施下述 private authority plan、两阶段
-RPC/最终事务、append-only migration 和实际单 publication caller。这些部分保持
-NOT_IMPLEMENTED。不能加入不可达 public method、仅返回 unsupported 的 command/table
-占位，或把 package-private fake-authority 正向结果称为生产持久化。D1–D6 是未来验收组，
-与 ACK-1 结果分开。
+获取可信、已持久化的原 Pod identity。[ACK-2 后续设计](2026-10-03-csi-durable-worker-ack.zh-CN.md)现已实施下述 private authority plan、两阶段 RPC/最终事务、append-only migration 和实际单 publication caller；这些部分在历史 ACK-1 基线中为 NOT_IMPLEMENTED。不能加入不可达 public method、仅返回 unsupported 的 command/table
+占位，或把 package-private fake-authority 正向结果称为生产持久化。D1–D6 是 ACK-2 验收组，与 ACK-1 结果分开；当前证据与剩余资格限制见后续设计。
 
 ## 闭合 wire 契约
 
@@ -195,10 +192,9 @@ cancel、generic ACK 和 release 均未获得新分支。
 placement 解析该 expectation，也不暴露新的 durable retirement command。后续 coordinator
 必须提供合格身份，不能把响应中的 Pod tuple 当成自身的 expected 值。
 
-## 后续 Java 权威边界与两阶段持久化（ACK-2）
+## Java 权威边界与两阶段持久化（ACK-2）
 
-本节全部 authority/persistence 内容均为受前置门禁约束的未来设计，不属于 ACK-1 实施任务。
-可信 provenance 可用后，再新增私有单 publication coordinator，store 操作仅由该 coordinator 内部使用。命令仅接收
+本节 authority/persistence 内容不属于 ACK-1 范围，现已由链接的 ACK-2 后续设计实现。私有单 publication coordinator 的 store 操作保留在内部，并要求可信 provenance。命令仅接收
 原 retirement 和 Session/publication selectors；从可信记录加载 registration、binding、
 原 lease、receipt 和 expected worker identity。命令输入不接受 endpoint、token、Pod tuple、
 response JSON 或 success boolean。
@@ -216,9 +212,8 @@ operation、REFERENCED admission outcome/manifest 和精确 committed `tool.rece
 工作。联网前结束并释放全部数据库事务/锁。
 
 Expected Pod tuple 必须来自可信、已持久化的原 CSI placement/attestation provenance。
-当前 `WorkspaceCsiRuntimeProvisioner` 明确无法提供该 provenance。创建前的 null handle、
-K1 scratch handle 或 worker 自报 Pod UID 均不合格。在该边界实现并审查前，不创建实际 ACK
-command 或 evidence insert 路径。组件 fixture 不能开放生产 admission，也不得
+历史 ACK-1 的 `WorkspaceCsiRuntimeProvisioner` 无法提供该 provenance；ACK-2 后续增量加入可信原身份，但不开放聚合 retirement。创建前的 null handle、
+K1 scratch handle 或 worker 自报 Pod UID 均不合格。实际 ACK command 和 evidence insert 路径要求该持久化边界及其审查。组件 fixture 不能开放生产 admission，也不得
 用可选 proof provider 或 caller approval flag 绕过缺口。
 
 取得精确正向响应后，开启新的短事务，在同一 native JDBC connection 上按既有顺序重新加锁：
@@ -241,10 +236,9 @@ current locking read，包括 quarantine、referenced receipt/admission 和 fini
 插入失败均回滚，不留下 ACK evidence。RPC 成功而 commit 失败时，对同一原 worker 和
 receipt 重试。Worker 内存可能已经确认，但 Java 不能因此跳过最终权威检查。
 
-## 后续 migration 与不可变幂等（ACK-2）
+## Migration 与不可变幂等（ACK-2）
 
-NOT_IMPLEMENTED；ACK-1 不创建 ACK table 或 schema 占位。ACK-2 provenance 合格后，
-实施时确认下一个未占用的 migration 编号，用于 `workspace_csi_worker_ack`。不重写 retirement migration（此次为 V36，旧快照为 V29）的
+ACK-1 未创建 ACK table 或 schema 占位。ACK-2 在 10 月 4 日顺延编号后的 V39 加入 `workspace_csi_worker_ack`；合入前仍须确认下一个未占用编号。不重写 retirement migration（此次为 V37，旧快照为 V29）的
 retirement identity、其他已应用 migration 或历史 row。新增一张
 `managed_workspace_csi_worker_ack` 表：
 
@@ -293,7 +287,7 @@ checkpoint 和物理状态的重新检查。不能从历史 REFERENCED publicati
 | ACK-2 持久化                       | 一条新 migration 及其实际 schema/migration test 入口；新增 `WorkspaceCsiWorkerAckStoreTest.java`                                                                                                        |
 | ACK-1 共享契约                     | 在现有 CSI fixtures 旁新增有界 ACK fixture，由 Java/TypeScript 独立消费；不改通用 Tool v3 schema                                                                                                        |
 
-仅 ACK-1 行属于当前实施范围。ACK-2 文件名只是未来设计位置，现在不创建占位文件。
+ACK-1 行描述本历史增量；ACK-2 位置已由链接的后续设计实现，使用实际 authority 和证据校验，不是占位文件。
 ACK-2 中除非存在实际第二消费者，否则 coordinator/store 保持在一起，不另抽象。审查全部新增读点、owned-route registry 和 transport wrappers。
 不需要 checkpoint parser、额外 publisher proof interface 或公共 service route。
 
@@ -322,10 +316,10 @@ request/seed/lease/context/capture pin，并保证每个旧三参数 context con
 numeric identity、重复键、非法 UTF-8/Unicode、尾随 token 和字节上限。POM scope 变更或
 仅 test classpath 通过本身都不能证明生产资格。
 
-ACK-2 D1–D6 等待可信 provenance 可用后再验收。须证明晚到过期/quarantine 和 authority
+ACK-2 D1–D6 验收要求可信 provenance；当前结果见链接的后续设计。须证明晚到过期/quarantine 和 authority
 冲突插入零 row，并验证精确重试、独立进程回读、并发插入及实际 ACK 后 rollback。MySQL
 测试必须观察真实锁等待及 repeatable read 下的 current row；仅 H2 不足以验证该行为。
-检查 UTC/非 UTC 时间边界。不能用 package-private fake authority 替代未来实际 coordinator
+检查 UTC/非 UTC 时间边界。不能用 package-private fake authority 替代实际 coordinator
 正向链。各阶段独立保留原始断言、source/class/dependency hash、实际退出码和独占资源清理
 证据。
 
