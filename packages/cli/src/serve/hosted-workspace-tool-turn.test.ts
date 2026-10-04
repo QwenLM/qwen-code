@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
@@ -4014,11 +4015,28 @@ it.each([
 // H3 background Shell flow
 // ---------------------------------------------------------------------------
 
-function backgroundTurnRig(outcome: ToolResultEnvelope) {
+function backgroundTurnRig(
+  outcome: ToolResultEnvelope,
+  options: { attached?: boolean } = {},
+) {
   enablement.childRun = true;
   const order: string[] = [];
   const orchestrator = {
     calls: [] as Array<readonly [string, unknown]>,
+    record(id: string) {
+      return options.attached === true
+        ? {
+            ...({} as Record<string, unknown>),
+            startReceiptRef: {
+              resourceId: `receipt-${id}`,
+              kind: 'managed-runtime-receipt',
+              schemaVersion: 1,
+              byteLength: 1,
+              digest: 'a'.repeat(64),
+            },
+          }
+        : undefined;
+    },
     async admit(params: unknown) {
       orchestrator.calls.push(['admit', params]);
     },
@@ -4213,6 +4231,98 @@ it('admits a background Shell through its child_run orchestrator and lands the d
     manifestRef: null,
   });
   expect(savedOutcome['envelope']).toEqual(detached);
+});
+
+it('answers a retried accept from the journal without minting a rerun', async () => {
+  const { call, parts } = backgroundCall();
+  const detached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Background shell started under unit qwen-bg-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(detached);
+  turn = rig.turn;
+  await turn.execute([call], parts, 'model', new AbortController().signal);
+
+  const accept = (
+    rig.turn as unknown as {
+      acceptBackgroundShell(
+        request: { call: ToolCallRequestInfo; input: Record<string, unknown> },
+        executionCallId: string,
+        saved: Record<string, string>,
+        result: ToolResultEnvelope,
+        model: string,
+      ): Promise<Part[]>;
+    }
+  ).acceptBackgroundShell.bind(rig.turn);
+  const retried = await accept(
+    { call, input: call.args as Record<string, unknown> },
+    'shell-execution',
+    {
+      publicationId: 'publication-1',
+      publicationToken: 'token-1',
+      runtimeBindingId: 'binding-1',
+      bindingGeneration: '1',
+      runtimeCallId: 'rt',
+    },
+    detached,
+    'model',
+  );
+  expect(retried[0]?.functionResponse?.response).toMatchObject({
+    executionStatus: 'success',
+  });
+  expect(
+    rig.orchestrator.calls.filter(([name]) => name === 'attach'),
+  ).toHaveLength(1);
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+});
+
+it('tolerates a crash between attach and journal instead of a rerun', async () => {
+  const { call, parts } = backgroundCall();
+  const detached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Background shell started under unit qwen-bg-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(detached, { attached: true });
+  turn = rig.turn;
+  await turn.execute([call], parts, 'model', new AbortController().signal);
+  expect(
+    rig.orchestrator.calls.filter(([name]) => name === 'attach'),
+  ).toHaveLength(0);
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+  expect(broker.acknowledgeV3).toHaveBeenCalledWith('shell-execution', {
+    executionCallId: 'shell-execution',
+    manifest: null,
+    deliveryStatus: 'blocked',
+    historyRevision: null,
+  });
 });
 
 it('records a proven-unstarted background refuse as start_failed and lands the unstarted family', async () => {

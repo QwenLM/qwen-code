@@ -1703,20 +1703,6 @@ export class HostedWorkspaceToolTurn {
         `Background Shell settled with an unexpected result shape (${result.executionStatus}).`,
       );
     }
-    await this.childRuns!.attach(
-      executionCallId,
-      {
-        runtimeBindingId: saved.runtimeBindingId,
-        generation: saved.bindingGeneration,
-      },
-      {
-        executionCallId,
-        runtimeCallId: saved.runtimeCallId,
-        unitName: `qwen-bg-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
-        bindingGeneration: saved.bindingGeneration,
-        occurredAt: Date.now(),
-      },
-    );
     const authority = this.session.authority;
     let receipt = authority
       .eventsInSequenceRange(1, authority.committedSequence)
@@ -1725,6 +1711,29 @@ export class HostedWorkspaceToolTurn {
           event.kind === 'tool.receipt' &&
           event.payload['executionCallId'] === executionCallId,
       );
+    if (receipt === undefined) {
+      // Attach the physical start to the record before history is written —
+      // replay-tolerant: a retry after a crash between attach and journal
+      // finds its own start receipt on this identity and must not mint a
+      // rerun; any mismatched receipt stays the funnel's rerun refusal.
+      const existing = this.childRuns!.record(executionCallId);
+      if (existing === undefined || existing.startReceiptRef === null) {
+        await this.childRuns!.attach(
+          executionCallId,
+          {
+            runtimeBindingId: saved.runtimeBindingId,
+            generation: saved.bindingGeneration,
+          },
+          {
+            executionCallId,
+            runtimeCallId: saved.runtimeCallId,
+            unitName: `qwen-bg-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
+            bindingGeneration: saved.bindingGeneration,
+            occurredAt: Date.now(),
+          },
+        );
+      }
+    }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
     let messageId: string;
