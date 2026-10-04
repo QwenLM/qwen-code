@@ -606,9 +606,23 @@ public class ManagedExtensionRecordStore {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
             announce(tenantId, sessionId, taskId, projection.state(),
                     revision);
-            taskEvents.appendStateChange(tenantId, sessionId, taskId,
-                    projection.state(), projection.runtimeState(),
-                    occurredAt);
+            try {
+                taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                        projection.state(), projection.runtimeState(),
+                        occurredAt);
+            } catch (ApiException refused) {
+                // The record row above is the authoritative state and it is
+                // already written; the event journal is a derived, bounded
+                // feed. A journal that refuses past its backlog bound — or
+                // whose retention floor is pinned behind unarchived output —
+                // degrades the feed, never the record commit, or one task's
+                // output backlog would wedge every later revision of it.
+                LOG.warn("Managed Stage H task event was refused by the journal"
+                                + " tenant={} session={} task={} revision={}"
+                                + " code={}",
+                        tenantId, sessionId, taskId, revision,
+                        refused.getCode());
+            }
         }
     }
 

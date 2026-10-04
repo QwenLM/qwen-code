@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -97,6 +98,72 @@ class ManagedExtensionRecordStoreTest {
                     .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
                     .containsExactly(taskId);
         }
+    }
+
+    @Test
+    void keepsCommittingRecordsWhenTheTaskJournalRefusesPastItsBound()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        JsonNode second = chain.required("revisions").get(1);
+        // The witness only bites if the second revision actually changes the
+        // task view, because only a view change appends a journal event.
+        assertThat(ManagedExtensionProjectionContractTest
+                .view(second.required("view")))
+                .isNotEqualTo(ManagedExtensionProjectionContractTest
+                        .view(first.required("view")));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("wedge-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+
+        // One unarchived output pins the retention floor, so the automatic
+        // pass cannot expire anything and the bound starts refusing. The
+        // output admission gate reads the durable Session row, so bind this
+        // Session to its workspace first.
+        if (jdbc.update("UPDATE managed_agent_session SET workspace_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                WORKSPACE, TENANT, sessionId) == 0) {
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                            + " session_id, agent_id, status, created_at,"
+                            + " updated_at, workspace_id,"
+                            + " workspace_generation, workspace_storage_id,"
+                            + " cwd_relative, context_config_ref,"
+                            + " context_revision, workspace_config_ref,"
+                            + " workspace_policy_ref) VALUES"
+                            + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1,"
+                            + " ?, 1, 'storage-1', '.', ?, 1,"
+                            + " 'config', 'policy')",
+                    TENANT, sessionId, WORKSPACE,
+                    "sha256:" + ExtensionRecordJournal.sha256(
+                            "config\u0000policy"));
+        }
+        ManagedTaskEventStore events = new ManagedTaskEventStore(jdbc);
+        events.appendOutput(TENANT, sessionId, taskId, "x", false, null,
+                null, null, null, 0);
+        for (int round = 0; round < ManagedTaskEventStore.BACKLOG_BOUND - 1;
+                round++) {
+            events.appendStateChange(TENANT, sessionId, taskId, "running",
+                    "ready", round);
+        }
+        assertThatThrownBy(() -> events.appendStateChange(TENANT, sessionId,
+                taskId, "running", "ready", 0))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                ManagedTaskEventStore.CODE_BACKLOG_FULL));
+
+        // The record row is the authoritative state; a full derived feed
+        // degrades the feed and never wedges the commit that feeds it.
+        journal.commitMonitor("wedge-1", second.required("monitorRun"),
+                second.required("occurredAt").longValue());
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .projection())
+                .isEqualTo(ManagedExtensionProjectionContractTest
+                        .view(second.required("view")));
     }
 
     @Test
