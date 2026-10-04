@@ -1825,13 +1825,16 @@ function actionIds(): string[] {
 
 async function requested(count = 1): Promise<string> {
   let requestId = '';
-  await vi.waitFor(async () => {
-    const ids = actionIds();
-    expect(ids).toHaveLength(count);
-    requestId = ids.at(-1)!;
-    expect(session.authority.action(requestId)?.state).toBe('requested');
-    expect((await checkpoint()).continuation.phase).toBe('await_action');
-  });
+  await vi.waitFor(
+    async () => {
+      const ids = actionIds();
+      expect(ids).toHaveLength(count);
+      requestId = ids.at(-1)!;
+      expect(session.authority.action(requestId)?.state).toBe('requested');
+      expect((await checkpoint()).continuation.phase).toBe('await_action');
+    },
+    { timeout: 5_000 },
+  );
   return requestId;
 }
 
