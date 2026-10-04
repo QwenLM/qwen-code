@@ -1233,11 +1233,12 @@ describe('BaseLlmClient', () => {
     });
 
     it('sends a larger caller-supplied maxOutputTokens as given', async () => {
-      // Callers that set one have already budgeted it against the *receiving*
-      // model's window (compaction via `computeCompactionOutputBudget`,
-      // #7960). Re-clamping it here would shrink a request against a window
-      // it is not going to, so it passes through even when it exceeds the
-      // configured one.
+      // A caller that budgeted its own value against the *receiving* window
+      // (compaction, via `computeCompactionOutputBudget`, #7960) must not be
+      // re-clamped here: that would shrink a request against a window it is
+      // not going to, so the value passes through even when it exceeds the
+      // configured one. The fixed-constant callers are not window-budgeted —
+      // see the caveat on `budgetOutputTokensForWindow`.
       useWindow('qwen3-coder-plus', 131_072);
 
       await askText('qwen3-coder-plus', 100_000, {
@@ -1332,6 +1333,23 @@ describe('BaseLlmClient', () => {
       expect(5_000 + 3_192).toBeLessThanOrEqual(8_192);
     });
 
+    it('leaves the request uncapped when the prompt already fills the window', async () => {
+      // Reachable without the prompt really being too big: the estimator
+      // over-prices as well as under-prices. A 2-byte PNG charged the
+      // operator's flat `imageTokenEstimate` next to 5_300 tokens of text
+      // estimates 8_300 against an 8_192 window, so `room` is negative while
+      // the real payload would have fit. Emitting `max_tokens: 1` there sends
+      // a request that can only answer with one token and reports it as a
+      // normal success — `generateText` returns no `finishReason`, so
+      // `tools/web-fetch.ts` stores that body as the page extract. Base sent
+      // no output limit and a validating backend rejected the overflow loudly.
+      useWindow('deepseek-r1', 8_192);
+
+      await askText('deepseek-r1', 9_000);
+
+      expect(sentBudget()).toBeUndefined();
+    });
+
     it('counts the system instruction against the window', async () => {
       // `systemInstruction` travels with the request but is not part of
       // `contents`, so a room term measuring only `contents` over-budgets by
@@ -1402,22 +1420,25 @@ describe('BaseLlmClient', () => {
       // Side queries default to the fast model, and a same-provider target
       // whose registry entry declares no window inherits the *session* model's
       // number through `{ ...parentConfig }` — a number, so the
-      // `?? tokenLimit(model, 'input')` fallback never fires. Session on an
-      // 8_192 window, target declaring 12_000: budgeting against the inherited
-      // number leaves 3_192 of room where the target's own window leaves
-      // 7_000, so the assertion below only holds when the window comes from
-      // the target. (A roomy target window would prove nothing here — the
-      // budget emits nothing at all once the window does not bind.)
+      // `?? tokenLimit(targetModel, 'input')` arm is the only thing standing
+      // between that route and the session window. Session `test-model` on
+      // 8_192, target `deepseek-r1` declaring nothing and tabled at 131_072:
+      // budgeting against the inherited number leaves no room at all, so the
+      // assertion below only holds when the window comes from the target, and
+      // only when the target's own window still binds (a roomy one would emit
+      // nothing either way). Deleting `contextWindowSize` from
+      // `ResolvedGeneratorForModel`, or the `?? tokenLimit(...)` arm that
+      // supplies it here, must redden it.
       useWindow('test-model', 8_192);
       mockConfig.getModelsConfig.mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue({
-          id: 'qwen3-coder-plus',
+          id: 'deepseek-r1',
           authType: AuthType.USE_GEMINI,
-          generationConfig: { contextWindowSize: 12_000 },
+          generationConfig: {},
         }),
       } as unknown as ReturnType<Config['getModelsConfig']>);
       mockBuildAgentContentGeneratorConfig.mockReturnValue({
-        model: 'qwen3-coder-plus',
+        model: 'deepseek-r1',
         authType: AuthType.USE_GEMINI,
         // what the real builder hands back for a same-provider target that
         // declares no window of its own: the session's, inherited
@@ -1432,11 +1453,11 @@ describe('BaseLlmClient', () => {
         embedContent: vi.fn(),
       });
 
-      await askText('qwen3-coder-plus', 5_000);
+      await askText('deepseek-r1', 100_000);
 
       expect(targetGenerateContent).toHaveBeenCalledTimes(1);
-      expect(sentBudget(targetGenerateContent)).toBe(7_000);
-      expect(5_000 + 7_000).toBeLessThanOrEqual(12_000);
+      expect(sentBudget(targetGenerateContent)).toBe(31_072);
+      expect(100_000 + 31_072).toBeLessThanOrEqual(131_072);
     });
 
     it('budgets against the session window when the target model is not registered', async () => {
@@ -1548,12 +1569,19 @@ describe('BaseLlmClient', () => {
         // above `defaultOutputCeiling` still reaches the wire on a side query,
         // as it does on the main turn. The window has to bind between the two
         // for that to be observable: at 60_100 the room is 60_000, above the
-        // model's own 32_768 ceiling and below the override, so a budget that
-        // intersected the two would emit 32_768 here.
+        // model's own 32_000 auto ceiling and below the override, so a budget
+        // that intersected the two would emit 32_000 here.
+        //
+        // The model has to be one no provider clips: `test-model` is in neither
+        // the catalog nor `OUTPUT_PATTERNS`, so what this layer emits is what
+        // reaches the wire. A `qwen3-coder-plus` case cannot show the design —
+        // `hasExplicitOutputLimit` is true for it, so `applyOutputTokenLimit`
+        // and Anthropic's `buildSamplingParameters` both clamp 60_000 and
+        // 100_000 to the same 32_768.
         process.env[ENV_KEY] = '100000';
-        useWindow('qwen3-coder-plus', 60_100);
+        useWindow('test-model', 60_100);
 
-        await askText('qwen3-coder-plus', 100);
+        await askText('test-model', 100);
 
         expect(sentBudget()).toBe(60_000);
       });

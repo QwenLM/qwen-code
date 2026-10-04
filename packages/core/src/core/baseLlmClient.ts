@@ -120,10 +120,13 @@ function estimateSystemInstructionTokens(
  * policy, and it stays out of the way when the window is not what binds.
  *
  * A caller-supplied `maxOutputTokens` passes through untouched (early return,
- * so the prompt is not even measured): every caller that sets one has already
- * budgeted it against the *receiving* model's window — compaction via
- * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
- * shrink it against a window it is not going to.
+ * so the prompt is not even measured): compaction budgets its own against the
+ * receiving window (`computeCompactionOutputBudget`, #7960) and re-clamping it
+ * here would shrink it against a window it is not going to. The rest pass
+ * fixed per-purpose constants — 60–4096, from `sessionTitle`,
+ * `toolUseSummary`, `sessionRecap`, `permissions/classifier`,
+ * `vision-bridge-service` and `LlmRewriter` — which are not window-budgeted,
+ * so the invariant above is not established for those call sites.
  *
  * An explicit user ceiling — `samplingParams.max_tokens`, else
  * `QWEN_CODE_MAX_OUTPUT_TOKENS` — *replaces* `defaultOutputCeiling` as the
@@ -192,7 +195,7 @@ function budgetOutputTokensForWindow(
     parsePositiveIntegerEnvValue(process.env['QWEN_CODE_MAX_OUTPUT_TOKENS']);
   // `<= 0` means "not configured", the reading `config.ts` gives this same
   // field: a cleared or mis-merged settings value must not become the window
-  // term and floor every governed side query to `max_tokens: 1`.
+  // term and cancel every governed side query's budget.
   const declaredWindow = [
     resolvedContextWindowSize,
     contentGeneratorConfig?.contextWindowSize,
@@ -205,6 +208,14 @@ function budgetOutputTokensForWindow(
     // prevent.
     estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction);
+
+  // A window the measured prompt already fills is not this layer's to paper
+  // over: `max_tokens: 1` would send a request that can only answer with one
+  // token and report it as a normal success — `generateText` returns no
+  // `finishReason`, so `tools/web-fetch.ts` would store that body as the page
+  // extract. Leave it uncapped and let a validating backend reject it loudly,
+  // as it did before side queries were budgeted.
+  if (room <= 0) return requestConfig;
 
   const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
   // Only the window term is this layer's business: when it does not bind,
