@@ -33,6 +33,7 @@ import {
   DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
 } from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
+import { LspJsonRpcError } from './LspConnectionFactory.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { sortJsonValue } from './sort-json-value.js';
@@ -130,6 +131,29 @@ function nothingRetrievedForDiagnostics(
   }
   return new Error(`No LSP diagnostics could be retrieved (${detail})`);
 }
+
+/** JSON-RPC "method not found": the server does not implement the request. */
+const JSON_RPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * Whether a diagnostics pull failed because the server does not implement
+ * pull diagnostics at all. The reply code is the only signal that works:
+ * real servers that serve `textDocument/diagnostic` (pyright, gopls) do not
+ * advertise `diagnosticProvider` for it, while servers that do not serve it
+ * (typescript-language-server, clangd) answer `-32601` every time. Such a
+ * server says nothing about the queried file, so it neither vetoes another
+ * server's answer nor backs a clean one — and it is still named when nothing
+ * else answered, with wording that says what it actually did. Every other
+ * failure (a crash, a timeout, a malformed report, `-32600`) keeps vetoing.
+ */
+function pullUnsupported(error: unknown): boolean {
+  return (
+    error instanceof LspJsonRpcError && error.code === JSON_RPC_METHOD_NOT_FOUND
+  );
+}
+
+/** Reason recorded for a server that does not implement the pull at all. */
+const PULL_UNSUPPORTED_REASON = 'does not support pull diagnostics';
 
 /**
  * Mapping from LSP language identifiers to file extensions, only for cases
@@ -2046,6 +2070,10 @@ export class NativeLspService {
       error: unknown;
       handle: LspServerHandle;
     }> = [];
+    // Queried servers that answered `-32601`: they do not implement the pull
+    // at all, so unlike `failures` they never veto a sibling's answer. They
+    // are kept apart only to be named when nothing else answered.
+    const unsupported: Array<{ name: string; error: unknown }> = [];
     // Queried servers that answered with a usable report, including an
     // authoritative empty one, and of those the ones the queried file does not
     // positively exclude. Only the latter can back a clean answer: an empty
@@ -2125,14 +2153,23 @@ export class NativeLspService {
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
-        failures.push({ name, handle, error });
+        if (pullUnsupported(error)) {
+          unsupported.push({
+            name,
+            error: new Error(PULL_UNSUPPORTED_REASON),
+          });
+        } else {
+          failures.push({ name, handle, error });
+        }
       }
     }
 
     if (allDiagnostics.length === 0) {
       // A server the queried file provably excludes cannot veto the answer —
-      // its failure says nothing about this file — but a failure or
-      // unusable answer from a server that could own the file must.
+      // its failure says nothing about this file — and neither can a server
+      // that answered `-32601`, which never implemented the pull in the first
+      // place (and so is already out of `failures`). A failure or unusable
+      // answer from a server that could own the file must still veto.
       const relevantFailures = failures.filter(
         ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
       );
@@ -2145,14 +2182,18 @@ export class NativeLspService {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
       // The relevance rule excuses a server from vetoing *another* server's
-      // answer; it cannot excuse the only answer there is. Nothing relevant
-      // answered, so the empty result certifies a file no queried server could
-      // analyze. Every queried server either answers or records a failure, so
-      // the ledger is empty here only when an excused server answered and
+      // answer; it cannot excuse the only answer there is, and a `-32601`
+      // cannot either: nothing relevant answered, so the empty result
+      // certifies a file no queried server could analyze. Every queried server
+      // either answers, records a failure or refuses the method outright, so
+      // both ledgers are empty here only when an excused server answered and
       // nothing else went wrong — that case needs its own reason string.
       if (answeredRelevant === 0) {
-        throw failures.length > 0
-          ? nothingRetrievedForDiagnostics(failures, unreachable)
+        throw failures.length > 0 || unsupported.length > 0
+          ? nothingRetrievedForDiagnostics(
+              [...failures, ...unsupported],
+              unreachable,
+            )
           : new Error(
               'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
             );

@@ -22,6 +22,24 @@ function trimTail(value: string, maxBytes: number): string {
   return buffer.subarray(buffer.byteLength - maxBytes).toString('utf8');
 }
 
+/**
+ * A JSON-RPC error reply from the server. The numeric `code` is kept because
+ * the message text alone cannot tell "this server does not implement the
+ * method" (-32601) apart from a request that was understood and failed, and
+ * callers must not excuse the second as they may the first. A reply that
+ * carries no numeric code yields `undefined` here, which matches no code and
+ * so keeps the caller's fail-closed behaviour.
+ */
+export class LspJsonRpcError extends Error {
+  constructor(
+    message: string,
+    readonly code: number | undefined,
+  ) {
+    super(message);
+    this.name = 'LspJsonRpcError';
+  }
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
@@ -210,7 +228,10 @@ class JsonRpcConnection {
       this.pendingRequests.delete(message.id);
       if (message.error) {
         pending.reject(
-          new Error(message.error.message || 'LSP request failed'),
+          new LspJsonRpcError(
+            message.error.message || 'LSP request failed',
+            message.error.code,
+          ),
         );
       } else {
         pending.resolve(message.result);

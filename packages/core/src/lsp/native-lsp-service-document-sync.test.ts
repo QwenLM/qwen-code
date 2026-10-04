@@ -18,6 +18,7 @@ import {
   DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
 } from './constants.js';
 import { sortJsonValue } from './sort-json-value.js';
+import { LspJsonRpcError } from './LspConnectionFactory.js';
 import { NativeLspService } from './native-lsp-service.js';
 import { NativeLspClient } from './NativeLspClient.js';
 import { LspTool, type LspToolParams } from '../tools/lsp.js';
@@ -2849,6 +2850,156 @@ describe('NativeLspService disk document synchronization', () => {
       const result = await run(queryDiagnosticsTool('diagnostics'));
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    /** A READY server named `name`, serving `languages`, on connection `target`. */
+    function serverOn(
+      name: string,
+      languages: string[],
+      target: ReturnType<typeof createConnection>,
+    ): LspServerHandle {
+      return {
+        ...handle,
+        config: { ...handle.config, name, languages },
+        connection: target,
+      };
+    }
+
+    /** A connection that refuses every request with JSON-RPC error `code`. */
+    function refusingConnection(
+      code: number,
+    ): ReturnType<typeof createConnection> {
+      const target = createConnection();
+      target.request.mockRejectedValue(
+        new LspJsonRpcError('Unhandled method textDocument/diagnostic', code),
+      );
+      return target;
+    }
+
+    it('keeps a clean Go file a push-only TypeScript sibling answers -32601 for', async () => {
+      // gopls serves textDocument/diagnostic without advertising it, while
+      // typescript-language-server answers -32601. `.go` is outside
+      // KNOWN_DIAGNOSTIC_EXTENSIONS, so no relevance test can excuse the
+      // refusal — only the reply code can. Without it the push-only sibling
+      // vetoes gopls's authoritative empty report and a clean file reads as a
+      // tool error naming a server that never could have owned it.
+      const [goPath] = addFile('main.go', 'package main\n');
+      const gopls = createConnection();
+      mockDiagnosticsResponses(gopls);
+      withServers([
+        ['go', serverOn('gopls', ['go'], gopls)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: goPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('keeps a clean TypeScript file from the pull-capable of two TS servers', async () => {
+      // Both servers declare `typescript`, so both really could own clean.ts
+      // and no relevance test excuses either. Only the -32601 reply stops the
+      // push-only server from vetoing its sibling's authoritative empty report.
+      const [cleanPath] = addFile('clean.ts', 'export const value = 1;\n');
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: cleanPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('still reports a real problem when a push-only sibling answers -32601', async () => {
+      // Excusing the refusal must not blunt the answer that was retrieved.
+      const [brokenPath] = addFile('broken.ts', 'const value: number = "";\n');
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo, [
+        { range, severity: 1, message: 'Type error' },
+      ]);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: brokenPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Type error');
+    });
+
+    it.each([-32600, -32603])(
+      'still lets a %d reply veto a clean document answer',
+      async (code) => {
+        // -32601 is the only code that proves the method is not implemented.
+        // An invalid request or an internal error means the server could own
+        // the file and did not analyze it, so the veto stands.
+        const tsgo = createConnection();
+        mockDiagnosticsResponses(tsgo);
+        withServers([
+          ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+          ['tsls', serverOn('tsls', ['typescript'], refusingConnection(code))],
+        ]);
+        const result = await run(queryDiagnosticsTool('diagnostics'));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(
+          'Unhandled method textDocument/diagnostic',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it('names a lone push-only server instead of reporting the file clean', async () => {
+      // Nothing else answered, so the refusal cannot be excused: an empty
+      // result would certify a file no server analyzed. The wording says what
+      // the server actually did rather than reporting an opaque failure.
+      withServers([
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'tsls: does not support pull diagnostics',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('still lets a -32601 workspace pull veto an empty workspace report', async () => {
+      // The workspace leg stays unqualified on purpose: with no queried file
+      // there is nothing to attribute, and a server that does not implement
+      // `workspace/diagnostic` leaves its whole slice of the workspace
+      // unexamined. Excusing it there would turn a refusal into a clean bill.
+      const healthy = createConnection();
+      mockDiagnosticsResponses(healthy);
+      withServers([
+        ['test', { ...handle, connection: healthy }],
+        ['gopls', serverOn('gopls', ['go'], refusingConnection(-32601))],
+      ]);
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('gopls');
+      expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
     it("lets an irrelevant server's failed pull veto an unbacked workspace report", async () => {
