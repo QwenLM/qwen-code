@@ -294,9 +294,11 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /**
-     * Every line below answers 200 to an ordinary commit today and bricks
-     * the authority's reader at the next open; the store must refuse it
-     * with a 409 instead, as the class's invariant promises.
+     * Every line below used to answer 200 to an ordinary commit. All but
+     * the reserved id brick the authority's reader at the next open; the
+     * reserved id instead collides with the id the authority assigns that
+     * domain's next Stage H record, so that record could never commit. The
+     * store must refuse each with a 409, as the class's invariant promises.
      */
     @Test
     void refusesEventLinesTheAuthorityWouldRefuseAtReopen() throws Exception {
@@ -346,6 +348,17 @@ class ManagedExtensionRecordStoreTest {
                         + " entry", goal, "event.payload.domain must be one"
                         + " of", event -> {
                 }, records -> records, 0, "not_a_domain", 0);
+        refuseOrdinary("a body-less domain.committed whose event id is not"
+                        + " NFC-normalized", goal,
+                "event.eventId must use NFC normalization",
+                event -> event.put("eventId", "goal-e\u0301"),
+                records -> records, 0);
+        refuseOrdinary("a body-less domain.committed whose operation id is"
+                        + " not NFC-normalized", goal,
+                "event.payload.operationId must use NFC normalization",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("operationId", "goal-e\u0301"),
+                records -> records, 0);
         String marker = "{\"subtype\":\"managed_session_commit_v1\","
                 + "\"managedSession\":{\"commandId\":\"big\","
                 + "\"padding\":\"" + "x".repeat(100_000) + "\"}}\n";

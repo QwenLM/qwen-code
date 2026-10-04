@@ -71,7 +71,7 @@ public class ManagedExtensionRecordStore {
     // Parses as strictly as the Session authority's reader: no duplicate
     // keys, no trailing content, no deeper nesting, and, checked after
     // parsing, only finite numbers. The store never accepts a line or a body
-    // that the authority could not read back.
+    // that the authority's JSON reader would refuse.
     private static final ObjectMapper JSON = JsonMapper.builder(JsonFactory
                     .builder().streamReadConstraints(StreamReadConstraints
                             .builder().maxNestingDepth(ManagedSessionStoreModels
@@ -173,12 +173,16 @@ public class ManagedExtensionRecordStore {
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
      * Every record line must be one the authority's reader can parse, and
-     * every event line one its reader can read back: a line the authority
-     * would refuse at the next open is refused here, so no commit can
-     * brick the Session it writes. A Stage H event must hold its declared
-     * place among the transaction's {@code eventCount} events, and its
-     * transaction must hold only those events and then its commit marker,
-     * as the authority writes it.
+     * every event line must pass the checks the authority applies to every
+     * line whatever its kind: the envelope, the event-kind and subtype
+     * vocabularies, the domain checks, the reserved id namespace and the
+     * byte caps. The per-kind payload schemas and subject rules, and the
+     * commit marker's digests, stay the authority's own contract; its
+     * client checks them before it commits, and they are not re-derived
+     * here. A Stage H event must hold its declared place among the
+     * transaction's {@code eventCount} events, and its transaction must
+     * hold only those events and then its commit marker, as the authority
+     * writes it.
      */
     List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
