@@ -58,6 +58,11 @@ public final class LocalProcessRuntimeProvisioner
     // Tombstones need only equality: store the SHA-256 of the canonical
     // identity encoding rather than the lease material itself.
     private final Set<String> issued = ConcurrentHashMap.newKeySet();
+    // A reaped worker's facts (pid), keyed by the same digest so no lease
+    // material is retained: observe() is a read callers may discard, so the
+    // NOT_FOUND verdict must stay reproducible after the entry is gone.
+    private final ConcurrentMap<String, Long> reaped =
+            new ConcurrentHashMap<>();
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -315,6 +320,7 @@ public final class LocalProcessRuntimeProvisioner
 
     void stop(RuntimeLease lease) {
         OwnedProcess process = owned.remove(ownershipKey(lease));
+        reaped.remove(tombstone(ownershipKey(lease)));
         if (process != null) {
             process.process.destroy();
         }
@@ -328,6 +334,7 @@ public final class LocalProcessRuntimeProvisioner
             }
         }
         owned.clear();
+        reaped.clear();
         executor.shutdownNow();
     }
 
@@ -642,15 +649,30 @@ public final class LocalProcessRuntimeProvisioner
         }
         OwnedProcess process = owned.get(ownershipKey(lastLease));
         if (process == null) {
-            return RuntimeObservation.unknown(handle);
+            Long reapedPid = reaped.get(tombstone(ownershipKey(lastLease)));
+            if (reapedPid == null) {
+                return RuntimeObservation.unknown(handle);
+            }
+            if (handle == null) {
+                return RuntimeObservation.notFound();
+            }
+            return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
+                    seed.getProvisionRequestId() + ":journal-lost",
+                    RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "owned-process-exit",
+                    Instant.now(), ownerDomain + ":" + reapedPid,
+                    seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle), null);
         }
         if (!process.seed.equals(seed)) {
             return RuntimeObservation.conflict(handle);
         }
         if (!process.process.isAlive()) {
             // The worker is provably gone; holding its entry would leak the
-            // ownership record for the broker's lifetime.
+            // ownership record for the broker's lifetime, while dropping the
+            // fact entirely would make the NOT_FOUND verdict one-shot.
             owned.remove(ownershipKey(lastLease), process);
+            reaped.put(tombstone(ownershipKey(lastLease)),
+                    process.process.pid());
             if (handle == null) {
                 return RuntimeObservation.notFound();
             }

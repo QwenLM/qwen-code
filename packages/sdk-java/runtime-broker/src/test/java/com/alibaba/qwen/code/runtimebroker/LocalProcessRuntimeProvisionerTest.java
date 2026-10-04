@@ -713,13 +713,23 @@ class LocalProcessRuntimeProvisionerTest {
                     lost.getLossEvidence().fact());
             assertEquals("owned-process-exit",
                     lost.getLossEvidence().source());
-            // The reaped entry makes a repeat read UNKNOWN, never a stale
-            // NOT_FOUND re-derivation.
-            RuntimeObservation reaped = provisioner
+            // observe() callers may discard the verdict, so the reaped facts
+            // must keep the repeat read identical — never a one-shot
+            // NOT_FOUND that degrades into UNKNOWN retries.
+            RuntimeObservation repeated = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    repeated.getOutcome());
+            assertEquals(lost.getLossEvidence().evidenceId(),
+                    repeated.getLossEvidence().evidenceId());
+            assertFalse(provisioner.isUsable(lease));
+            provisioner.stop(lease);
+            RuntimeObservation released = provisioner
                     .reconcile(request, seed, handle, lease)
                     .toCompletableFuture().get(10, TimeUnit.SECONDS);
             assertEquals(RuntimeObservation.Outcome.UNKNOWN,
-                    reaped.getOutcome());
+                    released.getOutcome());
         } finally {
             ProcessHandle.current().children()
                     .filter(process -> !before.contains(process.pid()))
@@ -767,6 +777,14 @@ class LocalProcessRuntimeProvisionerTest {
                     .toCompletableFuture().get(10, TimeUnit.SECONDS);
             assertEquals(RuntimeObservation.Outcome.CONFLICT,
                     foreignVersion.getOutcome());
+            // A conflicting observation must leave the owner's worker alone.
+            assertTrue(provisioner.isUsable(lease),
+                    "a conflicting observation must leave the owner's worker alone");
+            RuntimeObservation stillReady = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    stillReady.getOutcome());
         } finally {
             ProcessHandle.current().children()
                     .filter(process -> !before.contains(process.pid()))

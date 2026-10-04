@@ -600,7 +600,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
             String harnessSessionId, String runtimeSessionId, String key,
             Map<String, Object> reference, boolean dispatch) {
-        return safeStage(() -> {
+        // Clients replay an idempotent prepare once on retryable failure; an
+        // unmapped store outage must read as that class, not as a terminal
+        // 500 carrying an unclassified retryable flag.
+        return mapFailure(safeStage(() -> {
             ToolExecutionRecord receipt = executionRepository.findByIdempotencyKey(key);
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
@@ -614,7 +617,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.fastjson2.JSON;
+import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -24,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -780,6 +782,42 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void answersAStoreFailureAsRetryableServiceUnavailable() throws Exception {
+        InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
+        AtomicBoolean failing = new AtomicBoolean(true);
+        ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
+                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                new Class<?>[] { ToolExecutionRepository.class },
+                (proxy, method, args) -> {
+                    if (failing.get() && "findByIdempotencyKey".equals(method.getName())) {
+                        throw new IllegalStateException("Runtime Broker database operation failed");
+                    }
+                    return method.invoke(inner, args);
+                });
+        String digest = "sha256:" + "b".repeat(64);
+        Map<String, Object> body = Map.of(
+                "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                "toolCallId", "call", "requestDigest", digest,
+                "reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                        "callId", "call", "argsDigest", digest));
+        try (Fixture fixture = new Fixture(gate)) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/executions:prepare", body);
+            assertEquals(503, response.statusCode(), response.body());
+            var errorBody = JSON.parseObject(response.body());
+            assertEquals("runtime_broker_store_unavailable", errorBody.getString("code"));
+            assertTrue(errorBody.getBooleanValue("retryable"));
+            // The retry is safe: the same idempotency key lands once the store answers again.
+            failing.set(false);
+            Map<String, Object> retryBody = new HashMap<>(body);
+            retryBody.put("requestId", "retry");
+            HttpResponse<String> retried = fixture.post("/executions:prepare", retryBody);
+            assertEquals(200, retried.statusCode(), retried.body());
+        }
+    }
+
+    @Test
     void settledExecutionServesTheFullWireEnvelope() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -809,6 +847,11 @@ class RuntimeBrokerHttpServerTest {
                     "progress", "result"), status.keySet());
             assertEquals("settled", status.getString("state"));
             assertEquals("cancelled", status.getJSONObject("result").getString("executionStatus"));
+            assertTrue(status.getBooleanValue("cancelRequested"));
+            assertEquals(0, status.getLongValue("lastSeq"));
+            assertEquals(0, status.getLongValue("firstAvailableSeq"));
+            assertFalse(status.getBooleanValue("progressGap"));
+            assertEquals(List.of(), status.getJSONArray("progress"));
             assertEquals(0, fixture.transport.executions.get());
         }
     }
@@ -875,7 +918,7 @@ class RuntimeBrokerHttpServerTest {
     private static final class Fixture implements AutoCloseable {
         private final FailingTransport transport = new FailingTransport();
         private final HttpClient client = HttpClient.newHttpClient();
-        private final InMemoryToolExecutionRepository executions = new InMemoryToolExecutionRepository(Clock.systemUTC());
+        private final ToolExecutionRepository executions;
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
 
@@ -884,6 +927,15 @@ class RuntimeBrokerHttpServerTest {
         }
 
         private Fixture(boolean v3) throws Exception {
+            this(v3, new InMemoryToolExecutionRepository(Clock.systemUTC()));
+        }
+
+        private Fixture(ToolExecutionRepository executions) throws Exception {
+            this(false, executions);
+        }
+
+        private Fixture(boolean v3, ToolExecutionRepository executions) throws Exception {
+            this.executions = executions;
             RuntimeScope scope = new RuntimeScope("tenant", "workspace",
                     "generation", "/workspace", "capability", "workspace");
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
