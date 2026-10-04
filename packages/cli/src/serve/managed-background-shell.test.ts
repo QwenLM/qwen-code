@@ -157,6 +157,7 @@ interface Rig {
   readonly sink: FakeSink;
   readonly publisher: ManagedShellCapturePublisher & {
     readonly prepares: number;
+    readonly preparedRequests: unknown[];
     readonly finished: ToolResultEnvelope[];
   };
   readonly supervisor: {
@@ -170,9 +171,11 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
   const sink = fakeSink();
   const publisher = {
     prepares: 0,
+    preparedRequests: [] as unknown[],
     finished: [] as ToolResultEnvelope[],
-    async prepare() {
+    async prepare(request: unknown) {
       publisher.prepares += 1;
+      publisher.preparedRequests.push(request);
       return { identity: IDENTITY, sink, publisher: undefined };
     },
     async finish(_identity: unknown, envelope: ToolResultEnvelope) {
@@ -299,6 +302,9 @@ describe('managed v3 background Shell', () => {
       }),
     );
     expect(ctx.publisher.prepares).toBe(1);
+    expect(ctx.publisher.preparedRequests[0]).toMatchObject({
+      capture: { background: true },
+    });
     expect(ctx.sink.pid).toBe(4242);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
 

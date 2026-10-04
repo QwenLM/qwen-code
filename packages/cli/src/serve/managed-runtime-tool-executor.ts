@@ -711,7 +711,10 @@ export class ManagedToolExecutor {
     }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
-      prepared = await this.capturePublisher!.prepare({ reference, capture });
+      prepared = await this.capturePublisher!.prepare({
+        reference,
+        capture: { ...capture, background: true },
+      });
     } catch (cause) {
       throw new ManagedToolUnavailableError(
         cause instanceof Error ? cause.message : String(cause),

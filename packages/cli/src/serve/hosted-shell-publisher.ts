@@ -79,7 +79,6 @@ export class HostedShellPublisher {
     private readonly session: ManagedSession,
     private readonly resources: DurableToolResultResourceStore,
     private readonly assertWritable: () => Promise<void>,
-    private readonly runtimeSessionId: string,
     private readonly childRuns?: HostedChildRunSession,
   ) {}
 
@@ -153,14 +152,18 @@ export class HostedShellPublisher {
     return this.descriptor;
   }
 
-  register(request: BackgroundCaptureRequest, modelCallId: string): void {
+  register(
+    request: BackgroundCaptureRequest,
+    modelCallId: string,
+    callerPromptId: string,
+  ): void {
     if (this.closing)
       throw new Error('Shell publisher Runtime Session conflicts.');
-    // Foreground guards how the model call fits its turn; a background
-    // capture is admitted by its child_run record instead.
+    // Foreground guards how the model call fits the registering turn; a
+    // background capture is admitted by its child_run record instead.
     if (
       request.capture.background !== true &&
-      request.reference.sessionId !== this.runtimeSessionId
+      request.reference.sessionId !== callerPromptId
     )
       throw new Error('Shell publisher Runtime Session conflicts.');
     const id = request.capture.executionCallId;
@@ -195,7 +198,7 @@ export class HostedShellPublisher {
           store,
           request.capture.bindingGeneration,
           this.assertWritable,
-          this.runtimeSessionId,
+          request.reference.sessionId,
           this.resources,
         );
     this.captures.set(id, {

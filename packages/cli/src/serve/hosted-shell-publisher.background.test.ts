@@ -222,7 +222,6 @@ async function rig(): Promise<Rig> {
     session,
     resources,
     async () => {},
-    'runtime-a',
     orchestrator,
   );
   const descriptor = await publisher.start();
@@ -290,12 +289,46 @@ function backgroundRequest(
   } as BackgroundRigArg;
 }
 
+it('admits the foreground of every turn of the Session beside a background watch', async () => {
+  const r = await rig();
+  const bg = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: bg.reference, capture: bg.capture },
+    'model-call-a',
+    'prompt-a',
+  );
+  const fg = (promptId: string) => ({
+    reference: {
+      sessionId: promptId,
+      promptId,
+      callId: 'worker-call-b',
+      argsDigest: `sha256:${'a'.repeat(64)}`,
+    },
+    capture: {
+      tenantId: r.key.tenantId,
+      sessionId: r.key.sessionId,
+      turnId: promptId,
+      executionCallId: `execution-${promptId}`,
+      bindingGeneration: '1',
+      capturePolicy: 'complete_required' as const,
+    },
+  });
+  publisher!.register(fg('prompt-a'), 'model-call-a2', 'prompt-a');
+  // A later turn's foreground names its own prompt on the same instance.
+  publisher!.register(fg('prompt-b'), 'model-call-b', 'prompt-b');
+  // While one that pretends its registering turn's identity is refused.
+  expect(() =>
+    publisher!.register(fg('prompt-c'), 'model-call-c', 'prompt-b'),
+  ).toThrow(/Runtime Session conflicts/);
+});
+
 it('runs the background exit leg: revise, seal, settle as one evidence', async () => {
   const r = await rig();
   const request = backgroundRequest(r.key, '1');
   publisher!.register(
     { reference: request.reference, capture: request.capture },
     'model-call-a',
+    request.reference.sessionId,
   );
   const prepared = await r.registry.prepare(
     backgroundRequest(r.key, '1') as Parameters<

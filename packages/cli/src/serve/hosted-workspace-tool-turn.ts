@@ -103,6 +103,11 @@ export type HostedWorkspaceToolProfile =
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  // The Session-scoped publisher instance: one server owns every Shell
+  // capture of the Session across turns, so background traffic keeps its
+  // endpoint after the registering turn ends (H3 fifth slice drains it at
+  // the Session's ordered close).
+  publisher?: HostedShellPublisher;
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -931,11 +936,10 @@ export class HostedWorkspaceToolTurn {
         requests.some((request) => request.isShell) &&
         !this.publisher
       ) {
-        this.publisher = new HostedShellPublisher(
+        this.publisher = this.shell!.publisher ??= new HostedShellPublisher(
           this.session,
           this.shell!.resources,
           this.shell!.assertWritable,
-          this.promptId,
           this.childRuns,
         );
         this.bindingGeneration = await this.broker.registerPublisher(
@@ -1274,6 +1278,7 @@ export class HostedWorkspaceToolTurn {
               },
             },
             request.call.callId,
+            this.promptId,
           );
         }
       }
@@ -2355,7 +2360,9 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
-  async close(): Promise<void> {
-    await this.publisher?.close();
-  }
+  // The publisher lives on the Session across turns, so a turn's close
+  // deliberately does not touch it: the Session's ordered close (H3's
+  // fifth slice) drains the stores, and background traffic keeps its
+  // endpoint until then.
+  async close(): Promise<void> {}
 }
