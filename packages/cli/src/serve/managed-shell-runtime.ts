@@ -95,17 +95,21 @@ export class ManagedShellRuntime {
     const unitName = shellUnitNameOf(operation.targetOperationId);
     const registered = this.registry.describe(unitName);
     if (!registered || registered.sessionId !== runtimeSessionId) {
-      return { operationId: operation.operationId, state: 'unknown' };
+      return { operationId: operation.targetOperationId, state: 'unknown' };
     }
     if (operation.kind === 'shell-status') {
-      return { operationId: operation.operationId, state: 'running', unitName };
+      return {
+        operationId: operation.targetOperationId,
+        state: 'running',
+        unitName,
+      };
     }
     const receipt = await this.registry.terminate(unitName, 5_000);
     if (!receipt || receipt.evidence === null) {
-      return { operationId: operation.operationId, state: 'unknown' };
+      return { operationId: operation.targetOperationId, state: 'unknown' };
     }
     return {
-      operationId: operation.operationId,
+      operationId: operation.targetOperationId,
       state: 'exited',
       unitName,
       evidence: receipt.evidence,

@@ -14,7 +14,10 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import { shellUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-protocol.js';
-import type { ManagedShellCapturePublisher , ManagedShellCaptureSink } from './managed-runtime-tool-executor.js';
+import type {
+  ManagedShellCapturePublisher,
+  ManagedShellCaptureSink,
+} from './managed-runtime-tool-executor.js';
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
 import {
   ManagedShellError,
@@ -30,7 +33,7 @@ function operation(kind: string, extra: Record<string, unknown> = {}) {
   return {
     kind,
     sessionKey: SCOPE,
-    operationId: 'op-status-1',
+    operationId: 'abc.def-ghi',
     targetOperationId: TARGET,
     ...extra,
   };
@@ -150,7 +153,7 @@ describe('ManagedShellRuntime', () => {
       new ManagedBackgroundShellRegistry(),
     );
     const view = await runtime.control(SESSION, operation('shell-status'));
-    expect(view).toEqual({ operationId: 'op-status-1', state: 'unknown' });
+    expect(view).toEqual({ operationId: 'abc.def-ghi', state: 'unknown' });
   });
 
   it('answers running only for the registered Session scope', async () => {
@@ -158,13 +161,13 @@ describe('ManagedShellRuntime', () => {
     registerLive(registry);
     const runtime = new ManagedShellRuntime(registry);
     expect(await runtime.control(SESSION, operation('shell-status'))).toEqual({
-      operationId: 'op-status-1',
+      operationId: 'abc.def-ghi',
       state: 'running',
       unitName: UNIT,
     });
     expect(
       await runtime.control('another-session', operation('shell-status')),
-    ).toEqual({ operationId: 'op-status-1', state: 'unknown' });
+    ).toEqual({ operationId: 'abc.def-ghi', state: 'unknown' });
   });
 
   it('terminates with evidence and answers exited with it', async () => {
@@ -173,7 +176,7 @@ describe('ManagedShellRuntime', () => {
     const runtime = new ManagedShellRuntime(registry);
     const view = await runtime.control(SESSION, operation('shell-terminate'));
     expect(view).toEqual({
-      operationId: 'op-status-1',
+      operationId: 'abc.def-ghi',
       state: 'exited',
       unitName: UNIT,
       evidence: { exitCode: 7, exitSignal: null },
@@ -202,7 +205,7 @@ describe('ManagedShellRuntime', () => {
     });
     const runtime = new ManagedShellRuntime(registry);
     const view = await runtime.control(SESSION, operation('shell-terminate'));
-    expect(view).toEqual({ operationId: 'op-status-1', state: 'unknown' });
+    expect(view).toEqual({ operationId: 'abc.def-ghi', state: 'unknown' });
     // An unproven terminate refuses to settle: the hold is still there.
     expect(registry.hasHolds(SESSION)).toBe(true);
   });
