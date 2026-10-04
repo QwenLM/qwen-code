@@ -979,6 +979,33 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void announcesNothingInTheDeletingWindow() throws Exception {
+        String sessionId = agents.createSession(TENANT, "deleting-"
+                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode first = chain().get(0).required("monitorRun");
+        journal.commitMonitor("deleting-1", first, 1_000);
+        // The delete stays pending while this journal's writer holds the
+        // Session, so the Session is DELETING when the revision lands.
+        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
+                "sha256:" + "d".repeat(64), "delete", "digest-delete");
+        assertThat(jdbc.queryForObject("SELECT status FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class,
+                TENANT, sessionId)).isEqualTo("DELETING");
+        journal.commitMonitor("deleting-2",
+                chain().get(1).required("monitorRun"), 2_000);
+        // Only the revision ahead of the delete window announced: the
+        // outbox carries one row, and the Session event stream neither.
+        assertThat(taskEvents(sessionId)).hasSize(1);
+        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
+                .extracting(EventRecord::type)
+                .doesNotContain("task.updated");
+        assertThat(revisions(sessionId)).isEqualTo(2);
+    }
+
+    @Test
     void keepsTaskAnnouncementsOutOfTheMessageProjectionSequence()
             throws Exception {
         String sessionId = agents.createSession(TENANT, "split-"

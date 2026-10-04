@@ -2212,7 +2212,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4637,7 +4637,8 @@
           "status",
           "createdAt",
           "updatedAt",
-          "lastSequence"
+          "lastSequence",
+          "capabilities"
         ],
         "properties": {
           "creationOperationId": {

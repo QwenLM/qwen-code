@@ -12,7 +12,7 @@ Two questions of #12827 had to be answered first: who owns the records (question
 
 ## Current state
 
-The facts below are from `main` at `848cf5e6c4`.
+The facts below are from `main` at `9220c85358`.
 
 - **Authority.** `LocalManagedSessionAuthority` in `packages/core` is the only writer of a Session's journal. `commitDomainRecord` merges `operationId`, `revision` and `previousRecordRef` into the body it publishes and keeps one revision chain per domain. `submitInput` commits `input.accepted` and the `wake.requested` the authority generates for it in one transaction.
 - **Store.** The Hosted Harness writes the journal through `HttpManagedSessionStore` into the Java Session store, which keeps each transaction as opaque record bytes and each resource as a verified blob. Resources that event payloads reference travel inline with the commit; a resource named only inside another resource's body travels with it only when that body is a checkpoint.
@@ -39,7 +39,7 @@ The facts below are from `main` at `848cf5e6c4`.
 
 ## Decisions
 
-1. **The authority writes; the Java store materializes** (question 2). The TypeScript authority stays the single writer of the journal, as section 3 of the storage design requires: a registered domain has no second write path. The Java Session store is its durable store, and it now reads the Stage H revisions each transaction carries and writes the record index, the task projection and the delivery outbox into queryable rows inside the SQL transaction that stores the journal. It checks every revision with the H0b and H0c rules and refuses the whole commit if one fails, so the control plane never holds a record the authority could not have committed, and a disagreement stops the writer instead of passing silently. This gives the control plane the product records and the public projection that section 1 of the reference design assigns to it, without a second writer.
+1. **The authority writes; the Java store materializes** (question 2). The TypeScript authority stays the single writer of the journal, as section 3 of the storage design requires: a registered domain has no second write path. The Java Session store is its durable store, and it now reads the Stage H revisions each transaction carries and writes the record index, the task projection and the outbox into queryable rows inside the SQL transaction that stores the journal. It checks every revision with the H0b and H0c rules and refuses the whole commit if one fails. Within that check the control plane never holds a record the authority could not have committed; whether a domain is enabled for submission stays the authority's own gate, which the store does not mirror. A disagreement stops the writer instead of passing silently. This gives the control plane the product records and the public projection that section 1 of the reference design assigns to it, without a second writer.
 2. **A wake is `input.accepted` plus `wake.requested`** (question 3). A Stage H revision may commit a notification input in the same transaction; the authority generates the wake for it, as `submitInput` does. There is no `WakeIntent` record and no new event kind: section 3 of the storage design would require a new `minimumReader` for either, and `wake.requested` already is the rebuildable scheduling index. The Session inbox is a queue of user messages, not a wake carrier.
 3. **One chain per record, keyed by the body's identity** (H0b open question 3). The resource of a Stage H revision holds exactly the closed body; nothing is merged into it. The chain is keyed by the domain and the body's own identity (`monitorId` for a Monitor), and its revision, previous revision and opening operation come from the journal order, where they cannot disagree with the body.
 4. **A first revision opens its run.** Its run is `reserved` or `admitted`, its execution is absent or an `intent`, and its delivery is absent or `planned`; a Monitor has also written no output, and cannot have observed anything without a start receipt. H0b's successor rules only say how a revision follows another; without this rule, a record could appear already settled.
@@ -154,14 +154,14 @@ A Python labeler written from this document, independent of both languages and k
 - **Java:** the fixture replay; the chains, refusals with the rule that refused each, record lines the authority could not parse, replay, announcements and a deleted Session through `ManagedSessionStore`; the TypeScript writer's requests through the HTTP route; the API contract test for every mapped route and record; the MySQL integration test on MariaDB 10.11 and MySQL 8.4, which also shows that a refused revision leaves no resource, resource reference or journal row behind, and that a deletion committed during a Stage H commit keeps its announcement out of the task-event outbox.
 - **Broker:** the wire status reported for every execution state.
 - **Generated types:** the WebShell generator test.
-- **Mutation checks:** the projection rules, the start and chain rules, the authority's refusals and the store's checks were each disabled in turn, and a test failed for every one.
+- **Mutation checks:** on the TypeScript side, the projection rules, the start and chain rules and the authority's refusals were each disabled in turn, and a test failed for every one.
 
 ## Acceptance criteria
 
 - TypeScript and Java produce the same task IDs, task views and delivery outbox membership for every fixture case and refuse the same chains, and each maps the Runtime reports it reads to the execution states the fixtures give.
 - A refused revision commits nothing on either side.
 - A reopened authority and a restarted server report the same task list as before.
-- No planned route is mapped, and nothing changes for Sessions without Stage H records except the empty task list, `capabilities.tasks` and the stricter parse of record lines.
+- No planned route is mapped, and nothing changes for Sessions without Stage H records except the empty task list, `capabilities.tasks`, the stricter parse of record lines, and the generic append paths, which now accept a `domain.committed` event only for an enabled domain that has no Stage H record body — `goal_state`, `session_metadata`, `file_history` and `session_source` today — instead of for every registered name.
 - The H0 gate holds at the level of the contract. The fixtures pin the task IDs, the chain rules (a Runtime is attached again only under a later generation, after an unknown outcome), the Broker's execution states and the wire statuses the Broker reports for them. TypeScript, the Java store and the Broker each replay their part. Only the commit path runs end to end: nothing in production calls `commitExtensionRecord`, the grant gate or the execution mappings before H3 enables `monitor_run` and H1 wires the gate.
 - `monitor_run` is still refused for submission.
 
