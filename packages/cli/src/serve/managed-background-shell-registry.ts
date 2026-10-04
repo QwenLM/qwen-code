@@ -139,6 +139,23 @@ export class ManagedBackgroundShellRegistry {
     await Promise.allSettled(completions);
   }
 
+  /**
+   * Ordered close of one Session's background Shells: terminate each with
+   * the same supervisor evidence rules, then wait its completion so the
+   * drain's finalizations land before the caller proceeds. A Shell whose
+   * stop cannot be proven keeps its hold, and the caller sees it through
+   * {@link hasHolds}.
+   */
+  async stopSession(sessionId: string, graceMs: number): Promise<void> {
+    await Promise.allSettled(
+      [...this.entries.values()]
+        .filter((entry) => entry.sessionId === sessionId)
+        .map(async (entry) => {
+          await this.terminate(entry.unitName, graceMs);
+        }),
+    );
+  }
+
   private async complete(params: {
     unitName: string;
     sessionId: string;

@@ -611,12 +611,11 @@ export class HostedShellPublisher {
       );
     }
     await Promise.allSettled([...this.operations]);
-    // A background capture outlives its registering turn; the ordered
-    // close drain in H3's fifth slice settles its store properly.
+    // The publisher closes only at the Session's ordered close, after the
+    // last finalization landed (or accurately did not), so every capture
+    // store closes here — background families included.
     await Promise.all(
-      [...this.captures.values()]
-        .filter((entry) => entry.background === undefined)
-        .map((entry) => entry.store.close()),
+      [...this.captures.values()].map((entry) => entry.store.close()),
     );
   }
 }

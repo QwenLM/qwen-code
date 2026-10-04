@@ -1022,6 +1022,15 @@ export class ManagedToolExecutor {
     ]);
   }
 
+  /**
+   * Ordered close of one Session's background Shells, bounded per drain.
+   * The activation release gate calls this before refusing, so a close
+   * that can prove its stops never wedges on holds that ended.
+   */
+  async stopBackgroundSession(sessionId: string): Promise<void> {
+    await this.backgroundRegistry.stopSession(sessionId, 5_000);
+  }
+
   private static isCancelRequested(entry: JournalEntry): boolean {
     // Read across a method boundary: cancel() can move the entry to
     // cancel_requested while this invocation is parked in the tool.

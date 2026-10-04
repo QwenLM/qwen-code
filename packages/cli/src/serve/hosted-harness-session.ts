@@ -3338,6 +3338,9 @@ export function registerHostedHarnessSessionRoutes(
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
+      // The broker release drained the Session's background Shells and
+      // their exits settled through this publisher; it closes last.
+      await session.shell?.publisher?.close();
       await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();

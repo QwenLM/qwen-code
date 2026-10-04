@@ -210,6 +210,71 @@ describe('ManagedShellRuntime', () => {
     expect(registry.hasHolds(SESSION)).toBe(true);
   });
 
+  it('stopSession drains one Session and leaves another alone', async () => {
+    const registry = new ManagedBackgroundShellRegistry(10);
+    const stored = doubles();
+    const otherStored = doubles();
+    const targetChild = fakeChild();
+    let targetEvidence: ChildRunExitEvidence | null = null;
+    targetChild.on('exit', (code, signal) => {
+      targetEvidence = {
+        exitCode: typeof code === 'number' ? code : null,
+        exitSignal: typeof signal === 'string' ? signal : null,
+      };
+    });
+    const target = {
+      unitName: 'qwen-bg-target',
+      child: targetChild,
+      get exited() {
+        return targetEvidence !== null;
+      },
+      get evidence() {
+        return targetEvidence;
+      },
+      async terminate(): Promise<ChildRunExitEvidence | null> {
+        targetChild.emit('exit', null, 'SIGTERM');
+        return targetEvidence;
+      },
+    } as unknown as ManagedChildRunProcess;
+    registry.register({
+      unitName: 'qwen-bg-target',
+      sessionId: SESSION,
+      process: target,
+      sink: stored.sink as ManagedShellCaptureSink,
+      publisher: stored.publisher,
+      identity: stored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+    registry.register({
+      unitName: UNIT,
+      sessionId: 'other-session',
+      process: {
+        unitName: UNIT,
+        child: fakeChild(),
+        exited: false,
+        evidence: null,
+        terminate: async () => null,
+      } as unknown as ManagedChildRunProcess,
+      sink: otherStored.sink as ManagedShellCaptureSink,
+      publisher: otherStored.publisher,
+      identity: otherStored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+
+    await registry.stopSession(SESSION, 100);
+    expect(registry.hasHolds(SESSION)).toBe(false);
+    expect(registry.hasHolds('other-session')).toBe(true);
+    expect(
+      (await registry.describeFinished('qwen-bg-target'))?.receipt.evidence,
+    ).toEqual({ exitCode: null, exitSignal: 'SIGTERM' });
+
+    // And the surviving entry answers only its own drain.
+    await registry.stopSession('other-session', 100);
+    expect(registry.hasHolds('other-session')).toBe(true);
+  });
+
   it('answers exited from the retained receipt after a natural end', async () => {
     const registry = new ManagedBackgroundShellRegistry();
     const process = fakeProcess({ exitCode: 3, exitSignal: null });
