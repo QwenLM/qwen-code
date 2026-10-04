@@ -110,7 +110,8 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-新增迁移，保留 V32。升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
+在已有 V35 工具配置迁移之后新增 V36 生命周期迁移，保留 V32。
+升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。
 启用 L3 准入前升级全部 coordinator 和 Harness。缺少新协议能力时拒绝准入，

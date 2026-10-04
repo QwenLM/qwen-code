@@ -141,7 +141,8 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add a new migration; preserve V32. Historical admitted operations retain their
+Add lifecycle migration V36 after the existing V35 tool-profile migration;
+preserve V32. Historical admitted operations retain their
 original protocol and evidence, without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary
