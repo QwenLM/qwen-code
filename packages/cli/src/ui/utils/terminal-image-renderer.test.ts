@@ -690,6 +690,12 @@ describe('terminalImageRenderer', () => {
     async () => {
       const binDir = path.join(tempDir, 'bin');
       await fs.mkdir(binDir);
+      // Pin the shim's module scope: an ambient package.json up the tmp
+      // tree ({"type":"module"}) would otherwise parse this CJS script as ESM.
+      await fs.writeFile(
+        path.join(binDir, 'package.json'),
+        '{"type":"commonjs"}',
+      );
       const chafaPath = path.join(binDir, 'chafa');
       await fs.writeFile(
         chafaPath,

@@ -2637,6 +2637,7 @@ describe('per-hunk probes against real git', () => {
         // function's screen. Paths go in through JSON.stringify rather than
         // shell interpolation: a TMPDIR holding a space would otherwise split
         // the argument and the shim would silently plant nothing.
+        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         writeFileSync(
           join(shimDir, 'git'),
           `#!/usr/bin/env node
