@@ -73,6 +73,13 @@ public interface ToolExecutionRepository {
     boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
             String runtimeSessionId);
 
+    /** Like {@link #hasActiveByRuntimeSession(String, long, String)}, but
+     * skipping the named executions: the release drain asks whether anything
+     * but the Session's own background processes still runs. */
+    boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
+            String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds);
+
     /** Any nonterminal execution still points at this binding generation.
      * UNKNOWN counts as active; terminal uncertainty is not physical stop proof. */
     boolean hasActiveByBinding(String bindingId, long runtimeGeneration);

@@ -307,6 +307,17 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return recordsById.values().stream().anyMatch(record -> !record.isTerminal()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId)
+                && !excludingExecutionCallIds.contains(record.getExecutionCallId()));
+    }
+
+    @Override
     public synchronized boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

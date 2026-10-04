@@ -52,6 +52,7 @@ public final class ManagedShellProtocol {
                 || !VIEW_FIELDS.containsAll(view.keySet())
                 || expectedId == null
                 || !(view.get("operationId") instanceof String id) || id.isBlank()
+                || !expectedId.equals(view.get("operationId"))
                 || !(view.get("state") instanceof String state) || !STATES.contains(state)
                 || "exited".equals(state) && !validEvidence(view.get("evidence"))
                 || "running".equals(state) && !(view.get("unitName") instanceof String)

@@ -440,9 +440,24 @@ public final class JdbcToolExecutionRepository
     @Override
     public boolean hasActiveByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId) {
+        return hasActiveByRuntimeSessionExcluding(bindingId, runtimeGeneration,
+                runtimeSessionId, java.util.Set.of());
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return hasActiveByRuntimeSessionExcluding(bindingId, runtimeGeneration,
+                runtimeSessionId, excludingExecutionCallIds);
+    }
+
+    private boolean hasActiveByRuntimeSessionExcluding(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
         return JdbcRepositorySupport.read(dataSource, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT binding_id, runtime_session_id FROM qwen_tool_execution "
+                    "SELECT binding_id, runtime_session_id, execution_call_id FROM qwen_tool_execution "
                             + "WHERE binding_id = ? AND runtime_generation = ? "
                             + "AND runtime_session_key = ? "
                             + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')")) {
@@ -452,7 +467,8 @@ public final class JdbcToolExecutionRepository
                 try (ResultSet result = statement.executeQuery()) {
                     while (result.next()) {
                         if (bindingId.equals(result.getString("binding_id"))
-                                && runtimeSessionId.equals(result.getString("runtime_session_id"))) {
+                                && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                                && !excludingExecutionCallIds.contains(result.getString("execution_call_id"))) {
                             return true;
                         }
                     }

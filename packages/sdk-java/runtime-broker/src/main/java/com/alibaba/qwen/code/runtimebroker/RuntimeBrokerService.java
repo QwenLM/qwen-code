@@ -1527,6 +1527,64 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Boolean> releaseSessionAfterSweep(
             SessionContext context) {
+        boolean backgroundBusy;
+        synchronized (context) {
+            if (context.release() != null) {
+                return context.release();
+            }
+            if (context.hasActiveControl()
+                    || executionRepository.hasActiveByRuntimeSession(
+                            context.binding().getBindingId(), context.binding().getGeneration(),
+                            context.session().getRuntimeSessionId(),
+                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active operation");
+            }
+            backgroundBusy = executionRepository.hasActiveByRuntimeSession(
+                    context.binding().getBindingId(), context.binding().getGeneration(),
+                    context.session().getRuntimeSessionId());
+        }
+        if (!backgroundBusy) {
+            return completeSessionRelease(context);
+        }
+        // A running background Shell is a drain, not an immediate busy
+        // refusal: the worker's release route drains the Session's Shells
+        // first, the sweep then settles whatever the drain ended, and the
+        // complete release converges on what is genuinely still running.
+        return drainBackgroundSession(context)
+                .thenCompose(ignored -> settleUnprovenBackgroundRows(context))
+                .thenCompose(ignored -> completeSessionRelease(context));
+    }
+
+    /**
+     * One transport.release whose busy answer is swallowed: the worker's
+     * route drains BEFORE it refuses, so a 409 `managed_activation_conflict`
+     * still means the drain ran; any other failure stands. The maintenance
+     * routes are not activation-gated, so the sweep afterwards can still
+     * prove what the drain ended.
+     */
+    private CompletionStage<Boolean> drainBackgroundSession(
+            SessionContext context) {
+        return mapFailure(safeStage(() -> transport.release(context.lease(),
+                context.session())), "runtime_session_release_failed",
+                "Runtime Session release failed")
+                .handle((released, error) -> {
+                    if (error == null) {
+                        return released;
+                    }
+                    if (unwrap(error) instanceof RuntimeBrokerException failure
+                            && failure.getStatusCode() == 409
+                            && "managed_activation_conflict".equals(failure.getCode())) {
+                        return (Boolean) null;
+                    }
+                    throw unwrap(error) instanceof RuntimeException runtime
+                            ? runtime
+                            : new RuntimeException(unwrap(error));
+                });
+    }
+
+    private CompletionStage<Boolean> completeSessionRelease(
+            SessionContext context) {
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         synchronized (context) {
