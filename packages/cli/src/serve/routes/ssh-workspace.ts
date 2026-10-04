@@ -61,7 +61,7 @@ function isSshPassthroughRoute(req: Request): boolean {
         req.path,
       );
     case 'POST':
-      return /^\/(?:acp|voice(?:\/transcribe)?|file\/(?:write|edit|upload)|trust\/request|runtime\/(?:ensure|stop)|permissions|settings|sessions\/(?:delete|archive|unarchive)|session-groups)$/.test(
+      return /^\/(?:acp|voice(?:\/transcribe)?|file\/(?:write|edit|upload)|trust\/(?:request|grant)|runtime\/(?:ensure|stop)|permissions|settings|sessions\/(?:delete|archive|unarchive)|session-groups)$/.test(
         req.path,
       );
     case 'PATCH':
