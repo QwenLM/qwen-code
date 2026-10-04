@@ -31,12 +31,17 @@ import type {
   ToolResultSegmentStore,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { HostedMonitorSession } from './hosted-monitor-session.js';
+import { HostedMonitorLoop } from './hosted-monitor-loop.js';
+import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 
-// child_run is enabled by the H3 enablement slice; the test drives the
-// background path ahead of it with the same test-only flip the suites use.
-const enablement = vi.hoisted(() => ({ childRun: true }));
+// child_run and monitor_run are enabled by the H3 enablement slice; the
+// test drives both background paths ahead of it with the same test-only
+// flip the authority suites use.
+const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
 
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
@@ -50,7 +55,13 @@ vi.mock(
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (domain !== 'child_run' || !enablement.childRun) {
+        if (
+          domain === 'child_run'
+            ? !enablement.childRun
+            : domain === 'monitor_run'
+              ? !enablement.monitorRun
+              : true
+        ) {
           actual.assertManagedSessionDomainEnabled(domain);
         }
       },
@@ -84,6 +95,7 @@ interface Rig {
     sessionId: string;
   };
   orchestrator: HostedChildRunSession;
+  monitors: HostedMonitorSession;
   registry: ManagedShellPublisherRegistry;
   resources: DurableToolResultResourceStore;
   store: ToolResultSegmentStore;
@@ -195,6 +207,10 @@ async function rig(): Promise<Rig> {
     { runtimeBindingId: 'binding-a', generation: '1' },
     { pid: 7 },
   );
+  const monitors = new HostedMonitorSession(
+    { authority: session.authority, resources: session.resources },
+    key,
+  );
 
   const values = new Map<
     string,
@@ -223,6 +239,7 @@ async function rig(): Promise<Rig> {
     resources,
     async () => {},
     orchestrator,
+    monitors,
   );
   const descriptor = await publisher.start();
   const registry = new ManagedShellPublisherRegistry();
@@ -255,6 +272,7 @@ async function rig(): Promise<Rig> {
   return {
     key,
     orchestrator,
+    monitors,
     registry,
     resources,
     store: segmentStore(values),
@@ -269,6 +287,7 @@ type BackgroundRigArg = Parameters<
 function backgroundRequest(
   key: { tenantId: string; sessionId: string },
   generation: string,
+  monitoring = false,
 ): BackgroundRigArg {
   return {
     reference: {
@@ -281,6 +300,7 @@ function backgroundRequest(
       tenantId: key.tenantId,
       sessionId: key.sessionId,
       turnId: 'turn-a',
+      ...(monitoring ? { monitoring: true } : {}),
       executionCallId: 'execution-bg',
       bindingGeneration: generation,
       capturePolicy: 'complete_required',
@@ -404,4 +424,95 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
       .eventsInSequenceRange(1, session!.authority.committedSequence)
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(0);
+});
+
+it('melds a monitor watch through one terminal step only after its start receipt', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-execution',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-execution', BINDING);
+
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-execution';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  // Production start order: prepare, then supervisor.start, then attach.
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  let record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
+  );
+  expect(record.startReceiptRef).toBeNull();
+  expect(record.outputRef).toBeNull();
+
+  // The proven start's receipt arrives; only now may the record's output
+  // advance (and only through the monitor funnel, never the Shell's).
+  await r.monitors.attach('monitor-execution', BINDING, { pid: 8 });
+  const loop = new HostedMonitorLoop(
+    r.monitors,
+    'monitor-execution',
+    new HostedMonitorRemoteExecutor(publisher!),
+  );
+  await loop.resumeAttached({
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+    runtime: BINDING,
+  });
+
+  prepared.sink.setStarted(8);
+  await prepared.sink.write('stdout', Buffer.from('line one\nline two\n'));
+  record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
+  );
+  expect(record.outputRef?.kind).toBe(MANAGED_TOOL_RESULT_KINDS.manifest);
+
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize(
+    'success',
+    [{ text: 'finished' }],
+    undefined,
+  );
+  await r.registry.accept(prepared.identity, envelope);
+
+  // The finalize awaited the loop's own exit chain: the last window is
+  // committed to the record before its settled mark, exactly once.
+  record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
+    notifiedThrough: 1,
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
 });

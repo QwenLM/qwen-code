@@ -570,11 +570,30 @@ export class HostedShellPublisher {
     executionCallId: string,
   ): Promise<void> {
     const background = entry.background;
-    if (!background?.sink || !this.childRuns) return;
+    if (!background?.sink) return;
     const current = background.sink.currentManifest;
     if (current && current !== background.lastManifest) {
+      // The open manifest exists for readers from its first page on, but
+      // the record quotes it only once a start receipt exists: output
+      // before a start receipt is a parse-level refusal, never a commit.
+      const owner =
+        background.recordDomain === 'monitor_run'
+          ? this.monitors?.record(executionCallId)
+          : this.childRuns?.record(executionCallId);
+      if (!owner) {
+        throw new Error(
+          `The ${background.recordDomain} record for ${executionCallId} is missing.`,
+        );
+      }
+      if (owner.startReceiptRef === null) return;
       background.lastManifest = current;
-      await this.childRuns.advanceOutput(executionCallId, current);
+      if (background.recordDomain === 'monitor_run') {
+        if (!this.monitors) return;
+        await this.monitors.advanceOutput(executionCallId, current);
+      } else {
+        if (!this.childRuns) return;
+        await this.childRuns.advanceOutput(executionCallId, current);
+      }
     }
   }
 
@@ -662,8 +681,14 @@ export class HostedShellPublisher {
       background.remainder = '';
     }
     if (background.recordDomain === 'monitor_run') {
-      observer?.onExit(evidence === null);
-      if (evidence === null) {
+      const exit = observer?.onExit(evidence === null);
+      if (exit !== undefined) {
+        // An observed capture's loop owns the terminal settle: flush →
+        // settle lands inside this one chain, so the last window is
+        // committed before anything can settle the record, and its
+        // commit failures surface here instead of dying in the void.
+        await exit;
+      } else if (evidence === null) {
         await this.monitors?.settleFailed(executionCallId, {
           stopReason: 'watch_failed',
           started: true,

@@ -34,7 +34,12 @@ export interface MonitorWatchExecutor {
   start(
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
-    onExit: (failed: boolean) => void,
+    /**
+     * Fires exactly once, after the start promise resolved. May return a
+     * promise carrying the exit's flush and settle in order; an owner
+     * that awaits it never settles ahead of the last observation.
+     */
+    onExit: (failed: boolean) => Promise<void> | void,
     identity?: {
       readonly unitName: string;
       readonly cwd?: string;
@@ -181,9 +186,16 @@ export class HostedMonitorLoop {
     this.armIdle();
   }
 
-  private onExit(failed: boolean): void {
-    if (this.ended && !failed) return;
-    this.enqueue(async () => {
+  /**
+   * The watch's physical end. The returned chain carries the exit's own
+   * flush and settle in order, so an owner that awaits it settles nothing
+   * ahead of the last observation's commit — a caller that settles first
+   * (and lets the successor rule reject the late observe) is exactly how
+   * a final window once died silently between two async hops.
+   */
+  private onExit(failed: boolean): Promise<void> {
+    if (this.ended && !failed) return Promise.resolve();
+    return this.enqueue(async () => {
       if (failed) {
         if (this.ended) return;
         this.ended = true;
