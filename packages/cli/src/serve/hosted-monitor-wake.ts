@@ -103,9 +103,13 @@ export class HostedMonitorWakeScheduler {
       }
       // runTurn must have consumed the input: re-reading the journal is
       // the only honest check, and consuming is what lets the next
-      // notification's turn begin.
+      // notification's turn begin. When the owner's own settle path went
+      // blocked meanwhile, that accurate blocked is where this pump stops;
+      // anything else that leaves the input in place is a programming
+      // error and is thrown.
       const again = await this.deps.next();
       if (again?.turnId === next.turnId) {
+        if (this.deps.state() === 'blocked') return;
         throw new Error(
           `Monitor wake turn ${next.turnId} did not consume its input.`,
         );
