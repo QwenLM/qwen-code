@@ -441,6 +441,49 @@ describe('Channel editor state', () => {
     expect(draft.values.sessionScope).toBe('chat_thread');
   });
 
+  it('pre-fills user for a multiSession instance whose plugin default is legacy thread', () => {
+    // The legacy `field.default === 'thread'` branch below returns 'thread'
+    // for an existing instance, which the store rejects for multiSession —
+    // this is the QQ plugin's own shape.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+    const instance = configuredInstance();
+    instance.config.multiSession = true;
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.sessionScope).toBe('user');
+    expect(
+      buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-multi-session-thread',
+        instance,
+      ).config.sessionScope,
+    ).toBe('user');
+  });
+
+  it('pre-fills user for a multiSession instance whose sessionScope field has no default', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: undefined } : field,
+      ),
+    };
+    const instance = configuredInstance();
+    instance.config.multiSession = true;
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.sessionScope).toBe('user');
+  });
+
   it('keeps an explicit non-user scope so the store still rejects it', () => {
     const descriptor = chatThreadDefaultDescriptor();
     const instance = configuredInstance();
