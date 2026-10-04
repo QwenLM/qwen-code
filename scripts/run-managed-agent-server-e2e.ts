@@ -328,10 +328,16 @@ function start(
   return registered;
 }
 
+// One spelling for "has this child exited": five independent phrasings
+// drifted into the pre-fix ESRCH that process.kill raised on a reaped pid.
+function childExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 function processTreeExists(child: ChildProcess): boolean {
   if (child.pid === undefined) return false;
   if (process.platform === 'win32') {
-    return child.exitCode === null && child.signalCode === null;
+    return !childExited(child);
   }
   try {
     process.kill(-child.pid, 0);
@@ -386,23 +392,15 @@ async function crashChild(child: ChildProcess, name: string): Promise<void> {
 async function crashProcess(child: ChildProcess, name: string): Promise<void> {
   // A child killed BY signal has exitCode null but signalCode set; missing
   // that branch kills a pid that no longer exists and throws raw ESRCH.
-  if (
-    child.pid === undefined ||
-    child.exitCode !== null ||
-    child.signalCode !== null
-  ) {
+  if (child.pid === undefined || childExited(child)) {
     throw new Error(`${name} exited before the crash was injected`);
   }
   process.kill(child.pid, 'SIGKILL');
   const deadline = Date.now() + 5_000;
-  while (
-    child.exitCode === null &&
-    child.signalCode === null &&
-    Date.now() < deadline
-  ) {
+  while (!childExited(child) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  if (child.exitCode === null && child.signalCode === null) {
+  if (!childExited(child)) {
     throw new Error(`${name} survived SIGKILL`);
   }
 }
@@ -548,10 +546,7 @@ async function waitUntil(
   let lastError: unknown;
   while (Date.now() < deadline) {
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
-    if (
-      child &&
-      (child.child.exitCode !== null || child.child.signalCode !== null)
-    ) {
+    if (child && childExited(child.child)) {
       throw new Error(`${name} exited early\n${child.log()}`);
     }
     try {
@@ -572,7 +567,19 @@ async function waitUntil(
       ]);
       if (ready) return;
     } catch (error) {
-      lastError = error;
+      // The synthetic stall rejection is timing metadata, not a cause:
+      // never let it overwrite a real predicate error. Prefer the cause an
+      // undici fetch rejection carries (its own message is "fetch failed").
+      if (
+        !(
+          error instanceof Error && error.message.endsWith(' predicate stalled')
+        )
+      ) {
+        lastError =
+          error instanceof Error && error.cause instanceof Error
+            ? error.cause
+            : error;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -581,6 +588,15 @@ async function waitUntil(
     `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
   );
 }
+
+// MySQL reads $HOME/.mylogin.cnf even when option files are disabled,
+// so a mysql_config_editor credential on a developer's machine would
+// silently auth-connect to the scratch empty-password server. Client
+// invocations run against an isolated empty HOME instead of inheriting
+// the real one.
+const mysqlClientHome = mkdtempSync(
+  path.join(tmpdir(), 'qwen-e2e-mysql-home-'),
+);
 
 function runMysql(port: number, sql: string): string {
   const result = spawnSync(
@@ -598,7 +614,11 @@ function runMysql(port: number, sql: string): string {
       '--execute',
       sql,
     ],
-    { encoding: 'utf8' },
+    {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: mysqlClientHome },
+      timeout: 10_000,
+    },
   );
   if (result.status !== 0) {
     throw new Error(`MySQL command failed: ${result.stderr}`);
@@ -825,6 +845,8 @@ try {
   );
   await waitUntil(
     'MySQL',
+    // spawnSync blocks the event loop, so the race deadline cannot fire
+    // inside one iteration: the probe carries its own timeout.
     () =>
       spawnSync(
         mysqladmin,
@@ -836,7 +858,11 @@ try {
           '--user=root',
           'ping',
         ],
-        { stdio: 'ignore' },
+        {
+          stdio: 'ignore',
+          env: { ...process.env, HOME: mysqlClientHome },
+          timeout: 10_000,
+        },
       ).status === 0,
     60_000,
     mysqlServer,

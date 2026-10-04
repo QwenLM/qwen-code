@@ -31,30 +31,10 @@ const namedScripts = (text) => [
 
 describe('managed-agent-server e2e runner', () => {
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
-    const source = createSourceFile(
-      'runner.ts',
-      read('scripts/run-managed-agent-server-e2e.ts'),
-      ScriptTarget.Latest,
-      true,
+    const { outputText } = transpileModule(
+      extracted(['freePort', 'startHeldExecutionStartProxy', 'allocatedPorts']),
+      { compilerOptions: { target: ScriptTarget.ES2022 } },
     );
-    const allocation = source.statements
-      .filter(
-        (node) =>
-          (isFunctionDeclaration(node) &&
-            ['freePort', 'startHeldExecutionStartProxy'].includes(
-              node.name?.text,
-            )) ||
-          (isVariableStatement(node) &&
-            node.declarationList.declarations.some(
-              (declaration) =>
-                declaration.name.getText(source) === 'allocatedPorts',
-            )),
-      )
-      .map((node) => node.getText(source))
-      .join('\n');
-    const { outputText } = transpileModule(allocation, {
-      compilerOptions: { target: ScriptTarget.ES2022 },
-    });
     const sequence = [
       33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
       36417, 36418, 36419,
@@ -292,7 +272,7 @@ describe('managed-agent-server e2e runner', () => {
   it('crashProcess reports a by-signal exit instead of throwing ESRCH', async () => {
     const { crashProcess } = new Function(
       'process',
-      `${extracted(['crashProcess'])}\nreturn { crashProcess };`,
+      `${extracted(['crashProcess', 'childExited'])}\nreturn { crashProcess };`,
     )(process);
     const child = spawn('node', [
       '-e',
@@ -315,17 +295,18 @@ describe('managed-agent-server e2e runner', () => {
 
   it('passes --no-defaults to every MySQL client invocation', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    // mysqld twice, the mysql client once, mysqladmin once.
+    // mysqld twice, the mysql client once, mysqladmin once; the
+    // isolated-home comment above the lookup must not fake a fifth hit.
     expect(source.match(/--no-defaults/g)).toHaveLength(4);
   });
 
-  it('names the unclassified packaged jar from the pom version, never a wildcard over every repackaged artifact', () => {
+  it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
     expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
     // The pom's repackage executions leave three matching artifacts in
-    // target/, so any wildcard or cardinality check is wrong by
-    // construction: the lookup must read the project version and name the
-    // unclassified jar exactly.
+    // target/. The runner derives the unclassified name from the pom (one
+    // source of truth); the Dockerfile selects by classifier exclusion
+    // with a loud cardinality guard.
     expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
     expect(script).not.toContain('packagedJars');
     const dockerfile = read(
@@ -341,6 +322,18 @@ describe('managed-agent-server e2e runner', () => {
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/stallTimer\.unref\(\)/);
+  });
+
+  it('resolves the project version from the real pom', () => {
+    // The regex and its throw execute end-to-end — not just as greps. A
+    // whitespace change between <artifactId> and <version> or a
+    // ${revision} indirection must surface here, not at the next local
+    // run of the script.
+    const pom = read('packages/sdk-java/managed-agent-server/pom.xml');
+    const match = pom.match(
+      /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>([^<]+)<\/version>/,
+    );
+    expect(match?.[1]).toBe('0.1.0-alpha');
   });
 
   it('keeps the published bind and jar guard explicit and loud', () => {
