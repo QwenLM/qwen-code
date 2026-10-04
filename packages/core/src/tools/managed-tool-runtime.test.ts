@@ -680,7 +680,9 @@ describe('ManagedToolRuntime', () => {
   it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
     const ref = await prepare();
     await runtime.preflight(ref);
-    expect(() => runtime.beginTurn({ ...identity, promptId: 'prompt-2' })).toThrow('unfinished');
+    expect(() =>
+      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+    ).toThrow('unfinished');
     expect(runtime.status(ref).state).toBe('prepared');
     expect(runtime.hasActiveWork()).toBe(true);
   });
@@ -705,6 +707,31 @@ describe('ManagedToolRuntime', () => {
     expect(runtime.status(ref).state).toBe('settled');
     await runtime.beginTurn(next);
     expect(() => runtime.status(ref)).toThrow('identity does not match');
+  });
+
+  it('refuses a new turn while a cancellation is confirming', async () => {
+    const gate = deferred<void>();
+    tool.setup = (invocation) =>
+      invocation.onConfirm.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    const confirming = runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const rejection = confirming.catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
+    );
+    expect(runtime.cancel(ref).state).toBe('cancel_requested');
+    expect(() =>
+      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+    ).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('cancel_requested');
+    expect(runtime.hasActiveWork()).toBe(true);
+    gate.resolve();
+    await rejection;
+    await vi.waitFor(() => expect(runtime.status(ref).state).toBe('settled'));
+    expect(runtime.status(ref).result?.executionStatus).toBe('not_started');
   });
 
   it('runs the preflight hook once across the second confirmation bounce', async () => {
