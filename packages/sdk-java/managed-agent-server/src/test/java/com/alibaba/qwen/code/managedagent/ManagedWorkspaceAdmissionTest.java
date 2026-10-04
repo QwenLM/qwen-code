@@ -298,6 +298,8 @@ class ManagedWorkspaceAdmissionTest {
                 .getContentAsString()).get("id").asText();
         ContextBinding binding = store.requireSession(tenant, sessionId)
                 .workspace();
+        assertThat(store.requireSession(tenant, sessionId).toolProfile())
+                .isEqualTo("hosted-workspace-files/1");
         assertThat(binding.getTenantId()).isEqualTo(tenant);
         assertThat(binding.getWorkspaceGeneration()).isEqualTo(1);
         assertThat(binding.getStorageId()).isEqualTo("storage-a");
@@ -326,6 +328,8 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(jsonPath("$.id").value(sessionId));
         assertThat(store.requireSession(tenant, sessionId).workspace())
                 .isEqualTo(binding);
+        assertThat(store.requireSession(tenant, sessionId).toolProfile())
+                .isEqualTo("hosted-workspace-files/1");
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "create-b")
@@ -946,6 +950,8 @@ class ManagedWorkspaceAdmissionTest {
                 .andReturn();
         String sessionId = mapper.readTree(created.getResponse()
                 .getContentAsString()).get("sessionId").asText();
+        assertThat(store.requireSession(tenant, sessionId).toolProfile())
+                .isEqualTo("hosted-workspace-files/1");
         mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a"))
@@ -1005,6 +1011,9 @@ class ManagedWorkspaceAdmissionTest {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
                 + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session"
+                + " WHERE tenant_id = ?", String.class, tenant))
+                .isEqualTo(boundFirst ? "hosted-workspace-files/1" : null);
     }
 
     @Test

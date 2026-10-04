@@ -128,6 +128,29 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-message-chunks',
 ]);
 
+/**
+ * The prompt deadline timer and the cancel route abort the same controller,
+ * so the deadline aborts with a distinguishing reason; settlement reads it
+ * back to keep an expiry from being recorded as a user cancellation.
+ */
+const HOSTED_TURN_DEADLINE = new Error(
+  'The Hosted Harness Turn deadline expired.',
+);
+
+/**
+ * The terminal classification of a turn whose runner threw. A deadline
+ * expiry is an attributable failure, never a cancellation.
+ */
+function settledTurnOutcome(abort: AbortController): {
+  state: 'cancelled' | 'error';
+  stopReason: string;
+} {
+  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
+  return abort.signal.reason === HOSTED_TURN_DEADLINE
+    ? { state: 'error', stopReason: 'deadline_exceeded' }
+    : { state: 'cancelled', stopReason: 'cancelled' };
+}
+
 interface HostedSession {
   managed: ManagedSession;
   storeBaseUrl: string;
@@ -995,6 +1018,24 @@ async function eventEnvelope(
       },
     };
   }
+  if (event.kind === 'message.retracted') {
+    // A restarted model attempt retracts the orphaned prefix it published
+    // (#13319). The coordinator blanks the turn's deltas from
+    // `fromSequence` onward and announces the repair as `stream.reconciled`.
+    const turnId = event.payload['turnId'];
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'message_retracted',
+      ...(typeof turnId === 'string' ? { promptId: turnId } : {}),
+      data: {
+        sessionId,
+        turnId: event.payload['turnId'],
+        messageId: event.payload['messageId'],
+        fromSequence: event.payload['fromSequence'],
+      },
+    };
+  }
   if (
     event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
@@ -1050,30 +1091,37 @@ async function eventEnvelope(
   if (event.kind === 'turn.settled') {
     const promptId = event.payload['turnId'] as string;
     const outcome = event.payload['outcome'];
-    return outcome === 'completed' || outcome === 'cancelled'
-      ? {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_complete',
+    if (outcome === 'completed' || outcome === 'cancelled') {
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'turn_complete',
+        promptId,
+        data: {
+          sessionId,
           promptId,
-          data: {
-            sessionId,
-            promptId,
-            stopReason: event.payload['stopReason'] ?? 'end_turn',
-          },
-        }
-      : {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_error',
-          promptId,
-          data: {
-            sessionId,
-            promptId,
-            code: 'hosted_turn_failed',
-            message: 'Hosted Harness turn failed.',
-          },
-        };
+          stopReason: event.payload['stopReason'] ?? 'end_turn',
+        },
+      };
+    }
+    // A deadline expiry keeps its own error code so the coordinator's
+    // projection stays distinguishable from both a cancellation and an
+    // unattributed failure.
+    const expired = event.payload['stopReason'] === 'deadline_exceeded';
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'turn_error',
+      promptId,
+      data: {
+        sessionId,
+        promptId,
+        code: expired ? 'hosted_turn_deadline_exceeded' : 'hosted_turn_failed',
+        message: expired
+          ? 'The Hosted Harness Turn exceeded its deadline.'
+          : 'Hosted Harness turn failed.',
+      },
+    };
   }
   return {
     v: 1,
@@ -1220,14 +1268,19 @@ async function executeHostedTurn(
             cause instanceof HostedHookRecoveryRequiredError
           )
             throw cause;
-          state = abort.signal.aborted ? 'cancelled' : 'error';
-          stopReason = state;
+          const outcome = settledTurnOutcome(abort);
+          state = outcome.state;
+          stopReason = outcome.stopReason;
           if (state === 'error') {
+            // The model layer surfaces any abort as a cancellation, so a
+            // deadline expiry names the deadline, not the thrown cause.
             writeStderrLineSafe(
-              'qwen serve: Hosted Harness turn ' +
-                promptId +
-                ' failed: ' +
-                String(cause),
+              stopReason === 'deadline_exceeded'
+                ? `qwen serve: Hosted Harness turn ${promptId} exceeded its deadline.`
+                : 'qwen serve: Hosted Harness turn ' +
+                    promptId +
+                    ' failed: ' +
+                    String(cause),
             );
           }
         }
@@ -1240,14 +1293,18 @@ async function executeHostedTurn(
         await session.managed.sink.write(turnResult);
       }),
   );
-  await running.finally(() =>
-    toolTurn?.close().catch((cause: unknown) => {
+  // Session availability must not gate on publisher cleanup: the drain is
+  // unbounded, and a stalled Session Store would otherwise leave the Session
+  // permanently unavailable and undeletable. Each turn owns its publisher,
+  // so a next turn shares no listener or capture state with this drain.
+  await running.finally(() => {
+    void toolTurn?.close().catch((cause: unknown) => {
       session.blocked = true;
       writeStderrLineSafe(
         'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
       );
-    }),
-  );
+    });
+  });
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -1374,11 +1431,75 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     const resident = sessions.get(sessionId);
+    const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
+    const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     if (
       opening.has(sessionId) ||
-      (resident && (create || body?.['passiveManagedRuntimeRecovery'] !== true))
+      (resident && (create || (!passiveRecovery && !driveRecovery)))
     ) {
       error(res, 409, 'hosted_session_already_attached');
+      return;
+    }
+    // A continuation load redriven after a lost reply is answered from the
+    // Session it already attached: the writer fence above proves this load
+    // targets this generation, and no continue/cancel can have been admitted
+    // since (its identities ride the lost reply), so the resident state is
+    // still exactly what the first load left behind. Answer again from that
+    // state instead of wedging the Turn on a 409 loop; the re-run is read-only
+    // apart from the Broker acquire, which is idempotent under the same
+    // Runtime Session identity. A passive load takes the stricter resident
+    // path below, which validates the store and the tool profile first.
+    if (resident !== undefined && driveRecovery && !passiveRecovery) {
+      if (resident.hooks) {
+        error(res, 409, 'hosted_session_already_attached');
+        return;
+      }
+      const parked = unsettledPromptId(resident);
+      if (parked === undefined) {
+        // No single parked Turn: the first load's answer still holds, so the
+        // redrive gets the same attachment restated — including a blocked
+        // Session, whose recoveryRequired the coordinator already handles.
+        sendAttachment(res, sessionId, resident);
+        return;
+      }
+      if (
+        resident.active !== undefined ||
+        resident.toolProfile === undefined ||
+        !brokerOptions
+      ) {
+        error(res, 409, 'hosted_session_already_attached');
+        return;
+      }
+      let recovery: HostedRuntimeRecoveryReport;
+      try {
+        const recovered = await recoverHostedRuntimeTurn({
+          session: resident.managed,
+          sessionId,
+          cwd,
+          promptId: parked,
+          brokerOptions,
+          passive: false,
+          leaseAlreadyHeld: resident.runtimeLeaseHeld !== undefined,
+        });
+        if (recovered === undefined) {
+          error(res, 409, 'hosted_session_already_attached');
+          return;
+        }
+        recovery = recovered.report;
+        if (recovered.acquiredRuntime)
+          resident.runtimeLeaseHeld =
+            recovered.report.executions[0]?.runtimeSessionId ??
+            recovered.promptId;
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${String(cause)}`,
+        );
+        // Retry-inviting, like the first load's recovery failure; the
+        // attached Session keeps its owed lease for the next redrive.
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      sendAttachment(res, sessionId, resident, recovery);
       return;
     }
     if (resident) {
@@ -2082,7 +2203,10 @@ export function registerHostedHarnessSessionRoutes(
     const timer =
       deadlineMs === undefined
         ? undefined
-        : setTimeout(() => abort.abort(), deadlineMs as number);
+        : setTimeout(
+            () => abort.abort(HOSTED_TURN_DEADLINE),
+            deadlineMs as number,
+          );
     timer?.unref();
     session.active = { promptId, digest, abort };
     void (async () => {
@@ -2165,9 +2289,9 @@ export function registerHostedHarnessSessionRoutes(
             `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
           );
           try {
-            const state = abort.signal.aborted ? 'cancelled' : 'error';
+            const outcome = settledTurnOutcome(abort);
             await session.managed.sink.write(
-              turnResult ?? turnResultRecord(state, state),
+              turnResult ?? turnResultRecord(outcome.state, outcome.stopReason),
             );
           } catch (settleCause) {
             session.blocked = true;
@@ -2879,16 +3003,16 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       } finally {
-        try {
-          await toolTurn?.close();
-        } catch (cause) {
+        // Clear availability before the unbounded publisher drain, per the
+        // discipline in executeHostedTurn.
+        releaseRecoveredRuntime(session);
+        session.active = undefined;
+        void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,
           );
-        }
-        releaseRecoveredRuntime(session);
-        session.active = undefined;
+        });
       }
     })();
   });

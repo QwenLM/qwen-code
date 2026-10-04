@@ -707,6 +707,114 @@ class HostedHarnessClientTest {
         }
     }
 
+    // Issue #13320: a load refused fail-closed with a machine-readable code
+    // on the wire (e.g. a mixed-version takeover where the journal is newer
+    // than this reader) must surface the code to the caller; a failure
+    // without a recognizable code stays outcome-unknown.
+    @Test
+    void namedLoadRefusalSurfacesItsMachineReadableCode() {
+        AtomicInteger loadCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadCalls.incrementAndGet();
+                    // error and code deliberately differ, so the assertion
+                    // proves which field is read.
+                    sendJson(exchange, 503, "{\"error\":\"session open"
+                            + " failed\",\"code\":\"managed_session_open_"
+                            + "failed\"}", true);
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRefusedException failure = assertThrows(
+                    HarnessSessionRefusedException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertEquals(1, loadCalls.get(), "a named refusal must not be"
+                    + " retried by the SDK");
+            assertEquals(503, failure.getStatusCode());
+            assertEquals("managed_session_open_failed", failure.getCode());
+            assertTrue(failure.getMessage()
+                    .contains("managed_session_open_failed"));
+            assertTrue(failure.getCause()
+                    instanceof MutationOutcomeUnknownException);
+        }
+    }
+
+    @Test
+    void codelessLoadFailureStaysOutcomeUnknown() {
+        // An intermediary 503 carries no refusal envelope at all.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "Service Unavailable",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertTrue(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
+    @Test
+    void loadFailureWithoutARefusalCodeFieldStaysOutcomeUnknown() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503,
+                        "{\"error\":\"managed_session_open_failed\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void oversizedLoadRefusalCodeStaysOutcomeUnknown() {
+        // The refusal code flows into the turn's error_code column, a
+        // VARCHAR(128): anything longer is not a named refusal.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "{\"error\":\"x\","
+                        + "\"code\":\"" + "c".repeat(129) + "\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void loadRefusalCodeOutsideTheVocabularyStaysOutcomeUnknown() {
+        // A code carrying control characters could forge log lines where the
+        // refusal is recorded; only the snake_case vocabulary is named.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "{\"error\":\"x\","
+                        + "\"code\":\"managed_session_open_failed\\nforged\""
+                        + "}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void loadTransportFailureStaysOutcomeUnknown() {
+        // The connection drops without an HTTP status: nothing to classify.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                HttpExchange::close);
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertFalse(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
     private HostedHarnessClient newClient() {
         return HostedHarnessClient.builder()
                 .baseUri(baseUri)
