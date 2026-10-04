@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.ByteBuffer;
 import java.io.IOException;
 import java.io.InputStream;
@@ -83,7 +84,12 @@ public class ManagedSessionStore {
                     result.getString("latest_checkpoint_resource_id"),
                     result.getLong("compacted_through_revision"),
                     result.getString("recovery_status"),
-                    result.getString("recovery_detail_code"));
+                    result.getString("recovery_detail_code"),
+                    result.getString("activation_id"),
+                    result.getString("activation_phase"),
+                    result.getObject("activation_event_epoch", Long.class),
+                    result.getObject("activation_expires_at", Long.class),
+                    result.getObject("activation_head_revision", Long.class));
     private final RowMapper<TransactionRow> transactionMapper =
             (result, row) -> transactionRow(result);
     private final RowMapper<ResourceRow> resourceMapper = (result, row) ->
@@ -134,7 +140,9 @@ public class ManagedSessionStore {
     }
 
     record PublicationWriter(long now, long leaseUntil, long journalRevision,
-            long committedSequence, long activationEpoch, String checkpointId, String recoveryStatus) {
+            long committedSequence, long activationEpoch, String checkpointId, String recoveryStatus,
+            String activationId, String activationPhase, Long activationEventEpoch,
+            Long activationExpiresAt, Long activationHeadRevision) {
     }
 
     PublicationWriter lockPublicationWriter(String tenant, String workspace,
@@ -146,7 +154,9 @@ public class ManagedSessionStore {
         requireWriter(head, writer, generation, token, now, true);
         return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
-                head.latestCheckpointResourceId(), head.recoveryStatus());
+                head.latestCheckpointResourceId(), head.recoveryStatus(), head.activationId(),
+                head.activationPhase(), head.activationEventEpoch(), head.activationExpiresAt(),
+                head.activationHeadRevision());
     }
 
     @Transactional
@@ -356,11 +366,12 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
-        var receiptEvents = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+        var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
                         resourceId));
+        var receiptEvents = applied.receipts();
         if (actions != null) {
             actions.apply(
                     tenantId,
@@ -402,17 +413,52 @@ public class ManagedSessionStore {
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
                 validated.recordDigest(), now);
+        ActivationChange activation = activationChange(
+                applied.lastActivation());
+        // A payload wider than the columns blanks them instead of
+        // failing the commit: authorization then reads the journal
+        // directly, exactly as before the columns existed.
+        boolean fits = activation == null
+                || (activation.id() == null || activation.id().length()
+                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
+                        && (activation.phase() == null
+                                || activation.phase().length()
+                                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS);
+        // activation_head_revision stamps which journal revision the
+        // columns reflect, so a head written by a binary that does not
+        // maintain the columns is detected (stamp lags journal_revision)
+        // and rescanned instead of trusted. A commit that keeps the
+        // existing columns advances their stamp only when they were
+        // current at the previous revision — re-stamping a skewed set
+        // would certify it as fresh.
+        Long activationHeadRevision = head.activationHeadRevision();
+        if (activation != null || (activationHeadRevision != null
+                && activationHeadRevision == head.journalRevision())) {
+            activationHeadRevision = revision;
+        }
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
-                        + " updated_at = ? WHERE tenant_id = ?"
+                        + " activation_id = ?, activation_phase = ?,"
+                        + " activation_event_epoch = ?,"
+                        + " activation_expires_at = ?,"
+                        + " activation_head_revision = ?, updated_at = ?"
+                        + " WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 revision, request.lastSequence(), request.commitDigest(),
                 request.activationEpoch(),
-                request.latestCheckpointResourceId(), now, tenantId,
-                sessionId);
+                request.latestCheckpointResourceId(),
+                activation == null ? head.activationId()
+                        : fits ? activation.id() : null,
+                activation == null ? head.activationPhase()
+                        : fits ? activation.phase() : null,
+                activation == null ? head.activationEventEpoch()
+                        : fits ? activation.epoch() : null,
+                activation == null ? head.activationExpiresAt()
+                        : fits ? activation.expiresAt() : null,
+                activationHeadRevision, now, tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -910,6 +956,25 @@ public class ManagedSessionStore {
         }
     }
 
+    /**
+     * Converts the last activation.changed payload of a committed
+     * transaction, so the head row can answer authorization reads without
+     * rescanning the journal. The payload was already parsed by the
+     * extension record pass of this commit. Text fields read with the same
+     * leniency as the authorization scans, so the two never disagree.
+     */
+    private static ActivationChange activationChange(JsonNode payload) {
+        if (payload == null) {
+            return null;
+        }
+        return new ActivationChange(
+                ToolPublicationContract.text(payload, "activationId"),
+                ToolPublicationContract.text(payload, "phase"),
+                payload.path("epoch").asLong(),
+                ManagedExtensionRecords.millisLenient(
+                        payload.path("expiresAt")));
+    }
+
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
         ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
@@ -1377,7 +1442,9 @@ public class ManagedSessionStore {
                 "The Managed Session writer grant is stale or unavailable.");
     }
 
-    private static ApiException journalCorrupt() {
+    // Package-private: ToolPublicationStore's evidence reads answer a
+    // damaged journal with the same fault the session store raises.
+    static ApiException journalCorrupt() {
         return new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
                 ManagedSessionStoreModels.ERROR_JOURNAL_CORRUPT,
                 "The Managed Session transaction failed verification.");
@@ -1411,7 +1478,9 @@ public class ManagedSessionStore {
             String lastCommitDigest, long activationEpoch,
             String latestCheckpointResourceId,
             long compactedThroughRevision, String recoveryStatus,
-            String recoveryDetailCode) {
+            String recoveryDetailCode, String activationId,
+            String activationPhase, Long activationEventEpoch,
+            Long activationExpiresAt, Long activationHeadRevision) {
     }
 
     private record TransactionRow(String workspaceId, long journalRevision,
@@ -1423,6 +1492,10 @@ public class ManagedSessionStore {
             long activationEpoch, String latestCheckpointResourceId,
             String recordEncoding, byte[] recordBytes, long byteLength,
             String recordDigest) {
+    }
+
+    private record ActivationChange(String id, String phase, long epoch,
+            Long expiresAt) {
     }
 
     private record TransactionSize(long journalRevision, long byteLength) {

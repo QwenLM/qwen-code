@@ -187,11 +187,15 @@ public final class ToolPublicationContract {
     }
 
     public static JsonNode readJson(byte[] bytes) {
+        return readJson(bytes, 0, bytes.length);
+    }
+
+    public static JsonNode readJson(byte[] bytes, int offset, int length) {
         try {
             String text = StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .decode(ByteBuffer.wrap(bytes)).toString();
+                    .decode(ByteBuffer.wrap(bytes, offset, length)).toString();
             return JSON.reader().with(com.fasterxml.jackson.databind.DeserializationFeature
                     .FAIL_ON_TRAILING_TOKENS).readTree(text);
         } catch (IOException error) {

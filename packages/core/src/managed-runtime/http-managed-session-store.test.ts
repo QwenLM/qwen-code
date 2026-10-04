@@ -953,6 +953,52 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('swallows a renewal the Store fences after its writer sealed', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    let finishRenewal!: () => void;
+    const renewalGate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    let fencedRenewals = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const renewal = requestUrl(input).endsWith('/writers:renew');
+      if (renewal) await renewalGate;
+      const response = await server.fetch(input, init);
+      if (renewal && response.status === 409) fencedRenewals++;
+      return response;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      leaseDurationMs: 1000,
+      fetchFn,
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(500);
+      const closing = stores.close();
+      await vi.advanceTimersByTimeAsync(0);
+      finishRenewal();
+      await closing;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fencedRenewals).toBe(1);
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      finishRenewal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('commits the resources a Stage H record names and rebuilds it cold', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
@@ -1420,6 +1466,17 @@ class FakeManagedSessionStore {
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:renew') {
+      if (this.state === 'SEALED')
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message:
+                'The Managed Session writer grant is stale or unavailable.',
+            },
+          },
+          409,
+        );
       this.leaseUntil = Date.now() + 300_000;
       return jsonResponse(this.grant());
     }

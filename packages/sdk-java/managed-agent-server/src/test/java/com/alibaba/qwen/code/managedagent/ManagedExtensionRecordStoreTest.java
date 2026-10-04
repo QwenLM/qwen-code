@@ -337,7 +337,7 @@ class ManagedExtensionRecordStoreTest {
                 "event.kind must be one of", event -> {
                 }, records -> records, -2);
         refuseOrdinary("a second event line for another Session", goal,
-                "The event names another Session", event -> {
+                "Journal event scope conflicts", event -> {
                 }, records -> records, -3);
         refuseOrdinary("a line of an unknown subtype after a Managed line",
                 goal, "has the unknown subtype not_a_subtype after the"

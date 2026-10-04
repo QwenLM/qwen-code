@@ -169,6 +169,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -184,16 +192,24 @@ public class ManagedExtensionRecordStore {
      * hold only those events and then its commit marker, as the authority
      * writes it.
      */
-    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
+        JsonNode lastActivation = null;
         int applied = 0;
         boolean shaped = true;
         boolean managed = false;
         String lastSubtype = null;
+        // Every event line must be scoped to the committing Session — the
+        // closed-key check both read paths enforce applies at write time
+        // too, so a misscoped line never enters the journal at all.
+        JsonNode sessionScope = JSON.createObjectNode()
+                .put("tenantId", tenantId)
+                .put("workspaceId", workspaceId)
+                .put("sessionId", sessionId);
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
             if (record == null) {
@@ -227,8 +243,8 @@ public class ManagedExtensionRecordStore {
             }
             managed = true;
             require(index < eventCount, "The event of record line "
-                    + (index + 1) + " is not one of the transaction's"
-                    + " events.");
+                    + (index + 1) + " has an invalid journal position: it is"
+                    + " not one of the transaction's events.");
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
             String kind = event.path("kind").textValue();
@@ -237,6 +253,14 @@ public class ManagedExtensionRecordStore {
                     : null;
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
+            // requireEvent answers a Stage H record event's scope under its
+            // own messages; every other enveloped line is refused under the
+            // message both publication read paths give it.
+            if (event.isObject() && body == null) {
+                require(event.path("v").asInt() == 1
+                        && sessionScope.equals(event.path("sessionKey")),
+                        "Journal event scope conflicts");
+            }
             long occurredAt = requireEvent(event, tenantId, workspaceId,
                     sessionId, firstSequence + index, body == null);
             if (body == null) {
@@ -244,6 +268,9 @@ public class ManagedExtensionRecordStore {
                 require(!RESERVED_EVENT_ID.matcher(eventId).matches(),
                         "event id " + eventId
                                 + " is reserved for Stage H records.");
+            }
+            if ("activation.changed".equals(kind)) {
+                lastActivation = payload;
             }
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
@@ -265,7 +292,7 @@ public class ManagedExtensionRecordStore {
         require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return receipts;
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
