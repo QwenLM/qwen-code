@@ -28,6 +28,7 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  realpathDeepestExisting,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
@@ -276,13 +277,14 @@ export function registerManagedContextRoutes(
     mcp,
     hooks,
     async (sessionId, realPath) => {
-      // `mount.resolve` returns canonical directories only, so a lexical
-      // relative check against each installed sibling is enough.
+      // A stale binding still owns its missing or symlinked location, but
+      // must not veto targets in unrelated shared directories.
+      const root = await realpathDeepestExisting(boot.mountRoot);
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
-        const directory = await mount.resolve(binding.cwdRelative);
-        // An unresolved binding cannot prove the outside target is shared.
-        if (directory === undefined) return true;
+        const directory = await realpathDeepestExisting(
+          path.join(root, ...binding.cwdRelative.split('/')),
+        );
         const relative = path.relative(directory, realPath);
         if (
           relative !== '..' &&

@@ -1573,13 +1573,28 @@ describe('Managed context tool gate', () => {
     },
   );
 
-  it.each(['missing', 'linked'])(
-    'refuses directory-external file access with a %s sibling binding',
+  it.each(['missing', 'linked', 'dangling'])(
+    'contains a %s sibling without refusing shared dependencies',
     async (state) => {
-      const root = workspace(['services/api/src', 'services/web']);
+      const root = workspace([
+        'services/api/src',
+        'services/web',
+        'packages/ui/src',
+      ]);
       fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
       fs.writeFileSync(path.join(root, 'services/web/notes.txt'), 'peer-data');
+      fs.writeFileSync(
+        path.join(root, 'packages/ui/src/index.ts'),
+        'ui-source',
+      );
       fs.symlinkSync('../web', path.join(root, 'services/api/peek'));
+      fs.mkdirSync(path.join(root, 'services/api/node_modules/@acme'), {
+        recursive: true,
+      });
+      symlinkDirectory(
+        path.join(root, 'packages/ui'),
+        path.join(root, 'services/api/node_modules/@acme/ui'),
+      );
       const origin = await startWorker({
         ...BOOT,
         mountRoot: root,
@@ -1601,15 +1616,19 @@ describe('Managed context tool gate', () => {
           path.join(root, 'services/retired-web'),
         );
         fs.symlinkSync('retired-web', path.join(root, 'services/web'));
+        if (state === 'dangling')
+          fs.rmSync(path.join(root, 'services/retired-web'), {
+            recursive: true,
+          });
       }
       const answer = await (
         await post(origin, EXECUTE, {
           ...shell('session-1', 'call-1', ''),
-          toolName: state === 'missing' ? 'write_file' : 'read_file',
+          toolName: state === 'linked' ? 'read_file' : 'write_file',
           input:
-            state === 'missing'
-              ? { file_path: '../web/new.txt', content: 'dummy' }
-              : { file_path: 'peek/notes.txt' },
+            state === 'linked'
+              ? { file_path: 'peek/notes.txt' }
+              : { file_path: 'peek/new.txt', content: 'dummy' },
         })
       ).json();
       expect(answer.result.executionStatus).toBe('error');
@@ -1619,6 +1638,10 @@ describe('Managed context tool gate', () => {
       );
       if (state === 'missing')
         expect(fs.existsSync(path.join(root, 'services/web'))).toBe(false);
+      if (state === 'dangling')
+        expect(fs.existsSync(path.join(root, 'services/retired-web'))).toBe(
+          false,
+        );
       const own = await (
         await post(origin, EXECUTE, {
           ...shell('session-1', 'call-2', ''),
@@ -1628,6 +1651,15 @@ describe('Managed context tool gate', () => {
       ).json();
       expect(own.result.executionStatus).toBe('success');
       expect(JSON.stringify(own)).toContain('mine');
+      const linkedDep = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-3', ''),
+          toolName: 'read_file',
+          input: { file_path: 'node_modules/@acme/ui/src/index.ts' },
+        })
+      ).json();
+      expect(linkedDep.result.executionStatus).toBe('success');
+      expect(JSON.stringify(linkedDep)).toContain('ui-source');
     },
   );
 

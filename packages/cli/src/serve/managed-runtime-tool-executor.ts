@@ -844,8 +844,7 @@ export class ManagedToolExecutor {
           path.isAbsolute(relative)
         ) {
           // The boundary is the Session directory only when the target lands
-          // in ANOTHER installed Session's directory (or its binding cannot
-          // be resolved); anywhere else inside
+          // in ANOTHER installed Session's directory; anywhere else inside
           // the mount — a linked dependency's real location — stays
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
@@ -1316,7 +1315,9 @@ function escapesSession(relative: string): boolean {
  * its own not-found answer rather than being accused as traversal; any
  * non-ENOENT failure to resolve is not something containment may assume away.
  */
-async function realpathDeepestExisting(candidate: string): Promise<string> {
+export async function realpathDeepestExisting(
+  candidate: string,
+): Promise<string> {
   let resolved = candidate;
   const tail: string[] = [];
   try {
