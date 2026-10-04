@@ -60,6 +60,7 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
         />,
       ).lastFrame() ?? '';
 
+    expect(frame(2_000_000)).toContain('2.0m tokens');
     expect(frame(1_000_000)).toContain('1.0m tokens');
     expect(frame(1_000_000)).not.toContain('1000.0k');
     expect(frame(999_950)).toContain('1.0m tokens');

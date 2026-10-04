@@ -197,6 +197,7 @@ describe('collectContextData (contextCommand)', () => {
         await collectContextData(makeMockConfig(window), false),
       );
 
+    expect(await text(2_000_000)).toContain('Context window: 2.0m tokens');
     expect(await text(1_000_000)).toContain('Context window: 1.0m tokens');
     expect(await text(999_950)).toContain('Context window: 1.0m tokens');
     expect(await text(999_949)).toContain('Context window: 999.9k tokens');

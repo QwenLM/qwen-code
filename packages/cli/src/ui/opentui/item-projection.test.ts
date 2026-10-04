@@ -215,6 +215,35 @@ function expectCoherentBreakdown(item: {
 }
 
 describe('projectContextUsage', () => {
+  it('shows a million-token context window in millions', () => {
+    const withWindow = (contextWindowSize: number) => {
+      const item = {
+        modelName: 'coder-model',
+        totalTokens: 5000,
+        contextWindowSize,
+        breakdown: {
+          systemPrompt: 1000,
+          builtinTools: 800,
+          mcpTools: 0,
+          memoryFiles: 200,
+          skills: 0,
+          messages: 3000,
+          freeSpace: contextWindowSize - 5000 - 1000,
+          autocompactBuffer: 1000,
+        },
+        isEstimated: false,
+        showDetails: false,
+      };
+      expectCoherentBreakdown(item);
+      return projectContextUsage(item);
+    };
+
+    expect(withWindow(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(withWindow(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_950)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_949)).toContain('Context window: 999.9k tokens');
+  });
+
   it('prints the usage table with categories', () => {
     const item = {
       modelName: 'qwen3-max',
@@ -237,15 +266,6 @@ describe('projectContextUsage', () => {
     expectCoherentBreakdown(item);
     expect(text).toContain('Context Usage');
     expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
-    expect(
-      projectContextUsage({ ...item, contextWindowSize: 1_000_000 }),
-    ).toContain('Context window: 1.0m tokens');
-    expect(
-      projectContextUsage({ ...item, contextWindowSize: 999_950 }),
-    ).toContain('Context window: 1.0m tokens');
-    expect(
-      projectContextUsage({ ...item, contextWindowSize: 999_949 }),
-    ).toContain('Context window: 999.9k tokens');
     expect(text).toContain('█ Used 5.0k tokens (5.0%)');
     expect(text).toContain('█ Messages 3.0k tokens (3.0%)');
     expect(text).toContain('Run /context detail for per-item breakdown.');
