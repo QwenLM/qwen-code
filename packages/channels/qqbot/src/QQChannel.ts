@@ -1454,6 +1454,13 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
     this.activePromptSessions.clear();
+    // Report every divert-cap episode's cumulative total before dropping the
+    // map: disconnect is the last release point for these sessions, so an
+    // episode that accumulated drops after its first overflow line would
+    // otherwise lose its `capDropped - capLogged` total silently.
+    for (const [sessionId, held] of this.streamOrphanBuffer) {
+      this.reportOrphanStashCap(sessionId, held);
+    }
     this.streamOrphanBuffer.clear();
     this.completedTurns.clear();
   }

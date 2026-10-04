@@ -1685,6 +1685,67 @@ describe('onResponseComplete', () => {
     expect(sessionAnchors.has('sess-1')).toBe(false);
     stderrSpy.mockRestore();
   });
+
+  it("a stale-branch send never releases a successor turn's anchor", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // Turn 1 streams and its deferred flush chain still owns the entry, so
+    // turn 2's chunks are all diverted by the stale guard and turn 2 completes
+    // through the stale branch.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'turn-1-residual', 'sess-1');
+    pendingStreamDelete.add('sess-1');
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'turn-2-chunk', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.turn).toBe(1);
+
+    // Suspend the stale-branch send so a successor turn can re-anchor the
+    // session while it is still in flight.
+    let resolveSend!: (v: MockResponse) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((res) => {
+        resolveSend = res;
+      }),
+    );
+    const completion = onResponseComplete(
+      ch,
+      'test-chat',
+      'TURN-2-FULL',
+      'sess-1',
+    );
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(
+      (mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>)['msg_id'],
+    ).toBe('msg-B');
+
+    // A successor turn overwrites the session anchor with msg-C before the
+    // stale send settles. The finally must release the msgId it captured
+    // (msg-B): passing it keeps the identity guard from deleting msg-C, while
+    // an unconditional releaseSessionReplyAnchor(sessionId) would drop the
+    // successor's anchor and reclaim its msg_seq counter.
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-C');
+    expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-C');
+    seqMap.set('msg-C', 3);
+
+    resolveSend(mockResponse(true));
+    await completion;
+    await drain();
+
+    expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-C');
+    expect(seqMap.get('msg-C')).toBe(3);
+    stderrSpy.mockRestore();
+  });
 });
 
 describe('pendingStreamDelete coordination', () => {
@@ -2553,6 +2614,43 @@ describe('buffer limit flush (#11)', () => {
     // that the suppressed per-chunk lines would have carried is reported once.
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     expect(orphanBuffer.has('s1')).toBe(false);
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('stash capped:');
+    expect(logged).toContain(`(${droppedTotal} total)`);
+
+    stderrSpy.mockRestore();
+    resolveSend(mockResponse(true));
+    await drain();
+  });
+
+  it('reports the cumulative cap total before disconnect clears the buffer', async () => {
+    const ch = makeChannel({ bufferFlushLength: 40 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; capDropped?: number }
+    >;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const { resolveSend } = await reachStaleStash(ch);
+    for (let i = 0; i < 12; i++) {
+      onResponseChunk(ch, 'test-chat', 'x'.repeat(10), 's1');
+    }
+    // The first overflow logged immediately; the rest only accumulated.
+    expect(
+      stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('over the buffer limit')),
+    ).toHaveLength(1);
+    const droppedTotal = orphanBuffer.get('s1')!.capDropped!;
+    expect(droppedTotal).toBeGreaterThan(0);
+
+    // disconnect() is the only end for this episode — it drops the map with no
+    // report site after it, so the pending total must be flushed first.
+    ch.disconnect();
+    expect(orphanBuffer.size).toBe(0);
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain('stash capped:');
     expect(logged).toContain(`(${droppedTotal} total)`);
