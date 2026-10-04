@@ -112,6 +112,45 @@ describe('ManagedMonitorWatcher', () => {
     expect(exits).toEqual([false]);
   });
 
+  it('keeps a rune intact across chunk ends and the capture byte-exact', async () => {
+    const { supervisor, process, watcher, lines, exits } = rig();
+    const chunks: Buffer[] = [];
+    await watcher.start(
+      { command: 'du -sh .' },
+      (line) => lines.push(line),
+      (failed) => exits.push(failed),
+      { unitName: 'qwen-mon-watch-1', onChunk: (chunk) => chunks.push(chunk) },
+    );
+    const onOutput = supervisor.spec.given!.onOutput;
+    const cjk = Buffer.from('中');
+    onOutput(
+      'stdout',
+      Buffer.concat([Buffer.from('first\n\n'), cjk.subarray(0, 2)]),
+    );
+    onOutput('stdout', Buffer.concat([cjk.subarray(2), Buffer.from('\nlast')]));
+    process.child.emit('exit', 0, null);
+    // Observation lines drop blanks like the Legacy emit path does; the
+    // raw-hunk stream reproduces the command's stdout byte for byte.
+    expect(lines).toEqual(['first', '中', 'last']);
+    expect(Buffer.concat(chunks).toString()).toBe('first\n\n中\nlast');
+    expect(exits).toEqual([false]);
+  });
+
+  it('still ends a watch that exited before its listeners attached', async () => {
+    const { supervisor, process, watcher, lines, exits } = rig();
+    (process.child as unknown as { exitCode: number | null }).exitCode = 0;
+    await watcher.start(
+      { command: 'echo before; exit 7' },
+      (line) => lines.push(line),
+      (failed) => exits.push(failed),
+    );
+    supervisor.spec.given!.onOutput('stdout', Buffer.from('before'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lines).toEqual(['before']);
+    expect(exits).toEqual([false]);
+    (process.child as unknown as { exitCode: number | null }).exitCode = null;
+  });
+
   it('drops a partial line beyond the Legacy cap', async () => {
     const { supervisor, process, watcher, lines, exits } = rig();
     await watcher.start(

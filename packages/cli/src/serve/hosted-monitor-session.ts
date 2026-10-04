@@ -21,6 +21,7 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { manifestRevision } from './managed-output-revision.js';
 
 // H3 of #12827: the hosted orchestrator of a Session's monitor_run records,
 // the mirror of HostedChildRunSession. The managed-runtime worker owns the
@@ -48,6 +49,7 @@ export interface HostedMonitorStore {
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+    read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
 }
 
@@ -207,10 +209,24 @@ export class HostedMonitorSession {
     monitorId: string,
     outputRef: ManagedSessionDurableRef,
   ): Promise<void> {
-    return this.revise(monitorId, (previous) => ({
-      ...previous,
-      outputRef,
-    }));
+    return this.reviseAsync(monitorId, async (previous) => {
+      if (previous.outputRef !== null) {
+        const before = manifestRevision(
+          await this.store.resources.read(previous.outputRef),
+          'Monitor output manifest',
+        );
+        const after = manifestRevision(
+          await this.store.resources.read(outputRef),
+          'Monitor output manifest',
+        );
+        if (after <= before) {
+          throw new Error(
+            `Monitor ${monitorId} output may only advance forward.`,
+          );
+        }
+      }
+      return { ...previous, outputRef };
+    });
   }
 
   /** A started watch ended on its own terms. */

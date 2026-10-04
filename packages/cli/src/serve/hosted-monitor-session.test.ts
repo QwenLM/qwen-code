@@ -222,10 +222,22 @@ describe('HostedMonitorSession', () => {
       harness.now = 6_000;
       const manifest = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1}', 'utf8'),
+        Buffer.from('{"pages":1,"revision":1}', 'utf8'),
       );
       await orchestrator.advanceOutput('monitor-1', manifest);
       expect(committed(authority).body.outputRef).toEqual(manifest);
+      const manifestTwo = await harness.store.publish(
+        'managed-tool-result-manifest',
+        Buffer.from('{"pages":1,"revision":2}', 'utf8'),
+      );
+      await orchestrator.advanceOutput('monitor-1', manifestTwo);
+      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
+      // Output only ever advances forward: back to the older revision
+      // refuses exactly, leaving nothing committed behind.
+      await expect(
+        orchestrator.advanceOutput('monitor-1', manifest),
+      ).rejects.toThrow('may only advance forward');
+      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
 
       harness.now = 7_000;
       await orchestrator.settleQuiet('monitor-1', 'exited');

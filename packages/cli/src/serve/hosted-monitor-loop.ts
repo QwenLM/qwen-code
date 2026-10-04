@@ -35,7 +35,18 @@ export interface MonitorWatchExecutor {
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
     onExit: (failed: boolean) => void,
-    identity?: { readonly unitName: string; readonly cwd?: string },
+    identity?: {
+      readonly unitName: string;
+      readonly cwd?: string;
+      /**
+       * Raw stdout bytes, ahead of any line decode: the durable capture
+       * reproduces the command's stdout exactly — no line splitting, no
+       * dropped blanks, no lost tail — while onLine keeps the Legacy
+       * observation-line semantics. (Round-5 finding: a capture rebuilt
+       * from lines cannot do both.)
+       */
+      readonly onChunk?: (chunk: Buffer) => void;
+    },
   ): Promise<MonitorWatchHandle>;
 }
 

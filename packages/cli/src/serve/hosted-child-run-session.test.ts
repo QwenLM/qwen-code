@@ -193,17 +193,21 @@ describe('HostedChildRunSession', () => {
       harness.now = 4_000;
       const manifestA = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1}', 'utf8'),
+        Buffer.from('{"pages":1,"revision":1}', 'utf8'),
       );
       const manifestB = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":2}', 'utf8'),
+        Buffer.from('{"pages":1,"revision":2}', 'utf8'),
       );
       await orchestrator.advanceOutput('shell-1', manifestA);
       await orchestrator.advanceOutput('shell-1', manifestB);
       const advanced = committed(authority);
       expect(advanced.revision).toBe(5);
       expect(advanced.body.outputRef).toEqual(manifestB);
+      await expect(
+        orchestrator.advanceOutput('shell-1', manifestA),
+      ).rejects.toThrow('may only advance forward');
+      expect(committed(authority).body.outputRef).toEqual(manifestB);
       // Live revisions step the run line: waiting after the running before it.
       expect(advanced.body.run.state).toBe('waiting');
 

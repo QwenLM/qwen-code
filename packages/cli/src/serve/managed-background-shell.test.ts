@@ -275,16 +275,14 @@ describe('managed v3 Monitor watch', () => {
       ).monitorRegistry.countBySession('rs-1'),
     ).toBe(1);
 
-    // Watch lines land on the open-ended capture as monitor output.
+    // Watch output lands on the open-ended capture byte for byte — never
+    // rebuilt from lines (round-5 finding), and never line-split.
     const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
       onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
     };
-    spec.onOutput('stdout', Buffer.from('size 1\nsize 2\n'));
+    spec.onOutput('stdout', Buffer.from('size 1\nsize 2\ntail'));
     await new Promise((resolve) => setImmediate(resolve));
-    expect(ctx.sink.writes).toEqual([
-      ['stdout', 'size 1\n'],
-      ['stdout', 'size 2\n'],
-    ]);
+    expect(ctx.sink.writes).toEqual([['stdout', 'size 1\nsize 2\ntail']]);
   });
 
   it('refuses a fifth live watch of one Session', async () => {

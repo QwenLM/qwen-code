@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import type { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { sanitizeChildEnv } from '@qwen-code/qwen-code-core/utils/sanitize-child-env.js';
@@ -33,7 +34,7 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
     onExit: (failed: boolean) => void,
-    identity?: { readonly unitName: string; readonly cwd?: string },
+    identity?: Parameters<MonitorWatchExecutor['start']>[3],
   ): Promise<MonitorWatchHandle> {
     const text = command['command'];
     if (typeof text !== 'string' || text.length === 0)
@@ -41,6 +42,10 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
     const shell = getShellConfiguration();
     const unitName = identity?.unitName ?? `qwen-mon-${randomUUID()}`;
     const cwd = identity?.cwd ?? process.cwd();
+    // A StringDecoder keeps a multi-byte rune intact when a chunk ends
+    // inside it; a blank line consumes no observation, like the Legacy
+    // emit path, while onChunk carries the stdout raw.
+    const decoder = new StringDecoder('utf8');
     let remainder = '';
     const watch = await this.supervisor.start({
       unitName,
@@ -50,7 +55,8 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
       cwd,
       onOutput: (stream, chunk) => {
         if (stream !== 'stdout') return;
-        remainder += chunk.toString('utf8');
+        identity?.onChunk?.(chunk);
+        remainder += decoder.write(chunk);
         let at = remainder.indexOf('\n');
         while (at >= 0) {
           const line = remainder.slice(0, at);
@@ -61,14 +67,24 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
         if (remainder.length > MONITOR_PARTIAL_LINE_CAP_BYTES) remainder = '';
       },
     });
-    watch.child.once('exit', () => {
+    let exited = false;
+    const end = (failed: boolean) => {
+      if (exited) return;
+      exited = true;
+      remainder += decoder.end();
       if (remainder.length > 0) {
         onLine(remainder);
         remainder = '';
       }
-      onExit(false);
-    });
-    watch.child.once('error', () => onExit(true));
+      onExit(failed);
+    };
+    watch.child.once('exit', () => end(false));
+    watch.child.once('error', () => end(true));
+    // A watch faster than this await's continuation may have emitted its
+    // exit already; the check phase is after every awaiting caller, so the
+    // host still attaches before the end reports.
+    if (watch.child.exitCode != null || watch.child.signalCode != null)
+      setImmediate(() => end(false));
     return {
       receipt: {
         unitName,

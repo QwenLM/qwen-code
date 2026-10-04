@@ -6,6 +6,7 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
@@ -64,6 +65,7 @@ interface RegisteredCapture {
     lastManifest: ManagedSessionDurableRef | null;
     recordDomain: 'child_run' | 'monitor_run';
     remainder: string;
+    decoder: StringDecoder;
     observer?: {
       onLine: (line: string) => void;
       onExit: (failed: boolean) => void;
@@ -232,6 +234,7 @@ export class HostedShellPublisher {
               lastManifest: null,
               recordDomain: monitoringRequested ? 'monitor_run' : 'child_run',
               remainder: '',
+              decoder: new StringDecoder('utf8'),
             },
           }
         : {}),
@@ -315,7 +318,7 @@ export class HostedShellPublisher {
         entry.background?.recordDomain === 'monitor_run' &&
         stream === 'stdout'
       )
-        this.fanMonitorLines(entry.background, bytes.toString('utf8'));
+        this.fanMonitorLines(entry.background, bytes);
       return { accepted: true };
     }
     if (body['operation'] === 'finish') {
@@ -524,27 +527,33 @@ export class HostedShellPublisher {
   }
 
   /**
-   * Forwards whole lines from the watch's durable stream to the hosted
-   * observation loop, with the watch-side remainder kept across chunks
-   * and the Legacy partial-line cap honored.
+   * Forwards whole observation lines from the watch's durable stream to
+   * the hosted loop. A StringDecoder keeps a multi-byte rune intact when
+   * a chunk ends inside it; a blank line consumes no observation, exactly
+   * like the Legacy emit path (the durable stream holds its bytes
+   * regardless); the watch-side remainder survives across chunks, and the
+   * Legacy partial-line cap is honored.
    */
   private fanMonitorLines(
     background: {
       remainder: string;
+      decoder: StringDecoder;
       observer?: {
         onLine: (line: string) => void;
         onExit: (failed: boolean) => void;
       };
     },
-    chunk: string,
+    chunk: Buffer,
   ): void {
     const observer = background.observer;
     if (!observer) return;
-    background.remainder += chunk;
+    background.remainder += background.decoder.write(chunk);
     let at = background.remainder.indexOf('\n');
     while (at >= 0) {
       const line = background.remainder.slice(0, at);
       background.remainder = background.remainder.slice(at + 1);
+      // A blank line consumes no observation, exactly like the Legacy
+      // emit path; the durable stream already holds its bytes.
       if (line.length > 0) observer.onLine(line);
       at = background.remainder.indexOf('\n');
     }
@@ -645,6 +654,9 @@ export class HostedShellPublisher {
       background.recordDomain === 'monitor_run'
         ? background.observer
         : undefined;
+    if (observer && background.recordDomain === 'monitor_run') {
+      background.remainder += background.decoder.end();
+    }
     if (observer && background.remainder.length > 0) {
       observer.onLine(background.remainder);
       background.remainder = '';

@@ -958,36 +958,27 @@ export class ManagedToolExecutor {
       if (next) stream.pause();
       else stream.resume();
     };
+    const acceptChunk = (chunk: Buffer) => {
+      bufferedBytes += chunk.byteLength;
+      const written = sink.write('stdout', chunk);
+      const release = () => {
+        bufferedBytes -= chunk.byteLength;
+        if (paused && bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES)
+          applyPause(false);
+      };
+      void written.then(release, release);
+      if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
+        applyPause(true);
+    };
     try {
       watchHandle = await this.monitorWatcher.start(
         { command },
-        (line) => {
-          const bytes = Buffer.from(`${line}\n`);
-          bufferedBytes += bytes.byteLength;
-          const written = sink.write('stdout', bytes);
-          void written.then(
-            () => {
-              bufferedBytes -= bytes.byteLength;
-              if (
-                paused &&
-                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
-              )
-                applyPause(false);
-            },
-            () => {
-              bufferedBytes -= bytes.byteLength;
-              if (
-                paused &&
-                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
-              )
-                applyPause(false);
-            },
-          );
-          if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
-            applyPause(true);
+        (_observationLine) => {
+          // Observations ride the remote executor and the hosted fan-out;
+          // the durable capture below never goes through a line.
         },
         () => undefined,
-        { unitName, cwd: directory },
+        { unitName, cwd: directory, onChunk: acceptChunk },
       );
     } catch (cause) {
       return settle({

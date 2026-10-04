@@ -19,6 +19,7 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { manifestRevision } from './managed-output-revision.js';
 
 // H3 of #12827: the hosted orchestrator of a Session's child_run records
 // (kind shell). The managed-runtime worker owns the process; the dual path
@@ -45,6 +46,7 @@ export interface HostedChildRunStore {
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+    read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
 }
 
@@ -157,11 +159,26 @@ export class HostedChildRunSession {
     shellId: string,
     outputRef: ManagedSessionDurableRef,
   ): Promise<void> {
-    return this.revise(shellId, (previous) => ({
-      ...previous,
-      outputRef,
-      run: { ...previous.run, ...this.step(previous.run.state) },
-    }));
+    return this.reviseAsync(shellId, async (previous) => {
+      if (previous.outputRef !== null) {
+        const before = manifestRevision(
+          await this.store.resources.read(previous.outputRef),
+          'Shell output manifest',
+        );
+        const after = manifestRevision(
+          await this.store.resources.read(outputRef),
+          'Shell output manifest',
+        );
+        if (after <= before) {
+          throw new Error(`Shell ${shellId} output may only advance forward.`);
+        }
+      }
+      return {
+        ...previous,
+        outputRef,
+        run: { ...previous.run, ...this.step(previous.run.state) },
+      };
+    });
   }
 
   /** A stop was requested of the owner; set once, never cleared. */
