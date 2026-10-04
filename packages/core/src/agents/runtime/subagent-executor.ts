@@ -31,7 +31,15 @@ export interface SubagentExecutor {
   execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options?: { resetStats?: boolean },
+    options?: {
+      resetStats?: boolean;
+      /**
+       * Internal: enforce the agent time limit during retry backoff sleeps
+       * (see `ReasoningLoopOptions.enforceTimeLimitDuringRetryWait`). Set by
+       * workflow dispatches only.
+       */
+      enforceTimeLimitDuringRetryWait?: boolean;
+    },
   ): Promise<void>;
 
   executeExternalInputs(

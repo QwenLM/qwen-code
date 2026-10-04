@@ -849,7 +849,9 @@ async function runSingleDispatch(
       // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
       // so plan lifecycle tools remain blocked if tool filtering changes.
       await runWithAgentContext(workflowAgentId, () =>
-        subagent.execute(ctx, attemptSignal),
+        subagent.execute(ctx, attemptSignal, {
+          enforceTimeLimitDuringRetryWait: true,
+        }),
       );
     } finally {
       reportTokens(subagent, opts, onTokens);
@@ -1437,7 +1439,9 @@ async function runOverridePath(
         // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
         // so plan lifecycle tools remain blocked if tool filtering changes.
         await runWithAgentContext(workflowAgentId, () =>
-          subagent.execute(ctx, dispatchSignal),
+          subagent.execute(ctx, dispatchSignal, {
+            enforceTimeLimitDuringRetryWait: true,
+          }),
         );
       } finally {
         reportTokens(subagent, opts, onTokens);

@@ -109,6 +109,13 @@ public class ManagedAgentProperties {
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
+        /**
+         * Turn-level deadline passed to the Harness at prompt admission. An
+         * admitted Turn outliving it is settled by the Harness as a
+         * classified deadline failure, so a stalled model stream cannot pin
+         * a Session forever.
+         */
+        private Duration turnDeadline = Duration.ofMinutes(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -180,6 +187,14 @@ public class ManagedAgentProperties {
 
         public void setHeartbeatInterval(Duration heartbeatInterval) {
             this.heartbeatInterval = heartbeatInterval;
+        }
+
+        public Duration getTurnDeadline() {
+            return turnDeadline;
+        }
+
+        public void setTurnDeadline(Duration turnDeadline) {
+            this.turnDeadline = turnDeadline;
         }
     }
 
