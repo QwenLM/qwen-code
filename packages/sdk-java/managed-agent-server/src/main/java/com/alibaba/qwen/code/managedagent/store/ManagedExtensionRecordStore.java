@@ -357,6 +357,15 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("monitor_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "lastObservationRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         if (domain.equals("hook_execution")) {
             StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
             if (plan.kind().equals("managed-hook-plan")) {

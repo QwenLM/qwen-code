@@ -147,16 +147,6 @@ async function withAuthority<T>(
   }
 }
 
-function ref(resourceId: string, kind: string): ManagedSessionDurableRef {
-  return {
-    resourceId,
-    kind,
-    schemaVersion: 1,
-    byteLength: 64,
-    digest: 'a'.repeat(64),
-  };
-}
-
 const BINDING_1 = { runtimeBindingId: 'binding-1', generation: '1' };
 const BINDING_2 = { runtimeBindingId: 'binding-2', generation: '2' };
 
@@ -183,7 +173,6 @@ function monitor(
   return {
     monitorId: 'monitor-1',
     ownerScopeId: 'scope-main',
-    commandRef: ref('args-monitor-1', 'managed-tool-args'),
     maxEvents: 100,
     idleTimeoutMs: 60_000,
     debounceMs: 1000,
@@ -198,63 +187,104 @@ function monitor(
   };
 }
 
-const RECEIPT_1 = ref('receipt-1', 'managed-runtime-receipt');
-const RECEIPT_2 = ref('receipt-2', 'managed-runtime-receipt');
-const OBSERVATION_1 = ref('observation-1', 'managed-monitor-observation');
+interface MonitorRefs {
+  readonly args: ManagedSessionDurableRef;
+  readonly receipt1: ManagedSessionDurableRef;
+  readonly receipt2: ManagedSessionDurableRef;
+  readonly observation: ManagedSessionDurableRef;
+}
+
+const monitorRefsCache = new WeakMap<Harness, Promise<MonitorRefs>>();
+
+/** Every revision of a chain cites the same refs, so publish them once per harness. */
+function publishMonitorRefs(harness: Harness): Promise<MonitorRefs> {
+  const cached = monitorRefsCache.get(harness);
+  if (cached) return cached;
+  const pending = (async (): Promise<MonitorRefs> => ({
+    args: await harness.store.publish(
+      'managed-tool-args',
+      Buffer.from('{"command":"du -sh ."}', 'utf8'),
+    ),
+    receipt1: await harness.store.publish(
+      'managed-runtime-receipt',
+      Buffer.from('{"pid":7}', 'utf8'),
+    ),
+    receipt2: await harness.store.publish(
+      'managed-runtime-receipt',
+      Buffer.from('{"pid":8}', 'utf8'),
+    ),
+    observation: await harness.store.publish(
+      'managed-monitor-observation',
+      Buffer.from('{"size":1024}', 'utf8'),
+    ),
+  }))();
+  monitorRefsCache.set(harness, pending);
+  return pending;
+}
 
 /** A watch that starts, observes once, loses its Runtime and is rebuilt. */
-const LIFE = [
-  monitor({}),
-  monitor({ execution: 'dispatch_started', runtime: BINDING_1 }),
-  monitor(
-    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
-    { startReceiptRef: RECEIPT_1 },
-  ),
-  monitor(
-    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
-    {
-      startReceiptRef: RECEIPT_1,
-      observationSequence: 1,
-      lastObservationRef: OBSERVATION_1,
-    },
-  ),
-  monitor(
-    {
-      state: 'recovery_blocked',
-      reason: 'runtime_lost',
-      execution: 'outcome_unknown',
-      runtime: BINDING_1,
-    },
-    {
-      startReceiptRef: RECEIPT_1,
-      observationSequence: 1,
-      lastObservationRef: OBSERVATION_1,
-    },
-  ),
-  monitor(
-    {
-      state: 'running',
-      reason: 'runtime_lost',
-      execution: 'running_attached',
-      runtime: BINDING_2,
-    },
-    {
-      startReceiptRef: RECEIPT_2,
-      observationSequence: 1,
-      lastObservationRef: OBSERVATION_1,
-    },
-  ),
-  monitor(
-    { state: 'cancelled', execution: 'settled', runtime: BINDING_2 },
-    {
-      startReceiptRef: RECEIPT_2,
-      observationSequence: 1,
-      lastObservationRef: OBSERVATION_1,
-      notifiedThrough: 1,
-      stopReason: 'stop_requested',
-    },
-  ),
-];
+async function monitorLife(harness: Harness) {
+  const refs = await publishMonitorRefs(harness);
+  return [
+    monitor({}, { commandRef: refs.args }),
+    monitor(
+      { execution: 'dispatch_started', runtime: BINDING_1 },
+      { commandRef: refs.args },
+    ),
+    monitor(
+      { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+      { commandRef: refs.args, startReceiptRef: refs.receipt1 },
+    ),
+    monitor(
+      { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+      {
+        commandRef: refs.args,
+        startReceiptRef: refs.receipt1,
+        observationSequence: 1,
+        lastObservationRef: refs.observation,
+      },
+    ),
+    monitor(
+      {
+        state: 'recovery_blocked',
+        reason: 'runtime_lost',
+        execution: 'outcome_unknown',
+        runtime: BINDING_1,
+      },
+      {
+        commandRef: refs.args,
+        startReceiptRef: refs.receipt1,
+        observationSequence: 1,
+        lastObservationRef: refs.observation,
+      },
+    ),
+    monitor(
+      {
+        state: 'running',
+        reason: 'runtime_lost',
+        execution: 'running_attached',
+        runtime: BINDING_2,
+      },
+      {
+        commandRef: refs.args,
+        startReceiptRef: refs.receipt2,
+        observationSequence: 1,
+        lastObservationRef: refs.observation,
+      },
+    ),
+    monitor(
+      { state: 'cancelled', execution: 'settled', runtime: BINDING_2 },
+      {
+        commandRef: refs.args,
+        startReceiptRef: refs.receipt2,
+        observationSequence: 1,
+        lastObservationRef: refs.observation,
+        notifiedThrough: 1,
+        stopReason: 'stop_requested',
+      },
+    ),
+  ];
+}
 
 function command(commandId: string, digest = 'd') {
   return {
@@ -270,13 +300,15 @@ const TRUSTED = { class: 'trusted_entry' } as const;
 async function commitLife(
   harness: Harness,
   authority: LocalManagedSessionAuthority,
-  count = LIFE.length,
+  count?: number,
 ) {
+  const life = await monitorLife(harness);
+  count ??= life.length;
   for (let index = 0; index < count; index++) {
     harness.now = 1_000 * (index + 1);
     await authority.commitExtensionRecord(
       command(`monitor-1:${index + 1}`),
-      { domain: 'monitor_run', record: LIFE[index] },
+      { domain: 'monitor_run', record: life[index] },
       TRUSTED,
     );
   }
@@ -331,6 +363,50 @@ const chains = JSON.parse(
   }>;
 };
 
+// Same as the Java side: fixtures cite resources by fictional identity, so
+// every chain first mirrors them as real, same-kind placeholder resources —
+// identity stays fixed across the chain, only lookup becomes real.
+const fixtureResourcesCache = new WeakMap<
+  Harness,
+  Map<string, Promise<ManagedSessionDurableRef>>
+>();
+
+async function materializeFixtureMonitorRun(
+  harness: Harness,
+  body: unknown,
+): Promise<unknown> {
+  const monitor = body as Record<string, unknown>;
+  const cache =
+    fixtureResourcesCache.get(harness) ??
+    fixtureResourcesCache.set(harness, new Map()).get(harness)!;
+  const next = { ...monitor };
+  for (const field of [
+    'commandRef',
+    'startReceiptRef',
+    'outputRef',
+    'lastObservationRef',
+  ] as const) {
+    const ref = next[field];
+    if (!ref || typeof ref !== 'object' || Array.isArray(ref)) continue;
+    const typed = ref as Record<string, unknown>;
+    const key = `${typed['resourceId']}${typed['kind']}${typed['digest']}`;
+    const pending =
+      cache.get(key) ??
+      cache
+        .set(
+          key,
+          (async () =>
+            await harness.store.publish(
+              typed['kind'] as string,
+              Buffer.alloc(Number(typed['byteLength'])),
+            ))(),
+        )
+        .get(key)!;
+    next[field] = await pending;
+  }
+  return next;
+}
+
 describe('managed-extension-projection/1 monitor chains', () => {
   it.each(chains.monitorChainCases)(
     'commits and projects: $id',
@@ -342,7 +418,13 @@ describe('managed-extension-projection/1 monitor chains', () => {
           harness.now = revision.occurredAt;
           await authority.commitExtensionRecord(
             command(`chain:${index}`),
-            { domain: 'monitor_run', record: revision.monitorRun },
+            {
+              domain: 'monitor_run',
+              record: await materializeFixtureMonitorRun(
+                harness,
+                revision.monitorRun,
+              ),
+            },
             TRUSTED,
           );
           const [view] = authority.taskViews();
@@ -363,7 +445,10 @@ describe('managed-extension-projection/1 monitor chains', () => {
       for (const [index, record] of each.accepted.entries()) {
         await authority.commitExtensionRecord(
           command(`chain:${index}`),
-          { domain: 'monitor_run', record },
+          {
+            domain: 'monitor_run',
+            record: await materializeFixtureMonitorRun(harness, record),
+          },
           TRUSTED,
         );
       }
@@ -378,7 +463,10 @@ describe('managed-extension-projection/1 monitor chains', () => {
       await expect(
         authority.commitExtensionRecord(
           next,
-          { domain: 'monitor_run', record: each.next },
+          {
+            domain: 'monitor_run',
+            record: await materializeFixtureMonitorRun(harness, each.next),
+          },
           TRUSTED,
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
@@ -390,10 +478,11 @@ describe('managed-extension-projection/1 monitor chains', () => {
 describe('managed session authority Stage H records', () => {
   it('chains monitor revisions and projects the task', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const first = await authority.commitExtensionRecord(
         command('monitor-1:1'),
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       expect(first).toMatchObject({
@@ -407,7 +496,7 @@ describe('managed session authority Stage H records', () => {
       // The resource holds exactly the closed body, with no envelope.
       expect(
         JSON.parse((await harness.store.read(first.recordRef)).toString()),
-      ).toEqual(LIFE[0]);
+      ).toEqual(life[0]);
       expect(authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
@@ -422,11 +511,11 @@ describe('managed session authority Stage H records', () => {
         },
       ]);
 
-      for (let index = 1; index < LIFE.length; index++) {
+      for (let index = 1; index < life.length; index++) {
         harness.now = 1_000 * (index + 1);
         await authority.commitExtensionRecord(
           command(`monitor-1:${index + 1}`),
-          { domain: 'monitor_run', record: LIFE[index] },
+          { domain: 'monitor_run', record: life[index] },
           TRUSTED,
         );
         if (index === 4) {
@@ -445,9 +534,9 @@ describe('managed session authority Stage H records', () => {
       expect(
         authority.extensionRecord('monitor_run', 'monitor-1'),
       ).toMatchObject({
-        revision: LIFE.length,
+        revision: life.length,
         operationId: 'monitor-1:1',
-        record: LIFE.at(-1),
+        record: life.at(-1),
       });
       expect(authority.taskViews()).toEqual([
         {
@@ -467,10 +556,11 @@ describe('managed session authority Stage H records', () => {
 
   it('keeps one chain per monitor and lists the newest first', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         command('monitor-1:1'),
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       harness.now = 2_000;
@@ -478,7 +568,7 @@ describe('managed session authority Stage H records', () => {
         command('monitor-2:1'),
         {
           domain: 'monitor_run',
-          record: { ...LIFE[0], monitorId: 'monitor-2' },
+          record: { ...life[0], monitorId: 'monitor-2' },
         },
         TRUSTED,
       );
@@ -487,7 +577,7 @@ describe('managed session authority Stage H records', () => {
         command('monitor-3:1'),
         {
           domain: 'monitor_run',
-          record: { ...LIFE[0], monitorId: 'monitor-3' },
+          record: { ...life[0], monitorId: 'monitor-3' },
         },
         TRUSTED,
       );
@@ -502,12 +592,13 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses a first revision that does not open its run', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const before = authority.committedSequence;
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1'),
-          { domain: 'monitor_run', record: LIFE[2] },
+          { domain: 'monitor_run', record: life[2] },
           TRUSTED,
         ),
       ).rejects.toThrow(ManagedSessionConflictError);
@@ -529,7 +620,8 @@ describe('managed session authority Stage H records', () => {
           runtime: BINDING_1,
         },
         {
-          startReceiptRef: RECEIPT_1,
+          commandRef: (await publishMonitorRefs(harness)).args,
+          startReceiptRef: (await publishMonitorRefs(harness)).receipt1,
           observationSequence: 0,
           lastObservationRef: null,
         },
@@ -549,13 +641,14 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses a malformed body before publishing it', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1'),
           {
             domain: 'monitor_run',
-            record: { ...LIFE[0], operationId: 'envelope-field' },
+            record: { ...life[0], operationId: 'envelope-field' },
           },
           TRUSTED,
         ),
@@ -566,11 +659,12 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses a stale or foreign command before publishing it', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitExtensionRecord(
           { ...command('monitor-1:1'), expectedSequence: 99 },
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(/re-read before retrying/);
@@ -580,7 +674,7 @@ describe('managed session authority Stage H records', () => {
             ...command('monitor-1:1'),
             sessionKey: { ...sessionKey, sessionId: 'another-session' },
           },
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(/does not match this session/);
@@ -588,8 +682,35 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
+  it('refuses a record that cites a resource the store does not hold', async () => {
+    const harness = await createHarness();
+    const life = await monitorLife(harness);
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          {
+            domain: 'monitor_run',
+            record: {
+              ...life[0],
+              commandRef: {
+                resourceId: 'args-nobody-committed',
+                kind: 'managed-tool-args',
+                schemaVersion: 1,
+                byteLength: 22,
+                digest: 'b'.repeat(64),
+              },
+            },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/is not present/);
+    });
+  });
+
   it('keeps the Stage H event IDs for Stage H records', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.appendExecution(
@@ -616,7 +737,7 @@ describe('managed session authority Stage H records', () => {
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1'),
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).resolves.toMatchObject({ revision: 1 });
@@ -625,6 +746,7 @@ describe('managed session authority Stage H records', () => {
 
   it('commits a notification input and its wake with the record', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 4);
       const input: ManagedSessionInputRequest = {
@@ -642,7 +764,7 @@ describe('managed session authority Stage H records', () => {
         ),
         wakeReason: 'input',
       };
-      const notified = { ...LIFE[3], notifiedThrough: 1 };
+      const notified = { ...life[3], notifiedThrough: 1 };
       const committed = await authority.commitExtensionRecord(
         command('monitor-1:notify:1'),
         { domain: 'monitor_run', record: notified, input },
@@ -668,6 +790,7 @@ describe('managed session authority Stage H records', () => {
 
   it('replays a retried command without publishing again', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 2);
       const sequence = authority.committedSequence;
@@ -680,7 +803,7 @@ describe('managed session authority Stage H records', () => {
       const published = (await fs.readdir(bodies)).length;
       const replay = await authority.commitExtensionRecord(
         command('monitor-1:1'),
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       expect(replay).toMatchObject({
@@ -699,7 +822,7 @@ describe('managed session authority Stage H records', () => {
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1', 'e'),
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(/different content/);
@@ -708,10 +831,11 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses a monitor record committed around its chain', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const recordRef = await harness.store.publish(
         'managed-monitor_run',
-        Buffer.from(JSON.stringify(LIFE[0]), 'utf8'),
+        Buffer.from(JSON.stringify(life[0]), 'utf8'),
       );
       await expect(
         authority.appendExecution(
@@ -774,6 +898,7 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses domains without a body and disabled domains', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitExtensionRecord(
@@ -786,7 +911,7 @@ describe('managed session authority Stage H records', () => {
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1'),
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(/not enabled for submission/);
@@ -795,6 +920,7 @@ describe('managed session authority Stage H records', () => {
 
   it('rebuilds the chains and the task list after a restart', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     const before = await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 5);
       return authority.taskViews();
@@ -809,14 +935,14 @@ describe('managed session authority Stage H records', () => {
         await expect(
           authority.commitExtensionRecord(
             command('monitor-1:bad'),
-            { domain: 'monitor_run', record: LIFE[0] },
+            { domain: 'monitor_run', record: life[0] },
             TRUSTED,
           ),
         ).rejects.toThrow(ManagedSessionConflictError);
         harness.now = 6_000;
         const next = await authority.commitExtensionRecord(
           command('monitor-1:6'),
-          { domain: 'monitor_run', record: LIFE[5] },
+          { domain: 'monitor_run', record: life[5] },
           TRUSTED,
         );
         expect(next.revision).toBe(6);
@@ -851,12 +977,13 @@ describe('managed session authority Stage H records', () => {
 
   it('fails to reopen when committed revisions no longer chain', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       chainRules.lenient = true;
       await commitLife(harness, authority, 1);
       await authority.commitExtensionRecord(
         command('monitor-1:skip'),
-        { domain: 'monitor_run', record: LIFE[3] },
+        { domain: 'monitor_run', record: life[3] },
         TRUSTED,
       );
     });
@@ -870,6 +997,7 @@ describe('managed session authority Stage H records', () => {
 
   it('issues grants the Runtime gate installs, renews and replaces', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 5);
       const request = {
@@ -918,7 +1046,7 @@ describe('managed session authority Stage H records', () => {
       harness.now = 6_000;
       await authority.commitExtensionRecord(
         command('monitor-1:6'),
-        { domain: 'monitor_run', record: LIFE[5] },
+        { domain: 'monitor_run', record: life[5] },
         TRUSTED,
       );
       expect(
@@ -947,10 +1075,11 @@ describe('managed session authority Stage H records', () => {
 
   it('lets a command open one record, whatever its operation name', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         { ...command('open-1'), operation: 'startMonitor' },
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       await expect(
@@ -958,7 +1087,7 @@ describe('managed session authority Stage H records', () => {
           command('open-1'),
           {
             domain: 'monitor_run',
-            record: { ...LIFE[0], monitorId: 'monitor-2' },
+            record: { ...life[0], monitorId: 'monitor-2' },
           },
           TRUSTED,
         ),
@@ -969,6 +1098,7 @@ describe('managed session authority Stage H records', () => {
 
   it('refuses a Stage H retry of a command committed without a record', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const shared = command('shared-1');
       await authority.submitInput(shared, {
@@ -990,7 +1120,7 @@ describe('managed session authority Stage H records', () => {
       await expect(
         authority.commitExtensionRecord(
           shared,
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).rejects.toThrow(/committed without a Stage H record/);
@@ -1005,6 +1135,7 @@ describe('managed session authority Stage H records', () => {
 
   it('shows the record as soon as its transaction commits', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const journal = (
         authority as unknown as {
@@ -1030,7 +1161,7 @@ describe('managed session authority Stage H records', () => {
       );
       await authority.commitExtensionRecord(
         command('monitor-1:1'),
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       expect(seen.map(([committed]) => committed)).toContain(1);
@@ -1042,10 +1173,11 @@ describe('managed session authority Stage H records', () => {
 
   it('fails to reopen when two records share their opening command', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         { ...command('open-1'), operation: 'startMonitor' },
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       // A writer without the one-record rule, as a log written under looser
@@ -1062,7 +1194,7 @@ describe('managed session authority Stage H records', () => {
         command('open-1'),
         {
           domain: 'monitor_run',
-          record: { ...LIFE[0], monitorId: 'monitor-2' },
+          record: { ...life[0], monitorId: 'monitor-2' },
         },
         TRUSTED,
       );
@@ -1077,17 +1209,18 @@ describe('managed session authority Stage H records', () => {
 
   it('replays a committed command after its domain was disabled', async () => {
     const harness = await createHarness();
+    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       const first = await authority.commitExtensionRecord(
         command('monitor-1:1'),
-        { domain: 'monitor_run', record: LIFE[0] },
+        { domain: 'monitor_run', record: life[0] },
         TRUSTED,
       );
       enablement.monitorRun = false;
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:1'),
-          { domain: 'monitor_run', record: LIFE[0] },
+          { domain: 'monitor_run', record: life[0] },
           TRUSTED,
         ),
       ).resolves.toMatchObject({
@@ -1097,7 +1230,7 @@ describe('managed session authority Stage H records', () => {
       await expect(
         authority.commitExtensionRecord(
           command('monitor-1:2'),
-          { domain: 'monitor_run', record: LIFE[1] },
+          { domain: 'monitor_run', record: life[1] },
           TRUSTED,
         ),
       ).rejects.toThrow(/not enabled for submission/);

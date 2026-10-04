@@ -246,6 +246,24 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void refusesAMonitorRunCitingAResourceOutsideItsCommit() throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        byte[] decoyBytes = { 0 };
+        CommitResource decoy = new CommitResource(UUID.randomUUID()
+                .toString(), "managed-note", 1, decoyBytes.length,
+                ExtensionRecordJournal.sha256(decoyBytes),
+                Base64.getEncoder().encodeToString(decoyBytes));
+        assertRefused("a monitor run that cites a resource outside its"
+                        + " commit", sessionId,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                "A referenced Managed Session resource is missing.",
+                () -> journal.commit(journal.requestDomain("open",
+                        "monitor_run", chain().get(0).required("monitorRun"),
+                        List.of(decoy), 1_000)));
+    }
+
+    @Test
     void refusesWhatTheAuthorityCouldNotReadBack() throws Exception {
         byte[] start = ExtensionRecordJournal.bytes(
                 chain().get(0).required("monitorRun"));

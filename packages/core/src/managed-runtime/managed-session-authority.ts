@@ -10,6 +10,7 @@ import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
   type OperationGrant,
@@ -1910,6 +1911,14 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'child_run') {
       const child = parseChildRun(record);
       refs = [child.commandRef, child.startReceiptRef, child.outputRef];
+    } else if (domain === 'monitor_run') {
+      const monitor = parseMonitorRun(record);
+      refs = [
+        monitor.commandRef,
+        monitor.startReceiptRef,
+        monitor.outputRef,
+        monitor.lastObservationRef,
+      ];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
