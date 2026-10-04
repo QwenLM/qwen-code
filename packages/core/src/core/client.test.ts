@@ -2735,64 +2735,69 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('keeps the turn budget for a bridged Agent call the bridge refused', async () => {
-      // A refusal (or cancellation) still arrives as a `tool_call`-named
-      // functionResponse with the same call id, but with `error` in place of
-      // `output` — no Agent invocation ever ran, so the reminder force would
-      // fire on shape alone and reset the cadence for nothing.
-      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: LlmEventType.Content, value: 'response' };
-        })(),
-      );
-      client.getChat().setHistory([
-        {
-          role: 'model',
-          parts: [
+    it.each([
+      DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+      DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+    ])(
+      'keeps the turn budget for an unexecuted bridged Agent (%s)',
+      async (prefix) => {
+        // A refusal (or cancellation) still arrives as a `tool_call`-named
+        // functionResponse with the same call id, but with `error` in place of
+        // `output` — no Agent invocation ever ran, so the reminder force would
+        // fire on shape alone and reset the cadence for nothing.
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+        client.getChat().setHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-refused',
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: 'agent',
+                    args: { description: 'd', prompt: 'p' },
+                  },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const stream = client.sendMessageStream(
+          [
             {
-              functionCall: {
+              functionResponse: {
                 id: 'call-refused',
                 name: ToolNames.TOOL_CALL,
-                args: {
-                  name: 'agent',
-                  args: { description: 'd', prompt: 'p' },
+                response: {
+                  error: `${prefix}Agent invocation never started.`,
                 },
               },
             },
           ],
-        },
-      ]);
+          new AbortController().signal,
+          'prompt-bridged-agent-refused',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
 
-      const stream = client.sendMessageStream(
-        [
-          {
-            functionResponse: {
-              id: 'call-refused',
-              name: ToolNames.TOOL_CALL,
-              response: {
-                error:
-                  '[tool_call bridge refused] Deferred tool "agent" changed since tool_search last returned it.',
-              },
-            },
-          },
-        ],
-        new AbortController().signal,
-        'prompt-bridged-agent-refused',
-        { type: SendMessageType.ToolResult },
-      );
-      for await (const _ of stream) {
-        // drain
-      }
-
-      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
-        'prompt-bridged-agent-refused',
-      );
-      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalledWith(
-        'prompt-bridged-agent-refused',
-        true,
-      );
-    });
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-bridged-agent-refused',
+        );
+        expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalledWith(
+          'prompt-bridged-agent-refused',
+          true,
+        );
+      },
+    );
 
     it('forces the active todo reminder for a bridged Agent that ran and failed', async () => {
       // A bridged delegation that resolved and then threw carries a generic

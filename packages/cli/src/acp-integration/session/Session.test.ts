@@ -39957,6 +39957,8 @@ describe('Session', () => {
       );
       vi.mocked(mockConfig.setGoalProposalTurnKey).mockClear();
       mockLlmClient.setTools.mockClear();
+      mockToolRegistry.revealDeferredTool.mockClear();
+      mockToolRegistry.unrevealDeferredTool.mockClear();
       await session.prompt({
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'An unarmed turn.' }],
@@ -39971,6 +39973,8 @@ describe('Session', () => {
         undefined,
       );
       expect(mockLlmClient.setTools).not.toHaveBeenCalled();
+      expect(mockToolRegistry.revealDeferredTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.unrevealDeferredTool).not.toHaveBeenCalled();
     });
 
     it('applies an approved proposal when a sibling permission is rejected', async () => {

@@ -4240,12 +4240,14 @@ describe('runNonInteractive', () => {
       // computed unwrapped request would run the hidden target under its
       // own name and desync the provider's function-call/response names).
       const executedRequests: Array<{
+        callId: string;
         name: string;
         args: Record<string, unknown>;
       }> = [];
       mockCoreExecuteToolCall.mockImplementation(
         async (_config, request, _signal, options) => {
           executedRequests.push({
+            callId: request.callId,
             name: request.name,
             args: request.args as Record<string, unknown>,
           });
@@ -4309,17 +4311,13 @@ describe('runNonInteractive', () => {
       expect(started).toBe(total);
       expect(executedRequests).toHaveLength(2);
       for (const req of executedRequests) {
+        const args = { path: req.callId };
         expect(req.name).toBe(ToolNames.TOOL_CALL);
-        expect(req.args['name']).toBe(targetName);
+        expect(req.args).toEqual({
+          name: targetName,
+          arguments: format === 'string' ? JSON.stringify(args) : args,
+        });
       }
-      expect(bridgeEvents[0].value).toMatchObject({
-        args: {
-          arguments:
-            format === 'string'
-              ? JSON.stringify({ path: 'bridge-1' })
-              : { path: 'bridge-1' },
-        },
-      });
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-1' },

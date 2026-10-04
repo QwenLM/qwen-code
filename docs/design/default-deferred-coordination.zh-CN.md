@@ -19,7 +19,8 @@ Agent 和 Goal 的完整声明成本。此前显式配置 `tools.eager` 的实�
 的立即声明回退仍然适用。Code Mode 保持原有发现路径。基于声明工具的 system
 prompt 指引过滤仍生效，并新增一个输入：Agent 可达性。Subagent Delegation 与
 Codebase Search 两行在 `agent` 已声明、或已注册在桥接两端之后且出现在延迟摘要
-中时保留；桥接不完整的会话里被排除在立即声明之外的 Agent 两个条件都不满足，
+中时满足 Agent 条件；Codebase Search 仍要求 `grep_search` 和 `glob` 已声明。
+桥接不完整的会话里被排除在立即声明之外的 Agent 两个条件都不满足，
 因此这两行会被裁掉。其余受控行不新增例外，也不增加其他 prompt 裁剪策略。
 memory、history 和子 Agent 收到的 schema 保持不变。
 

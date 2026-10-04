@@ -22,7 +22,9 @@ when either bridge half is unavailable still apply. Code Mode keeps its existing
 discovery path. Declared-tool system-prompt gating still applies, with one
 added input: Agent reachability. The Subagent Delegation and Codebase Search
 lines survive when `agent` is declared, or when it is registered behind both
-bridge halves and listed in the deferred summary; an Agent withheld from the
+bridge halves and listed in the deferred summary. Reachability satisfies only
+the Agent prerequisite; Codebase Search still requires declared `grep_search`
+and `glob`. An Agent withheld from the
 eager reveal in an incomplete-bridge session is neither, so both lines drop. No
 other gated line gains an exception, and no further prompt-trimming policy is
 added. Memory, history, and the schemas that subagents receive are unchanged.

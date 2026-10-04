@@ -26,7 +26,7 @@ It is independent of the model and the window, and you cannot make it look bette
 
 ### 1. Turn off features you do not use
 
-Each feature that registers a tool pays for that tool's schema on every request. The largest single built-in entries are the ones belonging to optional features, so a deployment that does not use workflows, goals, scheduled tasks, or the review tooling saves more by switching those features off than by any amount of prompt editing. This also removes the tool from subagents, which the next lever does not always do.
+Each tool declared to the model adds its schema to every request. Switching off optional features with large resident tools can therefore save request tokens. Deferred tools instead contribute short catalog entries and the cost of later discovery or invocation. Disabling a feature also removes its tools from subagents, which the next lever does not always do.
 
 ### 2. Keep the eager tool surface to what you actually use
 
@@ -69,7 +69,7 @@ Keep in a context file only what is always true — identity, vocabulary, a hard
 
 ### 4. The system prompt, last
 
-The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. It also now describes only the tools the session actually declared, so trimming your tool surface shrinks it a little for free. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
+The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. Its gated tool guidance follows the declared set, with an exception for bridge-reachable Agent; other tools named by those entries still need declarations. Trimming your tool surface can therefore shrink that guidance as well. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
 
 ## Traps
 

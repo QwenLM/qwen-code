@@ -18,14 +18,14 @@
 
 `prompts.test.ts` 已有以下结构化测试；合并前仍需确认当前 HEAD 的 CI 结果，不能把历史通过记录当作当前验证：
 
-| 已自动覆盖                                           | 测试                                                                                                                                                                                                     |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 无快照与声明全部工具的渲染一致                       | 17 份完整提示词快照 + `renders identically when every tool is declared`                                                                                                                                  |
-| 无快照到文件白名单的节省量按 Agent 可达性区分        | `saves about 1.1k characters of policy text for a file-work allowlist when Agent is not bridge-reachable`；`saves only the monitor policy text for a file-work allowlist when Agent is bridge-reachable` |
-| 只有两个被门控段落发生变化                           | `changes nothing outside the two gated sections`                                                                                                                                                         |
-| 被门控段落里不出现未声明的工具（机械扫描全部工具名） | `never names an undeclared tool inside the gated sections`                                                                                                                                               |
-| code mode 完全不受门控影响（反向检查）               | `leaves CodeModeOnly guidance untouched by the declared set`                                                                                                                                             |
-| 快照确实从 `Config` 传到提示词构建器                 | `keeps Agent guidance when Agent is bridge-reachable`（#13033 重命名后同时断言 `getPromptAgentReachable()` 快照）                                                                                        |
+| 已自动覆盖                                                           | 测试                                                                                                                                                                                                     |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 无快照与声明全部工具的渲染一致                                       | 17 份完整提示词快照 + `renders identically when every tool is declared`                                                                                                                                  |
+| 无快照到文件白名单的节省量按 Agent 可达性区分                        | `saves about 1.1k characters of policy text for a file-work allowlist when Agent is not bridge-reachable`；`saves only the monitor policy text for a file-work allowlist when Agent is bridge-reachable` |
+| 只有两个被门控段落发生变化                                           | `changes nothing outside the two gated sections`                                                                                                                                                         |
+| 被门控段落只出现已声明工具，或桥接可达的 Agent（机械扫描全部工具名） | `never names an undeclared tool inside the gated sections`                                                                                                                                               |
+| code mode 完全不受门控影响（反向检查）                               | `leaves CodeModeOnly guidance untouched by the declared set`                                                                                                                                             |
+| 快照确实从 `Config` 传到提示词构建器                                 | `keeps Agent guidance when Agent is bridge-reachable`（#13033 重命名后同时断言 `getPromptAgentReachable()` 快照）                                                                                        |
 
 **因此这份文档只剩两类事需要真实会话：** 一是**真实请求的 token 是否真的下降**（单元测试只能量字符数，量不到 provider 的计费口径，也证明不了 `tools.eager` 在你们部署上真的被接受）；二是**召回率与其他模块在真实会话中的表现**（§5、§6）。
 
@@ -37,12 +37,12 @@
 
 | 对比基线 → 文件七件套白名单                                                                  | 节省字符 | 节省 UTF-8 字节 | 移除内容                                                     |
 | -------------------------------------------------------------------------------------------- | -------: | --------------: | ------------------------------------------------------------ |
-| 无声明快照（假定全部工具可用）                                                               |    1,135 |           1,139 | Subagent Delegation、Codebase Search、Monitor Processes 三条 |
+| 无声明快照（假定全部工具可用），白名单侧 Agent 不可达                                        |    1,135 |           1,139 | Subagent Delegation、Codebase Search、Monitor Processes 三条 |
 | 基线已不声明 monitor，且白名单侧 Agent 被 `tools.disabled: ["agent"]` 整体移除（桥保持完整） |      818 |             822 | Subagent Delegation、Codebase Search 两条                    |
 
 字符采用 JavaScript `string.length` 口径，字节采用 UTF-8 口径；`wc -c` 量的是字节，不能直接与字符数比较。两种对比都保留全部示例，因为示例只调用文件类工具和 shell。若继续移除 `edit`、`write_file`、`glob` 或 shell，示例也会被裁剪，必须按当前模型模板重新测量，不能沿用旧版范围。若 A/B 两边都开启 Todo，B 还会少 `- **Task Management:**` 一条（228 字符——该条按 `todo_write` 是否被**声明**门控，见 `prompts.ts` 的 `TOOL_GUIDANCE_LINE_GATES`，而 `todo_write` 不在文件七件套内）：无快照行差值变为 1,364 字符 / 1,368 字节，monitor 未声明行变为 1,047 字符 / 1,051 字节。
 
-上表第 2 行的白名单侧须额外在 settings 里设 `tools.disabled: ["agent"]` 才能让 Agent 真正不可达——`tools.eager` 名单做不到这一点（桥接两件套免于白名单降级，Agent 始终可通过桥接调用，可达性例外因此总是生效）。该行数字描述的是这一配置下的差值。
+上表两行的白名单侧都须额外在 settings 里设 `tools.disabled: ["agent"]` 才能让 Agent 真正不可达——`tools.eager` 名单做不到这一点（桥接两件套免于白名单降级，Agent 始终可通过桥接调用，可达性例外因此总是生效）。两行数字分别描述各自基线在这一配置下的差值。
 
 这些数字不是 token 计费数据，也不是所有真实 CLI 配置的固定收益。默认延迟加载的 `monitor` 若在 A/B 两边均未声明，就不能把它的 317 字符算入 A/B 差值。
 
