@@ -12,7 +12,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 
 ## 现状
 
-以下事实基于 `main` 的 `848cf5e6c4`。
+以下事实基于 `main` 的 `9220c85358`。
 
 - **Authority。** `packages/core` 中的 `LocalManagedSessionAuthority` 是 Session 日志唯一的写入者。`commitDomainRecord` 把 `operationId`、`revision` 与 `previousRecordRef` 合并进它发布的正文，并且每个 domain 只维护一条修订链。`submitInput` 在一个事务中提交 `input.accepted` 和 authority 为它生成的 `wake.requested`。
 - **存储。** Hosted Harness 通过 `HttpManagedSessionStore` 把日志写入 Java Session 存储；后者把每个事务存为不透明的记录字节，把每个资源存为经过校验的数据块。事件 payload 引用的资源随提交内联发送；只在另一个资源正文中被引用的资源，仅当该正文是检查点时才会随之发送。
@@ -39,7 +39,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 
 ## 决策
 
-1. **authority 写入，Java 存储物化**（问题 2）。TypeScript authority 仍是日志唯一的写入者，这是存储设计第 3 节的要求：注册 domain 没有第二条写入路径。Java Session 存储是它的持久存储，现在会读取每个事务携带的 Stage H 修订，并在保存日志的同一个 SQL 事务中，把记录索引、任务投影与 outbox 写成可查询的行。它用 H0b 与 H0c 的规则检查每一条修订，只要有一条不通过就拒绝整个提交。这样控制面绝不会持有 authority 不可能提交的记录，而两侧一旦不一致，写入者会停下，而不是悄无声息地继续。控制面由此获得参考设计第 1 节交给它的产品级记录与公开投影，且无需第二个写入者。
+1. **authority 写入，Java 存储物化**（问题 2）。TypeScript authority 仍是日志唯一的写入者，这是存储设计第 3 节的要求：注册 domain 没有第二条写入路径。Java Session 存储是它的持久存储，现在会读取每个事务携带的 Stage H 修订，并在保存日志的同一个 SQL 事务中，把记录索引、任务投影与 outbox 写成可查询的行。它用 H0b 与 H0c 的规则检查每一条修订，只要有一条不通过就拒绝整个提交。在这项检查之内，控制面绝不持有 authority 不可能提交的记录；某个 domain 是否开放提交，仍由 authority 自己把关，存储并不镜像。两侧一旦不一致，写入者会停下，而不是悄无声息地继续。控制面由此获得参考设计第 1 节交给它的产品级记录与公开投影，且无需第二个写入者。
 2. **唤醒就是 `input.accepted` 加 `wake.requested`**（问题 3）。一条 Stage H 修订可以在同一事务中提交一个通知输入，authority 会像 `submitInput` 那样为它生成唤醒。没有 `WakeIntent` 记录，也没有新的事件类型：按存储设计第 3 节，两者都需要新的 `minimumReader`，而 `wake.requested` 本身就是可重建的调度索引。Session inbox 是用户消息队列，不是唤醒的载体。
 3. **每条记录一条修订链，按正文自身的身份区分**（H0b 未决问题 3）。Stage H 修订的资源恰好保存封闭的正文，不合并任何其他内容。修订链按 domain 与正文自身的身份（Monitor 为 `monitorId`）区分，其修订号、上一修订和开启它的操作都来自日志顺序，因而不可能与正文不一致。
 4. **第一条修订必须开启运行。** 其运行为 `reserved` 或 `admitted`，执行为空或 `intent`，交付为空或 `planned`；Monitor 还必须尚未写出输出，而没有启动回执它也不可能有观测。H0b 的后继规则只说明一条修订如何接在另一条之后；没有这条规则，一条记录可能一出现就已结算。
@@ -106,7 +106,7 @@ Flyway `V18` 新增 `qwen_managed_session_extension_record`：每条记录一行
 3. 对照存储中的最新修订检查首修订规则或后继规则，并借助每行保存的开启命令哈希，检查开启记录的命令没有开启过另一条记录。然后用 `ManagedExtensionProjection` 投影任务视图，插入或更新该行。
 4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，追加一个带 `data.taskId` 与 `data.state` 的 `task.updated` 事件；事件带有去重键，重放的事务不会重复宣告。它先锁住 Session 所在的行再读取状态，因此能看到在 Session 存储事务进行期间已提交的删除。该事件与其他 Session 事件一样追加：它会推进 Session 的 `updated_at` 与版本；若它落在两段流式文本增量之间，会像任何穿插进来的事件一样把文本分段拆开。
 
-被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在，无论事务是否携带 Stage H 记录，每一行记录都必须是 authority 读取器能够接受的 JSON 对象，否则返回 `400 managed_session_invalid_request`。authority 写出的行一直满足这一点。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
+被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 managed_session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在，无论事务是否携带 Stage H 记录，每一行记录都必须是 authority 读取器能够接受的 JSON 对象，否则返回 `400 invalid_managed_session_store_request`。authority 写出的行一直满足这一点。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
 
 ## 公开契约
 
@@ -151,17 +151,17 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 ## 验证计划
 
 - **TypeScript：** 回放 fixture；authority 测试套件覆盖修订链、发布前的拒绝、重放以及提交时未带记录的命令、通知与唤醒、事务一提交记录即可见、绕过防护、保留的事件 ID、未开放的 domain、冷重建、正文缺失、接不上修订链或共用开启命令，以及 grant；gate 对照 H0b 的替换用例、撤销语义与格式错误的输入；HTTP 存储覆盖嵌套资源、经 HTTP 的冷重建以及写入端发出的请求。
-- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、authority 无法解析的记录行、重放、宣告与已删除的 Session；经 HTTP 路由回放 TypeScript 写入端的请求；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 与 MySQL 8.4 上运行，并证明被拒绝的修订不会留下任何资源、资源引用或日志行，且在 Stage H 提交期间已提交的删除不会在其终止事件之后收到 `task.updated`。
+- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、authority 无法解析的记录行、重放、宣告与已删除的 Session；经 HTTP 路由回放 TypeScript 写入端的请求；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 上运行，并证明被拒绝的修订允许同一命令以新命令再次提交——没有留下任何资源、资源引用或修订——且在 Stage H 提交期间已提交的删除不会在其终止事件之后收到 `task.updated`。
 - **Broker：** 每个执行状态对应上报的线上状态。
 - **生成类型：** WebShell 生成器测试。
-- **变异检查：** 依次禁用投影规则、起始与修订链规则、authority 的拒绝以及存储的检查，每一处都有测试失败。
+- **变异检查：** 在 TypeScript 侧依次禁用投影规则、起始与修订链规则以及 authority 的拒绝，每一处都有测试失败。
 
 ## 验收标准
 
 - 对每个 fixture 用例，TypeScript 与 Java 得出相同的任务 ID、任务视图与 outbox 归属，并拒绝相同的修订链；两侧各自把本侧读取的 Runtime 报告映射为 fixture 给出的执行状态。
 - 被拒绝的修订在两侧都不提交任何内容。
 - 重新打开的 authority 与重启后的服务报告与之前相同的任务列表。
-- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表、`capabilities.tasks` 以及更严格的记录行解析之外没有任何变化。
+- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表、`capabilities.tasks`、更严格的记录行解析之外，还有通用追加路径：现在只有已开放、且没有 Stage H 记录体的 domain 才能追加 `domain.committed` 事件——今天是 `goal_state`、`session_metadata`、`file_history` 与 `session_source`——而不再接受每一个已注册的名字。
 - H0 门槛在契约层面成立。fixture 固定了任务 ID、修订链规则（Runtime 只能在未知结果之后、以更新的代数重新挂接）、Broker 的执行状态以及 Broker 为其上报的线上状态。TypeScript、Java 存储与 Broker 各自回放自己的部分。目前只有提交路径是端到端运行的：在 H3 开放 `monitor_run`、H1 接入 gate 之前，生产代码不会调用 `commitExtensionRecord`、grant gate 或执行状态映射。
 - `monitor_run` 仍被拒绝提交。
 

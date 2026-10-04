@@ -39,6 +39,7 @@
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
     "dev:managed-agent-web": "npm --workspace packages/web-shell run dev -- --port 5174",
+    "dev:managed-agent": "node scripts/managed-agent-dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",

@@ -7,8 +7,10 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -678,13 +680,23 @@ class ManagedAgentMySqlIT {
                 Integer.class, tenant, session, refusedResource)).isZero();
         assertThat(count(jdbc, "qwen_managed_session_resource_ref", tenant,
                 session)).isEqualTo(references);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_session_journal_tx WHERE"
-                        + " tenant_id = ? AND session_id = ? AND"
-                        + " command_id = 'refused'", Integer.class, tenant,
-                session)).isZero();
-        assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
-                .get(0).projection()).isEqualTo(before);
+        // No command row survives the refusal: the same operation and
+        // command id commit a new body as new, not as a replay of the
+        // refused call; the rollback of its resource rows is pinned by the
+        // counts above.
+        JsonNode retry = ((ObjectNode) chain.get(0).required("monitorRun")
+                .deepCopy()).put("monitorId", "monitor-retry");
+        CommitReceipt resent = inTransaction(transactions,
+                () -> journal.commitMonitor("refused", retry, 99_000));
+        assertThat(resent.replayed()).isFalse();
+        String retryTask = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(session, "monitor_run",
+                        "monitor-retry"));
+        List<TaskRow> tasks = records.listTasks(tenant, session, null, null,
+                10).tasks();
+        assertThat(tasks).hasSize(2);
+        assertThat(tasks.get(0).taskId()).isEqualTo(retryTask);
+        assertThat(records.findTask(tenant, session, retryTask)).isPresent();
 
         // A first revision checks its opening command through an index, not
         // by reading every record of its Session. The plan is asked of a
@@ -706,9 +718,8 @@ class ManagedAgentMySqlIT {
                         .toList());
         jdbc.queryForList("ANALYZE TABLE"
                 + " qwen_managed_session_extension_record");
-        assertThat(jdbc.queryForList("EXPLAIN SELECT COUNT(*) FROM"
-                        + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND operation_hash = ?",
+        assertThat(jdbc.queryForList("EXPLAIN "
+                        + ManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
                 scopeKey, sha256("command-7")))
                 .extracting(row -> row.get("key"))
                 .containsExactly("idx_managed_session_extension_operation");

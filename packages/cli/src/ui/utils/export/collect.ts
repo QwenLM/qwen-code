@@ -131,7 +131,12 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   };
 
   for (const record of records) {
-    if (record.type !== 'tool_result' || !record.toolCallResult) continue;
+    if (
+      record.type !== 'tool_result' ||
+      record.subtype === 'code_mode_tool_result' ||
+      !record.toolCallResult
+    )
+      continue;
 
     const toolName = extractToolNameFromRecord(record);
     const callId = getExplicitToolResultCallId(record);
