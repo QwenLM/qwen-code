@@ -2,7 +2,7 @@
 
 [English](2026-09-23-managed-runtime-process-adoption.md) | [简体中文](2026-09-23-managed-runtime-process-adoption.zh-CN.md)
 
-Status: implemented. Updated: 2026-09-24. Continues the [attestation client](2026-09-23-java-runtime-attestation-client.md).
+Status: implemented. Updated: 2026-10-02. Continues the [attestation client](2026-09-23-java-runtime-attestation-client.md).
 
 ## This slice
 

@@ -3739,9 +3739,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
-    // Renewals run their synchronous JDBC on their own pool, so one stalled
-    // storage call cannot queue retries, polls, and every other binding's
-    // renewal past its lease. A second thread absorbs one slow call.
+    // Renewals run their synchronous JDBC on their own pool, so a stalled
+    // tick no longer occupies the coordination thread, and a second thread
+    // absorbs one slow call. That is not isolation: the tick holds its
+    // claim's monitor while parked, and the fence and settlement paths take
+    // that monitor from coordination tasks, so a long stall can still block
+    // coordination behind it (#13275).
     private static ScheduledExecutorService newRenewalScheduler() {
         ScheduledThreadPoolExecutor executor =
                 new ScheduledThreadPoolExecutor(2,

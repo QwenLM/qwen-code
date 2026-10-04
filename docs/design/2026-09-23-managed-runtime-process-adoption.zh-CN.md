@@ -2,7 +2,7 @@
 
 [English](2026-09-23-managed-runtime-process-adoption.md) | [简体中文](2026-09-23-managed-runtime-process-adoption.zh-CN.md)
 
-状态：已实现。更新日期：2026-09-24。承接[attestation 客户端](2026-09-23-java-runtime-attestation-client.zh-CN.md)。
+状态：已实现。更新日期：2026-10-02。承接[attestation 客户端](2026-09-23-java-runtime-attestation-client.zh-CN.md)。
 
 ## 本切片
 
