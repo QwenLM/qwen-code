@@ -491,7 +491,7 @@ export interface components {
             /** Format: int64 */
             lastSequence: number;
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
-            capabilities?: components["schemas"]["WebShellSessionCapabilities"];
+            capabilities: components["schemas"]["WebShellSessionCapabilities"];
         };
         WebShellSessionCapabilities: {
             /** @default false */

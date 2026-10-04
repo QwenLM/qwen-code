@@ -23,6 +23,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -387,10 +388,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletableFuture<SessionContext> current = sessions.get(runtimeId);
         if (current != null) {
             return current.thenApply(context -> {
-                synchronized (context) {
+                context.lock();
+                try {
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
                     return requireReadySessionRecord(context);
+                } finally {
+                    context.unlock();
                 }
             });
         }
@@ -417,9 +421,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (ManagedHookProtocol.isOperation(immutable)) {
                         ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         context.beginControl();
+                    } finally {
+                        context.unlock();
                     }
                     CompletionStage<Object> result;
                     try {
@@ -547,7 +554,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<ToolExecutionRecord> started = requireReadySession(
                 harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         ToolExecutionRecord record = requireExecution(context, executionId);
                         boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
@@ -618,6 +626,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
+                    } finally {
+                        context.unlock();
                     }
                 });
         return unknownWhenAdmissionClosed(started, harnessSessionId,
@@ -631,7 +641,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<ToolExecutionRecord> started = requireReadySession(
                 harnessSessionId, runtimeSessionId)
                 .thenApply(context -> {
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         ToolExecutionRecord record = requireExecution(context, executionId);
                         if (!ProviderRuntimeProtocol.isReference(record.getReference())) {
@@ -642,6 +653,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             beginDispatch(context, record);
                         }
                         return requireExecution(context, executionId);
+                    } finally {
+                        context.unlock();
                     }
                 });
         return unknownWhenAdmissionClosed(started, harnessSessionId,
@@ -703,9 +716,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
         return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            synchronized (context) {
+            context.lock();
+            try {
                 requireReadySessionRecord(context);
                 context.beginControl();
+            } finally {
+                context.unlock();
             }
             return safeStage(() -> {
                 requireUsableLease(context);
@@ -722,7 +738,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> savedReceipt = immutableMap(receipt, "receipt");
         return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
             ToolExecutionRecord record;
-            synchronized (context) {
+            context.lock();
+            try {
                 requireReadySessionRecord(context);
                 record = requireExecution(context, executionCallId);
                 if (!record.isSettled()
@@ -731,6 +748,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
                 }
                 context.beginControl();
+            } finally {
+                context.unlock();
             }
             return safeStage(() -> {
                 requireUsableLease(context);
@@ -755,7 +774,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
                         return acknowledgeLocalExecution(harnessSessionId, runtimeSessionId, id, receipt);
                     }
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         execution = requireExecution(context, id);
                         if (!execution.isSettled()
@@ -765,6 +785,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
                         }
                         context.beginControl();
+                    } finally {
+                        context.unlock();
                     }
                     ToolExecutionRecord original = execution;
                     return mapFailure(safeStage(() -> {
@@ -860,7 +882,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
                         boolean publicationV3;
-                        synchronized (context) {
+                        context.lock();
+                        try {
                             requireReadySessionRecord(context);
                             ToolExecutionRecord current = requireExecution(
                                     context, executionId);
@@ -886,6 +909,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 return CompletableFuture.completedFuture(
                                         requested);
                             }
+                        } finally {
+                            context.unlock();
                         }
                         if (requested.getState()
                                 == ToolExecutionRecord.State.DISPATCHING) {
@@ -1118,8 +1143,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             boolean takeover, boolean cooled) {
         requireOpen();
         requireAnswerableBinding(unknown);
-        synchronized (context) {
+        context.lock();
+        try {
             requireReadySessionRecord(context);
+        } finally {
+            context.unlock();
         }
         // Only the binding generation the execution was dispatched to,
         // reached through this process's attested lease, may answer.
@@ -1426,7 +1454,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private ToolExecutionRecord createExecution(SessionContext context,
             String idempotencyKey, Map<String, Object> reference, boolean dispatch) {
         ToolExecutionRecord record;
-        synchronized (context) {
+        context.lock();
+        try {
             requireReadySessionRecord(context);
             Map<String, Object> safeReference = immutableMap(reference,
                     "reference");
@@ -1467,6 +1496,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_idempotency_conflict",
                         "idempotency key belongs to another request");
             }
+        } finally {
+            context.unlock();
         }
         if (dispatch && shouldDriveDispatch(record)) {
             beginDispatch(context, record);
@@ -1499,7 +1530,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
-        synchronized (context) {
+        context.lock();
+        try {
             if (context.release() != null) {
                 return context.release();
             }
@@ -1518,6 +1550,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             result = new CompletableFuture<>();
             context.release(result);
+        } finally {
+            context.unlock();
         }
         mapFailure(safeStage(() -> transport.release(context.lease(),
                 context.session())), "runtime_session_release_failed",
@@ -1571,9 +1605,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     });
         }
         return selected.thenApply(context -> {
-            synchronized (context) {
+            context.lock();
+            try {
                 requireSameSession(context.session(), session);
                 return requireReadySessionRecord(context);
+            } finally {
+                context.unlock();
             }
         });
     }
@@ -3867,6 +3904,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private static final class SessionContext {
+        // One guard for the state below and every context.lock() region at
+        // the callers. Like them it must not pin a virtual-thread carrier
+        // when a repository call inside the guard blocks (JDK 21).
+        private final ReentrantLock guard = new ReentrantLock();
         private final RuntimeSession session;
         private final RuntimeBindingRecord binding;
         private final RuntimeLease lease;
@@ -3878,6 +3919,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             this.session = session;
             this.binding = binding;
             this.lease = lease;
+        }
+
+        void lock() {
+            guard.lock();
+        }
+
+        void unlock() {
+            guard.unlock();
         }
 
         RuntimeSession session() {
@@ -3892,28 +3941,57 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return lease;
         }
 
-        synchronized void beginControl() {
-            activeControls++;
+        void beginControl() {
+            lock();
+            try {
+                activeControls++;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized void endControl() {
-            activeControls--;
+        void endControl() {
+            lock();
+            try {
+                activeControls--;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized boolean hasActiveControl() {
-            return activeControls > 0;
+        boolean hasActiveControl() {
+            lock();
+            try {
+                return activeControls > 0;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized CompletableFuture<Boolean> release() {
-            return release;
+        CompletableFuture<Boolean> release() {
+            lock();
+            try {
+                return release;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized void release(CompletableFuture<Boolean> next) {
-            release = next;
+        void release(CompletableFuture<Boolean> next) {
+            lock();
+            try {
+                release = next;
+            } finally {
+                unlock();
+            }
         }
     }
 
     private final class BindingRenewal implements AutoCloseable {
+        // A monitor here would pin a virtual-thread carrier whenever a
+        // guarded repository call blocks on the database (JDK 21);
+        // the lock parks without pinning instead.
+        private final ReentrantLock monitor = new ReentrantLock();
         private final AtomicReference<RuntimeBindingRecord> current;
         private final AtomicBoolean valid = new AtomicBoolean(true);
         private final AtomicBoolean stopped = new AtomicBoolean();
@@ -3923,70 +4001,100 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = new AtomicReference<>(claimed);
         }
 
-        synchronized void start() {
-            long delay = renewalDelayMillis(operationLeaseDuration);
-            task = renewalScheduler.scheduleWithFixedDelay(this::renew, delay,
-                    delay, TimeUnit.MILLISECONDS);
-        }
-
-        synchronized RuntimeBindingRecord stopAndGet() {
-            close();
-            return !closed.get() && valid.get() ? current.get() : null;
-        }
-
-        synchronized boolean persistResourceHandle(
-                RuntimeResourceHandle handle) {
-            if (closed.get() || !valid.get()) {
-                return false;
-            }
-            RuntimeBindingRecord expected = current.get();
-            RuntimeBindingRecord updated = bindingRepository.compareAndSet(
-                    expected, expected.withResourceHandle(handle,
-                            clock.instant()));
-            if (updated == null) {
-                valid.set(false);
-                close();
-                return false;
-            }
-            current.set(updated);
-            return true;
-        }
-
-        private synchronized void renew() {
-            // stopped is per-instance: cancel(false) cannot retract a tick
-            // already waiting on this monitor, so once close() ran the tick
-            // must return here rather than renew a claim its owner has
-            // started renewing inline. The window is staged and pinned for
-            // the provision-path shape, where persistResourceHandle can hold
-            // this monitor while a tick queues behind it
-            // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
-            // the LOST-branch shape has no third monitor holder, so there it
-            // remains a timing-only guarantee.
-            if (stopped.get() || closed.get()) {
-                close();
-                return;
-            }
-            RuntimeBindingRecord expected = current.get();
+        void start() {
+            monitor.lock();
             try {
-                RuntimeBindingRecord renewed =
-                        bindingRepository.renewOperation(
-                                expected.getBindingId(), brokerOwnerId,
-                                expected.getOperationGeneration(),
-                                operationLeaseDuration);
-                if (renewed == null) {
-                    valid.set(false);
-                    close();
-                } else {
-                    current.set(renewed);
+                long delay = renewalDelayMillis(operationLeaseDuration);
+                task = renewalScheduler.scheduleWithFixedDelay(this::renew,
+                        delay, delay, TimeUnit.MILLISECONDS);
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        RuntimeBindingRecord stopAndGet() {
+            monitor.lock();
+            try {
+                closeLocked();
+                return !closed.get() && valid.get() ? current.get() : null;
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        boolean persistResourceHandle(
+                RuntimeResourceHandle handle) {
+            monitor.lock();
+            try {
+                if (closed.get() || !valid.get()) {
+                    return false;
                 }
-            } catch (RuntimeException exception) {
-                valid.set(false);
-                close();
+                RuntimeBindingRecord expected = current.get();
+                RuntimeBindingRecord updated = bindingRepository.compareAndSet(
+                        expected, expected.withResourceHandle(handle,
+                                clock.instant()));
+                if (updated == null) {
+                    valid.set(false);
+                    closeLocked();
+                    return false;
+                }
+                current.set(updated);
+                return true;
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void renew() {
+            monitor.lock();
+            try {
+                // stopped is per-instance: cancel(false) cannot retract a
+                // tick already waiting on this monitor, so once close() ran
+                // the tick must return here rather than renew a claim its
+                // owner has started renewing inline. The window is staged
+                // and pinned for the provision-path shape, where
+                // persistResourceHandle can hold this monitor while a tick
+                // queues behind it
+                // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
+                // the LOST-branch shape has no third monitor holder, so
+                // there it remains a timing-only guarantee.
+                if (stopped.get() || closed.get()) {
+                    closeLocked();
+                    return;
+                }
+                RuntimeBindingRecord expected = current.get();
+                try {
+                    RuntimeBindingRecord renewed =
+                            bindingRepository.renewOperation(
+                                    expected.getBindingId(), brokerOwnerId,
+                                    expected.getOperationGeneration(),
+                                    operationLeaseDuration);
+                    if (renewed == null) {
+                        valid.set(false);
+                        closeLocked();
+                    } else {
+                        current.set(renewed);
+                    }
+                } catch (RuntimeException exception) {
+                    valid.set(false);
+                    closeLocked();
+                }
+            } finally {
+                monitor.unlock();
             }
         }
 
         @Override
-        public synchronized void close() {
+        public void close() {
+            monitor.lock();
+            try {
+                closeLocked();
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void closeLocked() {
             stopped.set(true);
             if (task != null) {
                 task.cancel(false);
@@ -3995,6 +4103,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private final class DispatchRenewal implements AutoCloseable {
+        // Same virtual-thread rule as BindingRenewal: guarded repository
+        // calls must not pin the caller's carrier while they block.
+        private final ReentrantLock monitor = new ReentrantLock();
         private final String executionCallId;
         private final long dispatchGeneration;
         private ScheduledFuture<?> task;
@@ -4005,34 +4116,54 @@ public final class RuntimeBrokerService implements AutoCloseable {
             this.dispatchGeneration = dispatchGeneration;
         }
 
-        synchronized void start() {
-            long delay = renewalDelayMillis(dispatchLeaseDuration);
-            task = renewalScheduler.scheduleWithFixedDelay(this::renew, delay,
-                    delay, TimeUnit.MILLISECONDS);
+        void start() {
+            monitor.lock();
+            try {
+                long delay = renewalDelayMillis(dispatchLeaseDuration);
+                task = renewalScheduler.scheduleWithFixedDelay(this::renew,
+                        delay, delay, TimeUnit.MILLISECONDS);
+            } finally {
+                monitor.unlock();
+            }
         }
 
-        private synchronized void renew() {
-            if (closed.get()) {
-                close();
-                return;
-            }
+        private void renew() {
+            monitor.lock();
             try {
-                ToolExecutionRecord renewed =
-                        executionRepository.renewDispatch(executionCallId,
-                                brokerOwnerId, dispatchGeneration,
-                                dispatchLeaseDuration);
-                if (renewed == null) {
-                    executionRepository.claimDispatch(executionCallId,
-                            brokerOwnerId, dispatchLeaseDuration);
-                    close();
+                if (closed.get()) {
+                    closeLocked();
+                    return;
                 }
-            } catch (RuntimeException exception) {
-                // A transient repository failure does not prove claim loss.
+                try {
+                    ToolExecutionRecord renewed =
+                            executionRepository.renewDispatch(
+                                    executionCallId, brokerOwnerId,
+                                    dispatchGeneration,
+                                    dispatchLeaseDuration);
+                    if (renewed == null) {
+                        executionRepository.claimDispatch(executionCallId,
+                                brokerOwnerId, dispatchLeaseDuration);
+                        closeLocked();
+                    }
+                } catch (RuntimeException exception) {
+                    // A transient repository failure does not prove claim loss.
+                }
+            } finally {
+                monitor.unlock();
             }
         }
 
         @Override
-        public synchronized void close() {
+        public void close() {
+            monitor.lock();
+            try {
+                closeLocked();
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void closeLocked() {
             if (task != null) {
                 task.cancel(false);
             }
