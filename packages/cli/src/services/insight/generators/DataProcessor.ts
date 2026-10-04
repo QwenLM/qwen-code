@@ -1115,9 +1115,13 @@ None captured`;
               }
             }
 
-            // Track lines and files from tool results
+            // Track lines and files from tool results. Internal Code Mode
+            // results belong to the outer exec call, which export file
+            // statistics already count, so counting them again here would
+            // report different totals for the same transcript.
             if (
               record.type === 'tool_result' &&
+              record.subtype !== 'code_mode_tool_result' &&
               record.toolCallResult?.resultDisplay
             ) {
               const display = record.toolCallResult.resultDisplay;

@@ -807,9 +807,12 @@ export class QwenAgentManager {
             });
           }
         }
-        // Handle tool result records
+        // Handle tool result records. Internal Code Mode results have no
+        // model-emitted call partner, so rendering them adds rows for calls
+        // the model never made.
         else if (
           r.type === 'tool_result' &&
+          r.subtype !== 'code_mode_tool_result' &&
           r.toolCallResult &&
           typeof r.toolCallResult === 'object'
         ) {

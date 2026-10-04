@@ -84,6 +84,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         require(broker.getWorkspaceGeneration(),
                 "Runtime Broker workspace generation");
         require(broker.getWorkspaceCwd(), "Runtime Broker workspace cwd");
+        Duration v3ResultWindow = broker.getV3ResultWindow();
+        if (v3ResultWindow == null || v3ResultWindow.compareTo(
+                RuntimeBrokerService.MIN_V3_RESULT_WINDOW) < 0) {
+            // A suffix-less number binds as milliseconds; fail before the
+            // provisioner exists rather than degrade every v3 execution.
+            throw new IllegalStateException(
+                    "Runtime Broker v3 result window must be at least "
+                            + RuntimeBrokerService.MIN_V3_RESULT_WINDOW);
+        }
         String workspaceCwd = resolveWorkspaceCwd(broker);
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
@@ -154,21 +163,27 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.service = new RuntimeBrokerService(resolver, provisioner,
                 transport, bindingRepository, sessionRepository,
                 executionRepository, UUID.randomUUID().toString(), LEASE,
-                LEASE, verifier);
+                LEASE, verifier, v3ResultWindow);
         try {
             this.server = new RuntimeBrokerHttpServer(
                     new InetSocketAddress(broker.getHost(), broker.getPort()),
-                    broker.getToken(), service);
+                    broker.getToken(), service, broker.isAllowNonLoopback());
             server.start();
-        } catch (IOException error) {
+        } catch (IOException | IllegalArgumentException error) {
             service.close();
+            // The same catch covers the token and port validation, so name
+            // the actual refusal instead of blaming the listener for all of
+            // them.
             throw new IllegalStateException(
-                    "Runtime Broker listener could not start", error);
+                    "Runtime Broker listener could not start: "
+                            + error.getMessage(), error);
         }
         this.recovery = broker.isTrustedLocalRebootRecovery()
                 ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
-        LOG.info("Embedded Runtime Broker listening at {}",
-                server.getBaseUri());
+        // Log the resolved window: a suffix-less config value binds as
+        // milliseconds, so "30" meant as 30 minutes shows up here as PT0.03S.
+        LOG.info("Embedded Runtime Broker listening at {} (v3 result window {})",
+                server.getBaseUri(), v3ResultWindow);
     }
 
     @Override
