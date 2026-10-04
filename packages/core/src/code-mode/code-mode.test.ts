@@ -314,6 +314,10 @@ describe('CodeModeOnly exposure', () => {
       'Pending timeouts do not keep exec alive by themselves',
       'clearTimeout(timeoutId?: number)',
       'prefer a String.raw tagged template',
+      'parsed separately from this exec program',
+      'without nested backticks or interpolations',
+      'use forward slashes in Windows file paths',
+      'Inspect returned field names before composing dependent calls',
     ]) {
       expect(buildExecDescription(first)).toContain(fragment);
     }
