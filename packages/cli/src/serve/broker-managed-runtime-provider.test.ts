@@ -912,6 +912,11 @@ describe('BrokerManagedRuntimeProvider', () => {
     });
     await expect(client.execute(reference())).rejects.toThrow('503');
     expect(prepares).toBe(1);
+    // The refusal stays cached: a second execute and even a pure status
+    // read surface the same answer without re-sending the reservation.
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    await expect(client.status(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(1);
     provider.dispose();
   });
 

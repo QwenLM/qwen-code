@@ -1022,7 +1022,15 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         // eviction drops the recorded digest with it, so keep it tombstoned
         // or a changed-args retry would pass the identity check on an empty
         // cache.
-        void retained.reserved.catch(() => {
+        void retained.reserved.catch((error: unknown) => {
+          if (
+            error instanceof BrokerResponseError &&
+            error.retryable === false
+          ) {
+            // The Broker refused a retry at the protocol level: keep the
+            // refusal cached instead of re-sending it on every later call.
+            return;
+          }
           if (entry.executions.get(reference.invocationId) === retained) {
             entry.executions.delete(reference.invocationId);
             entry.failedDigests.set(
@@ -1093,7 +1101,12 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       // A transiently rejected start must not be cached forever either:
       // re-execution re-prepares under the stable idempotency key, with the
       // failed digest tombstoned for the same reason as above.
-      void execution.started.catch(() => {
+      void execution.started.catch((error: unknown) => {
+        if (error instanceof BrokerResponseError && error.retryable === false) {
+          // Same rule as the reservation: a declared-refusal start stays
+          // cached rather than being re-driven on every later call.
+          return;
+        }
         if (entry.executions.get(reference.invocationId) === startedExecution) {
           entry.executions.delete(reference.invocationId);
           entry.failedDigests.set(

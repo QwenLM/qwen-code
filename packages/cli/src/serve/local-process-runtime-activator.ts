@@ -89,6 +89,7 @@ export class LocalProcessRuntimeActivator {
   private readonly registry = new ProcessRegistry();
   private readonly generations = new Map<string, Generation>();
   private readonly epochs = new Map<string, number>();
+  private readonly cleanupFailures: unknown[] = [];
   private readonly draining = new Set<WorkspaceRuntime>();
   private readonly revoked = new Set<WorkspaceRuntime>();
   private readonly reloading = new Set<WorkspaceRuntime>();
@@ -282,7 +283,7 @@ export class LocalProcessRuntimeActivator {
   close(): Promise<void> {
     this.closed = true;
     this.closePromise ??= (async () => {
-      const stops = await Promise.allSettled(
+      await Promise.allSettled(
         [...this.generations.values()].map((g) =>
           this.stop(
             g,
@@ -291,10 +292,10 @@ export class LocalProcessRuntimeActivator {
         ),
       );
       await this.registry.shutdown();
-      const failed = stops.find(
-        (stop): stop is PromiseRejectedResult => stop.status === 'rejected',
-      );
-      if (failed) throw failed.reason;
+      // Cleanup failures that settled before close() was called are not in
+      // the map anymore, so the rejection set is instance state, not
+      // membership.
+      if (this.cleanupFailures.length > 0) throw this.cleanupFailures[0];
     })();
     return this.closePromise;
   }
@@ -444,27 +445,27 @@ export class LocalProcessRuntimeActivator {
     g.retiring = true;
     g.controller.abort(reason);
     g.stop = (async () => {
-      try {
-        await g.endpoint.catch(() => {});
-        if (g.tracked) {
-          try {
-            await g.tracked.terminate();
-          } catch (error) {
-            if (!(error instanceof ProcessExitError)) throw error;
-            this.log(g, 'terminated');
-          }
+      await g.endpoint.catch(() => {});
+      if (g.tracked) {
+        try {
+          await g.tracked.terminate();
+        } catch (error) {
+          if (!(error instanceof ProcessExitError)) throw error;
+          this.log(g, 'terminated');
         }
-        await rm(g.boot.outputRoot, { recursive: true, force: true });
-        this.log(g, 'released');
-        g.resolveExit();
-      } finally {
-        // Release the capacity slot even when cleanup fails; a leaked entry
-        // otherwise wedges same-key activation forever.
-        if (this.generations.get(g.key) === g) this.generations.delete(g.key);
       }
+      // The tree is proven down past this point, so the slot can go even
+      // when the rm below fails. A non-ProcessExitError terminate
+      // rejection leaves the entry — and with it `retiring`, the capacity
+      // count and workspaceActivity() — intact.
+      if (this.generations.get(g.key) === g) this.generations.delete(g.key);
+      await rm(g.boot.outputRoot, { recursive: true, force: true });
+      this.log(g, 'released');
+      g.resolveExit();
     })().catch((error) => {
       g.rejectExit(error);
       this.log(g, 'cleanup_failed');
+      this.cleanupFailures.push(error);
       throw error;
     });
     return g.stop;

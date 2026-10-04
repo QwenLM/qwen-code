@@ -729,7 +729,7 @@ public final class LocalProcessRuntimeProvisioner
                 lease.getLeaseId(), lease.getEpoch(), lease.getToken());
     }
 
-    private static String tombstone(List<Object> key) {
+    static String tombstone(List<Object> key) {
         StringBuilder canonical = new StringBuilder();
         for (Object component : key) {
             canonical.append(String.valueOf(component)).append('\0');

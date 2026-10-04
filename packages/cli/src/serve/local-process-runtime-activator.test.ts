@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 // @vitest-environment node
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -349,8 +349,42 @@ process.on('SIGTERM', () => process.exit(0));
       await expect(
         activator.activate(scope('b')).endpoint,
       ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
+      // An unproven teardown also fails closed for the same workspace and
+      // keeps its activity visible, instead of admitting a second worker
+      // onto the same cwd.
+      await expect(
+        activator.activate(workspace).endpoint,
+      ).rejects.toMatchObject({ code: 'managed_runtime_unavailable' });
+      expect(activator.workspaceActivity(workspace.runtime)).toBeGreaterThan(0);
     } finally {
       reserveSpy.mockRestore();
+      // close() now aggregates this recorded cleanup failure; the recorded
+      // assertion above is the full teardown of this one.
+      active.splice(active.indexOf(activator), 1);
+      await activator.close().catch(() => {});
+    }
+  });
+
+  it('aggregates a settled rm-class cleanup failure into close()', async (context) => {
+    if (process.platform === 'win32') return context.skip();
+    const { activator, stateDir } = await setup(1);
+    const workspace = scope();
+    const use = activator.activate(workspace);
+    await use.endpoint;
+    const workersRoot = path.join(stateDir, 'workers');
+    await chmod(workersRoot, 0o500);
+    try {
+      await expect(
+        activator.revokeWorkspace(workspace.runtime),
+      ).rejects.toThrow();
+      // The failure settled before close() — the stop deletion already
+      // dropped it from the map, so only instance state can surface it.
+      await expect(activator.close()).rejects.toThrow();
+    } finally {
+      await chmod(workersRoot, 0o700);
+      // close() intentionally aggregates the recorded failure; asserted
+      // above, so the shared teardown must not re-await it.
+      active.splice(active.indexOf(activator), 1);
     }
   });
 });

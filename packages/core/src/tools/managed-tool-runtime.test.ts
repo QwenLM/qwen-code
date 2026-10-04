@@ -473,8 +473,12 @@ describe('ManagedToolRuntime', () => {
       expect(build).toHaveBeenCalledOnce();
       expect(build.mock.instances[0]).not.toBe(parentRead);
       const boundView = build.mock.instances[0] as unknown as {
+        config: { getEffectiveInputModalities: () => unknown };
         schema: { description?: string };
       };
+      expect(boundView.config.getEffectiveInputModalities()).toEqual(
+        media.inputModalities,
+      );
       expect(boundView.schema.description).toBe(
         buildReadFileDescription(media.inputModalities),
       );

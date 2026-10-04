@@ -739,6 +739,55 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            // Recreate the fence identity deterministically; the digest must
+            // carry no bearer material, yet stay a function of every
+            // ownership-key component (otherwise distinct leases would
+            // collapse onto one tombstone).
+            java.util.List<Object> key = java.util.List.of(
+                    lease.getRuntimeInstanceId(), lease.getEndpoint(),
+                    lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+            String first = LocalProcessRuntimeProvisioner.tombstone(key);
+            String second = LocalProcessRuntimeProvisioner.tombstone(key);
+            assertEquals(first, second);
+            assertTrue(first.matches("[0-9a-f]{64}"),
+                    "tombstone must be a SHA-256 digest: " + first);
+            assertFalse(first.contains(lease.getToken()));
+            assertFalse(first.contains(lease.getEndpoint().toString()));
+            java.util.List<Object> remappedPort = java.util.List.of(
+                    lease.getRuntimeInstanceId(),
+                    java.net.URI.create("http://127.0.0.1:" + (lease.getEndpoint().getPort() + 1)),
+                    lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+            assertFalse(first.equals(
+                    LocalProcessRuntimeProvisioner.tombstone(remappedPort)));
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
     void observeReportsConflictForAForeignSeedOrHandleVersion()
             throws Exception {
         requireNode();

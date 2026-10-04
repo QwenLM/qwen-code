@@ -857,6 +857,67 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void settlesWithProgressSequenceGreaterThanZeroAndPinsTheGapArms() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            ToolExecutionRecord prepared = prepareAndAcquire(fixture);
+            // Settle at sequence 7 the way runtimes carrying progress do —
+            // the production settle paths keep the recorded sequence, so the
+            // repository is the honest driver for a non-degenerate record.
+            ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                    prepared.getExecutionCallId(), "broker", Duration.ofSeconds(30));
+            ToolExecutionRecord settled = fixture.executions.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 7, java.time.Instant.now()),
+                    "broker", claimed.getDispatchGeneration());
+            org.junit.jupiter.api.Assertions.assertNotNull(settled);
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + prepared.getExecutionCallId()
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> response = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            var status = JSON.parseObject(response.body()).getJSONObject("status");
+            assertEquals("settled", status.getString("state"));
+            assertEquals(7, status.getLongValue("lastSeq"));
+            assertEquals(7, status.getLongValue("firstAvailableSeq"));
+            assertTrue(status.getBooleanValue("progressGap"));
+            assertEquals(List.of(), status.getJSONArray("progress"));
+            assertEquals("success", status.getJSONObject("result").getString("executionStatus"));
+        }
+    }
+
+    @Test
+    void acceptsAValidProgressCursorAndServesTheFullStatus() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            ToolExecutionRecord prepared = prepareAndAcquire(fixture);
+            ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                    prepared.getExecutionCallId(), "broker", Duration.ofSeconds(30));
+            ToolExecutionRecord settled = fixture.executions.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 1, java.time.Instant.now()),
+                    "broker", claimed.getDispatchGeneration());
+            org.junit.jupiter.api.Assertions.assertNotNull(settled);
+            for (String cursor : new String[] {"0", "5"}) {
+                HttpRequest request = HttpRequest.newBuilder(fixture.uri("/executions/" + prepared.getExecutionCallId()
+                                + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=" + cursor))
+                        .header("Authorization", "Bearer secret").GET().build();
+                HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, response.statusCode(), response.body());
+                var status = JSON.parseObject(response.body()).getJSONObject("status");
+                // The cursor is validated then ignored: the full settled
+                // status always comes back.
+                assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
+                        "progress", "result"), status.keySet());
+            }
+        }
+    }
+
+    private static ToolExecutionRecord prepareAndAcquire(Fixture fixture) throws Exception {
+        String digest = "sha256:" + "b".repeat(64);
+        fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+        return fixture.service.prepareExecution("harness", "runtime", "key",
+                Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                .toCompletableFuture().join();
+    }
+
+    @Test
     void rejectsInvalidAfterSeqAndDuplicateQueryFields() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
