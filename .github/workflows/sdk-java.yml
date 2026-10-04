@@ -17,6 +17,7 @@ on:
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
+      - 'packages/sdk-typescript/src/daemon/sse.ts'
       - 'integration-tests/fake-openai-server.ts'
       - 'integration-tests/helpers/hosted-*'
       - 'integration-tests/cli/hosted-latency-baseline.test.ts'
@@ -47,6 +48,7 @@ on:
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
+      - 'packages/sdk-typescript/src/daemon/sse.ts'
       - 'integration-tests/fake-openai-server.ts'
       - 'integration-tests/helpers/hosted-*'
       - 'integration-tests/cli/hosted-latency-baseline.test.ts'
@@ -385,6 +387,8 @@ jobs:
           path: |
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+            packages/sdk-java/managed-agent-server/target/hosted-latency-raw/
+            packages/sdk-java/managed-agent-server/target/delayed-worker-shim/
           retention-days: 7
 
   daemon-e2e:

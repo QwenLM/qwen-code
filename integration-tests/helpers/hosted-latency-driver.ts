@@ -53,62 +53,71 @@ const elapsed = () => performance.now() - started;
 let initialMessages: unknown[] = [];
 let toolCallId = '';
 let contextVerified = false;
-const model = await startFakeOpenAIServer(({ body, requestIndex }) => {
-  assert.equal(body['model'], 'hosted-fixture');
-  assert.equal(body['stream'], true);
-  assert.deepEqual(
-    (body['tools'] as Array<{ function: { name: string } }>)
-      .map((tool) => tool.function.name)
-      .sort(),
-    ['edit', 'read_file', 'write_file'],
-  );
-  const messages = body['messages'] as Array<{
-    role: string;
-    content: unknown;
-    tool_calls?: Array<{
-      id: string;
-      function: { name: string; arguments: string };
+const modelAssertionErrors: unknown[] = [];
+const model = await startFakeOpenAIServer(async ({ body, requestIndex }) => {
+  try {
+    assert.equal(body['model'], 'hosted-fixture');
+    assert.equal(body['stream'], true);
+    assert.deepEqual(
+      (body['tools'] as Array<{ function: { name: string } }>)
+        .map((tool) => tool.function.name)
+        .sort(),
+      ['edit', 'read_file', 'write_file'],
+    );
+    const messages = body['messages'] as Array<{
+      role: string;
+      content: unknown;
+      tool_calls?: Array<{
+        id: string;
+        function: { name: string; arguments: string };
+      }>;
+      tool_call_id?: string;
     }>;
-    tool_call_id?: string;
-  }>;
-  if (sample.scenario === 'no-tool') return { content: 'TEXT_DONE' };
-  if (requestIndex === 1) {
-    initialMessages = structuredClone(messages);
-    assert(JSON.stringify(messages).includes('TOOL_CONTEXT_MARKER'));
-    return {
-      content: 'Preparing the Workspace file.',
-      toolCalls: [
-        fakeToolCall(
-          'write_file',
-          { file_path: 'proof.txt', content: 'latency-proof' },
-          toolCallId,
-        ),
-      ],
-    };
-  }
-  assert.equal(requestIndex, 2, 'exactly one continuation');
-  assert.deepEqual(messages.slice(0, initialMessages.length), initialMessages);
-  assert.equal(messages.length, initialMessages.length + 2);
-  const [assistant, result] = messages.slice(initialMessages.length);
-  assert.equal(assistant.role, 'assistant');
-  assert.deepEqual(assistant.tool_calls, [
-    {
-      id: toolCallId,
-      type: 'function',
-      function: {
-        name: 'write_file',
-        arguments: JSON.stringify({
-          file_path: 'proof.txt',
-          content: 'latency-proof',
-        }),
+    if (sample.scenario === 'no-tool') return { content: 'TEXT_DONE' };
+    if (requestIndex === 1) {
+      initialMessages = structuredClone(messages);
+      assert(JSON.stringify(messages).includes('TOOL_CONTEXT_MARKER'));
+      return {
+        content: 'Preparing the Workspace file.',
+        toolCalls: [
+          fakeToolCall(
+            'write_file',
+            { file_path: 'proof.txt', content: 'latency-proof' },
+            toolCallId,
+          ),
+        ],
+      };
+    }
+    assert.equal(requestIndex, 2, 'exactly one continuation');
+    assert.deepEqual(
+      messages.slice(0, initialMessages.length),
+      initialMessages,
+    );
+    assert.equal(messages.length, initialMessages.length + 2);
+    const [assistant, result] = messages.slice(initialMessages.length);
+    assert.equal(assistant.role, 'assistant');
+    assert.deepEqual(assistant.tool_calls, [
+      {
+        id: toolCallId,
+        type: 'function',
+        function: {
+          name: 'write_file',
+          arguments: JSON.stringify({
+            file_path: 'proof.txt',
+            content: 'latency-proof',
+          }),
+        },
       },
-    },
-  ]);
-  assert.equal(result.role, 'tool');
-  assert.equal(result.tool_call_id, toolCallId);
-  assert.match(JSON.stringify(result.content), /Successfully created/);
-  contextVerified = true;
-  return { content: 'TOOLS_DONE' };
+    ]);
+    assert.equal(result.role, 'tool');
+    assert.equal(result.tool_call_id, toolCallId);
+    assert.match(JSON.stringify(result.content), /Successfully created/);
+    contextVerified = true;
+    return { content: 'TOOLS_DONE' };
+  } catch (assertionError) {
+    modelAssertionErrors.push(assertionError);
+    throw assertionError;
+  }
 });
 
 const proxyFailures: unknown[] = [];
@@ -241,6 +250,7 @@ async function json(route: string, body: unknown, expected = 200) {
   assert.equal(response.status, expected, text);
   return text ? JSON.parse(text) : undefined;
 }
+let measurement: HostedLatencyMeasurement | undefined;
 try {
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
   const address = proxy.address();
@@ -340,6 +350,11 @@ try {
     }
     const turnStoreRequests = sample.storeRequests;
     await waitUntil(() => sample.runtimeReadyMs >= 0, 45_000);
+    if (proxyFailures.length > 0) {
+      throw new Error(
+        `Proxy failures during interaction: ${JSON.stringify(proxyFailures)}`,
+      );
+    }
     if (sample.scenario === 'tool') {
       sample.toolWaitMs =
         sample.runtimeReadyMs - sample.modelRounds[0].finishedMs;
@@ -355,7 +370,7 @@ try {
   }
   assert.deepEqual(proxyFailures, []);
   assert.equal(model.requests.length, 3);
-  const measurement: HostedLatencyMeasurement = {
+  measurement = {
     version: 1,
     provider: 'local-openai-fixture',
     runtimeProvisioningDelayMs: config.runtimeProvisioningDelayMs,
@@ -424,6 +439,14 @@ try {
   console.log('HOSTED_LATENCY_OK', JSON.stringify({ samples, comparison }));
 } catch (cause) {
   console.error(cli.output, proxyFailures);
+  const failureReport = {
+    ...(measurement || { samples }),
+    error: cause instanceof Error ? cause.stack : String(cause),
+    proxyFailures,
+    modelAssertionErrors,
+  };
+  await mkdir(path.dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, JSON.stringify(failureReport, null, 2) + '\n');
   throw cause;
 } finally {
   await cli.close();

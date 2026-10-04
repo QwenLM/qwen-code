@@ -1747,7 +1747,12 @@ try {
 } catch (error) {
   failure = error;
   console.error(error);
-  if (durableFailover && dumpPort !== undefined) {
+  if (existsSync(delayedNode)) {
+    console.error(
+      `\n--- Delayed worker shim (${delayedNode}) ---\n${readFileSync(delayedNode, 'utf8')}`,
+    );
+  }
+  if (dumpPort !== undefined) {
     try {
       console.error(
         `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.managed_agent_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.managed_agent_event ORDER BY sequence_id')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head')}`,

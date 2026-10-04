@@ -137,3 +137,56 @@ describe('SDK Java Flyway migration version guard', () => {
     }
   });
 });
+
+describe('SDK Java Hosted latency baseline CI contract', () => {
+  it('includes latency paths in pull_request and push triggers', () => {
+    const yml = parse(workflow);
+    const paths = [
+      'integration-tests/cli/hosted-latency-baseline.test.ts',
+      'integration-tests/baselines/hosted-latency.json',
+    ];
+    for (const event of ['pull_request', 'push']) {
+      for (const p of paths) {
+        expect(yml.on[event].paths).toContain(p);
+      }
+    }
+  });
+
+  it('checks hosted latency measurements directly after failsafe reports', () => {
+    const block = job('hosted-harness-mysql');
+    const failsafeStep = step(
+      block,
+      'Check that every Hosted integration test class ran',
+    );
+    const latencyStep = step(block, 'Check Hosted latency measurements');
+
+    const failsafeIndex = block.indexOf(failsafeStep);
+    const latencyIndex = block.indexOf(latencyStep);
+    // Assert adjacency: latency step must immediately follow the failsafe step
+    expect(latencyIndex).toBeGreaterThan(failsafeIndex);
+    const between = block.slice(
+      failsafeIndex + failsafeStep.length,
+      latencyIndex,
+    );
+    expect(between).not.toContain('- name:');
+
+    expect(failsafeStep).toContain(
+      'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server',
+    );
+    expect(latencyStep).toContain(
+      'test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json',
+    );
+    expect(latencyStep).toContain(
+      'npx vitest run cli/hosted-latency-baseline.test.ts',
+    );
+  });
+
+  it('uploads the hosted-latency-baseline.json artifact', () => {
+    const block = job('hosted-harness-mysql');
+    const uploadStep = step(block, 'Upload Hosted process reports');
+    expect(uploadStep).toContain('actions/upload-artifact@');
+    expect(uploadStep).toContain(
+      'packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json',
+    );
+  });
+});
