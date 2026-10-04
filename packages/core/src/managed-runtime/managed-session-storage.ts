@@ -246,6 +246,15 @@ export function scanManagedSessionJournal(
           `session log line ${index + 1} repeats the Managed header.`,
         );
       }
+      // The line kind is only known after the generic parse, so the
+      // stricter header cap the store contract pins applies here.
+      if (
+        Buffer.byteLength(line, 'utf8') > MANAGED_SESSION_LIMITS.maxHeaderBytes
+      ) {
+        throw new ManagedSessionRecordError(
+          `record exceeds ${MANAGED_SESSION_LIMITS.maxHeaderBytes} UTF-8 bytes.`,
+        );
+      }
       header = parseManagedSessionHeader(body);
       headerBytes = scanned;
       if (!managedSessionKeysEqual(header.sessionKey, sessionKey)) {
