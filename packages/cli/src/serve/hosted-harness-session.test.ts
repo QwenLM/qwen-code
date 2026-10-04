@@ -5259,6 +5259,169 @@ describe('Hosted Harness no-tool session', () => {
     expect(log).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
+
+  it('reports a deadline-exceeded turn as a classified failure, not a cancellation', async () => {
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    state.model.mockImplementationOnce(
+      ({ signal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'wait' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest, deadlineMs: 2000 });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({
+                code: 'hosted_turn_deadline_exceeded',
+              }),
+            }),
+          ]),
+        );
+        expect(
+          (transcript.body.events as Array<{ type: string }>).some(
+            (event) => event.type === 'turn_complete',
+          ),
+        ).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const saved = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    );
+    const settled = saved.events.find(
+      (event) => event.kind === 'turn.settled',
+    )!;
+    expect(settled.payload['outcome']).toBe('error');
+    expect(settled.payload['stopReason']).toBe('deadline_exceeded');
+    // The settled Turn frees the Session for the next prompt.
+    const followUp = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: randomUUID(), payloadDigest });
+    expect(followUp.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('classifies a deadline expiry on the retried settlement path', async () => {
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    let rejectWrite: ((reason?: unknown) => void) | undefined;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      if (kind === 'managed-message' && !rejectWrite) {
+        return new Promise<Awaited<ReturnType<typeof publish>>>(
+          (_resolve, reject) => {
+            rejectWrite = reject;
+          },
+        );
+      }
+      return publish.call(this, kind, bytes);
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'wait' }];
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        deadlineMs: 2000,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(() => expect(rejectWrite).toBeDefined());
+    // Let the deadline fire while the user-record write is still hung, so
+    // the turn fails before the model ran and the settlement retry path
+    // (not the runner's own catch) classifies the abort.
+    await new Promise((resolve) => setTimeout(resolve, 2250));
+    rejectWrite?.(new Error('transient store failure'));
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({
+                code: 'hosted_turn_deadline_exceeded',
+              }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
+    const saved = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    );
+    const settled = saved.events.find(
+      (event) => event.kind === 'turn.settled',
+    )!;
+    expect(settled.payload['outcome']).toBe('error');
+    expect(settled.payload['stopReason']).toBe('deadline_exceeded');
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
 });
 
 describe('Hosted Harness tool approvals', () => {
