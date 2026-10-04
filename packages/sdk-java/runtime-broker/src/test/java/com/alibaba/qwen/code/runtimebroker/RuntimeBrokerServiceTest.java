@@ -1167,6 +1167,119 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void backgroundStartAdmitsTheProcessRowBesideTheSettledHandle() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord process = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+            assertEquals("background_v3_process",
+                    process.getReference().get("dispatchMode"));
+            assertEquals(prepared.getExecutionCallId(), process.getReference().get("processOf"));
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            assertEquals("runtime_session_busy",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "call");
+            exited.put("state", "exited");
+            exited.put("unitName", "qwen-bg-call");
+            exited.put("evidence", Map.of("exitCode", 0));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            ToolExecutionRecord settled = join(fixture.service.observeBackgroundProcess(
+                    "harness", "runtime", prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals("exited", settled.getResult().get("state"));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
+    void unprovenProcessStatusKeepsItsHold() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+
+            fixture.transport.controlResult = CompletableFuture.completedFuture(
+                    Map.of("operationId", "call", "state", "unknown"));
+            ToolExecutionRecord answered = join(fixture.service.observeBackgroundProcess(
+                    "harness", "runtime", prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.PREPARED, answered.getState());
+            assertEquals("runtime_session_busy",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+        }
+    }
+
+    @Test
     void cancelUnknownDeferredV3CallsTheOriginalRuntime() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             RuntimeSessionRecord session = join(fixture.service.acquire(
@@ -4856,6 +4969,12 @@ class RuntimeBrokerServiceTest {
             delegate = new InMemoryToolExecutionRepository(clock);
         }
 
+
+        @Override
+        public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+                Map<String, Object> result, Instant settlementTime) {
+            return delegate.settlePrepared(expected, result, settlementTime);
+        }
         @Override
         public boolean hasActiveByRuntimeSession(String bindingId, long generation,
                 String runtimeSessionId) {
@@ -4969,6 +5088,12 @@ class RuntimeBrokerServiceTest {
             delegate = new InMemoryToolExecutionRepository(clock);
         }
 
+
+        @Override
+        public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+                Map<String, Object> result, Instant settlementTime) {
+            return delegate.settlePrepared(expected, result, settlementTime);
+        }
         @Override
         public boolean hasActiveByRuntimeSession(String bindingId, long generation,
                 String runtimeSessionId) {

@@ -556,6 +556,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     context.lease(), context.session(), grant)),
                                     "runtime_publication_install_failed", "Publication installation failed")
                                     .thenApply(ignored -> {
+                                        if (Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
+                                            admitBackgroundProcess(context, record);
+                                        }
                                         beginDispatch(context, record, payload, grant);
                                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                                         return latest == null ? record : latest;
@@ -1334,6 +1337,112 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ToolExecutionRecord current = executionRepository
                 .findByExecutionCallId(record.getExecutionCallId());
         return current == null ? record : current;
+    }
+
+    // H3: the background process is its own ledger row, admitted at start,
+    // carrying no model result and staying non-terminal until physical
+    // proof — that is what `hasActiveBy*` counts while it lives.
+    private void admitBackgroundProcess(SessionContext context,
+            ToolExecutionRecord invocation) {
+        synchronized (context) {
+            Map<String, Object> invocationReference = invocation.getReference();
+            String callId = referenceString(invocationReference, "callId");
+            Map<String, Object> reference = Map.of(
+                    "dispatchMode", "background_v3_process",
+                    "processOf", invocation.getExecutionCallId(),
+                    "sessionId", referenceString(invocationReference, "sessionId"),
+                    "promptId", referenceString(invocationReference, "promptId"),
+                    "callId", callId,
+                    "argsDigest", invocation.getRequestDigest());
+            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
+                    invocation.getExecutionCallId() + ":process",
+                    invocation.getExecutionCallId() + ":process",
+                    invocation.getBindingId(),
+                    invocation.getRuntimeGeneration(),
+                    invocation.getHarnessSessionId(),
+                    invocation.getRuntimeSessionId(),
+                    referenceString(invocationReference, "promptId"),
+                    callId,
+                    invocation.getRequestDigest(),
+                    reference);
+            try {
+                bindingRepository.admitExecution(sessionRepository,
+                        executionRepository, candidate);
+            } catch (IllegalArgumentException exception) {
+                throw conflict("runtime_execution_conflict",
+                        "background process identity is already in use", exception);
+            }
+        }
+    }
+
+    /**
+     * Asks the physical owner of a background process for status. An
+     * exited answer settles the process row with that evidence; anything
+     * else keeps the row active and its hold, exactly the wedge semantics
+     * — a status that cannot be proven never becomes a claimed end.
+     */
+    public CompletionStage<ToolExecutionRecord> observeBackgroundProcess(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId) {
+        requireOpen();
+        String invocationId = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        return requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    ToolExecutionRecord invocation = requireExecution(context, invocationId);
+                    ToolExecutionRecord process = requireExecution(context, invocationId + ":process");
+                    if (process.isTerminal()) {
+                        return CompletableFuture.completedFuture(process);
+                    }
+                    Map<String, Object> operation = new LinkedHashMap<>();
+                    operation.put("kind", "shell-status");
+                    operation.put("sessionKey", Map.of(
+                            "tenantId", context.session().getScope().getTenantId(),
+                            "workspaceId", context.session().getScope().getWorkspaceId(),
+                            "sessionId", context.session().getHarnessSessionId()));
+                    operation.put("operationId", process.getExecutionCallId());
+                    operation.put("targetOperationId",
+                            referenceString(invocation.getReference(), "callId"));
+                    context.beginControl();
+                    return mapFailure(safeStage(() -> transport.control(
+                            context.lease(), context.session(), operation)),
+                            "runtime_shell_status_failed", "Shell status lookup failed")
+                        .thenApply(view -> {
+                            if (!(view instanceof Map<?, ?> answer)
+                                    || !"exited".equals(answer.get("state"))) {
+                                return process;
+                            }
+                            settleBackgroundProcess(process, (Map<String, Object>) view);
+                            ToolExecutionRecord current = executionRepository
+                                    .findByExecutionCallId(process.getExecutionCallId());
+                            return current == null ? process : current;
+                        })
+                        .whenComplete((ignored, error) -> context.endControl());
+                });
+    }
+
+    private void settleBackgroundProcess(ToolExecutionRecord process,
+            Map<String, Object> view) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("state", "exited");
+        result.put("evidence", view.get("evidence"));
+        Object exitCode = view.get("evidence") instanceof Map<?, ?> evidence
+                ? evidence.get("exitCode") : null;
+        result.put("executionStatus", Integer.valueOf(0).equals(exitCode)
+                ? "success" : "error");
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            ToolExecutionRecord current = executionRepository
+                    .findByExecutionCallId(process.getExecutionCallId());
+            if (current == null || current.isTerminal()) {
+                return;
+            }
+            if (executionRepository.settlePrepared(current, result,
+                    clock.instant()) != null) {
+                return;
+            }
+        }
+        throw conflict("runtime_execution_state_conflict",
+                "Background process could not settle with its own generation");
     }
 
     private CompletionStage<Boolean> releaseSession(

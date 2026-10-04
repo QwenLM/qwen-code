@@ -306,6 +306,30 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
+    public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord current = selectByExecutionId(connection,
+                    expected.getExecutionCallId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || current.isTerminal()
+                    || current.getState() != ToolExecutionRecord.State.PREPARED) {
+                return null;
+            }
+            ToolExecutionRecord settled = current.withResult(result,
+                    current.getLastSequence(), settlementTime)
+                    .withVersion(current.getVersion() + 1);
+            updateExecution(connection, settled);
+            return settled;
+        });
+    }
+
+    @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         return resolve(expected, resolutionResult, resolutionTime, true);

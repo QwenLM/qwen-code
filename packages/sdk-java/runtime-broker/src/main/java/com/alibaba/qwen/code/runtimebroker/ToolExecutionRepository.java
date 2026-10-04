@@ -41,6 +41,14 @@ public interface ToolExecutionRepository {
     ToolExecutionRecord requestCancel(String executionCallId,
             long expectedVersion);
 
+    /** Evidence settlement of a PREPARED execution that was never
+     * dispatched: the background-process row's physical end arrives
+     * through the owner, never through a dispatch claim. Requires the
+     * immutable identity, the current version and state PREPARED; returns
+     * null when already terminal or the guard mismatches. */
+    ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime);
+
     /** Settles an UNKNOWN execution through recovery reconciliation. Requires
      * the immutable identity, the current version and state UNKNOWN, but no
      * dispatch claim: a takeover-fenced record's claim is expired by
