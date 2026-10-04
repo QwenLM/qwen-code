@@ -568,7 +568,7 @@ async function rereadSelectedDocuments(
   const dropped = docs.filter((_, index) => reread[index] === null);
   if (dropped.length > 0) {
     debugLogger.warn(
-      `Selected memory dropped before injection (deleted, unreadable, or untrusted): ${dropped
+      `Selected memory dropped before injection (unavailable or changed during the read): ${dropped
         .map(toAutoMemoryRef)
         .join(', ')}`,
     );

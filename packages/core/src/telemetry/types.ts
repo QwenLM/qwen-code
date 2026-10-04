@@ -1791,13 +1791,11 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
 }
 
 /**
- * Delivery stage, orthogonal to `strategy`. `phase` says *when* a result
- * reached the model — `fast` is the deterministic result injected on the
- * initial turn when the model selector had not settled inside the initial
- * budget, `refined` is the model-selected result. `strategy` separately says
- * *how* the documents were chosen. Both dimensions are needed: a `fast`
- * delivery is always `heuristic`, but a `refined` delivery may be `model` or,
- * when the selector failed, `heuristic`.
+ * Result stage, independent of `strategy` and `delivery_point`. `fast` is a
+ * deterministic result, including a skipped selector; `refined` is a
+ * selector-stage result or its fallback. Either can be delivered on the
+ * initial turn or a later tool result. `strategy` describes document
+ * selection; a router-only fast result can be `none`.
  */
 export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
 export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
@@ -1808,7 +1806,7 @@ export type MemoryRecallDiscardReason =
   | 'abort'
   | 'shutdown'
   | 'no_relevant_results'
-  /** Every document the refined result selected was already delivered by the fast phase. */
+  /** Every selected document was already delivered. */
   | 'already_delivered';
 
 export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {

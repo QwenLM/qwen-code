@@ -967,11 +967,13 @@ describe('auto-memory relevant recall', () => {
       ['1', 'keyword', 'provider fallback', query],
       [' TRUE ', 'keyword', 'provider fallback', query],
       ['1', 'title', 'provider fallback', query],
+      ['1', 'title', 'api+docs', 'api+docs'],
       ['1', 'title', 'Git文档', '请解释Git文档的格式'],
       ['1', 'keyword', '文档git', '请查看文档git的格式'],
       ['1', 'title', '生产部署', '检查生产部署流程'],
+      ['1', 'title', '生产部署', 'abc生产部署xyz'],
     ])(
-      'skips the selector with flag %s and a %s hit %s',
+      'skips the selector with flag %s and a %s hit %s in %s',
       async (flag, field, value, searchQuery) => {
         process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
         const hit =
@@ -1008,23 +1010,30 @@ describe('auto-memory relevant recall', () => {
       },
     );
 
-    it('keeps the selector when the knob is off', async () => {
-      delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
-      mockSnapshot([exact, docs[1]!]);
+    it.each([undefined, '0'])(
+      'keeps the selector when the knob is %s',
+      async (flag) => {
+        if (flag === undefined) {
+          delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+        } else {
+          process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        }
+        mockSnapshot([exact, docs[1]!]);
 
-      const result = await resolveRelevantAutoMemoryPromptForQuery(
-        '/tmp/project',
-        query,
-        { config, onFastResult: vi.fn() },
-      );
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
 
-      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
-      expect(result.selectorSkipped).toBeUndefined();
-      expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
-        config,
-        expect.objectContaining({ selector_skipped: false }),
-      );
-    });
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({ selector_skipped: false }),
+        );
+      },
+    );
 
     it('leaves selector_skipped unset for a legacy-mode recall even with the knob on', async () => {
       // The skip guard does not exist in legacy mode, so the recall has no
@@ -1620,7 +1629,7 @@ describe('auto-memory relevant recall', () => {
     vi.useRealTimers();
   });
 
-  it('warns when a selected document disappears before injection', async () => {
+  it('warns when a selected document is unavailable or changes during reread', async () => {
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(docs);
     vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) =>
       doc === docs[0] ? null : doc,
@@ -1634,7 +1643,7 @@ describe('auto-memory relevant recall', () => {
 
     expect(result.selectedDocs).toEqual([docs[1]]);
     expect(debugLogger.warn).toHaveBeenCalledWith(
-      'Selected memory dropped before injection (deleted, unreadable, or untrusted): project:reference.md',
+      'Selected memory dropped before injection (unavailable or changed during the read): project:reference.md',
     );
   });
 
