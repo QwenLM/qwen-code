@@ -440,8 +440,14 @@ public class ManagedAgentStore implements AgentStateStore {
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
+        // The replay probe must not lock: a FOR UPDATE read that misses
+        // next-key-locks a gap of the tenant-shared command index, and
+        // concurrent admissions holding such gap locks deadlock when they
+        // all try to insert into the same gap. The PRIMARY KEY deduplicates
+        // racing inserts instead, and the service replays on
+        // DuplicateKeyException.
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
-                idempotencyKey, true);
+                idempotencyKey);
         if (existing.isPresent()) {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);

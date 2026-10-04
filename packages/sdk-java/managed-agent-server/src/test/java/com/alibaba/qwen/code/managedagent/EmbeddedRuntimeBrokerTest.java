@@ -200,6 +200,53 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
+    @Test
+    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("could not start")
+                .cause()
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("non-loopback");
+    }
+
+    @Test
+    void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
+        // An absent value binds as null and a suffix-less one as
+        // milliseconds; every shape below the floor must be refused here
+        // rather than degrade each v3 execution later.
+        for (java.time.Duration window : new java.time.Duration[] {
+                null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
+                java.time.Duration.ofMillis(999)}) {
+            ManagedAgentProperties properties = properties();
+            properties.getRuntimeBroker().setV3ResultWindow(window);
+
+            assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                    properties))
+                    .as("window %s", window)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("v3 result window");
+        }
+    }
+
+    @Test
+    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+        properties.getRuntimeBroker().setAllowNonLoopback(true);
+
+        try (EmbeddedRuntimeBroker broker = broker(
+                mock(ManagedAgentStore.class), properties)) {
+            assertThat(broker.getBaseUri()).isNotNull();
+            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
+        }
+    }
+
     private static ManagedAgentProperties properties() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setCapabilityDigest("sha256:"
