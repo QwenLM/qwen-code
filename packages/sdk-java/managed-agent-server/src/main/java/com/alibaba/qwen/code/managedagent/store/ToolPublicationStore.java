@@ -41,7 +41,7 @@ public final class ToolPublicationStore {
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
     // While false, authorization keeps scanning the journal: a rolling fleet
-    // with a pre-V35 binary can commit without maintaining the head columns.
+    // with a pre-V36 binary can commit without maintaining the head columns.
     private final boolean journalHeadAuthorization;
 
     public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
@@ -137,7 +137,7 @@ public final class ToolPublicationStore {
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
         // The stamp says which journal revision the columns were written
-        // from; a pre-V35 binary's commit bumps journal_revision without
+        // from; a pre-V36 binary's commit bumps journal_revision without
         // touching it, so a stale head is detected and rescanned instead of
         // trusted.
         if (journalHeadAuthorization
@@ -170,7 +170,7 @@ public final class ToolPublicationStore {
 
     /**
      * Authorizes against the journal scan for heads whose activation columns
-     * predate migration V35, then backfills the head so later checks are
+     * predate migration V36, then backfills the head so later checks are
      * answered from the head row.
      */
     private void requireLegacyActivation(String tenant, String session,

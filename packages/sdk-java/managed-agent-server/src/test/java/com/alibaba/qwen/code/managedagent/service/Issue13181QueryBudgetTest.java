@@ -1094,11 +1094,11 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void preV35CommitSkewStillFencesWhileTheHeadGateIsOff() {
+    void preV36CommitSkewStillFencesWhileTheHeadGateIsOff() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture, false);
         // The head columns hold the active activation from the dispatch
-        // commit. A pre-V35 binary then commits a release: the journal gains
+        // commit. A pre-V36 binary then commits a release: the journal gains
         // the row and the revision bumps, but the columns stay untouched.
         // Reproduce that exact skew by restoring the columns and their stamp
         // after a real release commit.
@@ -1145,7 +1145,7 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         // The rolling-window residue: columns backfilled active, then a
-        // pre-V35 binary commits a release, bumping journal_revision without
+        // pre-V36 binary commits a release, bumping journal_revision without
         // touching the columns. Reproduce by restoring the columns and their
         // stamp after a real release commit, with the gate ON.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
@@ -1206,7 +1206,7 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         // The rolling-window skew: the columns hold the active activation,
-        // then a pre-V35 binary commits a release (journal row + revision
+        // then a pre-V36 binary commits a release (journal row + revision
         // bump, columns and stamp untouched) — reproduced by restoring the
         // pre-commit columns and stamp after a real release commit.
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
@@ -1378,7 +1378,7 @@ class Issue13181QueryBudgetTest {
     void legacyHeadRenewBackfillsFromTheJournalScan() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        // Simulate a pre-V35 head: the evidence scan on renew authorizes
+        // Simulate a pre-V36 head: the evidence scan on renew authorizes
         // from the journal and backfills the head columns.
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
@@ -1492,7 +1492,7 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
         // A non-conforming writer commits an activation.changed wider than
-        // the V35 columns; the commit blanks the head columns.
+        // the V36 columns; the commit blanks the head columns.
         append("activation.oversize",
                 event(journal.sequence + 1, "activation.changed",
                         JSON.createObjectNode()
@@ -1527,7 +1527,7 @@ class Issue13181QueryBudgetTest {
                             JSON.createObjectNode()) + "{}\n",
                     1, List.of(), null);
         }
-        // Simulate a journal last written before migration V35.
+        // Simulate a journal last written before migration V36.
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
@@ -1610,7 +1610,7 @@ class Issue13181QueryBudgetTest {
                 "pub-1", PUBLICATION_TOKEN);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
                 "for update")).isZero();
-        // A pre-V35 head scans the journal, parses the same value, and
+        // A pre-V36 head scans the journal, parses the same value, and
         // backfills it; the next authorization reads the head again.
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"

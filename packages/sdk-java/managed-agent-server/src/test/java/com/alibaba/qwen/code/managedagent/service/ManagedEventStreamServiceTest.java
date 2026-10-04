@@ -61,7 +61,8 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo",
+                        "hosted-workspace-files/1");
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
         when(registry.canRead("tenant", "actor", "ws-a"))
@@ -131,7 +132,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo", null);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
         AtomicInteger grantChecks = new AtomicInteger();
@@ -209,7 +210,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo", null);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
         AtomicInteger grantChecks = new AtomicInteger();
@@ -292,7 +293,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo", null);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
         AtomicInteger grantChecks = new AtomicInteger();
@@ -371,7 +372,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo", null);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicInteger grantChecks = new AtomicInteger();
         when(registry.canRead("tenant", "actor", "ws-a"))
@@ -446,7 +447,7 @@ class ManagedEventStreamServiceTest {
                 null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
-                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo");
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1), "yolo", null);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicInteger grantChecks = new AtomicInteger();
         when(registry.canRead("tenant", "actor", "ws-a"))

@@ -96,7 +96,7 @@ restores the per-event check — and
 `qwen.managed-agent.tool-publication.journal-head-authorization` (default
 `false`) switches tool-publication authorization from the journal scan to the
 session journal head's activation columns; enable it only after every writer
-in the fleet runs the V35 schema's code (the rolling-window self-healing is
+in the fleet runs the V36 schema's code (the rolling-window self-healing is
 covered in the
 [query-amplification design](../../../docs/design/2026-10-02-managed-agent-query-amplification.md)
 §9).

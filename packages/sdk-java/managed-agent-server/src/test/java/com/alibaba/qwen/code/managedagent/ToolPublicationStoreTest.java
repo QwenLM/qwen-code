@@ -1661,7 +1661,7 @@ class ToolPublicationStoreTest {
         reserve();
         assertThat(jdbc.queryForObject("SELECT activation_phase FROM qwen_managed_session_journal_head",
                 String.class)).isEqualTo("active");
-        // A non-conforming writer can exceed the V35 column widths; the
+        // A non-conforming writer can exceed the V36 column widths; the
         // commit must still succeed and leave the columns blank, so
         // authorization falls back to reading the journal.
         ObjectNode oversized = JSON.createObjectNode()

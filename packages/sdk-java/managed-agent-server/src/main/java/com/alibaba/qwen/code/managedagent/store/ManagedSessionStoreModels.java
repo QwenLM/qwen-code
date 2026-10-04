@@ -24,7 +24,7 @@ public final class ManagedSessionStoreModels {
     public static final long MIN_LEASE_MILLIS = 1_000;
     public static final long MAX_LEASE_MILLIS = 300_000;
     public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_990L;
-    /** Character widths of the head's activation columns (migration V35);
+    /** Character widths of the head's activation columns (migration V36);
      * a wider payload blanks the columns so authorization reads the journal.
      * Character-based, matching the {@code .length()} checks on both writers. */
     public static final int MAX_ACTIVATION_ID_CHARS = 512;

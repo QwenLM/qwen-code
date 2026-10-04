@@ -114,7 +114,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
                     result.getLong("version"), readBinding(result),
-                    result.getString("approval_mode"));
+                    result.getString("approval_mode"),
+                    result.getString("tool_profile"));
     private final RowMapper<TurnSummary> turnSummaryMapper =
             (result, row) -> new TurnSummary(result.getString("session_id"),
                     result.getString("turn_id"), result.getString("status"),
@@ -388,8 +389,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
-                        + " workspace_policy_ref) VALUES (?, ?, ?, ?, ?,"
-                        + " 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " workspace_policy_ref, tool_profile) VALUES (?, ?, ?, ?, ?,"
+                        + " 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
@@ -398,7 +399,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextConfigRef(),
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
-                resolved == null ? null : resolved.policyRef());
+                resolved == null ? null : resolved.policyRef(),
+                workspace == null ? null : "hosted-workspace-files/1");
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"

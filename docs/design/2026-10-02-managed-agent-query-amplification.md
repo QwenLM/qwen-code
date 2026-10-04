@@ -46,7 +46,7 @@ over mutable object storage; making it asynchronous changes the seal API
 contract (clients would have to poll `operationStatus`). The database side of
 that path is fixed here but opt-in at runtime: its heartbeat
 re-authorization becomes O(1) via Section 6 once an operator enables
-`journal-head-authorization` after the fleet fully runs the V35 code (the
+`journal-head-authorization` after the fleet fully runs the V36 code (the
 rollout is Section 9; the flip itself is tracked by the follow-up issue
 #13295); until then the heartbeat pays the legacy journal scan, unchanged
 from before. The contract change is tracked by the follow-up issue #13242.
@@ -71,7 +71,7 @@ when one of the following holds:
 A drained batch that rule 4 defers leaves the snapshot behind the projection
 while the consumer progress already covers it, so the deferral is recorded on
 the progress row: the batch's progress update sets `snapshot_stale_since` to
-the snapshot's `updated_at` (migration `V37`), and
+the snapshot's `updated_at` (migration `V38`), and
 `findMaterializationTargets` re-selects a session whose marker is at least
 `SNAPSHOT_REFRESH_MILLIS` old; the re-selected (empty) tick converges the
 snapshot and clears the marker. Without the reselection an idle caught-up
@@ -112,7 +112,7 @@ added to `AgentStateStore` / `ManagedAgentStore`:
 - `findLatestTurns(tenant, sessionIds)` — one query joining the turn rows
   to each session's latest `turn.accepted` event (`MAX(sequence_id)`
   derived table), preserving the single-session `findLatestTurn` semantics
-  including the turn-row existence join. Migration `V36` adds
+  including the turn-row existence join. Migration `V37` adds
   `managed_agent_event (tenant_id, session_id, event_type, sequence_id)` so
   it reads index ranges instead of a session's whole event history.
 - `findLatestEnvironmentEvents(tenant, turns)` — one query selecting each
@@ -147,7 +147,7 @@ delegating to the batch twin.
 
 ## 6. Publication authorization O(1)
 
-Migration `V35` adds five nullable columns to
+Migration `V36` adds five nullable columns to
 `qwen_managed_session_journal_head`: `activation_id`, `activation_phase`,
 `activation_event_epoch`, `activation_expires_at`, and
 `activation_head_revision`. `ManagedSessionStore.commit` collects the last
@@ -158,7 +158,7 @@ writes its fields into the head in the same single head `UPDATE` that bumps
 is written on every activation-carrying commit, and on any other commit
 only when the preserved columns were current at the previous revision — a
 commit that keeps columns whose stamp already lags leaves the stamp
-lagging, so a skew left by a pre-V35 writer is never re-stamped into
+lagging, so a skew left by a pre-V36 writer is never re-stamped into
 looking fresh. The head row therefore carries the journal's current
 activation state under the same lock discipline, and the stamp says which
 journal revision the columns reflect: a commit from a binary that does not
@@ -176,11 +176,11 @@ nothing in either direction (1e+N needs the giant integer, 1e-N expands
 10^N before dividing) — so the scan and the head columns can never disagree
 about representability.
 
-While a rolling fleet can still run a pre-V35 binary — which commits without
+While a rolling fleet can still run a pre-V36 binary — which commits without
 maintaining the columns — the head is not yet trustworthy, so
 `qwen.managed-agent.tool-publication.journal-head-authorization` (default
 `false`) keeps authorization on the journal scan. Once every writer runs the
-V35 schema's code, an operator flips the flag and:
+V36 schema's code, an operator flips the flag and:
 
 `ToolPublicationStore.producerBindingLocked` checks the head columns it
 already read `FOR UPDATE` — phase is `active`, the id and event epoch match
@@ -189,7 +189,7 @@ the head's `journal_revision` — instead of the backward journal scan. When
 the columns are NULL or the stamp lags (journals written before the
 migration, journals that never committed an activation change, a payload
 wider than the columns, which the commit blanks rather than rejecting, or
-residue from a pre-V35 commit), it runs the legacy scan once and backfills
+residue from a pre-V36 commit), it runs the legacy scan once and backfills
 the head from the found event — skipping the write when the columns already
 hold exactly those values — so every session becomes O(1) after its first
 post-migration authorization or its next activation change. `verifyDispatch`
@@ -201,7 +201,7 @@ state from the already locked head via the extended `PublicationWriter`
 record — before reading anything else, so a fenced activation pays no journal
 statement at all — and reads the `tool.intent` at its own revision directly:
 the binding carries `intentSequence`, so one indexed range read over
-`last_sequence` (migration `V38`) resolves the revision, one verified page
+`last_sequence` (migration `V39`) resolves the revision, one verified page
 fetches it, and one indexed count (bounded by the same byte-length tripwire
 the legacy walk applied per revision) proves the chain from that revision
 up to the locked head is gap-free. The statement count is constant — four
@@ -295,14 +295,14 @@ keep reading the rows of a session being deleted.
 - The legacy scan fallback in Section 6 keeps the old cost for
   pre-migration journals until their first authorization or activation
   change; this is intentional to avoid a data migration over journal bytes.
-- Rolling deployment: a pre-V35 binary commits without maintaining the head
+- Rolling deployment: a pre-V36 binary commits without maintaining the head
   activation columns, so the columns can go stale while old binaries still
   write. The `activation_head_revision` stamp records which journal revision
   the columns reflect, so such a head fails the stamp check and authorization
   rescans the journal and re-backfills — a premature flag flip self-heals per
   session instead of certifying stale state. The
   `journal-head-authorization` flag (default off) still ships as the
-  deliberate operator switch; enable it once the fleet fully runs the V35
+  deliberate operator switch; enable it once the fleet fully runs the V36
   code, knowing residual skew is detected and repaired rather than trusted.
 - The head path's chain proof (Section 6) is a count with the legacy walk's
   byte-length tripwire, not a per-line parse of the intermediate revisions:
