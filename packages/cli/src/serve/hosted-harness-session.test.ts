@@ -5651,6 +5651,85 @@ describe('Hosted Harness tool approvals', () => {
     return { server, clientId, answer, status, submit };
   }
 
+  it('streams a message_retracted envelope when a restarted attempt retracts its prefix', async () => {
+    state.model.mockImplementationOnce(async (input) => {
+      const deltas = (
+        input as {
+          textDeltas?: {
+            delta(text: string): Promise<void>;
+            retract(): Promise<void>;
+          };
+        }
+      ).textDeltas;
+      await deltas!.delta('orphaned prefix');
+      await deltas!.retract();
+      await deltas!.delta('recovered');
+      return { text: 'recovered', model: 'test-model' };
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+      approvalMode: 'yolo',
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'retry' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    const events = transcript.body.events as Array<{
+      id: number;
+      type: string;
+      promptId?: string;
+      data?: {
+        turnId?: string;
+        messageId?: string;
+        fromSequence?: number;
+        update?: { sessionUpdate?: string; content?: { text?: string } };
+      };
+    }>;
+    const chunks = events.filter((event) => event.type === 'session_update');
+    const retractions = events.filter(
+      (event) => event.type === 'message_retracted',
+    );
+    expect(retractions).toHaveLength(1);
+    expect(retractions[0]!.promptId).toBe(PROMPT_ID);
+    expect(retractions[0]!.data?.turnId).toBe(PROMPT_ID);
+    // The retraction names the orphaned prefix's first delta and lands
+    // between the orphaned chunks and the replay's.
+    expect(retractions[0]!.data?.fromSequence).toBe(chunks[0]!.id);
+    expect(retractions[0]!.id).toBeGreaterThan(chunks[0]!.id);
+    const replayed = chunks.filter((chunk) => chunk.id > retractions[0]!.id);
+    expect(
+      replayed.map((chunk) => chunk.data?.update?.content?.text).join(''),
+    ).toBe('recovered');
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
+      ]),
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
   it('blocks the Session at once when recording an answer stops its writes', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
