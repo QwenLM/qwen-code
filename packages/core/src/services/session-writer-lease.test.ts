@@ -2476,6 +2476,69 @@ describe('SessionWriterLease', () => {
       });
       await managed.release();
     });
+
+    it('does not reclaim a stale active lock from a newer managed format', async () => {
+      const fixture = await createFixture('managed-stale-format-session');
+      const owner = startLeaseProcess();
+      expect(
+        await requestChild(owner, {
+          type: 'acquire',
+          options: {
+            ...fixture.options,
+            lockSchema: { schemaVersion: 3, formatVersion: 2 },
+          },
+        }),
+      ).toMatchObject({ ok: true });
+      owner.kill('SIGKILL');
+      await waitForClose(owner);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        state: 'active',
+        format_version: 2,
+      });
+
+      // The barrier only refuses the older binary: a same-format acquirer
+      // reclaims the stale lock as before.
+      const newer = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await newer.release();
+    });
+
+    it('lets a newer managed format take over an older sealed lock', async () => {
+      const fixture = await createFixture('managed-format-upgrade-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.ownerId).not.toBe(first.ownerId);
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        format_version: 2,
+      });
+      await replacement.release();
+    });
   });
 
   it('waits for an accepted append before sealing the transcript', async () => {

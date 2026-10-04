@@ -560,6 +560,35 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('refuses to settle a turn whose result record is not reader-facing', async () => {
+    const harness = await createHarness();
+    const before = harness.authority.committedSequence;
+    // The session is still initial, so this settle takes the direct
+    // appendExecutionEvent path rather than commitTurnComplete.
+    await expect(
+      harness.sink.write(
+        record({
+          uuid: 'rec-turn-foreign',
+          sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: 'turn-foreign',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        } as Partial<ChatRecord>),
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    expect(
+      harness.authority
+        .readEvents()
+        .some((event) => event.kind === 'turn.settled'),
+    ).toBe(false);
+    await harness.close();
+  });
+
   it('refuses a turn result with no prompt id or state', async () => {
     const harness = await createHarness();
     await expect(

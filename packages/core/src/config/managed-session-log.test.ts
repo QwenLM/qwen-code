@@ -1058,17 +1058,35 @@ describe('Managed Session log recording', () => {
         version: 'test',
         systemPayload: { snapshots: [null] },
       } as unknown as ChatRecord);
+      // A healthy record after the damaged one: a whole-loop catch would
+      // truncate the projection to the prefix before the damage.
+      await sink.write({
+        uuid: 'rec-user-2',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'after the damage' }] },
+      } as ChatRecord);
 
       const projection = await sessionService().readRestoreProjection(
         SESSION_ID,
         { replay: { kind: 'none' } },
       );
+      expect(projection).toBeDefined();
+      expect(projection?.runtime.apiHistory).toEqual([
+        { role: 'user', parts: [{ text: 'before the damage' }] },
+        { role: 'user', parts: [{ text: 'after the damage' }] },
+      ]);
       expect(projection?.runtime.fileHistorySnapshots).toBeUndefined();
       const page = await new SessionTranscriptReader(
         projectDir,
       ).readTurnIndexPage(SESSION_ID);
       expect(page.turns).toEqual([
         expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-1' }),
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-2' }),
       ]);
     } finally {
       await lease.release().catch(() => undefined);

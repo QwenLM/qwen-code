@@ -349,8 +349,9 @@ export function buildManagedSessionRestoreProjection(
     try {
       fileHistory.add(record);
     } catch (error) {
-      // The sink does not admit these records today; belt-and-braces parity
-      // with the Legacy dispatch path, which skips rather than failing the
+      // The sink admits any file_history_snapshot carrying a systemPayload
+      // and publishes it unvalidated, so a malformed batch does reach here;
+      // skip it as the Legacy dispatch path does rather than failing the
       // whole restore.
       debugLogger.warn(
         `restore projection: skipping malformed file_history_snapshot: ${error}`,

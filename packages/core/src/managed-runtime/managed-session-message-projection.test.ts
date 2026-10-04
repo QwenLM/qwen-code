@@ -426,36 +426,59 @@ describe('managed session message projection', () => {
 
   it('rejects a turn.settled with a null resultRef as a typed record error', async () => {
     const harness = await createHarness();
-    try {
-      await harness.authority.appendExecutionEvent(
-        command('settleTurn', 'null-result-ref'),
-        (sequence) => ({
-          v: 1,
-          sequence,
-          eventId: 'turn:null-result',
-          sessionKey,
-          kind: 'turn.settled',
-          occurredAt: 1,
-          subject: {
-            type: 'activation',
-            scopeId: 'act-1',
-            activationId: 'act-1',
-            epoch: 1,
-          },
-          payload: {
-            turnId: 'turn-1',
-            outcome: 'completed',
-            stopReason: null,
-            resultRef: null,
-            usageRef: null,
-            pendingOwnersRef: null,
-          },
+    await harness.close();
+    // The writer refuses this event, so it is spliced into the committed log
+    // the way a writer from before that fence could have left it.
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'turn:null-result',
+      sessionKey,
+      kind: 'turn.settled',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        turnId: 'turn-1',
+        outcome: 'completed',
+        stopReason: null,
+        resultRef: null,
+        usageRef: null,
+        pendingOwnersRef: null,
+      },
+    });
+    const marker = {
+      transactionId: 'null-result',
+      commandId: 'null-result',
+      operation: 'settleTurn',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
         }),
-        HOLDS,
-      );
-    } finally {
-      await harness.close();
-    }
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
 
     const read = readManagedSessionRecords({
       transcriptPath: harness.transcriptPath,

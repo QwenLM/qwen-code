@@ -2536,6 +2536,143 @@ describe('managed session checkpoints', () => {
     await harness.close();
   });
 
+  async function openRunnableHarness(): Promise<CheckpointHarness> {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-v1',
+      }),
+      { state: initialV1State(harness.fixture), boundary: null },
+      HOLDS,
+    );
+    return harness;
+  }
+
+  function turnResultBody(overrides: Record<string, unknown> = {}): Buffer {
+    return Buffer.from(
+      JSON.stringify({
+        uuid: 'rec-turn-1',
+        parentUuid: null,
+        sessionId: 'managed-session',
+        timestamp: new Date(1).toISOString(),
+        type: 'system',
+        subtype: 'turn_result',
+        cwd: '/workspace',
+        version: 'test',
+        systemPayload: {
+          promptId: 'turn-1',
+          state: 'completed',
+          stopReason: 'end_turn',
+        },
+        ...overrides,
+      }),
+      'utf8',
+    );
+  }
+
+  it.each([
+    {
+      label: 'a record from another session',
+      body: () =>
+        turnResultBody({
+          sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        }),
+    },
+    {
+      label: 'a record without a cwd',
+      body: () => turnResultBody({ cwd: undefined }),
+    },
+    {
+      label: 'non-JSON bytes',
+      body: () => Buffer.from('this is not json', 'utf8'),
+    },
+  ])(
+    'rejects a turn-complete whose result body is $label',
+    async ({ body }) => {
+      const harness = await openRunnableHarness();
+      const resultRef = await harness.store.publish(
+        'managed-turn-result',
+        body(),
+      );
+      const before = harness.authority.committedSequence;
+      await expect(
+        harness.authority.commitTurnComplete(
+          inputCommand(harness.fixture, {
+            operation: 'settleTurn',
+            commandId: 'cmd-turn-invalid-body',
+          }),
+          {
+            turn: {
+              turnId: 'turn-1',
+              outcome: 'completed',
+              stopReason: 'end_turn',
+              resultRef,
+              occurredAt: 1,
+              eventId: 'turn:turn-1',
+            },
+            boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+            state: (identity, previous) =>
+              encodeHarnessCheckpointV1(
+                createNextTurnReadyHarnessCheckpoint({
+                  previous,
+                  ...identity,
+                  activationId: HOLDS.activation.activationId,
+                  turnId: 'turn-1',
+                  promptId: 'turn-1',
+                }),
+              ),
+          },
+          HOLDS,
+        ),
+      ).rejects.toThrow(/invalid reader-facing record/);
+      expect(harness.authority.committedSequence).toBe(before);
+      await harness.close();
+    },
+  );
+
+  it('rejects a turn-complete whose result resource was never published', async () => {
+    const harness = await openRunnableHarness();
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-missing-body',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: 'end_turn',
+            resultRef: ref('managed-turn-result'),
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: (identity, previous) =>
+            encodeHarnessCheckpointV1(
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: HOLDS.activation.activationId,
+                turnId: 'turn-1',
+                promptId: 'turn-1',
+              }),
+            ),
+        },
+        HOLDS,
+      ),
+    ).rejects.toThrow(/turn result is unreadable/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
   it('does not treat an opaque checkpoint as a turn-complete safety point', async () => {
     const harness = await openWithResources(await createFixture());
     await harness.authority.submitInput(

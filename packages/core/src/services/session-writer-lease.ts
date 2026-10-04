@@ -1999,6 +1999,21 @@ export class SessionWriterLease {
           ),
         });
       }
+      // The format barrier is two-directional here as it is for a sealed
+      // takeover: reclaiming a stale active lock from a newer format would
+      // rewrite the durable record at this binary's lower format and append
+      // records the newer binary's reader then refuses.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema !== undefined &&
+        normalizedOptions.lockSchema.formatVersion < state.record.format_version
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            `Stale session writer lock format ${state.record.format_version} is newer than this binary's format ${normalizedOptions.lockSchema.formatVersion}`,
+          ),
+        });
+      }
       if (normalizedOptions.reclaimPolicy === 'never') {
         throw new SessionWriterConflictError();
       }

@@ -1508,6 +1508,61 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it.each(['journalRevision', 'committedSequence'] as const)(
+    'rejects a restore head regressed only in %s',
+    async (override) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-store-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: server.fetch,
+      });
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{"model":"test"}', 'utf8'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: {
+          definitionRef,
+          rootSnapshotRef,
+          createdBy: 'test',
+        },
+      });
+      try {
+        const journal = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        // The honest head reads fine, then the server regresses one counter.
+        await expect(journal.read()).resolves.toBeDefined();
+        server.headOverrides[override] = 0;
+        await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',

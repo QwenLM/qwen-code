@@ -1177,38 +1177,6 @@ export class LocalManagedSessionAuthority {
           'turn-complete checkpoint requires no pending Harness work.',
         );
       }
-      // Read back the published turn result before the event commits it: the
-      // cold projection fails the whole session on a body that is not a
-      // reader-facing record, so an invalid one must not reach the log.
-      const resultBody = await store
-        .read(request.turn.resultRef)
-        .catch((cause: unknown) => {
-          throw new ManagedSessionRecordError(
-            `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
-          );
-        });
-      let resultValue: unknown;
-      try {
-        resultValue = JSON.parse(resultBody.toString('utf8'));
-      } catch {
-        throw new ManagedSessionRecordError(
-          'turn result resource contains an invalid reader-facing record.',
-        );
-      }
-      const validated = validateTranscriptRecord(resultValue);
-      const candidate = validated.record as Partial<ChatRecord> | undefined;
-      if (
-        validated.record === undefined ||
-        validated.record.sessionId !== this.sessionKey.sessionId ||
-        typeof candidate?.cwd !== 'string' ||
-        typeof candidate?.version !== 'string' ||
-        typeof candidate?.timestamp !== 'string' ||
-        validated.diagnostics.length > 0
-      ) {
-        throw new ManagedSessionRecordError(
-          'turn result resource contains an invalid reader-facing record.',
-        );
-      }
       const stateRef = await store.publish('managed-checkpoint', state);
       const subject = {
         type: 'activation' as const,
@@ -2163,6 +2131,12 @@ export class LocalManagedSessionAuthority {
       );
     }
 
+    for (const event of events) {
+      if (event.kind === 'turn.settled') {
+        await this.assertReaderFacingTurnResult(event.payload['resultRef']);
+      }
+    }
+
     const branches = await this.validateRecoveryFacts(events);
 
     // Events first, marker last: a crash before the marker leaves the
@@ -2466,6 +2440,51 @@ export class LocalManagedSessionAuthority {
         [{ class: 'coordinator' }],
       );
     });
+  }
+
+  /**
+   * Reads back the result a `turn.settled` event commits, the way the cold
+   * projection will read it: a body that is not a reader-facing record fails
+   * the whole session at restore, so no writer of the event may commit one.
+   */
+  private async assertReaderFacingTurnResult(
+    resultRef: unknown,
+  ): Promise<void> {
+    const store = this.resources;
+    if (store === undefined || resultRef === null) {
+      throw new ManagedSessionRecordError(
+        'turn result resource contains an invalid reader-facing record.',
+      );
+    }
+    const resultBody = await store
+      .read(resultRef as ManagedSessionDurableRef)
+      .catch((cause: unknown) => {
+        throw new ManagedSessionRecordError(
+          `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      });
+    let resultValue: unknown;
+    try {
+      resultValue = JSON.parse(resultBody.toString('utf8'));
+    } catch {
+      throw new ManagedSessionRecordError(
+        'turn result resource contains an invalid reader-facing record.',
+      );
+    }
+    const validated = validateTranscriptRecord(resultValue);
+    const candidate = validated.record as Partial<ChatRecord> | undefined;
+    if (
+      validated.record === undefined ||
+      validated.record.sessionId !== this.sessionKey.sessionId ||
+      typeof candidate?.cwd !== 'string' ||
+      typeof candidate?.version !== 'string' ||
+      typeof candidate?.timestamp !== 'string' ||
+      validated.diagnostics.length > 0
+    ) {
+      throw new ManagedSessionRecordError(
+        'turn result resource contains an invalid reader-facing record.',
+      );
+    }
   }
 
   /**

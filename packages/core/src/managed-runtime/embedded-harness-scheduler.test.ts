@@ -272,6 +272,45 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => handled.includes('a1') && handled.includes('a2'));
   });
 
+  it('polls on a bounded cadence while the pump stays memory-blocked', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const original = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const item = activation('a1');
+    await original.enqueue(item, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    await original.claim(item, 'dead-worker', 10);
+
+    now = 5;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'replacement-worker',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.start();
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // The lease expired at t=10; a blocked pump must re-arm the wake on the
+    // poll cadence, never on a zero delay that spins the macrotask queue.
+    now = 10;
+    await vi.advanceTimersByTimeAsync(5);
+    await waitUntil(() => consulted() > 0);
+    const before = consulted();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(consulted() - before).toBeLessThanOrEqual(120);
+  });
+
   it('renews the lease while a handler remains active', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;
