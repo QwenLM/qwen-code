@@ -44,7 +44,6 @@ import {
   assertManagedSessionTransaction,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
-  managedSessionReaderVersion,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
@@ -1300,20 +1299,12 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * `monitor_run` commits only into a Session created by a reader that knows
-   * the name; a Session whose header names less stays openable but never
-   * gains the domain, whatever path the commit arrives on.
+   * Every domain may commit into any header this writer creates: readers
+   * since #12837 parse them all, so nothing here distinguishes Sessions
+   * by their minimumReader. Only the enablement list gates a domain.
    */
   private assertDomainAdmittable(domain: ManagedSessionDomain): void {
     assertManagedSessionDomainEnabled(domain);
-    if (
-      domain === 'monitor_run' &&
-      (managedSessionReaderVersion(this.header.minimumReader) ?? 0) < 2
-    ) {
-      throw new ManagedSessionRecordError(
-        `domain ${domain} requires a Session created by managed-session/2.`,
-      );
-    }
   }
 
   /**

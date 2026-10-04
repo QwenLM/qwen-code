@@ -1238,48 +1238,29 @@ describe('managed session authority Stage H records', () => {
   });
 });
 
-describe('reader gating for the H3 domains', () => {
-  it('stamps a new Session with a managed-session/2 reader requirement', async () => {
+describe('reader compatibility for the H3 domains', () => {
+  it('stamps a new Session with a reader every deployed version carries', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      expect(authority.sessionHeader.minimumReader).toBe('managed-session/2');
+      expect(authority.sessionHeader.minimumReader).toBe('managed-session/1');
     });
   });
 
-  it('refuses monitor_run on a Session created before the reader bump', async () => {
+  it('admits monitor_run into the same v1 Session, enabled or not at all', async () => {
+    // Every deployed reader parses monitor_run since #12837; the only gate
+    // a domain ever needs is the enablement list, not a header version.
     const harness = await createHarness();
-    await withAuthority(harness, async () => undefined);
-    await downgradeReader(harness);
     const life = await monitorLife(harness);
-    await withAuthority(
-      harness,
-      async (authority) => {
-        expect(authority.sessionHeader.minimumReader).toBe('managed-session/1');
-        await expect(
-          authority.commitExtensionRecord(
-            command('monitor-1:1'),
-            { domain: 'monitor_run', record: life[0] },
-            TRUSTED,
-          ),
-        ).rejects.toThrow(/requires a Session created by managed-session\/2/);
-      },
-      { create: false },
-    );
+    await withAuthority(harness, async (authority) => {
+      expect(authority.sessionHeader.minimumReader).toBe('managed-session/1');
+      await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: life[0] },
+        TRUSTED,
+      );
+      expect(
+        authority.extensionRecord('monitor_run', 'monitor-1')?.revision,
+      ).toBe(1);
+    });
   });
 });
-
-async function downgradeReader(harness: Harness): Promise<void> {
-  const lines = (await fs.readFile(harness.transcriptPath, 'utf8'))
-    .trimEnd()
-    .split('\n');
-  const at = lines.findIndex(
-    (line) =>
-      (JSON.parse(line) as Record<string, unknown>)['subtype'] ===
-      'managed_session_header_v1',
-  );
-  const header = JSON.parse(lines[at]) as Record<string, unknown>;
-  (header['managedSession'] as Record<string, unknown>)['minimumReader'] =
-    'managed-session/1';
-  lines[at] = JSON.stringify(header);
-  await fs.writeFile(harness.transcriptPath, lines.join('\n') + '\n');
-}
