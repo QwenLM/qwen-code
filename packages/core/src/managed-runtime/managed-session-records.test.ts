@@ -456,21 +456,29 @@ describe('managed session shared field rules', () => {
     for (let level = 0; level < 24; level++) {
       shared = { a: shared, b: shared };
     }
-    // 25 distinct objects holding ~2^24 paths: the path-scoped ancestor walk
-    // needs a minute-scale run here, so this pin can only pass when the
-    // per-object height memo walks each object once.
+    // 25 distinct objects holding ~2^24 paths serialize to ~350 MB, and
+    // commit() stringifies before its byte check, so the expansion has to be
+    // refused here; a small shared graph stays legal.
+    expectEventError(
+      envelope('cancel.requested', 2, cancelPayload(shared)),
+      /expands past 8388608 bytes through shared references/,
+    );
+    let small: Record<string, unknown> = { leaf: 1 };
+    for (let level = 0; level < 8; level++) {
+      small = { a: small, b: small };
+    }
     expect(() =>
       parseManagedSessionEvent(
-        envelope('cancel.requested', 2, cancelPayload(shared)),
+        envelope('cancel.requested', 2, cancelPayload(small)),
       ),
     ).not.toThrow();
 
     let chain: unknown = null;
-    for (let depth = 0; depth < 60; depth++) {
+    for (let depth = 0; depth < 61; depth++) {
       chain = { nested: chain };
     }
-    // The second visit to the shared chain is one level deeper, so the memo
-    // must not short-circuit the depth bound.
+    // The second path to the shared chain ends one level past the bound, so
+    // the memo must not short-circuit the depth check.
     expectEventError(
       envelope(
         'cancel.requested',
@@ -479,6 +487,62 @@ describe('managed session shared field rules', () => {
       ),
       /maximum JSON depth/,
     );
+
+    // One object shorter, the second path ends exactly at the bound: the
+    // shared value must be accepted, as its unshared copy is.
+    const fits = (chain as { nested: unknown }).nested;
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope(
+          'cancel.requested',
+          2,
+          cancelPayload({ first: fits, shell: { second: fits } }),
+        ),
+      ),
+    ).not.toThrow();
+
+    // Array-shaped sharing goes through the same memo: heights propagate,
+    // and expansion is bounded for arrays exactly as for objects.
+    let rows: unknown = [1];
+    for (let level = 0; level < 24; level++) {
+      rows = [rows, rows];
+    }
+    expectEventError(
+      envelope('cancel.requested', 2, cancelPayload(rows)),
+      /expands past 8388608 bytes through shared references/,
+    );
+    let smallRows: unknown = [1];
+    for (let level = 0; level < 8; level++) {
+      smallRows = [smallRows, smallRows];
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope('cancel.requested', 2, cancelPayload(smallRows)),
+      ),
+    ).not.toThrow();
+
+    let rowChain: unknown = null;
+    for (let depth = 0; depth < 61; depth++) {
+      rowChain = [rowChain];
+    }
+    expectEventError(
+      envelope(
+        'cancel.requested',
+        2,
+        cancelPayload({ first: rowChain, shell: { second: rowChain } }),
+      ),
+      /maximum JSON depth/,
+    );
+    const fitsRows = (rowChain as unknown[])[0];
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope(
+          'cancel.requested',
+          2,
+          cancelPayload({ first: fitsRows, shell: { second: fitsRows } }),
+        ),
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -561,6 +625,25 @@ describe('managed session per-kind rules', () => {
     expect(parseManagedSessionEvent(activationEvent('active')).kind).toBe(
       'activation.changed',
     );
+    // hook_operation is the hosted Hook caller's legal subject and must
+    // stay accepted.
+    expect(
+      parseManagedSessionEvent(
+        activationEvent('active', {
+          subject: {
+            type: 'hook_operation',
+            operationId: 'op-1',
+            occurrenceId: 'occ-1',
+          },
+        }),
+      ).kind,
+    ).toBe('activation.changed');
+    expectEventError(
+      activationEvent('active', {
+        subject: { type: 'turn', turnId: 'turn-9' },
+      }),
+      /subject must identify the activation it changes/,
+    );
     expectEventError(
       activationEvent('active', {
         subject: { ...activationSubject, activationId: 'act-2' },
@@ -591,6 +674,48 @@ describe('managed session per-kind rules', () => {
     );
     expectEventError(
       { ...activationEvent('active'), subject: turnSubject },
+      /requires event.subject to match payload.subject/,
+    );
+    // Negative coverage for the hook_operation and activation comparison
+    // branches: each differing identity field on its own must fail.
+    const hookSubject = {
+      type: 'hook_operation',
+      operationId: 'op-1',
+      occurrenceId: 'occ-1',
+    };
+    expectEventError(
+      {
+        ...wakeEvent({ subject: hookSubject }),
+        subject: { ...hookSubject, operationId: 'op-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...wakeEvent({ subject: hookSubject }),
+        subject: { ...hookSubject, occurrenceId: 'occ-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, scopeId: 'scope-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, activationId: 'act-9' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, epoch: 9 },
+      },
       /requires event.subject to match payload.subject/,
     );
   });
@@ -677,6 +802,10 @@ describe('managed session per-kind rules', () => {
       }),
       /previousRevision must precede payload.revision/,
     );
+    expectEventError(
+      withPayload(wakeEvent(), { sourceEventId: 'evt-2' }),
+      /sourceEventId must not name itself/,
+    );
     expect(
       parseManagedSessionEvent(
         withPayload(eventForKind('config.bound'), {
@@ -688,6 +817,7 @@ describe('managed session per-kind rules', () => {
     expect(
       parseManagedSessionEvent(eventForKind('message.committed')).kind,
     ).toBe('message.committed');
+    expect(parseManagedSessionEvent(wakeEvent()).kind).toBe('wake.requested');
   });
 
   it('rejects a compaction range whose end precedes its start', () => {

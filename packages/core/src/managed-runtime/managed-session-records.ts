@@ -271,12 +271,21 @@ function object(
   return value as Record<string, ManagedSessionJsonValue>;
 }
 
+interface JsonShape {
+  /** Object levels from this object down; a primitive leaf adds none. */
+  readonly height: number;
+  /** A lower bound on the serialized size of the expanded subtree. */
+  readonly bytes: number;
+  /** Whether some object below is reached through more than one path. */
+  readonly shared: boolean;
+}
+
 function assertJsonValue(
   value: unknown,
   label: string,
   ancestors = new Set<object>(),
   depth = 1,
-  heights = new Map<object, number>(),
+  shapes = new Map<object, JsonShape>(),
 ): asserts value is ManagedSessionJsonValue {
   if (
     value === null ||
@@ -302,9 +311,9 @@ function assertJsonValue(
   // shared DAG would be walked once per path — exponentially. Memo the
   // subtree height so each distinct object is walked once per call while
   // the depth bound still accounts for the visiting path.
-  const seen = heights.get(value);
+  const seen = shapes.get(value);
   if (seen !== undefined) {
-    if (depth + seen - 1 > MANAGED_SESSION_LIMITS.maxJsonDepth) {
+    if (depth + seen.height - 1 > MANAGED_SESSION_LIMITS.maxJsonDepth) {
       fail(
         `${label} exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
       );
@@ -318,12 +327,27 @@ function assertJsonValue(
     const keys = Reflect.ownKeys(descriptors);
     const prototype = Object.getPrototypeOf(value) as object | null;
     let height = 1;
-    const noteChild = (child: unknown): void => {
-      const childHeight =
-        typeof child === 'object' && child !== null
-          ? (heights.get(child) ?? 1)
-          : 1;
-      height = Math.max(height, childHeight + 1);
+    let bytes = 2;
+    let shared = false;
+    // JSON.stringify expands every path of a shared graph, so the expanded
+    // size is what serialization will cost. A tree never reaches this bound
+    // through sharing (its size is its own), so only shared subgraphs are
+    // held to the largest budget any caller serializes into.
+    const visit = (child: unknown, childLabel: string, keyBytes: number) => {
+      const isObject = typeof child === 'object' && child !== null;
+      const reached = isObject && shapes.has(child);
+      assertJsonValue(child, childLabel, ancestors, depth + 1, shapes);
+      const shape = isObject ? shapes.get(child) : undefined;
+      height = Math.max(height, (shape?.height ?? 0) + 1);
+      bytes +=
+        keyBytes +
+        (shape?.bytes ?? (typeof child === 'string' ? child.length + 2 : 1));
+      shared = shared || reached || shape?.shared === true;
+      if (shared && bytes > MANAGED_SESSION_LIMITS.maxTransactionBytes) {
+        fail(
+          `${label} expands past ${MANAGED_SESSION_LIMITS.maxTransactionBytes} bytes through shared references.`,
+        );
+      }
     };
     if (Array.isArray(value)) {
       if (prototype !== Array.prototype) {
@@ -344,17 +368,9 @@ function assertJsonValue(
         fail(`${label} must be a dense JSON array.`);
       }
       for (let index = 0; index < value.length; index++) {
-        const child = descriptors[String(index)].value;
-        assertJsonValue(
-          child,
-          `${label}[${index}]`,
-          ancestors,
-          depth + 1,
-          heights,
-        );
-        noteChild(child);
+        visit(descriptors[String(index)].value, `${label}[${index}]`, 0);
       }
-      heights.set(value, height);
+      shapes.set(value, { height, bytes, shared });
       return;
     }
 
@@ -370,16 +386,9 @@ function assertJsonValue(
       if (!descriptor.enumerable || !('value' in descriptor)) {
         fail(`${keyLabel} must be an enumerable data property.`);
       }
-      assertJsonValue(
-        descriptor.value,
-        keyLabel,
-        ancestors,
-        depth + 1,
-        heights,
-      );
-      noteChild(descriptor.value);
+      visit(descriptor.value, keyLabel, key.length + 3);
     }
-    heights.set(value, height);
+    shapes.set(value, { height, bytes, shared });
   } finally {
     ancestors.delete(value);
   }
@@ -608,23 +617,37 @@ function subjectsEqual(
   right: ManagedSessionSubject,
 ): boolean {
   if (left.type !== right.type) return false;
-  if (left.type === 'activation' && right.type === 'activation') {
-    return (
-      left.scopeId === right.scopeId &&
-      left.activationId === right.activationId &&
-      left.epoch === right.epoch
-    );
+  switch (left.type) {
+    case 'activation': {
+      const other = right as Extract<
+        ManagedSessionSubject,
+        { type: 'activation' }
+      >;
+      return (
+        left.scopeId === other.scopeId &&
+        left.activationId === other.activationId &&
+        left.epoch === other.epoch
+      );
+    }
+    case 'turn': {
+      const other = right as Extract<ManagedSessionSubject, { type: 'turn' }>;
+      return left.turnId === other.turnId;
+    }
+    case 'hook_operation': {
+      const other = right as Extract<
+        ManagedSessionSubject,
+        { type: 'hook_operation' }
+      >;
+      return (
+        left.operationId === other.operationId &&
+        left.occurrenceId === other.occurrenceId
+      );
+    }
+    default: {
+      const exhaustive: never = left;
+      return exhaustive;
+    }
   }
-  if (left.type === 'turn' && right.type === 'turn') {
-    return left.turnId === right.turnId;
-  }
-  if (left.type === 'hook_operation' && right.type === 'hook_operation') {
-    return (
-      left.operationId === right.operationId &&
-      left.occurrenceId === right.occurrenceId
-    );
-  }
-  return false;
 }
 
 type FieldKind =
@@ -856,7 +879,7 @@ function assertField(
   name: string,
   kind: FieldKind,
   label: string,
-): void {
+): ManagedSessionSubject | undefined {
   const value = payload[name];
   const at = `${label}.${name}`;
   switch (kind) {
@@ -916,8 +939,7 @@ function assertField(
       }
       return;
     case 'subject':
-      assertSubject(value, at);
-      return;
+      return assertSubject(value, at);
     case 'json':
       assertJsonValue(value, at);
       return;
@@ -956,6 +978,12 @@ function assertPayloadRules(
         string,
         ManagedSessionJsonValue
       >;
+      // hook_operation is the hosted Hook caller's legal subject; a turn
+      // identifies nothing here, and a mismatched activation contradicts
+      // the record it rides on.
+      if (subject['type'] === 'turn') {
+        fail(`${at}.subject must identify the activation it changes.`);
+      }
       if (
         subject['type'] === 'activation' &&
         (subject['activationId'] !== payload['activationId'] ||
@@ -1151,14 +1179,24 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
   const names = Object.keys(schema.fields);
   assertNoUnknownKeys(payload, names, 'payload');
   const optional = schema.optional ?? [];
+  // Only a field declared with the 'subject' kind yields a value; kinds
+  // carrying another field named subject skip the cross-check entirely.
+  let payloadSubject: ManagedSessionSubject | undefined;
   for (const name of names) {
     if (!(name in payload)) {
       if (optional.includes(name)) continue;
       fail(`payload.${name} is required for ${kind}.`);
     }
-    assertField(payload, name, schema.fields[name], 'payload');
+    const parsed = assertField(payload, name, schema.fields[name], 'payload');
+    if (parsed !== undefined) payloadSubject = parsed;
   }
   assertPayloadRules(kind, payload);
+  if (
+    kind === 'wake.requested' &&
+    payload['sourceEventId'] === record['eventId']
+  ) {
+    fail('payload.sourceEventId must not name itself.');
+  }
 
   const subject =
     record['subject'] === undefined
@@ -1169,11 +1207,8 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
   }
   if (
     subject !== undefined &&
-    'subject' in schema.fields &&
-    !subjectsEqual(
-      subject,
-      assertSubject(payload['subject'], 'payload.subject'),
-    )
+    payloadSubject !== undefined &&
+    !subjectsEqual(subject, payloadSubject)
   ) {
     fail(`${kind} requires event.subject to match payload.subject.`);
   }
