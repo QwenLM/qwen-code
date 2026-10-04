@@ -40,15 +40,18 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -68,6 +71,10 @@ public class ManagedAgentStore implements AgentStateStore {
             new TypeReference<>() {
             };
     private static final String MESSAGE_PROJECTION = "message_projection";
+    // Between full rewrites the snapshot may lag the projection by this many
+    // events or this long; the batch that ends a Turn rewrites it anyway.
+    public static final int SNAPSHOT_REFRESH_EVENTS = 1000;
+    private static final long SNAPSHOT_REFRESH_MILLIS = 5000;
     private static final String INSERT_EVENT = "INSERT INTO managed_agent_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id,"
             + " event_type, data_json, terminal, source_key, created_at,"
@@ -77,10 +84,11 @@ public class ManagedAgentStore implements AgentStateStore {
             "ACCEPTED", "RUNNING", "CANCELLING");
     private static final String TURN_SUMMARY_COLUMNS = "session_id,"
             + " turn_id, status, created_at, completed_at, error_code";
-    private static final String LATEST_TURN_ID =
-            "SELECT turn_id FROM managed_agent_event WHERE tenant_id = ?"
-                    + " AND session_id = ? AND event_type = 'turn.accepted'"
-                    + " ORDER BY sequence_id DESC LIMIT 1";
+    // findLatestTurns joins managed_agent_event, so the same projection
+    // must be table-qualified there.
+    private static final String QUALIFIED_TURN_SUMMARY_COLUMNS =
+            "turn_record." + String.join(", turn_record.",
+                    TURN_SUMMARY_COLUMNS.split(", "));
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -106,6 +114,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
                     result.getLong("version"), readBinding(result),
+                    result.getString("approval_mode"),
                     result.getString("tool_profile"));
     private final RowMapper<TurnSummary> turnSummaryMapper =
             (result, row) -> new TurnSummary(result.getString("session_id"),
@@ -651,9 +660,26 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?"
-                + " AND session_id = ? AND operation_kind = 'CLOSE' AND state = 'COMPLETED' AND receipt_id IS NOT NULL",
-                Integer.class, tenantId, sessionId) > 0;
+        return completedWorkspaceCloses(tenantId, List.of(sessionId))
+                .contains(sessionId);
+    }
+
+    /** The given Sessions with a completed workspace close, in one read. */
+    @Override
+    public Set<String> completedWorkspaceCloses(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Set.of();
+        }
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
+                        + " managed_agent_operation WHERE tenant_id = ?"
+                        + " AND session_id IN (" + placeholders(sessionIds.size())
+                        + ") AND operation_kind = 'CLOSE' AND state = 'COMPLETED'"
+                        + " AND receipt_id IS NOT NULL",
+                String.class, arguments.toArray()));
     }
 
     private void requireWorkspaceCreator(SessionRecord session, String actorId) {
@@ -1085,24 +1111,64 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
-    public Optional<TurnRecord> findActiveTurn(String tenantId,
-            String sessionId) {
-        List<TurnRecord> rows = jdbc.query(
-                "SELECT * FROM managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING')"
-                        + " ORDER BY created_at DESC LIMIT 1",
-                turnMapper, tenantId, sessionId);
-        return rows.stream().findFirst();
+    /** The active Turn of each given Session, in one round trip. */
+    public Map<String, TurnSummary> findActiveTurns(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        List<TurnSummary> rows = jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS
+                        + " FROM managed_agent_turn"
+                        + " WHERE tenant_id = ? AND session_id IN ("
+                        + placeholders(sessionIds.size()) + ") AND status IN"
+                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') ORDER BY"
+                        + " created_at DESC",
+                turnSummaryMapper, arguments.toArray());
+        Map<String, TurnSummary> result = new HashMap<>(
+                sessionIds.size() * 2);
+        for (TurnSummary row : rows) {
+            result.putIfAbsent(row.sessionId(), row);
+        }
+        return result;
     }
 
-    public Optional<TurnRecord> findLatestTurn(String tenantId,
-            String sessionId) {
-        List<TurnRecord> rows = jdbc.query(
-                "SELECT * FROM managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? AND turn_id = (" + LATEST_TURN_ID + ")",
-                turnMapper, tenantId, sessionId, tenantId, sessionId);
-        return rows.stream().findFirst();
+    /** The latest Turn of each given Session, in one round trip. */
+    public Map<String, TurnSummary> findLatestTurns(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 3);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        arguments.add(tenantId);
+        arguments.add(tenantId);
+        List<TurnSummary> rows = jdbc.query("SELECT "
+                        + QUALIFIED_TURN_SUMMARY_COLUMNS + " FROM"
+                        + " managed_agent_turn turn_record JOIN (SELECT"
+                        + " event.session_id, event.turn_id FROM"
+                        + " managed_agent_event event JOIN (SELECT session_id,"
+                        + " MAX(sequence_id) AS max_sequence FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id IN (" + placeholders(sessionIds.size())
+                        + ") AND event_type = 'turn.accepted' GROUP BY"
+                        + " session_id) latest ON latest.session_id ="
+                        + " event.session_id AND latest.max_sequence ="
+                        + " event.sequence_id WHERE event.tenant_id = ?)"
+                        + " latest_turn ON latest_turn.session_id ="
+                        + " turn_record.session_id AND latest_turn.turn_id ="
+                        + " turn_record.turn_id WHERE turn_record.tenant_id ="
+                        + " ?",
+                turnSummaryMapper, arguments.toArray());
+        Map<String, TurnSummary> result = new HashMap<>(
+                sessionIds.size() * 2);
+        for (TurnSummary row : rows) {
+            result.put(row.sessionId(), row);
+        }
+        return result;
     }
 
     // Reads leave the Turn's input out; the public view never shows it.
@@ -1153,22 +1219,46 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, afterSequence, limit);
     }
 
-    public Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
-            String sessionId) {
-        requireSession(tenantId, sessionId);
-        return jdbc.query("SELECT event.* FROM managed_agent_event event"
-                        + " JOIN managed_agent_turn turn_record ON"
-                        + " turn_record.tenant_id = event.tenant_id AND"
-                        + " turn_record.session_id = event.session_id AND"
-                        + " turn_record.turn_id = event.turn_id WHERE"
-                        + " event.tenant_id = ? AND event.session_id = ? AND"
-                        + " event.event_type IN ('environment.provisioning',"
+    /**
+     * The latest environment event of each Session's latest Turn, in one
+     * round trip; the Turns are already loaded, so the turn-row join of the
+     * single-session read is implied.
+     */
+    public Map<String, EventRecord> findLatestEnvironmentEvents(
+            String tenantId, Map<String, TurnSummary> latestTurns) {
+        if (latestTurns.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>(latestTurns.size() * 2 + 2);
+        arguments.add(tenantId);
+        StringBuilder pairs = new StringBuilder();
+        for (TurnSummary turn : latestTurns.values()) {
+            if (pairs.length() > 0) {
+                pairs.append(",");
+            }
+            pairs.append(" (?, ?)");
+            arguments.add(turn.sessionId());
+            arguments.add(turn.turnId());
+        }
+        arguments.add(tenantId);
+        // One row per session: the latest environment event of its latest
+        // Turn, selected in SQL instead of shipping every match per pair.
+        List<EventRecord> rows = jdbc.query("SELECT event.* FROM"
+                        + " managed_agent_event event JOIN (SELECT session_id,"
+                        + " MAX(sequence_id) AS max_sequence FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " event_type IN ('environment.provisioning',"
                         + " 'environment.ready', 'environment.failed') AND"
-                        + " turn_record.turn_id = (" + LATEST_TURN_ID
-                        + ") ORDER BY event.sequence_id DESC"
-                        + " LIMIT 1",
-                eventMapper, tenantId, sessionId, tenantId, sessionId)
-                .stream().findFirst();
+                        + " (session_id, turn_id) IN (" + pairs + ")"
+                        + " GROUP BY session_id) latest ON latest.session_id ="
+                        + " event.session_id AND latest.max_sequence ="
+                        + " event.sequence_id WHERE event.tenant_id = ?",
+                eventMapper, arguments.toArray());
+        Map<String, EventRecord> result = new HashMap<>(latestTurns.size() * 2);
+        for (EventRecord row : rows) {
+            result.put(row.sessionId(), row);
+        }
+        return result;
     }
 
     public List<EventRecord> findControlEvents(String tenantId,
@@ -1226,14 +1316,23 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
-    @Override
-    public long findSnapshotCoveredSequence(String tenantId,
-            String sessionId) {
-        List<Long> rows = jdbc.queryForList("SELECT covered_sequence FROM"
+    /** The snapshot's covered sequence of each given Session, in one read. */
+    public Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        Map<String, Long> result = new HashMap<>(sessionIds.size() * 2);
+        RowCallbackHandler reader = row -> result.put(
+                row.getString("session_id"), row.getLong("covered_sequence"));
+        jdbc.query("SELECT session_id, covered_sequence FROM"
                         + " managed_agent_snapshot WHERE tenant_id = ? AND"
-                        + " session_id = ?",
-                Long.class, tenantId, sessionId);
-        return rows.isEmpty() ? 0 : rows.getFirst();
+                        + " session_id IN (" + placeholders(sessionIds.size())
+                        + ")", reader, arguments.toArray());
+        return result;
     }
 
     public ReplayWindow findReplayWindow(String tenantId, String sessionId) {
@@ -1276,23 +1375,30 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<MaterializationTarget> findMaterializationTargets(int limit) {
+        // The second disjunct re-selects a session whose drained batch
+        // deferred the snapshot rewrite, once the deferral marker is old
+        // enough; without it a caught-up idle session would stay stale
+        // forever.
         return jdbc.query("SELECT s.tenant_id, s.session_id FROM"
                         + " managed_agent_session s JOIN"
                         + " managed_agent_consumer_progress p ON"
                         + " p.tenant_id = s.tenant_id AND p.session_id ="
                         + " s.session_id AND p.consumer_name = ? WHERE"
-                        + " s.last_sequence > p.covered_sequence ORDER BY"
-                        + " p.updated_at ASC LIMIT ?",
+                        + " s.last_sequence > p.covered_sequence"
+                        + " OR (p.snapshot_stale_since IS NOT NULL"
+                        + " AND p.snapshot_stale_since <= ?)"
+                        + " ORDER BY p.updated_at ASC LIMIT ?",
                 (result, row) -> new MaterializationTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id")),
-                MESSAGE_PROJECTION, limit);
+                MESSAGE_PROJECTION, clock.millis() - SNAPSHOT_REFRESH_MILLIS,
+                limit);
     }
 
     @Transactional
     public MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
-        requireSessionForUpdate(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id"
                         + " = ? AND session_id = ? AND consumer_name = ?"
@@ -1308,6 +1414,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " sequence_id ASC LIMIT ?",
                 eventMapper, tenantId, sessionId, covered, limit);
         if (events.isEmpty()) {
+            // Reselected only because the snapshot still lags the progress:
+            // converge it now.
+            rewriteStaleSnapshot(tenantId, sessionId, covered);
             return new MaterializationResult(false, covered);
         }
         long expected = covered + 1;
@@ -1321,33 +1430,96 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();
+        List<SnapshotState> snapshots = snapshotForUpdate(tenantId,
+                sessionId);
+        // A full rewrite costs O(items) under the session row lock, so it
+        // runs at creation, every SNAPSHOT_REFRESH_EVENTS behind, on the
+        // batch that ends a Turn, and on a drained batch at most once per
+        // SNAPSHOT_REFRESH_MILLIS — a deferred drained batch marks the
+        // progress row so findMaterializationTargets re-selects the session
+        // once the snapshot ages out.
+        boolean defer = !snapshots.isEmpty()
+                && nextCovered - snapshots.get(0).coveredSequence()
+                        < SNAPSHOT_REFRESH_EVENTS
+                && events.stream().noneMatch(EventRecord::terminal)
+                && !(nextCovered >= session.lastSequence()
+                        && now - snapshots.get(0).updatedAt()
+                                >= SNAPSHOT_REFRESH_MILLIS);
         jdbc.update("UPDATE managed_agent_consumer_progress SET"
-                        + " covered_sequence = ?, updated_at = ? WHERE"
+                        + " covered_sequence = ?, updated_at = ?,"
+                        + " snapshot_stale_since = ? WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
                         + " consumer_name = ?",
-                nextCovered, now, tenantId, sessionId, MESSAGE_PROJECTION);
-        List<ItemRecord> items = allItems(tenantId, sessionId);
-        List<Long> versions = jdbc.query("SELECT snapshot_version FROM"
-                        + " managed_agent_snapshot WHERE tenant_id = ? AND"
-                        + " session_id = ? FOR UPDATE",
-                (result, row) -> result.getLong("snapshot_version"),
+                nextCovered, now,
+                defer ? snapshots.get(0).updatedAt() : null,
+                tenantId, sessionId, MESSAGE_PROJECTION);
+        if (defer) {
+            return new MaterializationResult(true, nextCovered);
+        }
+        writeSnapshot(tenantId, sessionId, snapshots, nextCovered, now);
+        return new MaterializationResult(true, nextCovered);
+    }
+
+    /**
+     * Rewrites a snapshot that still lags the projection by a batch whose
+     * rewrite the gate deferred, once it is SNAPSHOT_REFRESH_MILLIS old.
+     */
+    private void rewriteStaleSnapshot(String tenantId, String sessionId,
+            long covered) {
+        List<SnapshotState> snapshots = snapshotForUpdate(tenantId,
+                sessionId);
+        long now = clock.millis();
+        if (snapshots.isEmpty()
+                || snapshots.get(0).coveredSequence() >= covered) {
+            // No longer lagging (e.g. recreated by a retraction): drop any
+            // stale deferral marker.
+            jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                            + " snapshot_stale_since = NULL WHERE tenant_id = ?"
+                            + " AND session_id = ? AND consumer_name = ?"
+                            + " AND snapshot_stale_since IS NOT NULL",
+                    tenantId, sessionId, MESSAGE_PROJECTION);
+            return;
+        }
+        if (now - snapshots.get(0).updatedAt() < SNAPSHOT_REFRESH_MILLIS) {
+            return;
+        }
+        writeSnapshot(tenantId, sessionId, snapshots, covered, now);
+        jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " snapshot_stale_since = NULL WHERE tenant_id = ?"
+                        + " AND session_id = ? AND consumer_name = ?",
+                tenantId, sessionId, MESSAGE_PROJECTION);
+    }
+
+    private List<SnapshotState> snapshotForUpdate(String tenantId,
+            String sessionId) {
+        return jdbc.query("SELECT snapshot_version, covered_sequence,"
+                        + " updated_at FROM managed_agent_snapshot WHERE"
+                        + " tenant_id = ? AND session_id = ? FOR UPDATE",
+                (result, row) -> new SnapshotState(
+                        result.getLong("snapshot_version"),
+                        result.getLong("covered_sequence"),
+                        result.getLong("updated_at")),
                 tenantId, sessionId);
-        if (versions.isEmpty()) {
+    }
+
+    private void writeSnapshot(String tenantId, String sessionId,
+            List<SnapshotState> snapshots, long covered, long now) {
+        List<ItemRecord> items = allItems(tenantId, sessionId);
+        if (snapshots.isEmpty()) {
             jdbc.update("INSERT INTO managed_agent_snapshot (tenant_id,"
                             + " session_id, snapshot_version,"
                             + " covered_sequence, items_json, created_at,"
                             + " updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
-                    tenantId, sessionId, nextCovered, writeJson(items), now,
+                    tenantId, sessionId, covered, writeJson(items), now,
                     now);
         } else {
             jdbc.update("UPDATE managed_agent_snapshot SET"
                             + " snapshot_version = ?, covered_sequence = ?,"
                             + " items_json = ?, updated_at = ? WHERE"
                             + " tenant_id = ? AND session_id = ?",
-                    versions.get(0) + 1, nextCovered, writeJson(items), now,
-                    tenantId, sessionId);
+                    snapshots.get(0).version() + 1, covered,
+                    writeJson(items), now, tenantId, sessionId);
         }
-        return new MaterializationResult(true, nextCovered);
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
@@ -2610,6 +2782,14 @@ public class ManagedAgentStore implements AgentStateStore {
     private static String publicId(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString()
                 .replace("-", "");
+    }
+
+    private static String placeholders(int count) {
+        return String.join(", ", Collections.nCopies(count, "?"));
+    }
+
+    private record SnapshotState(long version, long coveredSequence,
+            long updatedAt) {
     }
 
     private record ItemRow(String tenantId, String sessionId, String itemId,
