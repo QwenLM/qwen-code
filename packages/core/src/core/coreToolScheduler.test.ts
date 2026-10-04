@@ -5282,6 +5282,40 @@ describe('CoreToolScheduler', () => {
     expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
+  it('records Goal-only discovery as bookkeeping', async () => {
+    const goalContext = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+    const output =
+      '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>';
+    const recordToolResult = vi.fn();
+    await runReadBatch(
+      { [ToolNames.TOOL_SEARCH]: textResult(output) },
+      [
+        {
+          ...valueRequest(
+            ToolNames.TOOL_SEARCH,
+            'select:update_goal',
+            'prompt-goal-discovery',
+          ),
+          goalContext,
+        },
+      ],
+      {
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
+      },
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'call-tool_search',
+        status: 'success',
+      }),
+      { goalContext, provenance: 'goal_runtime' },
+    );
+  });
+
   it('includes failed tool responses in PostToolBatch payloads', async () => {
     const messageBus = allowAllHookBus();
     const recordToolResult = vi.fn();

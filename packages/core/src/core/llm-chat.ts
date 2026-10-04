@@ -592,6 +592,15 @@ export interface LlmChatSendOptions {
   disableModelFallbacks?: boolean;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts, so
+   * a cut that already delivered content replays the original request instead
+   * of asking the model to continue from it. The Hosted Harness sets this:
+   * its deltas are published durably, and a continuation answered with a
+   * fresh full answer would glue the retracted attempt's prefix onto the
+   * public transcript (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -3939,18 +3948,27 @@ export class LlmChat {
             // from that attempt can appear twice. Thinking models can
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
+            //
+            // A consumer that retracts delivered output on a fresh retry
+            // (the Hosted Harness) replays even after content delivery: the
+            // resend replaces the retracted output, where a continuation
+            // answered with a fresh full answer would glue it back on
+            // (#13319). Such sends never take the continuation arm below.
+            const replayAdmitsDeliveredContent =
+              options?.retractDeliveredOutputOnRetry === true;
             if (
               isReplayableStreamError &&
-              !streamYieldedContentChunk &&
-              // `streamYieldedContentChunk` is per-attempt, so on its own it
-              // cannot tell "nothing has been delivered" from "this attempt
-              // was cut while thinking, after earlier attempts already put
-              // text on screen". Only the first is replayable; replaying the
-              // second discards output the caller is watching. The
-              // accumulated buffer is what distinguishes them, and it must be
-              // consulted here because this branch is checked before the
-              // continuation one below.
-              transportContinuationText.trim().length === 0 &&
+              (replayAdmitsDeliveredContent ||
+                (!streamYieldedContentChunk &&
+                  // `streamYieldedContentChunk` is per-attempt, so on its own it
+                  // cannot tell "nothing has been delivered" from "this attempt
+                  // was cut while thinking, after earlier attempts already put
+                  // text on screen". Only the first is replayable; replaying the
+                  // second discards output the caller is watching. The
+                  // accumulated buffer is what distinguishes them, and it must be
+                  // consulted here because this branch is checked before the
+                  // continuation one below.
+                  transportContinuationText.trim().length === 0)) &&
               streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
@@ -3980,11 +3998,12 @@ export class LlmChat {
               );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
-              // continuation had staged must go. The gate above now admits
-              // only an empty accumulated buffer, which leaves nothing for
-              // this to clear — it stays as an assertion of that invariant,
-              // so a future gate change cannot leak staged text into a
-              // restarted attempt.
+              // continuation had staged must go. Without
+              // `retractDeliveredOutputOnRetry` the gate above admits only an
+              // empty accumulated buffer, which leaves nothing for this to
+              // clear; with it the buffer holds the delivered text the caller
+              // is about to retract, and clearing it keeps the resend from
+              // asking the model to resume output the caller no longer has.
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
@@ -4034,8 +4053,13 @@ export class LlmChat {
               attemptFinishReason !== undefined &&
               CLOSED_FINISH_REASONS.has(attemptFinishReason) &&
               streamYieldedContentChunk;
+            // A consumer retracting delivered output replays instead: a
+            // continuation tail is only correct when the provider honors the
+            // resume instruction, and a restart is indistinguishable from a
+            // perfect continuation — so append is not safe for it (#13319).
             const canContinueAfterTransportCut =
               isContinuableStreamCut &&
+              !replayAdmitsDeliveredContent &&
               !attemptClosedWithOwnOutput &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
