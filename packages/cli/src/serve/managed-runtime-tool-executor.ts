@@ -755,8 +755,11 @@ export class ManagedToolExecutor {
       if (!child) return;
       for (const stream of [child.stdout, child.stderr]) {
         if (!stream) continue;
-        if (next) stream.pause();
-        else stream.resume();
+        if (next) {
+          if (!stream.isPaused()) stream.pause();
+        } else if (stream.isPaused()) {
+          stream.resume();
+        }
       }
     };
     try {
@@ -768,6 +771,10 @@ export class ManagedToolExecutor {
         cwd: directory,
         onOutput: (stream, chunk) => {
           bufferedBytes += chunk.byteLength;
+          // flushStdio resumes the paused pipes when the launcher exits;
+          // re-assert the pause behind every delivered chunk so a writer
+          // that outlives its launcher never balloons the queue (R5 G5).
+          if (paused) applyPause(true);
           const written = sink.write(stream, chunk);
           void written.then(
             () => {
@@ -955,11 +962,17 @@ export class ManagedToolExecutor {
       paused = next;
       const stream = watchHandle?.process?.child.stdout;
       if (!stream) return;
-      if (next) stream.pause();
-      else stream.resume();
+      if (next) {
+        if (!stream.isPaused()) stream.pause();
+      } else if (stream.isPaused()) {
+        stream.resume();
+      }
     };
     const acceptChunk = (chunk: Buffer) => {
       bufferedBytes += chunk.byteLength;
+      // The launcher-exit flushStdio resumes the paused pipe; re-assert
+      // the pause behind every delivered chunk, like the Shell path.
+      if (paused) applyPause(true);
       const written = sink.write('stdout', chunk);
       const release = () => {
         bufferedBytes -= chunk.byteLength;
