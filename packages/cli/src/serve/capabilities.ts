@@ -245,8 +245,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
   // Inspect bound workspace trust and request local operator action.
-  // Remote clients cannot directly write trustedFolders.json.
+  // Recording the decision itself is the separate grant tag below.
   workspace_trust: { since: 'v1' },
+  // Record the bound workspace as trusted in the local trusted-folders file.
+  // This is the recovery path for Web Shell / Desktop clients, which cannot
+  // render the terminal-only folder-trust prompt (#13130). The route sits
+  // behind the strict mutation gate, so a caller already holds operator
+  // authority over this daemon, and it has no revoke counterpart.
+  // Advertised only where trust hot-reload applies the decision to the running
+  // runtime without a daemon restart.
+  workspace_trust_grant: { since: 'v1' },
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
@@ -422,6 +430,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   channel_control: { since: 'v1' },
   // Sanitized workspace Channel configuration, lifecycle, and pairing.
   channel_management: { since: 'v1' },
+  // `DELETE /workspaces/:workspace/channels/:name` converges a Channel whose
+  // configuration is gone from the merged settings view the Worker resolves
+  // (system + user + workspace scopes): the runtime must be silent about the
+  // Channel or confirm exactly one committed Worker owner in that workspace,
+  // which is stopped before the persisted startup selection held in that
+  // scope is removed, instead of reporting `channel_instance_not_found`.
+  channel_delete_config_loss_convergence: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -481,6 +496,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_list_details: { since: 'v1' },
   extension_state: { since: 'v1' },
   extension_git_credentials: { since: 'v1' },
   extension_local_path_install: { since: 'v1' },
@@ -749,10 +765,18 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_trust_hot_reload',
     (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
   ],
+  [
+    'workspace_trust_grant',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
+  [
+    'channel_delete_config_loss_convergence',
     (toggles) => toggles.channelManagementAvailable === true,
   ],
   [
