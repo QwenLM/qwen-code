@@ -730,7 +730,7 @@ export interface components {
             decisionReceiptId?: string;
             questions: components["schemas"]["WebShellActionQuestion"][];
         } & unknown;
-        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
+        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. A requested native-tool Action may carry a bounded input preview when the producer supplies an input reference. Version 1 Actions and unavailable inputs omit it. Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
         WebShellPermissionAction: {
             actionId: string;
             /** Format: uuid */
@@ -752,6 +752,7 @@ export interface components {
             turnId?: string;
             functionCallId: string;
             toolName: string;
+            inputPreview?: components["schemas"]["WebShellActionInputPreview"];
         } & unknown;
         WebShellPermissionResponse: {
             /** @constant */
@@ -949,6 +950,18 @@ export interface components {
             cursor?: string | null;
             /** @default 20 */
             limit?: number;
+        };
+        /** @description Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options. */
+        WebShellActionInputPreview: {
+            /** @description Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON. */
+            text: string;
+            /** @description True when text is shorter than the complete UTF-8 input. */
+            truncated: boolean;
+            /**
+             * Format: int64
+             * @description Byte length of the complete payloadJson in UTF-8, before truncation.
+             */
+            byteLength: number;
         };
     };
     responses: {

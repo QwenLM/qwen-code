@@ -128,11 +128,16 @@ public class ManagedExtensionRecordStore {
     /** Reads only a committed resource in this Session's scope. */
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref) {
+        return readBody(readCommittedResource(tenantId, sessionId, ref));
+    }
+
+    public StoredResource readCommittedResource(String tenantId, String sessionId,
+            JsonNode ref) {
         ManagedExtensionRecords.durableRef(ref, "recordResource");
         StoredResource resource = readResource(tenantId, sessionId,
                 ref.get("resourceId").textValue());
         requireReference(resource, ref);
-        return readBody(resource);
+        return resource;
     }
 
     private StoredResource readResource(String tenantId, String sessionId,

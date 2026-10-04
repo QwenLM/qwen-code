@@ -23,6 +23,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -34,7 +36,9 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,6 +78,189 @@ class ManagedActionsTest {
                     }
                     return RETURNS_DEFAULTS.answer(call);
                 });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command"})
+    void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        String arguments = switch (tool) {
+            case "read_file" -> "{ \"file_path\" : \"notes.md\", \"offset\" : 1e2 }";
+            case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
+            case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
+            case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
+            default -> throw new AssertionError(tool);
+        };
+        String payload = " { \"toolName\" : \"" + tool + "\", \"input\" : " + arguments + " } ";
+        ActionJournal journal = inputJournal(tenant, session, payload);
+        journal.options.put("toolName", tool);
+        journal.change("requested", null);
+        for (JsonNode view : inputViews(tenant, session, journal.id)) {
+            boolean web = view.has("actionId");
+            JsonNode preview = view.path(web ? "inputPreview" : "input_preview");
+            assertThat(preview.path("text").asText()).isEqualTo(payload);
+            assertThat(preview.path("truncated").asBoolean()).isFalse();
+            assertThat(preview.path(web ? "byteLength" : "byte_length").asLong())
+                    .isEqualTo(payload.getBytes(StandardCharsets.UTF_8).length);
+        }
+        mvc.perform(auth(get(path(session, journal.id)), tenant(), "owner"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void boundsInputByUtf8BytesWithoutSplittingCodePoints() throws Exception {
+        String prefix = "{\"toolName\":\"write_file\",\"input\":{\"file_path\":\"notes.md\",\"content\":\"";
+        String suffix = "\"}}";
+        for (boolean large : List.of(false, true)) {
+            String tenant = tenant();
+            String session = session(tenant);
+            String payload = large
+                    ? prefix + "a".repeat(8191 - prefix.length()) + "😀tail" + suffix
+                    : prefix + "a".repeat(8192 - prefix.length() - suffix.length()) + suffix;
+            ActionJournal journal = inputAction(tenant, session, payload);
+            for (JsonNode view : inputViews(tenant, session, journal.id)) {
+                boolean web = view.has("actionId");
+                JsonNode preview = view.path(web ? "inputPreview" : "input_preview");
+                String text = preview.path("text").asText();
+                assertThat(text).isEqualTo(large ? payload.substring(0, 8191) : payload);
+                assertThat(text.getBytes(StandardCharsets.UTF_8).length)
+                        .isEqualTo(large ? 8191 : 8192);
+                assertThat(preview.path("truncated").asBoolean()).isEqualTo(large);
+                assertThat(preview.path(web ? "byteLength" : "byte_length").asLong())
+                        .isEqualTo(payload.getBytes(StandardCharsets.UTF_8).length);
+            }
+        }
+    }
+
+    @Test
+    void missingInvalidAndCorruptInputNeverFailsTheActionRead() throws Exception {
+        for (String fault : List.of("missing", "null", "kind", "version", "length", "digest",
+                "corrupt", "unreferenced")) {
+            String tenant = tenant();
+            String session = session(tenant);
+            ActionJournal journal = inputJournal(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
+            ObjectNode ref = (ObjectNode) journal.options.path("inputRef");
+            String resourceId = ref.path("resourceId").asText();
+            switch (fault) {
+                case "missing" -> ref.put("resourceId", "missing-input");
+                case "null" -> journal.options.putNull("inputRef");
+                case "kind" -> ref.put("kind", "managed-action-options");
+                case "version" -> ref.put("schemaVersion", 2);
+                case "length" -> ref.put("byteLength", 1);
+                case "digest" -> ref.put("digest", "0".repeat(64));
+                default -> {}
+            }
+            journal.change("requested", null);
+            if ("corrupt".equals(fault)) {
+                jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
+                                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                        new byte[] {1}, tenant, session, resourceId);
+            } else if ("unreferenced".equals(fault)) {
+                jdbc.update("UPDATE qwen_managed_session_resource SET state = 'UNREFERENCED'"
+                                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                        tenant, session, resourceId);
+            }
+            assertNoInputPreview(tenant, session, journal.id);
+        }
+    }
+
+    @Test
+    void refusesCrossSessionAndCrossTenantInputReferences() throws Exception {
+        for (boolean otherTenant : List.of(false, true)) {
+            String tenant = tenant();
+            String session = session(tenant);
+            String foreignTenant = otherTenant ? tenant() : tenant;
+            String foreignSession = session(foreignTenant);
+            ActionJournal foreign = new ActionJournal(journals, foreignTenant, foreignSession, 100, 1000)
+                    .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
+            foreign.change("requested", null);
+            ActionJournal local = new ActionJournal(journals, tenant, session, 100, 1000);
+            local.options.put("v", 2);
+            local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
+            local.change("requested", null);
+            assertNoInputPreview(tenant, session, local.id);
+        }
+    }
+
+    @Test
+    void omitsMalformedPayloadsAndInternalMcpInputs() throws Exception {
+        for (String fault : List.of("session", "runtime", "extra", "json", "duplicate", "tool",
+                "scalar", "mcp", "utf8", "empty")) {
+            String tenant = tenant();
+            String session = session(tenant);
+            ObjectNode wrapper = (ObjectNode) json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
+            switch (fault) {
+                case "session" -> wrapper.put("harnessSessionId", "other-session");
+                case "runtime" -> wrapper.put("runtimeSessionId", 1);
+                case "extra" -> wrapper.put("extra", "not part of the wrapper");
+                case "json" -> wrapper.put("payloadJson", "{broken");
+                case "duplicate" -> wrapper.put("payloadJson", "{\"toolName\":\"write_file\",\"toolName\":\"edit\",\"input\":{}}");
+                case "tool" -> wrapper.put("payloadJson", "{\"toolName\":\"edit\",\"input\":{}}");
+                case "scalar" -> wrapper.put("payloadJson", "{\"toolName\":\"write_file\",\"input\":\"not an object\"}");
+                case "mcp" -> wrapper.put("payloadJson", "{\"toolName\":\"managed_mcp_call\",\"input\":{\"grant\":\"internal authorization\"}}");
+                default -> {}
+            }
+            byte[] bytes = json.writeValueAsBytes(wrapper);
+            if ("empty".equals(fault)) {
+                bytes = new byte[] {32};
+            } else if ("utf8".equals(fault)) {
+                int offset = new String(bytes, StandardCharsets.UTF_8).indexOf("runtime-actions");
+                bytes[offset] = (byte) 0xff;
+            }
+            ActionJournal journal = new ActionJournal(journals, tenant, session, 100, 1000).withInput(bytes);
+            if ("mcp".equals(fault)) {
+                journal.options.put("toolName", "managed_mcp_call");
+            }
+            journal.change("requested", null);
+            assertNoInputPreview(tenant, session, journal.id);
+        }
+    }
+
+    @Test
+    void stillRejectsUnknownOptionsVersionsAndFields() throws Exception {
+        for (String fault : List.of("oldExtra", "missingRef", "version", "extra")) {
+            String tenant = tenant();
+            String session = session(tenant);
+            ActionJournal journal = new ActionJournal(journals, tenant, session, 100, 1000);
+            switch (fault) {
+                case "oldExtra" -> journal.options.putNull("inputRef");
+                case "missingRef" -> journal.options.put("v", 2);
+                case "version" -> journal.options.put("v", 3);
+                case "extra" -> {
+                    journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
+                    journal.options.put("extra", true);
+                }
+                default -> throw new AssertionError(fault);
+            }
+            assertThatThrownBy(() -> journal.change("requested", null))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("managed_session_action_rejected"));
+            assertThat(actions.find(tenant, session, journal.id)).isEmpty();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    void answersV2WithTheExistingPolicyAndKeepsTerminalDetail(String option) throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal journal = inputAction(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
+        responses.put(journal.id, call -> {
+            journal.change("decided", call.getArgument(3));
+            return null;
+        });
+        JsonNode operation = readAccepted(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "v2-answer")
+                .contentType(MediaType.APPLICATION_JSON).content(response(option)));
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(
+                sessions.findOperation(tenant, session, operation.path("id").asText()).orElseThrow().state())
+                .isEqualTo("COMPLETED"));
+        JsonNode terminal = read(auth(get(path(session, journal.id)), tenant, "owner"));
+        assertThat(terminal.path("state").asText()).isEqualTo("decided");
+        assertThat(terminal.has("input_preview")).isFalse();
+        assertThat(terminal.path("decision_receipt_id").asText()).startsWith("decision_");
+        assertThat(OpenApiContract.load().validate("/components/schemas/PublicAction", terminal)).isEmpty();
     }
 
     @Test
@@ -170,6 +357,7 @@ class ManagedActionsTest {
                 .isEmpty();
         assertThat(publicView.path("function_call_id").asText()).isEqualTo("call-actions");
         assertThat(publicView.path("tool_name").asText()).isEqualTo("write_file");
+        assertThat(publicView.has("input_preview")).isFalse();
         JsonNode web =
                 read(
                         auth(post("/api/agent/web-shell/v1/actions/get"), tenant, "owner")
@@ -184,6 +372,7 @@ class ManagedActionsTest {
         assertThat(OpenApiContract.load().validate("/components/schemas/WebShellAction", web))
                 .isEmpty();
         assertThat(web.path("inputRevision").asLong()).isEqualTo(1);
+        assertThat(web.has("inputPreview")).isFalse();
         mvc.perform(auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1));
@@ -542,6 +731,46 @@ class ManagedActionsTest {
                                 tenant,
                                 session))
                 .isZero();
+    }
+
+    private byte[] inputBytes(String session, String payload) throws Exception {
+        return json.writeValueAsBytes(Map.of("harnessSessionId", session,
+                "runtimeSessionId", "runtime-actions", "payloadJson", payload));
+    }
+
+    private ActionJournal inputJournal(String tenant, String session, String payload) throws Exception {
+        return new ActionJournal(journals, tenant, session, 100, 9007199254740991L)
+                .withInput(inputBytes(session, payload));
+    }
+
+    private ActionJournal inputAction(String tenant, String session, String payload) throws Exception {
+        ActionJournal journal = inputJournal(tenant, session, payload);
+        journal.change("requested", null);
+        return journal;
+    }
+
+    private List<JsonNode> inputViews(String tenant, String session, String id) throws Exception {
+        List<JsonNode> views = List.of(
+                read(auth(get(path(session, id)), tenant, "owner")),
+                read(auth(post("/api/agent/web-shell/v1/actions/get"), tenant, "owner")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("sessionId", session, "actionId", id)))),
+                read(auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner")).path("data").get(0),
+                read(auth(post("/api/agent/web-shell/v1/actions/query"), tenant, "owner")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("sessionId", session)))).path("data").get(0));
+        for (JsonNode view : views) {
+            assertThat(OpenApiContract.load().validate(view.has("actionId")
+                    ? "/components/schemas/WebShellAction" : "/components/schemas/PublicAction", view)).isEmpty();
+        }
+        return views;
+    }
+
+    private void assertNoInputPreview(String tenant, String session, String id) throws Exception {
+        for (JsonNode view : inputViews(tenant, session, id)) {
+            assertThat(view.has("input_preview") || view.has("inputPreview")).isFalse();
+            assertThat(view.path("state").asText()).isEqualTo("requested");
+        }
     }
 
     private ActionJournal action(String tenant, String session, long created, long expiry)

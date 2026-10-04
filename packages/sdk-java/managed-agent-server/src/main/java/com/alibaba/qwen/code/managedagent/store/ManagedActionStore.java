@@ -158,8 +158,7 @@ public class ManagedActionStore {
             JsonNode ref = payload.path("optionsRef");
             StoredResource resource = resource(ref, "managed-action-options", resources);
             JsonNode options = read(new String(resource.bytes(), StandardCharsets.UTF_8));
-            closed(
-                    options,
+            List<String> optionFields = new ArrayList<>(List.of(
                     "v",
                     "requestId",
                     "turnId",
@@ -169,10 +168,15 @@ public class ManagedActionStore {
                     "inputRevision",
                     "createdAt",
                     "expiresAt",
-                    "options");
+                    "options"));
+            if (options.path("v").asLong() == 2) {
+                optionFields.add("inputRef");
+            }
+            closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
-                            && options.path("v").asLong() == 1
+                            && (options.path("v").asLong() == 1
+                                    || options.path("v").asLong() == 2)
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
