@@ -494,7 +494,12 @@ public class ManagedExtensionRecordStore {
     /** A record line no longer, in UTF-8 bytes, than its kind's cap. */
     private static void requireLineBytes(String line, int index,
             int maxBytes) {
-        require(line.getBytes(StandardCharsets.UTF_8).length <= maxBytes,
+        // Texts of at most maxBytes/3 characters fit any cap; texts longer
+        // than maxBytes characters miss any cap — UTF-8 costs one to three
+        // bytes per BMP char. Only the band between needs the encoding.
+        long chars = line.length();
+        require(3L * chars <= maxBytes || (chars > maxBytes ? false
+                : line.getBytes(StandardCharsets.UTF_8).length <= maxBytes),
                 "Record line " + (index + 1) + " exceeds " + maxBytes
                         + " UTF-8 bytes.");
     }
