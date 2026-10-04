@@ -1283,50 +1283,61 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('prefers the terminal stop reason over a later transient error and keeps it after the transient clears', async () => {
+    // Pin the poller's first-rung failure delay to its maximum so the
+    // recovering read lands after both positional alert checks.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
     vi.useFakeTimers();
-    mocks.client.getSession
-      .mockResolvedValueOnce(summary('s1'))
-      .mockRejectedValueOnce(
-        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
-      )
-      .mockResolvedValue(summary('s1'));
-    mocks.client.subscribeEvents
-      .mockImplementationOnce(async function* () {
-        yield event(3, 'still streaming');
-        await new Promise((resolve) => setTimeout(resolve, 3_500));
-        throw new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway');
-      })
-      .mockImplementationOnce(async function* (
-        _id: string,
-        opts: { signal: AbortSignal },
-      ) {
-        yield event(4, 'resumed after the stop');
-        await new Promise<void>((resolve) => {
-          if (opts.signal.aborted) resolve();
-          else
-            opts.signal.addEventListener('abort', () => resolve(), {
-              once: true,
-            });
+    try {
+      mocks.client.getSession
+        .mockResolvedValueOnce(summary('s1'))
+        .mockRejectedValueOnce(
+          new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+        )
+        .mockResolvedValue(summary('s1'));
+      mocks.client.subscribeEvents
+        .mockImplementationOnce(async function* () {
+          yield event(3, 'still streaming');
+          await new Promise((resolve) => setTimeout(resolve, 3_500));
+          throw new JavaManagedAgentHttpError(
+            502,
+            'bad_gateway',
+            'Bad gateway',
+          );
+        })
+        .mockImplementationOnce(async function* (
+          _id: string,
+          opts: { signal: AbortSignal },
+        ) {
+          yield event(4, 'resumed after the stop');
+          await new Promise<void>((resolve) => {
+            if (opts.signal.aborted) resolve();
+            else
+              opts.signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+          });
         });
+      await render('s1');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500);
+        await flush();
       });
-    await render('s1');
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_500);
-      await flush();
-    });
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Not found',
-    );
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_500);
-      await flush();
-    });
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Not found',
-    );
-    expect(
-      container.querySelector('[data-testid="messages"]')?.textContent,
-    ).toContain('resumed after the stop');
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'Not found',
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500);
+        await flush();
+      });
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'Not found',
+      );
+      expect(
+        container.querySelector('[data-testid="messages"]')?.textContent,
+      ).toContain('resumed after the stop');
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('shows a fresh action error alongside a sticky terminal stop', async () => {

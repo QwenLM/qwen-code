@@ -150,7 +150,130 @@ describe('useManagedSession', () => {
     }
   });
 
-  it('stops resubscribing when the stream answers with a non-retryable error', async () => {
+  it('retires a session-leg verdict on the poll loop next success', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ sessionId: 'session-1' })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('session gone'), { status: 404 }),
+        )
+        .mockResolvedValue({ sessionId: 'session-1' });
+      const provider = {
+        getSession,
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number; signal?: AbortSignal },
+        ) {
+          yield event(2);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('session');
+      expect(latest?.error).toBe('session gone');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('restarts the loops after a session-leg bootstrap stop when a later read succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const provider = {
+        getSession: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('session gone'), { status: 404 }),
+          )
+          .mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number; signal?: AbortSignal },
+        ) {
+          calls++;
+          yield event(2);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(calls).toBe(0);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_300);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(calls).toBe(1);
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a transcript-leg verdict while only session-leg reads succeed', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi
+          .fn()
+          .mockResolvedValueOnce(transcript(1))
+          .mockRejectedValueOnce(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          )
+          .mockResolvedValue(transcript(2)),
+        subscribeEvents: vi.fn(async function* () {
+          calls++;
+          if (calls > 1) {
+            await new Promise((resolve) => setTimeout(resolve, 120_000));
+            return;
+          }
+          yield event(2);
+          yield { ...event(2), type: 'stream_gap' };
+        }),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+      expect(provider.getSession.mock.calls.length).toBeGreaterThan(4);
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records a definite stream answer and keeps resubscribing behind its ladder', async () => {
     vi.useFakeTimers();
     try {
       const subscribeEvents = vi.fn(async function* () {
@@ -166,9 +289,17 @@ describe('useManagedSession', () => {
       await flushReact();
       expect(subscribeEvents).toHaveBeenCalledTimes(1);
       await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
-      expect(subscribeEvents).toHaveBeenCalledTimes(1);
+      expect(subscribeEvents.mock.calls.length).toBeGreaterThan(10);
+      expect(subscribeEvents.mock.calls.length).toBeLessThanOrEqual(45);
+      expect(latest?.stoppedReason).toBe('session gone');
     } finally {
       vi.useRealTimers();
     }

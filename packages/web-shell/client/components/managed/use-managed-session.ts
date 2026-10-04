@@ -47,6 +47,10 @@ interface ManagedSessionState {
   // A terminal (non-retryable) stop, sticky across per-event updates that
   // legitimately clear the transient `error` of the loop that owns it.
   stoppedReason?: string;
+  // Which authority answered the stop: only a later success by that same
+  // leg retires it — a live stream cannot certify history, and a summary
+  // read cannot certify the event log.
+  stoppedLeg?: 'session' | 'transcript';
 }
 
 export function useManagedSession(
@@ -62,6 +66,10 @@ export function useManagedSession(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const cursorRef = useRef<string | undefined>(undefined);
+  // Whether any loop ended terminally on a session-leg answer; a later
+  // session-leg success re-arms the whole effect instead of leaving a
+  // silent dead loop next to a live summary.
+  const endedRef = useRef(false);
   // Paging state: whether any older page was ever loaded, the highest id any
   // page returned (the paged region's top edge), and whether the user paged
   // all the way to the beginning.
@@ -76,6 +84,7 @@ export function useManagedSession(
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
+    endedRef.current = false;
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -89,6 +98,23 @@ export function useManagedSession(
         error: error instanceof Error ? error.message : String(error),
         loading: false,
       });
+    // A successful read retires its own leg's verdict (transient error and
+    // sticky reason), and a session-leg success also restarts loops that
+    // ended terminally.
+    const retire = (leg: 'session' | 'transcript' | 'both') => {
+      if (abort.signal.aborted) return;
+      setState((current) => ({
+        ...current,
+        error: undefined,
+        ...(leg === 'both' || current.stoppedLeg === leg
+          ? { stoppedReason: undefined, stoppedLeg: undefined }
+          : {}),
+      }));
+      if (leg === 'session' && endedRef.current) {
+        endedRef.current = false;
+        setRevision((value) => value + 1);
+      }
+    };
     const snapshot = async (preserveLoadedPages: boolean) => {
       const [summary, transcript] = await Promise.all([
         provider.getSession(sessionId, opts),
@@ -175,6 +201,7 @@ export function useManagedSession(
             loading: false,
             error: undefined,
             stoppedReason: undefined,
+            stoppedLeg: undefined,
           };
         });
       } else {
@@ -186,22 +213,27 @@ export function useManagedSession(
           loading: false,
           error: undefined,
           stoppedReason: undefined,
+          stoppedLeg: undefined,
         });
       }
       return transcript.lastEventId;
     };
-    const stop = (error: unknown) =>
+    const stop = (error: unknown, leg: 'session' | 'transcript' = 'session') =>
       update({
         stoppedReason: error instanceof Error ? error.message : String(error),
+        stoppedLeg: leg,
       });
     // A terminal (definite 4xx) answer: surface it transiently and stickily.
     // Callers return from their loop when this holds, unless they own a
     // retryable-in-principle retry that must outlive the classification.
-    const failed = (error: unknown): boolean => {
+    const failed = (
+      error: unknown,
+      leg: 'session' | 'transcript' = 'session',
+    ): boolean => {
       fail(error);
       if (isAuthFailure(error) || !isNonRetryableClientError(error))
         return false;
-      stop(error);
+      stop(error, leg);
       return true;
     };
     void (async () => {
@@ -220,8 +252,11 @@ export function useManagedSession(
           ) {
             fail(error);
             if (!isAuthFailure(error) && isNonRetryableClientError(error))
-              stop(error);
-          } else if (failed(error)) return;
+              stop(error, 'transcript');
+          } else if (failed(error)) {
+            endedRef.current = true;
+            return;
+          }
           await pause(abort.signal, failureRetryDelayMs(failures++));
         }
       }
@@ -284,18 +319,22 @@ export function useManagedSession(
               // A definite-4xx snapshot is recorded but must not kill a
               // live stream: the gap simply re-detects and the read climbs
               // its own ladder.
-              failed(error);
+              failed(
+                error,
+                (error as { snapshotLeg?: string }).snapshotLeg === 'transcript'
+                  ? 'transcript'
+                  : 'session',
+              );
               delayMs = failureRetryDelayMs(snapshotFailures++);
             }
           } else if (!abort.signal.aborted) {
             // Same policy as the gap branch: a definite answer from a
             // routine summary read is recorded, never a kill for a stream
-            // that is otherwise healthy.
+            // that is otherwise healthy; its success retires session-leg
+            // verdicts.
             try {
-              update({
-                summary: await provider.getSession(sessionId, opts),
-                stoppedReason: undefined,
-              });
+              update({ summary: await provider.getSession(sessionId, opts) });
+              retire('session');
             } catch (error) {
               failed(error);
             }
@@ -303,7 +342,10 @@ export function useManagedSession(
           }
           failures = 0;
         } catch (error) {
-          if (failed(error)) return;
+          // The event log's own answer is a transcript-leg verdict and is
+          // recorded rather than killing the loop outright: reconnects keep
+          // coming on the ladder.
+          failed(error, 'transcript');
           // Any delivered frame, or a connection that simply lived long
           // enough, proves the path healthy; only back-to-back failures
           // with nothing delivered should stretch the ladder.
@@ -321,6 +363,7 @@ export function useManagedSession(
         if (abort.signal.aborted) return;
         try {
           update({ summary: await provider.getSession(sessionId, opts) });
+          retire('session');
           failures = 0;
         } catch (error) {
           // A definite answer is recorded (sticky through fail/stop) but
@@ -379,6 +422,9 @@ export function useManagedSession(
           events: mergeManagedEvents(current.events, page.events),
           olderCursor: page.olderCursor,
           error: undefined,
+          ...(current.stoppedLeg === 'transcript'
+            ? { stoppedReason: undefined, stoppedLeg: undefined }
+            : {}),
         }));
       } catch (error) {
         if (abort.signal.aborted) return;
