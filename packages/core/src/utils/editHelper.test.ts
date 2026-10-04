@@ -252,6 +252,12 @@ describe('applyReplacementPreservingLineEndings', () => {
     );
   });
 
+  it('preserves a bare CR before a new-string CRLF break', () => {
+    expect(splice('one\r\ntwo\r\nthree\r\n', 'two', 'X\r\r\nY')).toBe(
+      'one\r\nX\r\r\nY\r\nthree\r\n',
+    );
+  });
+
   it('is a no-op on a file that is already uniformly LF', () => {
     expect(splice('one\ntwo\nthree\n', 'two', 'TWO\nAGAIN')).toBe(
       'one\nTWO\nAGAIN\nthree\n',
@@ -370,6 +376,7 @@ describe('applyReplacementPreservingLineEndings', () => {
     ];
     const edits: Array<[string, string]> = [
       ['const b = 2;', 'const B = 2;'],
+      ['const b = 2;', 'X\r\r\nY'],
       ['const a = 1;\n', 'const A = 1;\n'],
       ['\nconst b = 2;', '\nconst B = 2;'],
       ['const b = 2;\n', ''],

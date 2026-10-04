@@ -725,17 +725,16 @@ export function applyReplacementPreservingLineEndings(
     const insertedEnding = ending;
     const inserted = newString
       .split(/\r\n|\n/)
-      .map((text, index) => {
-        // A `\r` the split did not consume is the first half of a break. The
-        // second half is `insertedEnding` for every segment but the last, and
-        // for the last one it is whatever break follows the span. Copying it
-        // through as well leaves a doubled `\r` in front of the untouched tail,
-        // so the unpaired one goes. The previous writer absorbed it the same
-        // way, by replacing on LF-normalized text and letting
-        // `ensureCrlfLineEndings` rebuild the breaks -- except where no break
-        // followed the span, in which case it left the `\r` behind as a stray
-        // mid-line character.
-        const body = text.endsWith('\r') ? text.slice(0, -1) : text;
+      .map((text, index, segments) => {
+        // The split consumes each complete CRLF break, so a trailing `\r` in
+        // an intermediate segment is user content. Only the final segment
+        // keeps the existing CR absorption: it avoids duplicating the CR before
+        // an untouched tail break and, as documented above, still drops it when
+        // no break follows the span.
+        const body =
+          index === segments.length - 1 && text.endsWith('\r')
+            ? text.slice(0, -1)
+            : text;
         return index === 0 ? body : `${insertedEnding}${body}`;
       })
       .join('');

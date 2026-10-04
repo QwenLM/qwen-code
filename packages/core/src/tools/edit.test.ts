@@ -790,6 +790,16 @@ describe('EditTool', () => {
       );
     });
 
+    it('preserves a bare CR in a non-final new-string segment on disk', async () => {
+      seedFile(filePath, 'one\r\ntwo\r\nthree\r\n');
+      seedPriorRead(filePath);
+
+      const result = await run(edit(filePath, 'two', 'X\r\r\nY'));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe('one\r\nX\r\r\nY\r\nthree\r\n');
+    });
+
     it('preserves a bare CR at the start of a matched span', async () => {
       const original = 'a\r\nb\rc\nd\n';
       fs.writeFileSync(filePath, original, 'utf8');
