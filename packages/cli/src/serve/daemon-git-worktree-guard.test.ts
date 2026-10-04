@@ -417,6 +417,92 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // Same PR-body idiom, but the body carries `)` characters (checklists,
+  // emoticons): the substitution scan must read the heredoc instead of
+  // letting the first body paren close the substitution early.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body whose lines carry closing parens',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## Checklist\n1) run npm test\n2) open the preview\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\nlgtm :)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      // A quoted delimiter keeps the body inert even when it carries a
+      // substitution-shaped line: bash never expands it, so the guard must
+      // not start denying it either.
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n1) item\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      // Unquoted delimiter, but the body stays free of expansions: bash runs
+      // nothing extra, so the strip is safe and the idiom stays allowed.
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\n1) item\nplain text\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // The hostile flip side: with an unquoted delimiter bash expands the body
+  // at read time, so a stripped body line can run commands no later stage
+  // ever sees. Those shapes must fail closed.
+  it.runIf(bashSemanticsLane)(
+    'fails closed when an unquoted heredoc body hides a substitution behind a closing paren',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\n1) item\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\nlgtm :)\n\`git -C ${cmdPath(outsideRepo)} reset --hard\`\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  // No substitution wrapper needed: a top-level unquoted body can assign
+  // GIT_DIR for the commands that follow it in the same shell.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on an unquoted heredoc body carrying parameter expansion',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nHEREDOC\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
 
