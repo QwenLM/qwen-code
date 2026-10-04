@@ -9,6 +9,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -1354,6 +1355,43 @@ describe('Managed Session log recording', () => {
     const block = restored.getManagedSessionBlock();
     expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
     expect(block?.message).toContain('never settled');
+    await restored.closeSessionWriter();
+  });
+
+  it('blocks a restore whose newest checkpoint state cannot be read', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    // A crash-damaged store: the checkpoint's state body no longer reads.
+    const stateRoot = path.join(runtimeDir, 'resources', SESSION_ID);
+    let zeroed = 0;
+    for (const kind of await readdir(stateRoot)) {
+      const dir = path.join(stateRoot, kind);
+      for (const file of await readdir(dir)) {
+        if (file.startsWith('.')) continue;
+        const candidate = path.join(dir, file);
+        if ((await readFile(candidate)).includes('ckpt-')) {
+          await writeFile(candidate, Buffer.alloc(0));
+          zeroed += 1;
+        }
+      }
+    }
+    expect(zeroed).toBeGreaterThan(0);
+
+    // The restore repair leaves the unreadable checkpoint to the gate: the
+    // session opens blocked rather than failing to open at all.
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('cannot be read');
     await restored.closeSessionWriter();
   });
 

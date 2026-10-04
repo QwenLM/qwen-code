@@ -569,6 +569,17 @@ describe('restored runtime block', () => {
     roots.add(root);
     {
       const { session, seal } = await openSession(root, 'session-unrecorded');
+      // A record the turn committed before the crash: the recovered result
+      // must continue this chain, not open a fresh root that truncates it.
+      await session.sink.write({
+        ...session.authority.recordEnvelope,
+        uuid: 'user-before-crash',
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'before the crash' }] },
+      } as never);
       const outcomes = new LocalManagedRuntimeOutcomes(session);
       await outcomes.admit(admission('call-a'));
       await outcomes.settle({
@@ -600,11 +611,231 @@ describe('restored runtime block', () => {
       );
       expect(body.toString()).toContain('call-a');
       expect(body.toString()).toContain('settled but unrecorded');
+      // The record the restore commits reads like the live one: the model's
+      // functionResponse id space, on the chain the pre-crash records built.
+      const record = JSON.parse(body.toString()) as {
+        provenance?: string;
+        parentUuid?: string | null;
+        message?: { role?: string; parts?: Array<Record<string, unknown>> };
+        toolCallResult?: { callId?: string; status?: string };
+      };
+      expect(record.provenance).toBe('tool_result');
+      expect(record.parentUuid).toBe('user-before-crash');
+      expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
+        id: 'call-a',
+        name: 'read_file',
+        response: { output: 'settled but unrecorded' },
+      });
+      expect(record.toolCallResult).toMatchObject({
+        callId: 'call-a',
+        status: 'success',
+      });
+      // The projection keeps the pre-crash record and appends the recovered
+      // result in order — nothing is re-rooted.
+      const projected = await restored.sink.project();
+      expect(projected.map((entry) => entry.uuid)).toEqual([
+        'user-before-crash',
+        'recovered-tool-result:call-a',
+      ]);
       const checkpoint = (await checkpointOf(restored))!;
       expect(checkpoint.continuation.phase).toBe('results_ready');
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toBeUndefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it("re-records a call whose id only another record's text quotes", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-quoted-id');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.admit(admission('call-b'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'answer a' }],
+        },
+      });
+      await outcomes.settle({
+        functionCallId: 'call-b',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'answer b' }],
+        },
+      });
+      // The recorder wrote call-b's result — whose text quotes call-a's id —
+      // and died before call-a's. A substring search over serialized bodies
+      // would mistake the quote for call-a's record.
+      await session.sink.write({
+        ...session.authority.recordEnvelope,
+        uuid: 'recorded-result:call-b',
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-b',
+                name: 'read_file',
+                response: { output: 'called call-a' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-b',
+          status: 'success',
+          responseParts: [{ text: 'called call-a' }],
+        },
+      } as never);
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-quoted-id');
+    try {
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(2);
+      const bodies = await Promise.all(
+        resultsRecorded.map(
+          async (event) =>
+            JSON.parse(
+              (
+                await restored.resources.read(
+                  event.payload['contentRef'] as never,
+                )
+              ).toString(),
+            ) as { uuid?: string; toolCallResult?: { callId?: string } },
+        ),
+      );
+      // call-a's answer is its own recovered record — the quote in call-b's
+      // text did not stand in for it — and call-b's record stands alone.
+      expect(
+        bodies.filter((record) => record.toolCallResult?.callId === 'call-a'),
+      ).toHaveLength(1);
+      expect(
+        bodies.filter((record) => record.toolCallResult?.callId === 'call-b'),
+      ).toHaveLength(1);
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('recovers a cancelled outcome with the cancellation the live path reports', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-cancelled');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      // The cancel branch's durable payload: settled, with no error field.
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'cancelled',
+        payload: { executionStatus: 'cancelled', responseParts: [] },
+      });
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-cancelled');
+    try {
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      const record = JSON.parse(body.toString()) as {
+        message?: { parts?: Array<Record<string, unknown>> };
+        toolCallResult?: {
+          callId?: string;
+          status?: string;
+          error?: unknown;
+        };
+      };
+      // What the model reads matches the live cancellation: an error part
+      // with the cancellation message, not an empty answer.
+      expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
+        id: 'call-a',
+        name: 'read_file',
+        response: { error: 'The tool call was cancelled.' },
+      });
+      // And the UI-facing half keeps the call failed, never completed.
+      expect(record.toolCallResult?.status).toBe('cancelled');
+      expect(record.toolCallResult?.error).toBeDefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('recovers a not-started outcome with the did-not-run evidence', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-refused');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'not_started',
+        payload: {
+          executionStatus: 'not_started',
+          responseParts: [],
+          error: { message: 'The Runtime worker refused the tool call.' },
+        },
+      });
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-refused');
+    try {
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      const record = JSON.parse(body.toString()) as {
+        message?: { parts?: Array<Record<string, unknown>> };
+        toolCallResult?: {
+          callId?: string;
+          status?: string;
+          error?: unknown;
+        };
+      };
+      expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
+        id: 'call-a',
+        name: 'read_file',
+        response: {
+          error:
+            'The tool call did not run: The Runtime worker refused the tool call.',
+        },
+      });
+      expect(record.toolCallResult?.status).toBe('error');
+      expect(record.toolCallResult?.error).toBeDefined();
     } finally {
       await restored.close();
     }
@@ -811,6 +1042,11 @@ describe('restored runtime block', () => {
 
     const { session: restored } = await openSession(root, 'session-gone-state');
     try {
+      // The restore repair leaves an unreadable checkpoint to the gate: it
+      // no-ops rather than failing the open the gate is about to block.
+      await expect(
+        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+      ).resolves.toBeUndefined();
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toContain('cannot be read');
@@ -840,6 +1076,11 @@ describe('restored runtime block', () => {
 
     const { session: restored } = await openSession(root, 'session-bad-state');
     try {
+      // Same for a checkpoint no parse recognizes: the gate classifies it,
+      // the repair does not throw ahead of it.
+      await expect(
+        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+      ).resolves.toBeUndefined();
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toContain('cannot be parsed');

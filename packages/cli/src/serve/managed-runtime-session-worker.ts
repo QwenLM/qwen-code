@@ -21,7 +21,10 @@ import {
   type ExecutionEnvironment,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { LocalExecutionEnvironment } from '@qwen-code/qwen-code-core/services/local-execution-environment.js';
-import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  managedToolDigest,
+  managedToolFailureMessage,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type { Part } from '@google/genai';
 import type { ToolResult } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -845,13 +848,7 @@ export function toToolResult(payload: ManagedToolResultPayload): ToolResult {
   }
   // A call that never ran says so: it is no tool failure, and nothing it
   // would have done took effect.
-  const message =
-    payload.executionStatus === 'not_started'
-      ? `The tool call did not run: ${payload.error?.message ?? 'the Runtime worker did not run it.'}`
-      : (payload.error?.message ??
-        (payload.executionStatus === 'cancelled'
-          ? 'The tool call was cancelled.'
-          : 'The tool call failed.'));
+  const message = managedToolFailureMessage(payload);
   return {
     llmContent: parts.length > 0 ? parts : message,
     returnDisplay: text || message,
@@ -908,9 +905,14 @@ export function createManagedRuntimeEnvironment(
         unknown
       >;
       const promptId = promptIdContext.getStore() ?? 'unknown';
+      // The durable log keys the call by the scheduler's function-call id —
+      // the id the recorded history names — so a restored tool_result can be
+      // matched to the model call it answers. The invocation's own id only
+      // ever named the preparation inside this environment.
+      const callId = call.callId ?? call.id;
       // Admitted before dispatch; an admission that fails never sends.
       await outcomes.admit({
-        functionCallId: call.id,
+        functionCallId: callId,
         toolName: call.toolName,
         promptId,
         params,
@@ -919,67 +921,75 @@ export function createManagedRuntimeEnvironment(
       });
       // Cancelled between the admission and the dispatch: the worker never
       // hears the call, so its outcome is known — cancelled — and settles
-      // the same way, without contacting the worker.
+      // the same way, without contacting the worker. The payload carries the
+      // cancellation so the durable outcome keeps the evidence the live
+      // result reports.
       if (signal.aborted) {
         const payload: ManagedToolResultPayload = {
           executionStatus: 'cancelled',
           responseParts: [],
+          error: {
+            message: managedToolFailureMessage({
+              executionStatus: 'cancelled',
+            }),
+          },
         };
         await outcomes.settle({
-          functionCallId: call.id,
+          functionCallId: callId,
           executionStatus: payload.executionStatus,
           payload,
         });
         return toToolResult(payload);
       }
-      let settleStarted = false;
-      const reference = worker.referenceFor(call.id, params);
+      const reference = worker.referenceFor(callId, params);
+      let payload: ManagedToolResultPayload;
       try {
-        const payload = await worker.executeIn(
+        payload = await worker.executeIn(
           started,
           call.toolName,
           params,
           signal,
           reference,
         );
-        // Settled before the model continues, then forgotten by the worker.
-        settleStarted = true;
-        await outcomes.settle({
-          functionCallId: call.id,
-          executionStatus: payload.executionStatus,
-          payload,
-        });
-        // Fire-and-forget: the outcome is committed, and nothing in the turn
-        // may wait on the worker hearing the receipt — a wedged boot or
-        // worker must never hold a settled result back.
-        void worker.acknowledge(reference);
-        const result = toToolResult(payload);
-        // As Legacy, a read shows no copy of the file it returns.
-        return call.toolName === ToolNames.READ_FILE && !result.error
-          ? { ...result, returnDisplay: '' }
-          : result;
       } catch (error) {
         if (error instanceof ManagedRuntimeOutcomeUnknownError) {
           // The checkpoint item stays in progress: that is the durable form
           // of the block, which every later open of the log re-applies.
           config.blockManagedSession(error);
           await worker.close().catch(() => undefined);
-          throw error;
-        }
-        if (settleStarted) {
-          // A settled call whose durable settlement failed is as unknowable
-          // for the model as a lost outcome: block, never let it continue on
-          // a result nothing recorded.
-          const blocked = new ManagedRuntimeOutcomeUnknownError(
-            'The durable settlement of a Runtime tool call failed.',
-            { cause: error },
-          );
-          config.blockManagedSession(blocked);
-          await worker.close().catch(() => undefined);
-          throw blocked;
         }
         throw error;
       }
+      try {
+        // Settled before the model continues, then forgotten by the worker.
+        await outcomes.settle({
+          functionCallId: callId,
+          executionStatus: payload.executionStatus,
+          payload,
+        });
+      } catch (error) {
+        // A settled call whose durable settlement failed is as unknowable
+        // for the model as a lost outcome: block, never let it continue on
+        // a result nothing recorded. The conversion covers only the settle:
+        // a failure after the commit landed — shaping the result for the
+        // model — is an ordinary error, never this block.
+        const blocked = new ManagedRuntimeOutcomeUnknownError(
+          'The durable settlement of a Runtime tool call failed.',
+          { cause: error },
+        );
+        config.blockManagedSession(blocked);
+        await worker.close().catch(() => undefined);
+        throw blocked;
+      }
+      // Fire-and-forget: the outcome is committed, and nothing in the turn
+      // may wait on the worker hearing the receipt — a wedged boot or
+      // worker must never hold a settled result back.
+      void worker.acknowledge(reference);
+      const result = toToolResult(payload);
+      // As Legacy, a read shows no copy of the file it returns.
+      return call.toolName === ToolNames.READ_FILE && !result.error
+        ? { ...result, returnDisplay: '' }
+        : result;
     },
   });
   return {

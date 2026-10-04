@@ -74,6 +74,8 @@ const server = http.createServer(async (req, res) => {
   }
   if (route === 'execute') {
     if (mode === 'lost-response' || mode === 'unknown') return req.socket.destroy();
+    // A settled answer whose parts no result-shaping survives.
+    if (mode === 'null-part') return send(200, { protocolVersion: 2, state: 'settled', result: { executionStatus: 'success', responseParts: [null] } });
     if (mode === 'dies-mid-execute') {
       // A crash: the port is free for anyone, then the connection breaks.
       server.close();
@@ -1064,6 +1066,58 @@ describe.skipIf(process.platform === 'win32')(
       expect(settlements).toHaveLength(0);
     });
 
+    it('does not block when result shaping fails after the settlement landed', async () => {
+      const env = create('null-part');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      // The settlement committed; the failure to shape the result for the
+      // model is an ordinary tool error, not an unknown outcome.
+      await expect(env.execute('write', signal)).rejects.toThrow(TypeError);
+      expect(settlements).toHaveLength(1);
+      expect(config.getManagedSessionBlock()).toBeUndefined();
+    });
+
+    it("admits the call under the scheduler's call id when it carries one", async () => {
+      const env = create('ok');
+      await env.prepare(
+        {
+          id: 'invocation-1',
+          callId: 'model-call-1',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await env.execute('invocation-1', signal);
+      expect(admissions).toEqual([
+        expect.objectContaining({ functionCallId: 'model-call-1' }),
+      ]);
+      expect(settlements).toEqual([
+        expect.objectContaining({ functionCallId: 'model-call-1' }),
+      ]);
+      // The worker's journal names the call by the same id.
+      const entries = (await readFile(logFile, 'utf8'))
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              route?: string;
+              request?: { reference?: { callId?: string } };
+            },
+        );
+      expect(
+        entries.find((entry) => entry.route === 'execute')?.request?.reference
+          ?.callId,
+      ).toBe('model-call-1');
+    });
+
     it('commits a refused call as not started and still settles it', async () => {
       const env = create('refuse');
       await env.prepare(
@@ -1111,11 +1165,18 @@ describe.skipIf(process.platform === 'win32')(
       release();
       const settled = await result;
       expect(settled.error?.message).toBe('The tool call was cancelled.');
+      // The durable payload keeps the cancellation evidence the live result
+      // reports, so a restore can rebuild the same record from it.
       expect(settlements).toEqual([
-        expect.objectContaining({
+        {
           functionCallId: 'write',
           executionStatus: 'cancelled',
-        }),
+          payload: {
+            executionStatus: 'cancelled',
+            responseParts: [],
+            error: { message: 'The tool call was cancelled.' },
+          },
+        },
       ]);
       // The worker heard nothing: the admission stands, the cancelled
       // settlement closes it.

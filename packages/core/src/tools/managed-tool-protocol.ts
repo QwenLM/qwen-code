@@ -210,6 +210,27 @@ export function managedToolDigest(
     .digest('hex');
 }
 
+/**
+ * The message the host reports for a settled call that did not succeed: what
+ * the model reads for a call that failed, never ran, or was cancelled. The
+ * live result path and the restore's re-recorded record both synthesize it
+ * from the durable payload, so they say the same thing.
+ */
+export function managedToolFailureMessage(payload: {
+  readonly executionStatus: string;
+  readonly error?: { readonly message?: string };
+}): string {
+  if (payload.executionStatus === 'not_started') {
+    return `The tool call did not run: ${payload.error?.message ?? 'the Runtime worker did not run it.'}`;
+  }
+  return (
+    payload.error?.message ??
+    (payload.executionStatus === 'cancelled'
+      ? 'The tool call was cancelled.'
+      : 'The tool call failed.')
+  );
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ManagedToolProtocolError();

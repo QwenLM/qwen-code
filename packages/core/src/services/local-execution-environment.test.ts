@@ -113,6 +113,49 @@ describe('LocalExecutionEnvironment', () => {
     }
   });
 
+  it("hands the scheduler's call id to the runner when the call carries one", async () => {
+    const run = vi.fn(async () => ({
+      llmContent: 'ran elsewhere',
+      returnDisplay: 'ran elsewhere',
+    }));
+    const elsewhere = new LocalExecutionEnvironment(
+      new Config({
+        targetDir: workspace,
+        cwd: workspace,
+        debugMode: false,
+        telemetry: { enabled: false },
+        deferTelemetryInitialization: true,
+      }),
+      { toolNames: new Set([ToolNames.WRITE_FILE]), run },
+    );
+    try {
+      await elsewhere.prepare(
+        {
+          id: 'invocation-1',
+          callId: 'model-call-1',
+          toolName: ToolNames.WRITE_FILE,
+          params: { file_path: path.join(workspace, 'f.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await elsewhere.execute('invocation-1', signal);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        {
+          id: 'invocation-1',
+          callId: 'model-call-1',
+          toolName: ToolNames.WRITE_FILE,
+          params: expect.objectContaining({
+            file_path: path.join(workspace, 'f.txt'),
+          }),
+        },
+        expect.any(AbortSignal),
+        undefined,
+      );
+    } finally {
+      await elsewhere.dispose();
+    }
+  });
+
   // Windows does not unescape paths.
   it.skipIf(process.platform === 'win32')(
     'does not run elsewhere what a second build would change',

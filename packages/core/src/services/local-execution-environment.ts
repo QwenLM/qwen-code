@@ -56,6 +56,8 @@ interface PendingExecution {
   invocation: AnyToolInvocation;
   confirmation?: ToolCallConfirmationDetails;
   executing: boolean;
+  /** The scheduler's function-call id, when the call carries one. */
+  callId?: string;
 }
 
 /**
@@ -67,6 +69,8 @@ export type PreparedExecutionRunner = (
     readonly id: string;
     readonly toolName: string;
     readonly params: Record<string, unknown>;
+    /** The scheduler's function-call id, when the call carries one. */
+    readonly callId?: string;
   },
   signal: AbortSignal,
   updateOutput?: (output: ToolResultDisplay) => void,
@@ -156,6 +160,7 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
       toolName: request.toolName,
       invocation,
       executing: false,
+      ...(request.callId === undefined ? {} : { callId: request.callId }),
     });
     return {
       params: invocation.params as Record<string, unknown>,
@@ -225,7 +230,12 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
           );
         }
         return await this.run(
-          { id, toolName: pending.toolName, params },
+          {
+            id,
+            toolName: pending.toolName,
+            params,
+            ...(pending.callId === undefined ? {} : { callId: pending.callId }),
+          },
           controller.signal,
           updateOutput,
         );
