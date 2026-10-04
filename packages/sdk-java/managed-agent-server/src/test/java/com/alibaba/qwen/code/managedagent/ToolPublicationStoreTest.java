@@ -60,7 +60,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 
 class ToolPublicationStoreTest {
-    private static final String MARKER = "{\"subtype\":\"managed_session_commit_v1\"}\n";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final ToolPublicationDataStore.VerificationBudget VERIFICATION_BUDGET =
             new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25));
@@ -1373,7 +1372,9 @@ class ToolPublicationStoreTest {
     // never silently resolved. A stray line claiming an out-of-range
     // sequence lives outside every declared revision range, so the head
     // path's locate never reads it — and writing one requires an authority
-    // already writing outside its declared ranges.
+    // already writing outside its declared ranges. The commit refuses a
+    // line out of its sequence, so the duplicate is planted in the stored
+    // revision, as a journal written before that check could hold it.
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void duplicateIntentLinesAtOneSequenceAreFenced(boolean journalHeadAuthorization) {
@@ -1382,14 +1383,24 @@ class ToolPublicationStoreTest {
                 .put("outcomeSource", "runtime");
         intentA.set("argsRef", binding.get("argsRef"));
         ObjectNode intentB = intentA.deepCopy();
-        // Under the commit-side full-envelope validation the duplicated
-        // pair never enters the journal: the second line's position is
-        // refused at commit, which supersedes the downstream fencing.
-        assertThatThrownBy(() -> addSecondExecutionWith(
-                event(3, "tool.intent", intentA)
-                        + event(3, "tool.intent", intentB) + MARKER, 2))
-                .hasMessageContaining(
-                        "event.sequence must be an integer from 4 to 4.");
+        ObjectNode second = addSecondExecutionWith(event(3, "tool.intent", intentA)
+                + event(4, "tool.intent", intentB) + MARKER, 2);
+        byte[] record = jdbc.queryForObject("SELECT record_bytes FROM"
+                + " qwen_managed_session_journal_tx WHERE tenant_id = 'tenant-1'"
+                + " AND session_id = 'session-1' AND journal_revision = 3",
+                byte[].class);
+        String poisoned = new String(record, StandardCharsets.UTF_8)
+                .replace("\"sequence\":4", "\"sequence\":3");
+        assertThat(poisoned).isNotEqualTo(new String(record, StandardCharsets.UTF_8));
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?,"
+                + " record_digest = ?"
+                + " WHERE tenant_id = 'tenant-1' AND session_id = 'session-1'"
+                + " AND journal_revision = 3",
+                poisoned.getBytes(StandardCharsets.UTF_8), digest(poisoned));
+        ObjectNode candidate = request("reserve");
+        candidate.set("binding", second);
+        assertThatThrownBy(() -> store.apply(candidate, WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Intent sequence conflicts");
     }
 
     // A journal line scoped to another Session (or a version the reader
@@ -1404,7 +1415,7 @@ class ToolPublicationStoreTest {
                 .put("workspaceId", "workspace-1").put("sessionId", "session-9");
         assertThatThrownBy(() -> addSecondExecutionWith(
                 event(3, "tool.intent", intent, foreignKey, 1) + MARKER))
-                .hasMessageContaining("The event names another Session.");
+                .hasMessageContaining("Journal event scope conflicts");
     }
 
     @Test
@@ -1414,11 +1425,11 @@ class ToolPublicationStoreTest {
         intent.set("argsRef", binding.get("argsRef"));
         assertThatThrownBy(() -> addSecondExecutionWith(
                 event(3, "tool.intent", intent, binding.get("sessionKey"), 2) + MARKER))
-                .hasMessageContaining("event.v must be an integer from 1 to 1.");
+                .hasMessageContaining("Journal event scope conflicts");
     }
 
-    // A misscoped domain.committed line is refused by the commit-side
-    // envelope scope check before any domain check runs.
+    // A misscoped domain.committed line for an unknown domain has no
+    // requireEnvelope to catch it — the write-side scope check does.
     @Test
     void unknownDomainLinesAreRejectedAtCommit() {
         ObjectNode payload = JSON.createObjectNode()
@@ -1427,7 +1438,7 @@ class ToolPublicationStoreTest {
                 .put("workspaceId", "workspace-1").put("sessionId", "session-9");
         assertThatThrownBy(() -> addSecondExecutionWith(
                 event(3, "domain.committed", payload, foreignKey, 1) + MARKER))
-                .hasMessageContaining("The event names another Session.");
+                .hasMessageContaining("Journal event scope conflicts");
     }
 
     // A pre-existing journal (written before the commit-side check) with a
@@ -1941,6 +1952,9 @@ class ToolPublicationStoreTest {
             JsonNode sessionKey, int v) {
         return journal.event(number, kind, payload, sessionKey, v);
     }
+
+    /** A commit-marker's line, closing each transaction's events. */
+    private static final String MARKER = PublicationJournalFixture.MARKER;
 
     record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
             ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,

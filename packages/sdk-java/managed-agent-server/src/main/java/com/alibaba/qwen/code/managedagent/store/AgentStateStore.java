@@ -266,8 +266,11 @@ public interface AgentStateStore {
      * the tenant's Session exists and is neither deleted nor being
      * deleted. The Session is locked before its status is read, so a
      * deletion that commits first is always seen. The outbox stays out of
-     * the Session event stream, which turn and lifecycle events share with
-     * the message projection's sequence.
+     * the Session event stream, whose sequence the message projection
+     * reads. The next outbox sequence comes from a plain read, so the
+     * caller's transaction must already hold the lock that serializes this
+     * Session's outbox writers (the Session store's journal head) when it
+     * makes its first plain read: that read fixes the snapshot.
      */
     void appendLiveSessionTaskEvent(String tenantId, String sessionId,
             String taskId, String state, long revision, String sourceKey);

@@ -812,6 +812,10 @@ class ManagedAgentMySqlIT {
                 String.class, tenant, session);
         assertThat(events).endsWith("session.deleted")
                 .doesNotContain("task.updated");
+        // The announcement's locking read sees the deletion that committed
+        // after this transaction's snapshot, so the outbox stays empty.
+        assertThat(count(jdbc, "managed_agent_task_event", tenant, session))
+                .isZero();
     }
 
     @Test
