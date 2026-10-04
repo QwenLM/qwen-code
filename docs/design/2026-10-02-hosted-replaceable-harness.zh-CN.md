@@ -131,7 +131,11 @@ D5 解析用的错误体访问器，以及记在「边界与开放问题」里�
 路径形状不变，而且仍然会被走到——它正是 D4 的触发条件：一个已标记但
 从未准入的 Turn 在拒绝时撤回标记并重绑；终态的
 `hosted_harness_generation_mismatch` 保留给重绑也失败、或撤回 CAS
-输掉的情形。
+输掉的情形。有一处刻意的绕行：没有恢复可回绑时，plain attach 上的
+`CANCELLING` Turn 直接在 bind **之前** 用 `harness.cancel` 终局——
+bind 只为提交存在，一次取消绝不能以其指向的 Turn 尚未被取消为名被
+打成 `hosted_harness_generation_mismatch`（它留下的 blocked 状态会把
+后续的一切都楔死）。
 
 ### D4 —— 已标记但从未准入的 Turn 撤回提交标记
 

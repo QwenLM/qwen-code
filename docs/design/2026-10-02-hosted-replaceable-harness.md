@@ -148,7 +148,12 @@ keep moving through the recovery branch only. The "bind refusal" path
 keeps its shape and is still reached — it is D4's trigger: a refusal on a
 marked but never-admitted Turn withdraws the mark and rebinds, and the
 terminal `hosted_harness_generation_mismatch` remains for the case where
-the rebind also loses, or the withdrawal CAS does.
+the rebind also loses, or the withdrawal CAS does. One bypass is
+deliberate: with no recovery to rebind through, a `CANCELLING` Turn on a
+plain attach settles by `harness.cancel` directly, BEFORE the bind — the
+bind exists for submissions, and a cancel must never die stamped
+`hosted_harness_generation_mismatch` while the Turn it names cannot be
+cancelled (everything queued behind it wedges on the block it leaves).
 
 ### D4 — A marked-but-never-admitted Turn withdraws its submission mark
 

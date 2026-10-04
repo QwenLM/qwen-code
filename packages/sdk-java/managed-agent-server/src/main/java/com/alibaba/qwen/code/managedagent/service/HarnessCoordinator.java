@@ -320,6 +320,7 @@ public class HarnessCoordinator {
         }
         TurnRecord current;
         boolean recoveredCancellation = false;
+        boolean cancelledOnAttach = false;
         if (runtimeRecovery != null) {
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
@@ -393,6 +394,19 @@ public class HarnessCoordinator {
                 current = store.findTurn(current.tenantId(),
                         current.sessionId(), current.turnId()).orElseThrow();
             }
+        } else if ("CANCELLING".equals(claimed.status())) {
+            // A CANCELLING Turn does not submit, so generation bind is not
+            // its gate: the plain attach holds the replacement Session, and
+            // the cancel itself is the terminal act — the next Turn's
+            // takeover adopt moves the generation when anything continues
+            // (bindCAS would otherwise fail boot-old != boot-new, failing
+            // the Turn as hosted_harness_generation_mismatch while the
+            // cancel was never issued, wedging every later prompt and the
+            // Session close).
+            harness.cancel(session.tenantId(), session.sessionId());
+            requireLease(leaseLost);
+            current = claimed;
+            cancelledOnAttach = true;
         } else {
             boolean bound = store.bindHarness(session.tenantId(),
                     session.sessionId(), claimed.turnId(), owner,
@@ -458,7 +472,7 @@ public class HarnessCoordinator {
             }
         }
         if ("CANCELLING".equals(current.status())
-                && !recoveredCancellation) {
+                && !recoveredCancellation && !cancelledOnAttach) {
             harness.cancel(session.tenantId(), session.sessionId());
         }
         long lastEventId = current.harnessLastEventId() == null ? 0

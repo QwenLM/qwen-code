@@ -519,12 +519,14 @@ class HarnessCoordinatorTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
-        // Inapplicable on the wire: a plain Attachment with no recovery.
+        // Inapplicable on the wire: a plain Attachment with no recovery —
+        // and bindHarness deliberately UNFALSE: the real store denies the
+        // CAS on boot-old != boot-new, which is exactly the wedge R4a
+        // reported (generation_mismatch was stamped while the cancel was
+        // never issued). The cancel arm must not ask for a bind at all.
         when(harness.recoverManagedRuntime("tenant", "session", true))
                 .thenReturn(new Attachment("boot-new", null, 4L,
                         "epoch-old"));
-        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("boot-new"))).thenReturn(true);
         when(store.findTurn("tenant", "session", "turn"))
                 .thenReturn(Optional.of(claimed));
         when(harness.stream("tenant", "session", 4, "epoch-old"))
@@ -539,11 +541,19 @@ class HarnessCoordinatorTest {
             coordinator.close();
         }
         verify(harness).cancel("tenant", "session");
+        verify(harness, times(1)).cancel(anyString(), anyString());
         verify(harness, never()).cancelManagedRuntime(anyString(),
                 anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).bindHarness(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(store, never()).withdrawSubmissionAttempted(anyString(),
+                anyString(), anyString(), anyString());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(),
                 eq("managed_runtime_recovery_blocked"));
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(),
+                eq("hosted_harness_generation_mismatch"));
     }
 
     // The withdrawal is a CAS: losing it (the mark is gone, or the lease
