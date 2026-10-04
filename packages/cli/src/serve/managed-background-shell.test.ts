@@ -234,7 +234,10 @@ describe('managed v3 background Shell', () => {
     const view = await execute(ctx);
     expect(view).toMatchObject({
       state: 'settled',
-      result: { executionStatus: 'success', capture: null },
+      result: {
+        executionStatus: 'success',
+        capture: { captureStatus: 'detached', manifest: null },
+      },
     });
     expect(ctx.supervisor.start).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -283,7 +286,7 @@ describe('managed v3 background Shell', () => {
     expect(view).toMatchObject({
       state: 'settled',
       result: {
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         capture: null,
         error: {
           message:
@@ -301,7 +304,7 @@ describe('managed v3 background Shell', () => {
     expect(view).toMatchObject({
       state: 'settled',
       result: {
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         capture: null,
         error: {
           message:
@@ -322,7 +325,7 @@ describe('managed v3 background Shell', () => {
     });
     expect(view).toMatchObject({
       state: 'settled',
-      result: { executionStatus: 'error', capture: null },
+      result: { executionStatus: 'not_started', capture: null },
     });
     expect(ctx.publisher.prepares).toBe(0);
     expect(ctx.supervisor.start).not.toHaveBeenCalled();
@@ -334,8 +337,8 @@ describe('managed v3 background Shell', () => {
     const accepted = ctx.executor.acknowledgeV3(REFERENCE, {
       executionCallId: 'exec-1',
       manifest: null,
-      deliveryStatus: 'committed',
-      historyRevision: 1,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
     });
     expect(accepted.state).toBe('settled');
     expect(() =>
@@ -348,8 +351,8 @@ describe('managed v3 background Shell', () => {
           byteLength: 2,
           digest: 'f'.repeat(64),
         },
-        deliveryStatus: 'committed',
-        historyRevision: 1,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
       }),
     ).toThrow(/conflicts/);
   });

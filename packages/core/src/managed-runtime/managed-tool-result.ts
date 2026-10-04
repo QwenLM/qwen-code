@@ -237,7 +237,10 @@ export interface ToolResultPage {
 }
 
 export interface ToolResultCapture {
-  readonly captureStatus: Exclude<ToolResultCaptureStatus, 'pending'>;
+  /** 'detached': a settled call whose output streams through its own record. */
+  readonly captureStatus:
+    | Exclude<ToolResultCaptureStatus, 'pending'>
+    | 'detached';
   readonly captureReason: ToolResultCaptureReason | null;
   readonly manifest: ManagedSessionDurableRef | null;
   readonly previewTruncated: boolean;
@@ -866,14 +869,18 @@ function parseCapture(value: unknown): ToolResultCapture {
   const capture = closed(value, CAPTURE_KEYS, 'result.capture');
   const captureStatus = oneOf(
     capture.captureStatus,
-    ['complete', 'partial', 'unavailable'] as const,
+    ['complete', 'partial', 'unavailable', 'detached'] as const,
     'result.capture.captureStatus',
   );
   const captureReason = nullable(capture.captureReason, (reason) =>
     oneOf(reason, CAPTURE_REASONS, 'result.capture.captureReason'),
   );
-  if ((captureReason === null) !== (captureStatus === 'complete')) {
-    fail('result.capture.captureReason must be set unless it is complete.');
+  const reasonless =
+    captureStatus === 'complete' || captureStatus === 'detached';
+  if ((captureReason === null) !== reasonless) {
+    fail(
+      'result.capture.captureReason must be set unless the capture is complete or detached.',
+    );
   }
   const manifest = nullable(capture.manifest, (ref) =>
     reference(
@@ -883,8 +890,17 @@ function parseCapture(value: unknown): ToolResultCapture {
       LIMITS.maxManifestBytes,
     ),
   );
-  if (manifest === null && captureStatus !== 'unavailable') {
-    fail('result.capture.manifest is required unless it is unavailable.');
+  if (
+    manifest === null &&
+    captureStatus !== 'unavailable' &&
+    captureStatus !== 'detached'
+  ) {
+    fail(
+      'result.capture.manifest is required unless the capture is unavailable or detached.',
+    );
+  }
+  if (manifest !== null && captureStatus === 'detached') {
+    fail('result.capture.manifest must be null while the capture is detached.');
   }
   return Object.freeze({
     captureStatus,

@@ -129,6 +129,7 @@ Monitor 的每个被接受观测提交其 revision；到通知时机时，在同
 ## 接口与兼容性
 
 - **worker 协议。** 新增一条与 `ManagedHookProtocol` 同级的私有路由（`/internal/managed-runtime/v3/…`），kind 包括 shell-start/status/terminate/kill、monitor-start/status/stop 以及 read-output 流；恢复 kind 携带 `targetOperationId`，为 shell-status/terminate 与 monitor-stop（shell kill 是 terminate 的升级手段，不是独立的恢复 kind）。路由在新效果之前校验 Session、workspace generation 与 operation grant，与 Hook、MCP 路由一致。
+- **envelope 家族。** 启动调用以 `captureStatus: 'detached'` 结算——`managed-tool-result/1` 的新 envelope capture 状态，其 capture 对象不带 reason、不带 manifest，因为输出活在记录的增量 manifest 上，而不在结果里。持久交付与之配对 `decision: 'blocked'`（handle 经 Session 历史到达模型，不经发布存储）；turn 接线落地时，replay 与恢复校验器在 complete 与 not-started 两族之外收到第三族，ack 恰与 null manifest 相配。启动调用的已提交拒绝以 `not_started` 加 null capture 结算，即持久未启动族既有的形状。
 - **公开 API。** 任务事件路由在两个面都翻转 `planned`→`partial`，含各自 controller 与契约测试流量；不改动其他公开路由。PID、绝对路径、Runtime endpoint、cgroup 名都不出现在公开面上——`status` 投影只携带 Managed 状态，诊断信息是受权 Artifact 引用，与任务视图既有的承诺一致。不新增公开错误码：平台隔离拒绝是已记录的失败准入（`start_failed`，落在被证明从未启动的执行上），而不是传输错误。
 - **Legacy 面不变。** daemon 的 `/session/:id/tasks`、`BackgroundShellRegistry`、`MonitorRegistry` 与 Legacy Shell/Monitor 工具保持原行为；本切片不迁移 Legacy Session，也不复用其内存注册表作为证据。
 - **Flyway/契约。** 一个新 Flyway 迁移（任务事件账表，以及持有账目所需的 execution 账本列），取下一个空闲版本；契约次版本递增。两者都在合入时对照 main 重编号。

@@ -632,7 +632,7 @@ export class ManagedToolExecutor {
     };
     if (!this.backgroundSupervisor) {
       return settle({
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         responseParts: [],
         capture: null,
         error: {
@@ -646,7 +646,7 @@ export class ManagedToolExecutor {
     if (typeof requestedDirectory === 'string' && requestedDirectory !== '') {
       if (!tools.admitsDirectory(requestedDirectory)) {
         return settle({
-          executionStatus: 'error',
+          executionStatus: 'not_started',
           responseParts: [],
           capture: null,
           error: {
@@ -659,7 +659,7 @@ export class ManagedToolExecutor {
       directory = tools.directory;
     } else {
       return settle({
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         responseParts: [],
         capture: null,
         error: {
@@ -670,7 +670,7 @@ export class ManagedToolExecutor {
     const command = normalized['command'];
     if (typeof command !== 'string' || !command.trim()) {
       return settle({
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         responseParts: [],
         capture: null,
         error: { message: 'Hosted Shell requires a nonempty command.' },
@@ -699,7 +699,7 @@ export class ManagedToolExecutor {
       });
     } catch (cause) {
       return settle({
-        executionStatus: 'error',
+        executionStatus: 'not_started',
         responseParts: [],
         capture: null,
         error: {
@@ -726,7 +726,16 @@ export class ManagedToolExecutor {
           text: `Background shell started under unit ${unitName}. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.`,
         },
       ],
-      capture: null,
+      // The handle owns no capture: the live output streams through the
+      // child_run record's output manifest instead, and the exit facts
+      // settle there, with the same physical evidence.
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
     });
   }
 
