@@ -865,12 +865,12 @@ public class ManagedAgentService {
     // Cancelling aborts work that is already running, so it needs only what
     // identifies the creator, not the grants that admit new work: the
     // creator who can still read the Workspace may cancel while can_create is
-    // revoked, the Workspace is draining or it was re-registered.
+    // revoked, the Workspace is draining or it was re-registered. The shape
+    // term stays: a Session that can no longer execute keeps the refusal.
     private void requireCanceller(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        if (session.workspace() == null
-                || !harness.isWorkspaceFilesAvailable()
+        if (!maySubmitShape(session)
                 || !workspaces.canRead(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId())
                 || !workspaces.createdSession(session.tenantId(), actorId,

@@ -1160,6 +1160,28 @@ class ManagedWorkspaceAdmissionTest {
                 "workspace_unavailable");
     }
 
+    @Test
+    void cancelRefusesABoundSessionThatCanNoLongerExecute() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        String turnId = service.submitTurn(tenant, "actor-a", "submit-1",
+                sessionId, List.of(new InputBlock("text", "go"))).turnId();
+
+        // Cancelling cites the admission shape, so closing the Session
+        // restores the legacy refusal instead of writing a CANCEL command
+        // for a Turn that can no longer run.
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+                + " WHERE tenant_id = ? AND session_id = ?",
+                tenant, sessionId);
+        assertRefused(() -> service.cancelTurn(tenant, "actor-a", "cancel-1",
+                sessionId, turnId), "workspace_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_command WHERE tenant_id = ?"
+                + " AND operation = 'CANCEL_TURN'", Integer.class, tenant))
+                .isZero();
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void reRegistrationRefusesLaterWorkBeforeAnyCommandIsWritten(boolean storageOnly) {
