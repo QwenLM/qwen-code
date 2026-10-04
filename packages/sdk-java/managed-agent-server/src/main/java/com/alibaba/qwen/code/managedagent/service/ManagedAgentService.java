@@ -661,7 +661,7 @@ public class ManagedAgentService {
                                 session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
-        Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants =
+        Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants =
                 grantWorkspaces.isEmpty() ? Map.of()
                         : workspaces.findReadable(tenantId, actorId,
                                 grantWorkspaces);
@@ -908,16 +908,23 @@ public class ManagedAgentService {
     }
 
     // The page twin of the singular: the same rule answered from the batch
-    // reads the assembler already made.
+    // reads the assembler already made. The grant batch carries the registry's
+    // binding stamp, so a re-registration drops the capability here exactly as
+    // bindingCurrent drops it in the singular.
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             Set<String> creatorOwns,
-            Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants) {
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants) {
         if (!maySubmitShape(session)
                 || !creatorOwns.contains(session.sessionId())) {
             return false;
         }
-        var summary = grants.get(session.workspace().getWorkspaceId());
-        return summary != null && summary.canCreateSession();
+        var grant = grants.get(session.workspace().getWorkspaceId());
+        if (grant == null || !grant.canCreateSession()) {
+            return false;
+        }
+        var binding = session.workspace();
+        return grant.workspaceGeneration() == binding.getWorkspaceGeneration()
+                && grant.storageId().equals(binding.getStorageId());
     }
 
     private boolean maySubmitShape(SessionRecord session) {
