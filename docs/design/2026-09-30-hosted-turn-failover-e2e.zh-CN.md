@@ -131,4 +131,6 @@ G1 归属 #12952。issue 的切片文本曾假定接管机器已存在；本设�
 published model attempt.`）：`message.delta` 一旦落盘，部分尝试就已公开、无法撤回，轮次只能以
   `error` 结算，而不是像流式化之前那样丢弃该次尝试并重试。因此一次瞬时的 provider 容量事件会
   在流中途永久失败该轮次，而不会由协调器重试（`turn_result` 是终态）。把这类结算归类为协调器
-  可重试是后续项。
+  可重试是后续项。（其后由 #13319 改为带内撤回：发布后到达的重试改为全新 replay，Harness 落账
+  `message.retracted`，server 按源序号范围置空该消息的 delta 并发布 `stream.reconciled`——见
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.zh-CN.md)。）

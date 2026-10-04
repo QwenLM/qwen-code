@@ -396,6 +396,23 @@ public class HarnessCoordinator {
                         && !turn.promptId().equals(source.promptId())) {
                     continue;
                 }
+                if ("message_retracted".equals(source.type())) {
+                    // A restarted model attempt retracts the prefix the failed
+                    // one published (#13319). Flush the pending batch first:
+                    // the retraction range covers deltas this stream already
+                    // read but has not recorded yet.
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
+                    store.retractHarnessTurnOutput(turn.tenantId(),
+                            turn.sessionId(), turn.turnId(), owner,
+                            stream.eventEpoch(), retractionFromSequence(source),
+                            source.id());
+                    // The replay's first chunk is the new first visible text:
+                    // the transcript it replaces was just blanked.
+                    flushFirstVisibleText = true;
+                    continue;
+                }
                 ProjectedEvent projection = projector.project(source,
                         turn.turnId());
                 HarnessEvent event = new HarnessEvent(source.id(),
@@ -489,6 +506,21 @@ public class HarnessCoordinator {
     private static boolean isTextDelta(ProjectedEvent event) {
         return "item.output_text.delta".equals(event.type())
                 || "item.reasoning.delta".equals(event.type());
+    }
+
+    // The journal sequence of the retracted message's first delta (#13319).
+    // Fail closed on a malformed event: skipping it would keep the orphaned
+    // prefix in the public transcript.
+    private static long retractionFromSequence(SourceEvent event) {
+        Object data = event.data();
+        if (data instanceof Map<?, ?> map) {
+            Object fromSequence = map.get("fromSequence");
+            if (fromSequence instanceof Number number) {
+                return number.longValue();
+            }
+        }
+        throw new IllegalStateException(
+                "Hosted Harness retraction is missing fromSequence");
     }
 
     private static int estimatedBytes(ProjectedEvent event) {
