@@ -60,8 +60,10 @@ let overviewCalls: Array<{
 const refreshCapabilities = vi.fn();
 const invalidateWorkspace = vi.fn();
 const workspaceGit = vi.fn();
+const grantWorkspaceTrust = vi.fn();
 const workspaceByCwd = vi.fn((cwd: string) => ({
   workspaceGit: (options?: unknown) => workspaceGit(cwd, options),
+  grantWorkspaceTrust: () => grantWorkspaceTrust(cwd),
 }));
 const removeWorkspace = vi.fn();
 const workspaceClient = { workspaceByCwd };
@@ -158,8 +160,16 @@ beforeEach(() => {
   root = createRoot(container);
   sessionQueryOptions = [];
   overviewCalls = [];
-  refreshCapabilities.mockReset();
+  refreshCapabilities.mockReset().mockResolvedValue(undefined);
   invalidateWorkspace.mockReset();
+  grantWorkspaceTrust.mockReset().mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/locked',
+    folderTrustEnabled: true,
+    effective: { state: 'trusted', source: 'file' },
+    explicitTrustLevel: 'TRUST_FOLDER',
+    requiresDaemonRestartForChanges: false,
+  });
   removeWorkspace.mockReset().mockResolvedValue({ removed: true });
   workspaceGit.mockReset().mockImplementation((cwd: string) =>
     Promise.resolve({
@@ -315,6 +325,99 @@ describe('WorkspacesOverviewPanel', () => {
       (button) => button.textContent?.includes('New task'),
     );
     expect(newTask?.disabled).toBe(true);
+  });
+
+  it('offers a trust grant only where the daemon advertises it', async () => {
+    const trustButtonIn = (row: HTMLTableRowElement) =>
+      Array.from(row.querySelectorAll('button')).find((candidate) =>
+        candidate.textContent?.includes('Trust'),
+      );
+    await render();
+    expect(trustButtonIn(rowByLabel('/locked'))).toBeUndefined();
+
+    connectionState.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['workspace_runtime_removal', 'workspace_trust_grant'],
+    } as DaemonCapabilities;
+    await render();
+    expect(trustButtonIn(rowByLabel('/locked'))?.textContent).toContain(
+      'Trust',
+    );
+    expect(trustButtonIn(rowByLabel('/w'))).toBeUndefined();
+    expect(trustButtonIn(rowByLabel('API'))).toBeUndefined();
+  });
+
+  it('grants trust for the untrusted workspace and refreshes capabilities', async () => {
+    connectionState.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['workspace_runtime_removal', 'workspace_trust_grant'],
+    } as DaemonCapabilities;
+    await render();
+
+    const trustButton = Array.from(
+      rowByLabel('/locked').querySelectorAll('button'),
+    ).find((candidate) => candidate.textContent?.includes('Trust'))!;
+    await act(async () => {
+      trustButton.click();
+    });
+
+    expect(grantWorkspaceTrust).toHaveBeenCalledWith('/locked');
+    expect(refreshCapabilities).toHaveBeenCalled();
+
+    // The runtime that reports the decision is rebuilt asynchronously, so the
+    // row stays pending until the capabilities payload carries the new state.
+    expect(
+      Array.from(rowByLabel('/locked').querySelectorAll('button')).some(
+        (candidate) => candidate.textContent?.includes('Trusting'),
+      ),
+    ).toBe(true);
+
+    workspaceCapabilities = {
+      ...workspaceCapabilities!,
+      workspaces: (workspaceCapabilities!.workspaces ?? []).map((entry) =>
+        entry.cwd === '/locked' ? { ...entry, trusted: true } : entry,
+      ),
+    };
+    await render();
+
+    const refreshed = rowByLabel('/locked');
+    expect(refreshed.textContent).not.toContain('untrusted');
+    expect(
+      Array.from(refreshed.querySelectorAll('button')).some((candidate) =>
+        candidate.textContent?.includes('New task'),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns the row to a clickable state when the reconcile never lands', async () => {
+    vi.useFakeTimers();
+    try {
+      connectionState.capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: ['workspace_runtime_removal', 'workspace_trust_grant'],
+      } as DaemonCapabilities;
+      await render();
+      const buttonWith = (label: string) =>
+        Array.from(rowByLabel('/locked').querySelectorAll('button')).find(
+          (candidate) => candidate.textContent?.includes(label),
+        );
+
+      // Every reconcile attempt fails, so the polled payload never changes.
+      refreshCapabilities.mockRejectedValue(new Error('offline'));
+      await act(async () => {
+        buttonWith('Trust')!.click();
+      });
+      expect(buttonWith('Trusting')).toBeDefined();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31_000);
+      });
+
+      expect(buttonWith('Trusting')).toBeUndefined();
+      expect(buttonWith('Trust')).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('starts a new task in the row workspace', async () => {
