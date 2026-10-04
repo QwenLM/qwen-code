@@ -121,7 +121,7 @@ import {
   ExtensionConflictError,
   ExtensionStore,
   getManagedSecretNames,
-  isManagedAbsenceUnproven,
+  hasUnprovenManagedEntries,
   type ExtensionActivation,
   type ExtensionActivationResult,
   type ExtensionIdentity,
@@ -783,6 +783,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
+    await this.refreshActivationOwnership();
     const extension = this.getLoadedExtensions().find(
       (ext) => ext.name === name,
     );
@@ -795,20 +796,32 @@ export class ExtensionManager {
       let snapshot: ExtensionStoreSnapshot;
       if (scope === SettingScope.Workspace) {
         snapshot = await this.extensionStore.setWorkspaceActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           currentDir,
           'enabled',
         );
-      } else if (await this.isManagedPolicy(extension)) {
+      } else if (extension.source === 'managed') {
         snapshot = await this.extensionStore.setDefaultActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           'enabled',
           { clearLegacyPathRules: true },
         );
       } else {
         const scopePath = os.homedir();
         snapshot = await this.extensionStore.setLegacyPathActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           scopePath,
           'enabled',
         );
@@ -841,6 +854,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
+    await this.refreshActivationOwnership();
     const extension = this.getLoadedExtensions().find(
       (ext) => ext.name === name,
     );
@@ -853,20 +867,32 @@ export class ExtensionManager {
       let snapshot: ExtensionStoreSnapshot;
       if (scope === SettingScope.Workspace) {
         snapshot = await this.extensionStore.setWorkspaceActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           currentDir,
           'disabled',
         );
-      } else if (await this.isManagedPolicy(extension)) {
+      } else if (extension.source === 'managed') {
         snapshot = await this.extensionStore.setDefaultActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           'disabled',
           { clearLegacyPathRules: true },
         );
       } else {
         const scopePath = os.homedir();
         snapshot = await this.extensionStore.setLegacyPathActivation(
-          { id: extension.id, name: extension.name },
+          {
+            id: extension.id,
+            name: extension.name,
+            source: extension.source ?? 'user',
+          },
           scopePath,
           'disabled',
         );
@@ -952,7 +978,11 @@ export class ExtensionManager {
         this.getExtensionSkillState(extensionId, name, workspacePath, previous);
       }
       const snapshot = await this.extensionStore.setSkillWorkspaceOverrides(
-        { id: extension.id, name: extension.name },
+        {
+          id: extension.id,
+          name: extension.name,
+          source: extension.source ?? 'user',
+        },
         workspacePath,
         Object.fromEntries(states),
         previous.extensions[extensionId]?.artifactGeneration ?? 0,
@@ -989,6 +1019,20 @@ export class ExtensionManager {
     return this.getExtensionActivationFromSnapshot(
       extensionId,
       snapshot,
+      workspacePath,
+    );
+  }
+
+  getLoadedExtensionActivation(
+    extensionId: string,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    if (!this.storeSnapshot) {
+      throw new Error('Extension activation has not been loaded.');
+    }
+    return this.getExtensionActivationFromSnapshot(
+      extensionId,
+      this.storeSnapshot,
       workspacePath,
     );
   }
@@ -1058,13 +1102,17 @@ export class ExtensionManager {
     activation: ExtensionActivation,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
-    const extension = this.findExtensionById(extensionId);
+    const extension = await this.findActivationExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionDefaultActivation');
     try {
       const snapshot = await this.extensionStore.setDefaultActivation(
-        { id: extension.id, name: extension.name },
+        {
+          id: extension.id,
+          name: extension.name,
+          source: extension.source ?? 'user',
+        },
         activation,
-        { clearLegacyPathRules: await this.isManagedPolicy(extension) },
+        { clearLegacyPathRules: extension.source === 'managed' },
       );
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
@@ -1082,6 +1130,7 @@ export class ExtensionManager {
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('setExtensionDefaultActivations');
     try {
+      await this.refreshActivationOwnership();
       const identities = this.resolveBatchExtensionIdentities(names);
       const snapshot = await this.extensionStore.setDefaultActivations(
         identities,
@@ -1104,11 +1153,15 @@ export class ExtensionManager {
     activation: InitialExtensionActivation,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
-    const extension = this.findExtensionById(extensionId);
+    const extension = await this.findActivationExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionActivationScope');
     try {
       const snapshot = await this.extensionStore.setActivationScope(
-        { id: extension.id, name: extension.name },
+        {
+          id: extension.id,
+          name: extension.name,
+          source: extension.source ?? 'user',
+        },
         activation,
       );
       onCommitted?.(snapshot.generation);
@@ -1126,11 +1179,15 @@ export class ExtensionManager {
     activation: ExtensionActivation,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
-    const extension = this.findExtensionById(extensionId);
+    const extension = await this.findActivationExtensionById(extensionId);
     const endMutation = this.beginMutation('setExtensionWorkspaceActivation');
     try {
       const snapshot = await this.extensionStore.setWorkspaceActivation(
-        { id: extension.id, name: extension.name },
+        {
+          id: extension.id,
+          name: extension.name,
+          source: extension.source ?? 'user',
+        },
         workspacePath,
         activation,
       );
@@ -1151,6 +1208,7 @@ export class ExtensionManager {
   ): Promise<ExtensionStoreMutationResult> {
     const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
     try {
+      await this.refreshActivationOwnership();
       const identities = this.resolveBatchExtensionIdentities(names);
       let snapshot: ExtensionStoreSnapshot;
       let updated = true;
@@ -1197,8 +1255,8 @@ export class ExtensionManager {
     return names.map((name) => {
       const loaded = loadedByName.get(name.toLowerCase());
       return loaded
-        ? { id: loaded.id, name: loaded.name }
-        : { id: hashValue(name.toLowerCase()), name };
+        ? { id: loaded.id, name: loaded.name, source: loaded.source ?? 'user' }
+        : { id: hashValue(name.toLowerCase()), name, source: 'user' };
     });
   }
 
@@ -1207,11 +1265,15 @@ export class ExtensionManager {
     workspacePath: string,
     onCommitted?: ExtensionCommitCallback,
   ): Promise<ExtensionStoreMutationResult> {
-    const extension = this.findExtensionById(extensionId);
+    const extension = await this.findActivationExtensionById(extensionId);
     const endMutation = this.beginMutation('clearExtensionWorkspaceActivation');
     try {
       const snapshot = await this.extensionStore.clearWorkspaceActivation(
-        { id: extension.id, name: extension.name },
+        {
+          id: extension.id,
+          name: extension.name,
+          source: extension.source ?? 'user',
+        },
         workspacePath,
       );
       onCommitted?.(snapshot.generation);
@@ -2051,19 +2113,25 @@ export class ExtensionManager {
     return [...manageds, ...visibleUsers];
   }
 
-  // The batch activation path and the store both decide "is this managed?"
-  // from the policy's marker because a retained managed policy can be
-  // re-keyed onto the same-name user copy while the deployment root is
-  // unseen — in that state the loaded extension's source says 'user' for a
-  // package the deployment still owns.
-  private async isManagedPolicy(
-    extension: Pick<Extension, 'id' | 'source'>,
-  ): Promise<boolean> {
-    if (extension.source === 'managed') return true;
-    const policy = (await this.extensionStore.readSnapshot()).extensions[
-      extension.id
-    ];
-    return policy?.managed === true;
+  private async findActivationExtensionById(
+    extensionId: string,
+  ): Promise<Extension> {
+    await this.refreshActivationOwnership();
+    const extension = this.getLoadedExtensions().find(
+      (candidate) => candidate.id === extensionId,
+    );
+    if (!extension) {
+      throw new ExtensionConflictError(
+        `Extension with id ${extensionId} does not exist. Refresh the extension list before retrying.`,
+      );
+    }
+    return extension;
+  }
+
+  private async refreshActivationOwnership(): Promise<void> {
+    if (this.managedExtensionsDir) {
+      await this.refreshCacheWithSnapshot();
+    }
   }
 
   private async assertUserManagedExtension(
@@ -2139,7 +2207,7 @@ export class ExtensionManager {
           policy.name.toLowerCase() === extension.name.toLowerCase() &&
           (managedRootUnreadable ||
             failedManaged.some((failed) => failed.name === undefined) ||
-            isManagedAbsenceUnproven(policy, unprovenManagedNames)),
+            hasUnprovenManagedEntries(unprovenManagedNames)),
       );
       if (retained) {
         throw new ManagedExtensionReadOnlyError(extension.name);
@@ -3952,7 +4020,7 @@ export class ExtensionManager {
           managedRootUnreadable ||
           failedManaged.some((failed) => failed.name === undefined) ||
           managedNames.has(policy.name.toLowerCase()) ||
-          isManagedAbsenceUnproven(policy, manifestlessManagedDirs)
+          hasUnprovenManagedEntries(manifestlessManagedDirs)
         ) {
           throw new ManagedExtensionReadOnlyError(policy.name);
         }
@@ -3976,7 +4044,7 @@ export class ExtensionManager {
           { id: extensionId, name: policy.name },
           {
             beforeRemove: (current) => {
-              if (isManagedAbsenceUnproven(current, manifestlessManagedDirs)) {
+              if (hasUnprovenManagedEntries(manifestlessManagedDirs)) {
                 throw new ManagedExtensionReadOnlyError(current.name);
               }
               if (

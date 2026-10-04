@@ -668,15 +668,15 @@ describe('managed extensions', () => {
     ]);
     expect(subject.getLoadedExtensions()).toEqual([]);
     expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
-    const full = subject.getLoadedExtensions();
-    const managedExtension = full.find(
-      (extension) => extension.source === 'managed',
-    )!;
+    const managedExtension = subject
+      .getLoadedExtensions()
+      .find((extension) => extension.source === 'managed')!;
     expect(managedExtension.skills?.[0].body).toBe('Skill body');
     await subject.setExtensionDefaultActivation(
       managedExtension.id,
       'disabled',
     );
+    const full = subject.getLoadedExtensions();
     const before = await subject.getExtensionStoreSnapshot();
     const readFile = vi.spyOn(fs.promises, 'readFile');
     const catalog = await subject.refreshCatalogSnapshot({
@@ -1310,7 +1310,7 @@ describe('managed extensions', () => {
     ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
   });
 
-  it('clears a blind home-path rule when disabling a re-keyed managed policy', async () => {
+  it('refuses a blind activation change on a re-keyed managed policy', async () => {
     writeExtension(user, 'portable', { version: 'user' });
     writeExtension(managed, 'portable');
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -1328,28 +1328,19 @@ describe('managed extensions', () => {
         ?.managed,
     ).toBe(true);
 
-    // A blind run with no deployment root writes the user-scope toggle as a
-    // home-path legacy rule onto the still-managed policy.
+    // Preserve a legacy rule written before activation checked ownership;
+    // a blind run must not now overwrite this retained managed policy.
     await store.setLegacyPathActivation(
       { id: userCopy.id, name: 'portable' },
       os.homedir(),
       'enabled',
     );
 
-    await unflagged.setExtensionDefaultActivation(userCopy.id, 'disabled');
-    const after = await unflagged.getExtensionStoreSnapshot();
-    const policy = after.extensions[userCopy.id]!;
-    expect(policy.managed).toBe(true);
-    expect(policy.defaultActivation).toBe('disabled');
-    expect(policy.legacyPathRules).toBeUndefined();
-    expect(
-      store.getActivation(
-        after,
-        userCopy.id,
-        'portable',
-        path.join(os.homedir(), 'sub'),
-      ),
-    ).toMatchObject({ effective: 'disabled' });
+    const before = await unflagged.getExtensionStoreSnapshot();
+    await expect(
+      unflagged.setExtensionDefaultActivation(userCopy.id, 'disabled'),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await unflagged.getExtensionStoreSnapshot()).toEqual(before);
   });
 
   it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {

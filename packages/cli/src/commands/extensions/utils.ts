@@ -86,14 +86,12 @@ export function extensionToOutputString(
   inline = false,
 ): string {
   const cwd = workspaceDir;
-  const userEnabled = extensionManager.isEnabled(
-    extension.config.name,
-    os.homedir(),
-  );
-  const workspaceEnabled = extensionManager.isEnabled(
-    extension.config.name,
-    cwd,
-  );
+  const userEnabled =
+    extensionManager.getLoadedExtensionActivation(extension.id, os.homedir())
+      .effective === 'enabled';
+  const workspaceEnabled =
+    extensionManager.getLoadedExtensionActivation(extension.id, cwd)
+      .effective === 'enabled';
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   const locale = getCurrentLanguage();

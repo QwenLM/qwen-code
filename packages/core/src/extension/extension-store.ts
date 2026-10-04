@@ -127,10 +127,8 @@ export interface ExtensionStoreSnapshot {
 
 interface ManagedHandBackOptions {
   managedAbsenceProven?: boolean;
-  // Lowercased basenames of managed-root entries that are present but hold
-  // no manifest. A present entry — a package mid-deploy — cannot prove its
-  // own withdrawal, so the hand-back skips a policy whose name matches one
-  // even when absence is otherwise proven.
+  // Lowercased basenames of entries without a governing manifest. Any one
+  // can be a relocated package mid-deploy, so none proves managed withdrawal.
   unprovenManagedNames?: ReadonlySet<string>;
   // Fired for each recorded spelling of a policy whose managed marker the
   // proven-withdrawal hand-back deletes. Secrets written during the managed
@@ -165,13 +163,10 @@ export function getManagedSecretNames(policy: ExtensionPolicy): string[] {
   ];
 }
 
-export function isManagedAbsenceUnproven(
-  policy: ExtensionPolicy,
+export function hasUnprovenManagedEntries(
   unprovenNames: ReadonlySet<string> | undefined,
 ): boolean {
-  return [policy.name, policy.managedName, policy.managedDirectory].some(
-    (name) => name !== undefined && unprovenNames?.has(name.toLowerCase()),
-  );
+  return (unprovenNames?.size ?? 0) > 0;
 }
 
 function isManagedDirectoryName(value: unknown): value is string {
@@ -527,6 +522,20 @@ function findLegacyRules(
       ([candidate]) => candidate.toLowerCase() === normalizedName,
     )?.[1].overrides ?? []
   );
+}
+
+function assertActivationSource(
+  identity: ExtensionIdentity,
+  policy: ExtensionPolicy,
+): void {
+  if (
+    identity.source !== undefined &&
+    (identity.source === 'managed') !== (policy.managed === true)
+  ) {
+    throw new ExtensionConflictError(
+      `Extension "${identity.name}" has conflicting loaded source and managed ownership. Refresh with the configured managed extension directory before retrying.`,
+    );
+  }
 }
 
 function assertIdentity(identity: ExtensionIdentity): void {
@@ -1227,7 +1236,7 @@ export class ExtensionStore {
           changed = true;
         } else if (
           managedAbsenceProven &&
-          !isManagedAbsenceUnproven(policy, options.unprovenManagedNames)
+          !hasUnprovenManagedEntries(options.unprovenManagedNames)
         ) {
           const handBackNames = getManagedSecretNames(policy);
           delete policy.managed;
@@ -1830,7 +1839,7 @@ export class ExtensionStore {
       if (
         identity.source !== 'user' ||
         !policy?.managed ||
-        isManagedAbsenceUnproven(policy, options.unprovenManagedNames)
+        hasUnprovenManagedEntries(options.unprovenManagedNames)
       ) {
         continue;
       }
@@ -2111,6 +2120,7 @@ export class ExtensionStore {
           `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
         );
       }
+      assertActivationSource(identity, policy);
       update(policy);
       snapshot.extensions[identity.id] = policy;
       snapshot.generation += 1;
@@ -2198,6 +2208,7 @@ export class ExtensionStore {
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );
         }
+        assertActivationSource(identity, policy);
         policies.push({ policy, identity });
       }
       if (policies.length === 0) {

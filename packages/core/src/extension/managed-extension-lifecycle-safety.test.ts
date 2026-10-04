@@ -145,7 +145,7 @@ describe('managed extension lifecycle safety', () => {
   );
 
   it.each(['refresh', 'release'] as const)(
-    'does not let an unrelated asset-only directory block genuine %s',
+    'defers %s until an unattributed asset-only directory is removed',
     async (action) => {
       const name = 'acme-toolkit';
       const deployed = path.join(managedRoot, 'acme-toolkit-1.4.0');
@@ -163,8 +163,26 @@ describe('managed extension lifecycle safety', () => {
       );
       const fresh = manager();
       await fresh.refreshCache({ allowManagedHandBack: action === 'refresh' });
+      if (action === 'release') {
+        await expect(
+          fresh.uninstallExtensionById(managed.id, false),
+        ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+      }
+      expect(await secretPresent(name, managed.id)).toBe(true);
+      expect(
+        Object.values(
+          (await new ExtensionStore().readSnapshot()).extensions,
+        ).find((policy) => policy.name === name)?.managed,
+      ).toBe(true);
+      fs.rmSync(path.join(managedRoot, 'unrelated-assets'), {
+        recursive: true,
+      });
+      const confirmed = manager();
+      await confirmed.refreshCache({
+        allowManagedHandBack: action === 'refresh',
+      });
       if (action === 'release')
-        await fresh.uninstallExtensionById(managed.id, false);
+        await confirmed.uninstallExtensionById(managed.id, false);
       expect(await secretPresent(name, managed.id)).toBe(false);
       expect(
         Object.values(

@@ -135,6 +135,116 @@ describe('ExtensionStore', () => {
     return { store, identity, initial };
   };
 
+  it.each([
+    'default',
+    'workspace',
+    'scope',
+    'skill',
+    'legacy',
+    'inherit',
+    'bulk default',
+    'bulk workspace',
+    'bulk inherit',
+  ])(
+    'rejects a user-source %s write against retained managed ownership under the lock',
+    async (operation) => {
+      const store = makeStore();
+      const user = {
+        id: 'a'.repeat(64),
+        name: 'returning',
+        source: 'user' as const,
+      };
+      const sibling = {
+        id: 'b'.repeat(64),
+        name: 'ordinary',
+        source: 'user' as const,
+      };
+      await store.ensureInitialized([user, sibling]);
+      const before = await store.ensureInitialized([
+        { ...user, source: 'managed' },
+        sibling,
+      ]);
+      const beforeCommit = vi.fn();
+      const workspace = workspacePath('activation-ownership');
+      const mutate = () => {
+        switch (operation) {
+          case 'default':
+            return store.setDefaultActivation(user, 'disabled');
+          case 'workspace':
+            return store.setWorkspaceActivation(user, workspace, 'disabled');
+          case 'scope':
+            return store.setActivationScope(user, { scope: 'user' });
+          case 'skill':
+            return store.setSkillWorkspaceOverrides(
+              user,
+              workspace,
+              { review: false },
+              0,
+              beforeCommit,
+            );
+          case 'legacy':
+            return store.setLegacyPathActivation(user, workspace, 'disabled');
+          case 'inherit':
+            return store.clearWorkspaceActivation(user, workspace);
+          case 'bulk default':
+            return store.setDefaultActivations([sibling, user], 'disabled');
+          case 'bulk workspace':
+            return store.setWorkspaceActivations(
+              [sibling, user],
+              workspace,
+              'disabled',
+            );
+          default:
+            return store.clearWorkspaceActivations([sibling, user], workspace);
+        }
+      };
+      await expect(mutate()).rejects.toThrow(ExtensionConflictError);
+      expect(beforeCommit).not.toHaveBeenCalled();
+      expect(await store.readSnapshot()).toEqual(before);
+    },
+  );
+
+  it.each(['single', 'bulk'] as const)(
+    'rejects a stale managed-source %s write after hand-back',
+    async (mode) => {
+      const store = makeStore();
+      const managed = {
+        id: 'c'.repeat(64),
+        name: 'returned',
+        source: 'managed' as const,
+      };
+      await store.ensureInitialized([managed]);
+      const before = await store.ensureInitialized(
+        [{ ...managed, source: 'user' }],
+        { managedAbsenceProven: true },
+      );
+      expect(before.extensions[managed.id]!.managed).toBeUndefined();
+      await expect(
+        mode === 'single'
+          ? store.setDefaultActivation(managed, 'disabled')
+          : store.setDefaultActivations([managed], 'disabled'),
+      ).rejects.toThrow(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+    },
+  );
+
+  it('rejects a bulk declaration that resolves by name to retained managed ownership', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd'.repeat(64),
+      name: 'retained',
+      source: 'managed' as const,
+    };
+    const before = await store.ensureInitialized([managed]);
+    await expect(
+      store.setDefaultActivations(
+        [{ id: 'e'.repeat(64), name: 'retained', source: 'user' }],
+        'disabled',
+      ),
+    ).rejects.toThrow(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
   const firstAndSecond = (
     a: string,
     b: string,
@@ -2685,6 +2795,7 @@ describe('ExtensionStore', () => {
       'bundle 新版本',
     );
     expect(await makeStore().readSnapshot()).toEqual(current);
+    await store.setDefaultActivation(managed, 'disabled');
     const user = { id: 'd4'.repeat(32), name: 'demo', source: 'user' as const };
     const onManagedHandBack = vi.fn();
     const retained = await store.ensureInitialized([user], {
@@ -2700,9 +2811,25 @@ describe('ExtensionStore', () => {
         unprovenManagedNames: new Set(['bundle 新版本']),
       }),
     ).toBe(retained);
-    const released = await store.ensureInitialized([user], {
+    const ambiguous = await store.ensureInitialized([user], {
       managedAbsenceProven: true,
       unprovenManagedNames: new Set(['bundle old', 'assets']),
+      onManagedHandBack,
+    });
+    expect(ambiguous.extensions[user.id]?.managed).toBe(true);
+    expect(ambiguous.extensions[user.id]?.defaultActivation).toBe('disabled');
+    expect(ambiguous.extensions[user.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+    expect(onManagedHandBack).not.toHaveBeenCalled();
+    expect(
+      store.projectManagedHandBackSnapshot(ambiguous, [user], {
+        managedAbsenceProven: true,
+        unprovenManagedNames: new Set(['never-observed-provider']),
+      }),
+    ).toBe(ambiguous);
+    const released = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
       onManagedHandBack,
     });
     expect(released.extensions[user.id]?.managed).toBeUndefined();

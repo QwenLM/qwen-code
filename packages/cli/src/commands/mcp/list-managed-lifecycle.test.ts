@@ -22,7 +22,11 @@ import { reconnectCommand } from './reconnect.js';
 import { handleList } from '../extensions/list.js';
 import { settingsCommand } from '../extensions/settings.js';
 import { handleSourcesList } from '../extensions/sources.js';
-import { getExtensionManager } from '../extensions/utils.js';
+import {
+  extensionToOutputString,
+  getExtensionManager,
+} from '../extensions/utils.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { loadChannelsFromExtensions } from '../channel/runtime.js';
 
 vi.mock('../../config/settings.js', () => ({
@@ -97,14 +101,15 @@ describe('MCP list managed lifecycle safety', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  const manager = () =>
+  const manager = (enabledExtensionOverrides?: string[]) =>
     new ExtensionManager({
       managedExtensionsDir: managedRoot,
+      enabledExtensionOverrides,
       workspaceDir: workspace,
       isWorkspaceTrusted: true,
     });
 
-  async function withdrawnManaged() {
+  async function withdrawnManaged(disabled = false) {
     const deployed = path.join(managedRoot, 'package');
     writePackage(deployed);
     writePackage(path.join(root, 'home', 'extensions', 'user-copy'));
@@ -114,6 +119,9 @@ describe('MCP list managed lifecycle safety', () => {
       .getLoadedExtensions()
       .find((extension) => extension.name === name)!;
     expect(managed.source).toBe('managed');
+    if (disabled) {
+      await initial.setExtensionDefaultActivation(managed.id, 'disabled');
+    }
     await updateSetting(
       config,
       managed.id,
@@ -200,6 +208,51 @@ describe('MCP list managed lifecycle safety', () => {
           ],
         )
         .toBe(token);
+    },
+  );
+
+  it('lists the returning user activation without consuming managed policy or secrets', async () => {
+    const id = await withdrawnManaged(true);
+    vi.mocked(writeStdoutLine).mockClear();
+    await handleList(managedRoot);
+    const output = vi.mocked(writeStdoutLine).mock.calls.flat().join('\n');
+    expect.soft(output).toContain('Enabled (User): true');
+    expect.soft(output).toContain('Enabled (Workspace): true');
+    expect.soft(output).toContain('✓');
+    const policy = Object.values(
+      (await new ExtensionStore().readSnapshot()).extensions,
+    ).find((candidate) => candidate.name === name);
+    expect(policy).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+    expect(
+      (await getScopedEnvContents(config, id, ExtensionSettingScope.USER))[
+        'TOKEN'
+      ],
+    ).toBe(token);
+  });
+
+  it.each([
+    { overrides: ['none'], enabled: false },
+    { overrides: ['another-extension'], enabled: false },
+    { overrides: [name.toUpperCase()], enabled: true },
+  ])(
+    'keeps CLI overrides $overrides in loaded activation output',
+    async ({ overrides, enabled }) => {
+      await withdrawnManaged(true);
+      const reader = manager(overrides);
+      await reader.refreshCache({ allowManagedHandBack: false });
+      const extension = reader.getLoadedExtensions()[0]!;
+      expect(extension.isActive).toBe(enabled);
+      const output = extensionToOutputString(extension, reader, workspace);
+      expect(output).toContain(`Enabled (User): ${enabled}`);
+      expect(output).toContain(`Enabled (Workspace): ${enabled}`);
+      expect(reader.getLoadedExtensionActivation(extension.id)).toMatchObject({
+        effective: enabled ? 'enabled' : 'disabled',
+        source: 'cli_override',
+      });
     },
   );
 
