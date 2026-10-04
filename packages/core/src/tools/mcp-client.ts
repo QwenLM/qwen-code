@@ -116,19 +116,17 @@ const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
  */
 const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
 /**
- * Bound `transport.close()` / `client.close()` during disconnect. The SDK's
- * close path has no timeout of its own; a hung transport I/O would otherwise
- * leave the pool's cleanup barrier (`PoolEntry.cleanupInFlight`) unresolved
- * forever, permanently blocking every later acquire for the same server.
- * Descendants are already SIGTERM'd before this point, so a timed-out close
- * cannot leak a subprocess tree — only the caller's wait is bounded.
+ * Bound non-stdio `transport.close()` / `client.close()` during disconnect,
+ * so hung transport I/O cannot leave the pool's cleanup barrier unresolved.
+ * SDK stdio close already bounds its graceful waits before SIGKILL; it must
+ * finish that native escalation rather than be cut short by this deadline.
  */
 const TRANSPORT_CLOSE_TIMEOUT_MS = 3_000;
 /**
  * Worst-case wall-clock budget for `McpClient.disconnect()`: the bounded
- * session termination plus the two bounded closes. The pool's cleanup barrier
- * must wait at least this long, otherwise a teardown that finishes within its
- * own budget would still time the barrier out.
+ * session termination plus the two bounded closes. This also covers stdio's
+ * native 4-second close plus the bounded 3-second client close. The pool's
+ * cleanup barrier must outlast either path.
  */
 export const MCP_TEARDOWN_TIMEOUT_MS =
   TERMINATE_SESSION_TIMEOUT_MS + 2 * TRANSPORT_CLOSE_TIMEOUT_MS;
@@ -880,11 +878,18 @@ export class McpClient {
         }
       }
       try {
-        await runWithTimeout(
-          transport.close(),
-          TRANSPORT_CLOSE_TIMEOUT_MS,
-          `transport.close for server '${this.serverName}'`,
-        );
+        if (transport instanceof StdioClientTransport) {
+          // The SDK waits up to 2s for EOF, then 2s for SIGTERM before
+          // SIGKILL. A shorter outer timeout lets callers exit while that
+          // final signal is still pending, orphaning the owned child.
+          await transport.close();
+        } else {
+          await runWithTimeout(
+            transport.close(),
+            TRANSPORT_CLOSE_TIMEOUT_MS,
+            `transport.close for server '${this.serverName}'`,
+          );
+        }
       } finally {
         try {
           // stdio close can return before the process close event. Settle

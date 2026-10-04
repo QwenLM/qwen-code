@@ -14,7 +14,7 @@
 - 释放只报 session，因此一个被取代的 handle 可能 detach 掉接替它的连接。
 - entry 在销毁**开始**时就从池索引移除，而不是在结束时，因此并发 acquire 可能在旧进程尚未退出前，为同一连接指纹启动第二个进程。
 
-另有一处：被 EOF 杀掉的 stdio server 此前是不可见的——SDK 在该路径不会调用 `onerror`，于是 entry 保持 `active`，工具仍注册在一个已死的 transport 上。而且 SDK 的关闭路径没有超时，挂住的 transport 会让销毁永远无法结束。
+另有一处：被 EOF 杀掉的 stdio server 此前是不可见的——SDK 在该路径不会调用 `onerror`，于是 entry 保持 `active`，工具仍注册在一个已死的 transport 上。非 stdio 的 close 调用此前没有外层超时，挂住的 transport 会让销毁永远无法结束。
 
 ## 目标
 
@@ -32,7 +32,7 @@
 1. **按 seat 归属。** 每个池订阅以 seat 为索引——即逻辑 session id 与 `ToolRegistry` 身份的组合。`release` 与 `releaseSession` 按 seat 释放，因此一个注册表无法移除另一个的引用。unpooled entry 同样记录其所属 session。
 2. **handle 身份释放。** 连接 handle 携带自身身份，并在释放回调中把自己传回。只有当该 handle 仍是当前绑定到该 seat 的那一个时，detach 才成功。重新 attach 一个 seat 会处置被取代的 handle（清空其监听、标记为失效）；它随后的池释放因身份不符而成为空操作，而唯一的非池化调用方每次 acquire 都新建 entry。
 3. **cleanup 屏障。** 关闭连接时，先发布 cleanup promise，再通知订阅者。acquire 会等待同一连接指纹（包括已从索引移除的 entry）的在途清理，其截止时间**不小于**销毁预算加子进程扫描的余量。超时则 acquire 失败关闭并保留屏障，因此绝不会在旧进程尚未退出时启动新进程。
-4. **有界销毁。** `transport.close()` 与 `client.close()` 由 `TRANSPORT_CLOSE_TIMEOUT_MS` 约束；`MCP_TEARDOWN_TIMEOUT_MS` 是由它推导出的最坏情况断开预算。子进程在此前已被 SIGTERM，因此超时的 close 不会泄漏进程树。
+4. **有界销毁。** 非 stdio 的 `transport.close()` 与 `client.close()` 由 `TRANSPORT_CLOSE_TIMEOUT_MS` 约束。SDK 的 stdio transport 本身会先等待 EOF 2 秒，再等待 SIGTERM 2 秒，随后发送 SIGKILL；disconnect 会等待这套原生升级回收完成，而不提前截断。8 秒的 `MCP_TEARDOWN_TIMEOUT_MS` 预算同时覆盖远程路径（2 秒 session 终止加两次 3 秒 close）和 stdio 路径（4 秒原生 close 加 3 秒 client close）。池销毁会在 disconnect 前另行向后代进程发信号，其他 disconnect 调用方不保证执行后代进程扫描。
 
 ## 行为变化：意外 transport 关闭现在可见
 

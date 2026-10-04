@@ -14,7 +14,7 @@ The transport pool assumes a shared connection is only replaced on a configurati
 - A release names only the session, so a superseded handle could detach the connection that replaced it.
 - An entry leaves the pool index when teardown starts, not when it finishes, so a concurrent acquire could spawn a second process for the same connection fingerprint before the previous one exited.
 
-Separately, an EOF-killed stdio server was invisible: the SDK does not invoke `onerror` on that path, so the entry stayed `active` with the tools registered against a dead transport. And the SDK close path had no timeout, so a hung transport could leave teardown unresolved.
+Separately, an EOF-killed stdio server was invisible: the SDK does not invoke `onerror` on that path, so the entry stayed `active` with the tools registered against a dead transport. Non-stdio close calls had no outer timeout, so a hung transport could leave teardown unresolved.
 
 ## Goals
 
@@ -32,7 +32,7 @@ Separately, an EOF-killed stdio server was invisible: the SDK does not invoke `o
 1. **Seat-scoped attachment.** Each pool subscription is indexed by a seat — the pair of logical session id and `ToolRegistry` identity. `release` and `releaseSession` detach per seat, so one registry cannot remove another's reference. Unpooled entries record their owning session for the same reason.
 2. **Handle-identity release.** A connection handle carries its own identity and passes itself to the release callback. Detach succeeds only when the handle is still the one bound to the seat. Re-attaching a seat disposes the superseded handle (clears its listeners, marks it inert); its pool release then no-ops by identity, and the only unpooled caller builds a fresh entry per acquire.
 3. **Cleanup barrier.** Closing a connection publishes a cleanup promise before subscribers are notified. Acquire waits for any in-flight cleanup of the same connection fingerprint (including entries already evicted from the index) under a deadline that is at least the teardown budget plus slack for the descendant pid sweep. On timeout the acquire fails closed and keeps the barrier, so a replacement process is never started over a previous one that has not finished exiting.
-4. **Bounded teardown.** `transport.close()` and `client.close()` are bounded by `TRANSPORT_CLOSE_TIMEOUT_MS`; `MCP_TEARDOWN_TIMEOUT_MS` is the worst-case disconnect budget derived from it. Descendants are already signalled before this point, so a timed-out close cannot leak a process tree.
+4. **Bounded teardown.** Non-stdio `transport.close()` and `client.close()` are bounded by `TRANSPORT_CLOSE_TIMEOUT_MS`. The SDK stdio transport already bounds its graceful waits to 2 seconds for EOF and 2 seconds for SIGTERM before sending SIGKILL; disconnect awaits that native escalation instead of cutting it short. The 8-second `MCP_TEARDOWN_TIMEOUT_MS` budget covers both the remote path (2-second session termination plus two 3-second closes) and the stdio path (4-second native close plus a 3-second client close). Pool teardown separately signals descendants before disconnect; other disconnect callers do not guarantee a descendant sweep.
 
 ## Behaviour change: unexpected transport close is now observed
 
