@@ -996,15 +996,18 @@ alone says which call took effect.
   Runtime state blocks the session again with
   `managed_runtime_outcome_unknown` before any model request, and the reason
   says it comes from the log. A log whose latest Runtime state is
-  `results_ready` restores normally: every outcome is committed, the recorded
-  results are in history, and nothing replays the Runtime. The leftover
-  continuation closes at the session's next admission — consumed and settled,
-  since its outcomes are committed; that is not replaying — and a turn that
-  settled under an earlier prompt ends with its own boundary, so the new
-  prompt's batch and attempt are its own. A fresh open's dispatch gate is
-  empty, and a blocked session admits no prompt, so the gate cannot claim a
-  re-dispatch of the original call. Recovery of a settled but unconsumed
-  turn, and of a blocked session, stays with M6.
+  `results_ready` restores normally: every outcome is committed, the restore
+  re-records a settled result whose record never landed, and nothing replays
+  the Runtime. The session's next admission closes a leftover from an
+  earlier turn — consumed and settled, since its outcomes are committed;
+  that is not replaying — while the live turn's own `results_ready` closes
+  only at the batch end, after its records are flushed, so a sealed log
+  never claims the model saw results it did not; and a turn that settled
+  under an earlier prompt ends with its own boundary, so the new prompt's
+  batch and attempt are its own. A fresh open's dispatch gate is empty, and
+  a blocked session admits no prompt, so the gate cannot claim a re-dispatch
+  of the original call. Recovery of a settled but unconsumed turn, and of a
+  blocked session, stays with M6.
 - **The worker forgets what is committed.** The host acknowledges each call
   once its commit has landed, over an `acknowledge` route added to the same
   tool v2 protocol; the worker then drops the call's parameters and result
