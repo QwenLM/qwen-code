@@ -557,20 +557,26 @@ Hook output supports three categories of fields:
 
 **Output Options**:
 
-- `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
-- `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
+- `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (optional)
+- `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (optional)
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
 - `hookSpecificOutput.additionalContext`: text appended, after a blank line, to this call's tool result that the model sees next (for a call made from a Code Mode `exec` script, to the `exec` call's result; see below). It is delivered whatever the decision: after the tool's own output when it runs, or after the error message when it is denied, stopped, or fails. `<` and `>` are escaped.
 
 The `permissionDecision` value controls whether the tool runs:
 
-- `"allow"` — run the tool without the usual approval prompt.
+- `"allow"` — continue through the normal permission checks. Permission rules, plan mode, protected-write checks and tools requiring user interaction still apply.
 - `"deny"` — block the tool; it does not execute and an error is returned to the model.
 - `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
 
 With `"ask"`, the hook runs once. Its `additionalContext` is delivered with the tool result if the user confirms, and dropped if the user declines or the call is cancelled. In ACP sessions (IDE integrations), `"ask"` is currently treated as `"deny"`, and the context is delivered with the denial.
+
+`updatedInput` replaces the entire input object; include every parameter you want to keep. In CLI and ACP calls, the replacement is validated and the invocation rebuilt before permission checks, tool preparation and confirmation. Invalid input fails without executing the tool. Permissions, confirmation, execution and post-tool hooks use the effective input. The hook runs only once, including when the user confirms. `deny` and `continue: false` block execution and ignore the replacement.
+
+ACP hooks receive caller arguments before operator-controlled media policy defaults and locked fields are injected. Those fields are applied by the policy again after replacement; hooks cannot override protected configuration. Headless structured output uses the effective completed input, and argument-sensitive shell calls run sequentially while PreToolUse hooks are enabled.
+
+For sequential hooks, each following hook receives the previous `updatedInput` as its `tool_input`. Parallel hooks retain the existing aggregation rule: the last replacement in configuration order wins. Digest-pinned managed invocations and fixed-policy calls refuse changed input because their authorization is already bound to the prepared request.
 
 `additionalContext` goes into the tool result. It does not change the tool input, the approval prompt, the error shown while the tool runs, or the user's prompt. Because it becomes part of the tool result, it is saved in the session transcript with it and can appear wherever the full tool output is shown, such as the Ctrl+O detail view or a resumed session; it is not marked apart from the tool's own output.
 

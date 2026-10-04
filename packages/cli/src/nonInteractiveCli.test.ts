@@ -4214,6 +4214,37 @@ describe('runNonInteractive', () => {
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
     });
 
+    it('serializes headless shell admission when PreToolUse can rewrite its arguments', async () => {
+      setupMetricsMock();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Execute,
+      } as ReturnType<typeof mockToolRegistry.getTool>);
+      const order: string[] = [];
+      mockCoreExecuteToolCall.mockImplementation(async (_config, request) => {
+        order.push(`start:${request.callId}`);
+        await new Promise((resolve) => setImmediate(resolve));
+        order.push(`end:${request.callId}`);
+        return {
+          responseParts: [{ text: 'rewritten mutating invocation completed' }],
+        };
+      });
+      const events = toolCallEvents(
+        ['one', 'two'],
+        ToolNames.SHELL,
+        'rewrite-batch',
+      ).map((event) => ({
+        ...event,
+        value: { ...event.value, args: { command: 'git status' } },
+      }));
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(events))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'rewrite-batch');
+      expect(order).toEqual(['start:one', 'end:one', 'start:two', 'end:two']);
+    });
+
     it('uses deferred target identity for headless bridge concurrency and completion tracking', async () => {
       setupMetricsMock();
       const targetName = 'mcp__docs__read';
@@ -8225,6 +8256,62 @@ describe('runNonInteractive', () => {
   });
 
   describe('--json-schema structured output', () => {
+    it('emits effective completed arguments as the final structured result', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { value: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          const response = { responseParts: [{ text: 'accepted' }] };
+          await options.onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request: { ...request, args: { value: 'hook' } },
+              response,
+              durationMs: 1,
+            } as never,
+          ]);
+          return response;
+        },
+      );
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'effective-structured',
+              name: ToolNames.STRUCTURED_OUTPUT,
+              args: { value: 'model' },
+              isClientInitiated: false,
+              prompt_id: 'effective-structured',
+            },
+          },
+        ]),
+      );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'emit',
+        'effective-structured',
+      );
+      const events = writes
+        .join('')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .flat();
+      expect(
+        events.find((event) => event.type === 'result').structured_result,
+      ).toEqual({ value: 'hook' });
+    });
     // Helper: walk an emitted event and extract the first tool_use_id when
     // it represents a tool_result block. Returns undefined for any other
     // event shape.

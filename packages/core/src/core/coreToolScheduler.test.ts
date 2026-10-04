@@ -41,6 +41,7 @@ import {
 } from '../index.js';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import osModule from 'node:os';
 import * as fsSync from 'node:fs';
 import { writeFile as fsWriteFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -49,7 +50,7 @@ import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -86,6 +87,7 @@ import { unescapePath } from '../utils/paths.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { ReadFileTool } from '../tools/read-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
@@ -8019,6 +8021,33 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
   });
 });
 describe('CoreToolScheduler Plan shell routing', () => {
+  it('blocks a read-only request rewritten into a write by PreToolUse', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('should not run'));
+    const { completed } = await runPlanShell(
+      {
+        tools: [shellTool({ execute })],
+        disableHooks: false,
+        messageBus: hookBus(async (req) =>
+          hookResponse(
+            'rewrite-plan',
+            req.eventName === 'PreToolUse'
+              ? {
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'allow',
+                    updatedInput: { command: 'rm -rf ./output' },
+                  },
+                }
+              : {},
+          ),
+        ) as unknown as MessageBus,
+      },
+      request('rewritten-plan-shell', 'git status'),
+    );
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   const unknownWarning =
     'Plan mode could not determine whether this shell command is read-only. Approval applies only to this exact invocation once; it may modify system state, and Plan mode will remain active.';
   const PYTHON = "python -c 'print(1)'";
@@ -8791,6 +8820,431 @@ describe('CoreToolScheduler telemetry spans', () => {
     /** Shorthand for an execute that rejects with `new Error(throws)`. */
     throws?: string;
   };
+
+  describe('PreToolUse effective input', () => {
+    it('preserves raw paths through an ordinary inline content approval', async () => {
+      const platform = vi.spyOn(osModule, 'platform').mockReturnValue('linux');
+      try {
+        const executed: Array<Record<string, unknown>> = [];
+        const tool = new WriteFileTool({
+          getProjectRoot: () => '/workspace',
+          getTargetDir: () => '/workspace',
+        } as Config);
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((args) => {
+          const invocation = build(args);
+          invocation.getDefaultPermission = async () => 'ask';
+          invocation.getConfirmationDetails = async () => ({
+            type: 'edit',
+            title: 'Edit',
+            fileName: 'file',
+            filePath: invocation.params.file_path,
+            fileDiff: '',
+            originalContent: '',
+            newContent: invocation.params.content,
+            onConfirm: async () => {},
+          });
+          invocation.execute = async () => {
+            executed.push({ ...invocation.params });
+            return textResult('ok');
+          };
+          return invocation;
+        });
+        const harness = buildScheduler({
+          tools: [tool],
+          approvalMode: ApprovalMode.DEFAULT,
+          disableHooks: true,
+        });
+        await harness.scheduler.schedule(
+          toolRequest(
+            'inline-path',
+            tool.name,
+            { file_path: '/workspace/a\\\\ b', content: 'model' },
+            'inline-path',
+          ),
+          new AbortController().signal,
+        );
+        const waiting = await waitForApproval(harness.onToolCallsUpdate);
+        await waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+          { newContent: 'user' },
+        );
+        await settledLastBatch(harness.onAllToolCallsComplete);
+        expect(executed[0]).toMatchObject({
+          file_path: '/workspace/a\\ b',
+          content: 'user',
+        });
+      } finally {
+        platform.mockRestore();
+      }
+    });
+
+    it.each(['exec', 'mcp', 'info'] as const)(
+      'keeps the hook ask reason in a combined %s confirmation',
+      async (type) => {
+        const onConfirm = async () => {};
+        const details: ToolCallConfirmationDetails =
+          type === 'exec'
+            ? {
+                type,
+                title: 'Shell',
+                command: 'echo hello',
+                rootCommand: 'echo',
+                onConfirm,
+              }
+            : type === 'mcp'
+              ? {
+                  type,
+                  title: 'MCP',
+                  serverName: 'echo',
+                  toolName: 'echo',
+                  toolDisplayName: 'Echo',
+                  autoModeFallback: {
+                    reason: 'classifier_unavailable',
+                    message: 'Classifier unavailable',
+                  },
+                  onConfirm,
+                }
+              : { type, title: 'Info', prompt: 'Existing prompt', onConfirm };
+        const harness = buildScheduler({
+          approvalMode: ApprovalMode.DEFAULT,
+          tools: [
+            new MockTool({
+              name: 'reason_tool',
+              getDefaultPermission: async () => 'ask',
+              getConfirmationDetails: async () => details,
+            }),
+          ],
+          hooks: preContextBus({
+            permissionDecision: 'ask',
+            permissionDecisionReason: 'Check [literal] before proceeding',
+          }),
+        });
+        await harness.scheduler.schedule(
+          toolRequest('reason', 'reason_tool', {}, 'reason'),
+          new AbortController().signal,
+        );
+        const waiting = await waitForApproval(harness.onToolCallsUpdate);
+        const visible =
+          waiting.confirmationDetails.type === 'exec'
+            ? waiting.confirmationDetails.warnings?.join('\n')
+            : waiting.confirmationDetails.type === 'info'
+              ? waiting.confirmationDetails.prompt
+              : '';
+        expect(visible).toContain('Check [literal] before proceeding');
+        if (type === 'mcp')
+          expect(waiting.confirmationDetails.autoModeFallback).toEqual({
+            reason: 'classifier_unavailable',
+            message: 'Classifier unavailable',
+          });
+        await waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+        );
+      },
+    );
+
+    it.each([false, true])(
+      'preserves a canonical read path retained by a hook (changes limit: %s)',
+      async (changeLimit) => {
+        const platform = vi
+          .spyOn(osModule, 'platform')
+          .mockReturnValue('linux');
+        try {
+          const executed: Array<Record<string, unknown>> = [];
+          const tool = new ReadFileTool({
+            getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
+            getTargetDir: () => '/workspace',
+          } as unknown as Config);
+          const build = tool.build.bind(tool);
+          vi.spyOn(tool, 'build').mockImplementation((args) => {
+            const invocation = build(args);
+            invocation.getDefaultPermission = async () => 'allow';
+            invocation.execute = async () => {
+              executed.push({ ...invocation.params });
+              return textResult('ok');
+            };
+            return invocation;
+          });
+          const harness = buildScheduler({
+            tools: [tool],
+            hooks: preContextBus((request) => ({
+              updatedInput: {
+                ...(request.input?.['tool_input'] as Record<string, unknown>),
+                ...(changeLimit ? { limit: 1 } : {}),
+              },
+            })),
+          });
+          await harness.scheduler.schedule(
+            toolRequest(
+              'retained-path',
+              tool.name,
+              { file_path: '/workspace/a\\\\ b' },
+              'prompt-path',
+            ),
+            new AbortController().signal,
+          );
+          await settledLastBatch(harness.onAllToolCallsComplete);
+          expect(executed).toHaveLength(1);
+          expect(executed[0]['file_path']).toBe('/workspace/a\\ b');
+          if (changeLimit) expect(executed[0]['limit']).toBe(1);
+        } finally {
+          platform.mockRestore();
+        }
+      },
+    );
+
+    it('confirms the current invocation after a PermissionRequest rewrite and hook ask', async () => {
+      const executed: string[] = [];
+      class EditInvocation extends BaseToolInvocation<
+        { value: string },
+        ToolResult
+      > {
+        private prepared?: string;
+        private approved = false;
+        getDescription() {
+          return this.params.value;
+        }
+        override async getDefaultPermission(): Promise<PermissionDecision> {
+          return 'ask';
+        }
+        override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
+          this.prepared = this.params.value;
+          return {
+            type: 'edit',
+            title: this.params.value,
+            fileName: 'test.txt',
+            filePath: '/test.txt',
+            fileDiff: this.params.value,
+            originalContent: '',
+            newContent: this.params.value,
+            onConfirm: async () => {
+              this.approved = true;
+            },
+          };
+        }
+        async execute(): Promise<ToolResult> {
+          executed.push(`${this.prepared}:${this.approved}`);
+          return textResult(this.params.value);
+        }
+      }
+      class EditTool extends BaseDeclarativeTool<
+        { value: string },
+        ToolResult
+      > {
+        constructor() {
+          super('effective_edit', 'Edit', 'Edit fixture', Kind.Edit, {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+            required: ['value'],
+          });
+        }
+        protected createInvocation(params: { value: string }) {
+          return new EditInvocation(params);
+        }
+      }
+      const hooks = hookBus(async (request) =>
+        hookResponse(
+          'effective-edit',
+          request.eventName === 'PreToolUse'
+            ? {
+                hookSpecificOutput: {
+                  permissionDecision: 'ask',
+                  updatedInput: { value: 'first' },
+                },
+              }
+            : request.eventName === 'PermissionRequest'
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'allow',
+                      updatedInput: { value: 'second' },
+                    },
+                  },
+                }
+              : {},
+        ),
+      );
+      const harness = buildScheduler({
+        tools: [new EditTool()],
+        hooks,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      await harness.scheduler.schedule(
+        toolRequest(
+          'effective-edit',
+          'effective_edit',
+          { value: 'model' },
+          'prompt-edit',
+        ),
+        new AbortController().signal,
+      );
+      const waiting = await waitForApproval(harness.onToolCallsUpdate);
+      expect(waiting.confirmationDetails).toMatchObject({
+        newContent: 'second',
+      });
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(executed).toEqual(['second:true']);
+      expect(
+        hooks.request.mock.calls.filter(([r]) => r.eventName === 'PreToolUse'),
+      ).toHaveLength(1);
+    });
+
+    it('rechecks a real deny rule against the rewritten shell command', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('must not execute'));
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => undefined,
+        getPermissionsAsk: () => undefined,
+        getPermissionsDeny: () => ['Bash(echo forbidden)'],
+      });
+      pm.initialize();
+      const harness = buildScheduler({
+        tools: [new MockTool({ name: ToolNames.SHELL, execute })],
+        hooks: preContextBus({
+          permissionDecision: 'allow',
+          updatedInput: { command: 'echo forbidden' },
+        }),
+        configOverrides: { getPermissionManager: () => pm },
+      });
+      await harness.scheduler.schedule(
+        toolRequest(
+          'rule-rewrite',
+          ToolNames.SHELL,
+          { command: 'echo allowed' },
+          'prompt-rule',
+        ),
+        new AbortController().signal,
+      );
+      const [call] = await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(execute).not.toHaveBeenCalled();
+    });
+    const prepared: string[] = [];
+    const executed: string[] = [];
+    const released: string[] = [];
+    class EchoInvocation extends BaseToolInvocation<
+      { value: string },
+      ToolResult
+    > {
+      private cached?: string;
+      private approved = false;
+      async release() {
+        released.push(this.params.value);
+      }
+      getDescription() {
+        return this.params.value;
+      }
+      override async getDefaultPermission(): Promise<PermissionDecision> {
+        this.cached = this.params.value;
+        prepared.push(this.params.value);
+        return this.params.value === 'denied'
+          ? 'deny'
+          : this.params.value === 'confirm'
+            ? 'ask'
+            : 'allow';
+      }
+      override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
+        return {
+          type: 'info',
+          title: this.params.value,
+          prompt: this.params.value,
+          onConfirm: async () => {
+            this.approved = true;
+          },
+        };
+      }
+      async execute(): Promise<ToolResult> {
+        const value = `${this.cached}:${this.approved}`;
+        executed.push(value);
+        return textResult(value);
+      }
+    }
+    class EchoTool extends BaseDeclarativeTool<{ value: string }, ToolResult> {
+      constructor() {
+        super('echo_input', 'Echo', 'Echo input', Kind.Read, {
+          type: 'object',
+          properties: { value: { type: 'string' } },
+          required: ['value'],
+        });
+      }
+      protected createInvocation(params: { value: string }) {
+        return new EchoInvocation(params);
+      }
+    }
+    beforeEach(() => {
+      prepared.length = 0;
+      executed.length = 0;
+      released.length = 0;
+    });
+    async function scheduleRewrite(
+      updatedInput: Record<string, unknown>,
+      permissionDecision?: string,
+    ) {
+      const hooks = preHookBus({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput,
+          permissionDecision,
+        },
+      });
+      const harness = buildScheduler({
+        tools: [new EchoTool()],
+        hooks,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      await harness.scheduler.schedule(
+        toolRequest(
+          'rewrite',
+          'echo_input',
+          { value: 'model' },
+          'prompt-rewrite',
+        ),
+        new AbortController().signal,
+      );
+      return { ...harness, hooks };
+    }
+    it('prepares and executes replacement input and reports it to post hooks', async () => {
+      const harness = await scheduleRewrite({ value: 'hook' });
+      await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(prepared).toEqual(['hook']);
+      expect(executed).toEqual(['hook:false']);
+      expect(released).toEqual(['model', 'hook']);
+      const post = harness.hooks.request.mock.calls.find(
+        ([request]) => request.eventName === 'PostToolUse',
+      );
+      expect(post?.[0].input.tool_input).toEqual({ value: 'hook' });
+    });
+    it('rejects invalid replacement without preparing or executing', async () => {
+      const harness = await scheduleRewrite({ missing: true });
+      const [call] = await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(prepared).toEqual([]);
+      expect(executed).toEqual([]);
+    });
+    it('denies the replacement even when the hook allows it', async () => {
+      const harness = await scheduleRewrite({ value: 'denied' }, 'allow');
+      const [call] = await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(executed).toEqual([]);
+    });
+    it('confirms the replacement once and preserves its invocation approval state', async () => {
+      const harness = await scheduleRewrite({ value: 'confirm' });
+      const waiting = await waitForApproval(harness.onToolCallsUpdate);
+      expect(waiting.confirmationDetails.title).toBe('confirm');
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await settledLastBatch(harness.onAllToolCallsComplete);
+      expect(executed).toEqual(['confirm:true']);
+      expect(
+        harness.hooks.request.mock.calls.filter(
+          ([r]) => r.eventName === 'PreToolUse',
+        ),
+      ).toHaveLength(1);
+    });
+  });
 
   /** Schedules one `span-call` request and returns its tool span and batch. */
   async function runSingleTool(options: RunSingleToolOptions = {}) {
@@ -10404,7 +10858,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     return { ...built, details };
   }
 
-  it('refuses a stale round-1 IDE resolution for a bounced edit confirmation', async () => {
+  it('keeps hook-requested edit approval pending when an IDE resolution arrives', async () => {
     // Round 1 (DEFAULT mode, IDE diffing on) opens the IDE diff; the user
     // approves via the scheduler, the hook says 'ask' and the call bounces.
     // Only THEN does round-1 openDiff resolve with edited panel content (as
@@ -10427,32 +10881,18 @@ describe('CoreToolScheduler telemetry spans', () => {
         ideMode: true,
       });
 
-    // Round-1 confirmation opened the IDE diff.
     await vi.waitFor(() => expect(awaitingSnapshots).toHaveLength(1));
     expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1);
-    const round1 = awaitingSnapshots[0];
-
-    // Approve round-1 via the scheduler path; the hook ask bounces the
-    // call back to awaiting_approval with its own edit confirmation.
-    await round1.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-    await vi.waitFor(() => expect(awaitingSnapshots).toHaveLength(2));
-    const bounced = awaitingSnapshots[1];
-    expect(bounced).toMatchObject({ type: 'edit', hideModify: true });
-
-    // The stale round-1 IDE diff now resolves as accepted with edited
-    // panel content. It must be refused — the call stays parked on the
-    // bounced confirmation with the hook-reviewed content untouched.
+    const confirmation = awaitingSnapshots[0];
+    expect(confirmation).toMatchObject({ type: 'edit', hideModify: true });
     ideDiff.resolve({ status: 'accepted', content: 'STALE-PANEL-CONTENT' });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(execute).not.toHaveBeenCalled();
-    expect(awaitingSnapshots).toHaveLength(2);
-    expect(
-      (awaitingSnapshots.at(-1) as { newContent?: string }).newContent,
-    ).toBe('new content');
-
-    // The bounced confirmation is the only valid resolver: approving it
-    // executes exactly once (and the hook does not re-fire).
-    await bounced.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect(awaitingSnapshots).toHaveLength(1);
+    expect((awaitingSnapshots[0] as { newContent?: string }).newContent).toBe(
+      'new content',
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
     const completed = await settledLastBatch(onAllToolCallsComplete);
     expect(completed[0].status).toBe('success');
     expect(execute).toHaveBeenCalledTimes(1);
@@ -10464,21 +10904,20 @@ describe('CoreToolScheduler telemetry spans', () => {
     vi.mocked(IdeClient.getInstance).mockReset();
   });
 
-  it('creates new confirmation details when a tool bounces after approval', async () => {
-    const { details: approvalDetails, onToolCallsUpdate } =
-      await scheduleBouncingEdit(
-        'approval-then-bounce',
-        vi.fn().mockResolvedValue(textResult('ok')),
-        askMessageBus(),
-      );
-    const initialWaiting = await waitForApproval(onToolCallsUpdate);
-    const initialDetails = initialWaiting.confirmationDetails;
-
-    await initialDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-    await vi.waitFor(() => {
-      expect(approvalDetails).toHaveLength(2);
-      expect(approvalDetails[1]).not.toBe(initialDetails);
-    });
+  it('combines ordinary and hook-requested approval into one confirmation', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const harness = await scheduleBouncingEdit(
+      'approval-once',
+      execute,
+      askMessageBus(),
+    );
+    const waiting = await waitForApproval(harness.onToolCallsUpdate);
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await settledLastBatch(harness.onAllToolCallsComplete);
+    expect(harness.details).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('cancels the tool without executing when the user declines an ask', async () => {
@@ -10521,6 +10960,16 @@ describe('CoreToolScheduler telemetry spans', () => {
     policyId: 'img-downsample',
     stage: 'preprocessing',
   };
+
+  it('refuses changed input on fixed-policy calls before execution', async () => {
+    const execute = vi.fn();
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      hooks: preContextBus({ updatedInput: { input: 'changed' } }),
+      tools: [new MockMediaPolicyTool({ name: 'mockTool', execute })],
+      executionOrigin: IMG_DOWNSAMPLE_ORIGIN,
+    });
+    await expectNotExecuted(onAllToolCallsComplete, 'error', execute);
+  });
 
   it('denies a PreToolUse ask (no bounce) for a fixed_policy invocation', async () => {
     // A model-originated call WOULD bounce here, so the exclusion comes from
@@ -10599,11 +11048,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     ).toBe(unescapePath(rawPath));
   });
 
-  it('approving a bounced ask runs the tool even while a sibling is still executing', async () => {
+  it('approving a hook ask lets the ready batch execute once', async () => {
     toolSpanRecords.length = 0;
-    // toolA bounces while toolB is still 'executing' when A is approved; the
-    // attemptExecutionOfScheduledCalls guard fails on that pass, so without a
-    // re-check after toolB drains toolA would hang in 'scheduled' forever.
+    // Approval now precedes execution of the whole batch.
     const b = deferred<ToolResult>();
     const aExecute = vi.fn().mockResolvedValue(textResult('A ok'));
     const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
@@ -10621,7 +11068,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     const waiting = await waitForApproval(onToolCallsUpdate);
     // Approve A while toolB's execute is still pending.
-    await waiting.confirmationDetails.onConfirm(
+    const approving = waiting.confirmationDetails.onConfirm(
       ToolConfirmationOutcome.ProceedOnce,
     );
     // Let toolB finish — toolA must now run rather than stay stuck.
@@ -10629,6 +11076,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     await schedulePromise;
+    await approving;
     const completed = lastBatch(onAllToolCallsComplete);
     expect(aExecute).toHaveBeenCalledTimes(1);
     expect(completed.find((c) => c.request.callId === 'a')?.status).toBe(
@@ -10758,7 +11206,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(bExecute).toHaveBeenCalledTimes(1);
   });
 
-  it('abort drain leaves executing siblings to finish their own abort path', async () => {
+  it('abort drains siblings after hook approval starts the batch', async () => {
     const b = deferred<ToolResult>();
     const bExecute = vi.fn().mockReturnValue(b.promise);
     const abortController = new AbortController();
@@ -10776,7 +11224,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       abortController.signal,
     );
 
-    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    const approving = waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
     await vi.waitFor(() => expect(bExecute).toHaveBeenCalled());
 
     abortController.abort();
@@ -10786,6 +11237,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     b.resolve(textResult('B done'));
     await schedulePromise;
+    await approving;
   });
 
   it('abort drain cancels scheduled siblings behind a bounced ask', async () => {
@@ -10839,11 +11291,11 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     const internals = scheduler as unknown as {
       bouncedAwaitingApproval: Set<string>;
-      bouncedToolUseId: Map<string, string>;
+      toolUseIds: Map<string, string>;
       toolSpans: Map<string, unknown>;
     };
     expect(internals.bouncedAwaitingApproval.size).toBe(0);
-    expect(internals.bouncedToolUseId.size).toBe(0);
+    expect(internals.toolUseIds.size).toBe(0);
     expect(internals.toolSpans.size).toBe(0);
   });
 

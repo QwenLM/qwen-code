@@ -186,6 +186,17 @@ describe('ManagedToolRuntime', () => {
     await runtime.dispose();
   });
 
+  it('refuses a hook rewrite of digest-pinned prepared input', async () => {
+    const ref = await prepare();
+    hooks.pre.mockResolvedValue({
+      shouldProceed: true,
+      updatedInput: { value: 'hook' },
+    });
+    await expect(runtime.preflight(ref)).rejects.toThrow(/input|parameters/i);
+    expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+    expect(() => runtime.execute(ref)).toThrow(/preflight/i);
+  });
+
   async function prepare(args = input, call = identity) {
     await runtime.beginTurn(call);
     return reference(await runtime.prepare(call, tool.name, args));

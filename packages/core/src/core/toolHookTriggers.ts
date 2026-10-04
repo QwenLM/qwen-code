@@ -25,9 +25,41 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ToolArtifact } from '../tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
+import { PATH_ARG_KEYS, unescapePath } from '../utils/paths.js';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
 const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
+
+/** Hook-visible paths must not replace raw arguments used by later rebuilds. */
+export function normalizeToolHookInput(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = { ...input };
+  for (const key of PATH_ARG_KEYS) {
+    if (typeof normalized[key] === 'string')
+      normalized[key] = unescapePath(String(normalized[key]).trim());
+  }
+  return normalized;
+}
+
+/** Retained hook-visible paths have already been unescaped by the caller. */
+export function getPreToolUseInputForBuild(
+  originalInput: Record<string, unknown>,
+  hookInput: Record<string, unknown>,
+  updatedInput: Record<string, unknown>,
+): Record<string, unknown> {
+  const input = { ...updatedInput };
+  for (const key of PATH_ARG_KEYS) {
+    if (
+      typeof originalInput[key] === 'string' &&
+      typeof input[key] === 'string' &&
+      input[key] === hookInput[key]
+    ) {
+      input[key] = originalInput[key];
+    }
+  }
+  return input;
+}
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -40,6 +72,8 @@ export function generateToolUseId(): string {
  * Result of PreToolUse hook execution
  */
 export interface PreToolUseHookResult {
+  /** Whole replacement input, applied before permission evaluation. */
+  updatedInput?: Record<string, unknown>;
   /** Whether the tool execution should proceed */
   shouldProceed: boolean;
   /** If blocked, the reason for blocking */
@@ -191,19 +225,6 @@ export async function firePreToolUseHook(
       };
     }
 
-    // Check if user confirmation is required
-    if (preToolOutput.isAsk()) {
-      return {
-        shouldProceed: false,
-        blockReason:
-          preToolOutput.getPermissionDecisionReason() ||
-          'User confirmation required',
-        blockType: 'ask',
-        additionalContext,
-      };
-    }
-
-    // Check if execution should stop
     if (preToolOutput.shouldStopExecution()) {
       return {
         shouldProceed: false,
@@ -213,9 +234,23 @@ export async function firePreToolUseHook(
       };
     }
 
+    // Check if user confirmation is required
+    if (preToolOutput.isAsk()) {
+      return {
+        shouldProceed: false,
+        blockReason:
+          preToolOutput.getPermissionDecisionReason() ||
+          'User confirmation required',
+        blockType: 'ask',
+        additionalContext,
+        updatedInput: preToolOutput.getUpdatedInput(),
+      };
+    }
+
     return {
       shouldProceed: true,
       additionalContext,
+      updatedInput: preToolOutput.getUpdatedInput(),
     };
   } catch (error) {
     // Hook errors should not block tool execution

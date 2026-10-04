@@ -26,6 +26,7 @@ import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
+import { Kind } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   executeToolCall,
   shutdownTelemetry,
@@ -502,10 +503,19 @@ function partitionHeadlessToolCalls(
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
   return partitionByConcurrencySafety(requests, (request) => {
     const executionRequest = getHeadlessExecutionRequest(request, config);
+    const kind = config
+      .getToolRegistry()
+      .getTool(canonicalToolName(executionRequest.name))?.kind;
+    // A separate scheduler resolves each hook, after this outer admission step.
+    if (
+      kind === Kind.Execute &&
+      !config.getDisableAllHooks?.() &&
+      config.hasHooksForEvent?.('PreToolUse')
+    )
+      return false;
     return isToolCallConcurrencySafe(
       executionRequest.name,
-      config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
-        ?.kind,
+      kind,
       executionRequest.args,
     );
   });
@@ -2186,7 +2196,7 @@ export async function runNonInteractive(
             // above so future changes to SyntheticOutputTool can't
             // silently drop those signals. structuredSubmission is the
             // session-scoped binding from the enclosing scope.
-            structuredSubmission = requestInfo.args;
+            structuredSubmission = executionRequest.args;
             return true;
           }
           return false;
