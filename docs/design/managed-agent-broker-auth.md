@@ -143,7 +143,12 @@ Mode resolution at startup:
   (`server.tomcat.threads.max`, 200 by default), times the per-request
   buffer-growth factor (up to roughly 2× for a declared-length body and
   3× for a chunked one while the buffer grows); lower either knob on
-  memory-tight deployments.
+  memory-tight deployments. Finally, the request the filter forwards pins
+  JSON media types to UTF-8: the `Content-Type` charset parameter is not
+  signed, and a non-Unicode charset would otherwise steer the JSON decoder
+  into persisting content that differs from the signed bytes (JSON is
+  UTF-8 by definition, RFC 8259), so the chain observes
+  `application/json;charset=UTF-8` regardless of the declared charset.
 
 - `auto`: resolves to `open` when `server.address` is loopback (the
   shipped default `127.0.0.1`), otherwise startup fails and names

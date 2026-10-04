@@ -200,7 +200,70 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                         new java.io.InputStreamReader(getInputStream(),
                                 StandardCharsets.UTF_8));
             }
+
+            // The charset parameter is unsigned, but a non-Unicode charset
+            // steers Spring's JSON decoder away from the signed bytes. JSON
+            // is UTF-8 by definition (RFC 8259), so the Content-Type the
+            // chain observes is pinned to UTF-8 for JSON media types; the
+            // decoded content then depends on the signed bytes alone. MVC
+            // reads the header, not getReader(), so the pin must live on
+            // the header accessors.
+            @Override
+            public String getContentType() {
+                return pinJsonUtf8(super.getContentType());
+            }
+
+            @Override
+            public String getHeader(String name) {
+                if (HttpHeaders.CONTENT_TYPE.equalsIgnoreCase(name)) {
+                    return pinJsonUtf8(super.getHeader(name));
+                }
+                return super.getHeader(name);
+            }
+
+            @Override
+            public java.util.Enumeration<String> getHeaders(String name) {
+                if (HttpHeaders.CONTENT_TYPE.equalsIgnoreCase(name)) {
+                    String pinned = pinJsonUtf8(super.getHeader(name));
+                    return java.util.Collections.enumeration(
+                            pinned == null ? java.util.List.of()
+                                    : java.util.List.of(pinned));
+                }
+                return super.getHeaders(name);
+            }
+
+            @Override
+            public String getCharacterEncoding() {
+                String contentType = super.getContentType();
+                if (contentType != null
+                        && !contentType.equals(pinJsonUtf8(contentType))) {
+                    return StandardCharsets.UTF_8.name();
+                }
+                return super.getCharacterEncoding();
+            }
         }, response);
+    }
+
+    private static String pinJsonUtf8(String contentType) {
+        if (contentType == null) {
+            return null;
+        }
+        MediaType parsed;
+        try {
+            parsed = MediaType.parseMediaType(contentType);
+        } catch (org.springframework.http.InvalidMediaTypeException error) {
+            return contentType;
+        }
+        if (!"application".equalsIgnoreCase(parsed.getType())) {
+            return contentType;
+        }
+        String subtype = parsed.getSubtype()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (!subtype.equals("json") && !subtype.endsWith("+json")) {
+            return contentType;
+        }
+        return parsed.getType() + '/' + parsed.getSubtype()
+                + ";charset=UTF-8";
     }
 
     private String sign(String method, String uri, String query,

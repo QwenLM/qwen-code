@@ -130,7 +130,11 @@ harness。
   认证前的聚合缓冲上限为该值乘以 Servlet 工作线程数
   （`server.tomcat.threads.max`，默认 200），再乘每请求的缓冲增长
   系数（声明长度的请求体约 2 倍，chunked 约 3 倍）；内存紧张的
-  环境可调低两者之一。
+  环境可调低两者之一。最后，过滤器转发的请求把 JSON 媒体类型
+  钉在 UTF-8：`Content-Type` 的 charset 参数不在签名内，非
+  Unicode 字符集本可引导 JSON 解码器持久化出与已签字节不同的
+  内容（JSON 按 RFC 8259 定义即 UTF-8），因此无论声明何种
+  charset，链路观察到的都是 `application/json;charset=UTF-8`。
 
 - `auto`：当 `server.address` 为回环地址（交付默认值
   `127.0.0.1`）时解析为 `open`，否则启动失败并点名需要 `signed`

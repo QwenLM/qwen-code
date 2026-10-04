@@ -162,6 +162,79 @@ class Issue13180SignedModeTest {
                 .hasValue("true");
     }
 
+    /**
+     * Issue #13180 review R6-1: the signature binds the raw body bytes but
+     * not the Content-Type charset, while Spring's Jackson converter decodes
+     * a non-Unicode charset through that parameter. The broker must decode
+     * signed JSON as UTF-8 regardless of the declared charset, so a relayed
+     * request persists the same content its signer wrote. The content digest
+     * and the idempotency record are both computed over the decoded content,
+     * so a charset-switched decode is observable through either.
+     */
+    @Test
+    void signedJsonDecodesAsUtf8RegardlessOfTheDeclaredCharset()
+            throws Exception {
+        byte[] body = ("{\"model\":{},\"instructions\":\"café\","
+                + "\"tools\":[],\"permission_policy\":{}}")
+                .getBytes(StandardCharsets.UTF_8);
+        String idempotencyKey = UUID.randomUUID().toString();
+        String timestamp = now();
+        HttpResponse<String> created = http.send(
+                HttpRequest.newBuilder(URI.create(
+                                "http://127.0.0.1:" + port + "/v1/agents"))
+                        .header("X-Qwen-Tenant-Id", TENANT)
+                        .header("X-Qwen-Actor-Id", "actor-a")
+                        .header("X-Qwen-Signature-Timestamp", timestamp)
+                        .header("X-Qwen-Signature",
+                                sign("POST", "/v1/agents", TENANT, "actor-a",
+                                        timestamp, body, idempotencyKey))
+                        .header("Idempotency-Key", idempotencyKey)
+                        .header("Content-Type",
+                                "application/json; charset=ISO-8859-1")
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(created.statusCode()).as(created.body()).isEqualTo(202);
+        String attackDigest = JSON.readTree(created.body()).path("digest")
+                .asText();
+        assertThat(attackDigest).isNotBlank();
+
+        // The identical signed bytes with a UTF-8 declaration must be an
+        // idempotent replay of the same content, never a conflict.
+        String replayTimestamp = now();
+        HttpResponse<String> replay = http.send(
+                HttpRequest.newBuilder(URI.create(
+                                "http://127.0.0.1:" + port + "/v1/agents"))
+                        .header("X-Qwen-Tenant-Id", TENANT)
+                        .header("X-Qwen-Actor-Id", "actor-a")
+                        .header("X-Qwen-Signature-Timestamp", replayTimestamp)
+                        .header("X-Qwen-Signature",
+                                sign("POST", "/v1/agents", TENANT, "actor-a",
+                                        replayTimestamp, body,
+                                        idempotencyKey))
+                        .header("Idempotency-Key", idempotencyKey)
+                        .header("Content-Type",
+                                "application/json; charset=UTF-8")
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(replay.statusCode()).as(replay.body()).isEqualTo(202);
+        assertThat(replay.headers().firstValue("X-Qwen-Idempotent-Replay"))
+                .hasValue("true");
+
+        // A fresh UTF-8 control persists the identical content digest.
+        String controlKey = UUID.randomUUID().toString();
+        String controlTimestamp = now();
+        HttpResponse<String> control = call("POST", "/v1/agents", TENANT,
+                "actor-a", controlTimestamp,
+                sign("POST", "/v1/agents", TENANT, "actor-a",
+                        controlTimestamp, body, controlKey),
+                controlKey, new String(body, StandardCharsets.UTF_8));
+        assertThat(control.statusCode()).as(control.body()).isEqualTo(202);
+        assertThat(JSON.readTree(control.body()).path("digest").asText())
+                .isEqualTo(attackDigest);
+    }
+
     /** The bare collection route and its normalized spellings are covered. */
     @Test
     void theBareCollectionRouteRequiresASignature() throws Exception {
