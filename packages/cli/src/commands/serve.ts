@@ -701,13 +701,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker URL for --profile hosted-harness; not implemented and rejects startup.',
+          'Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns.',
       })
       .option('managed-runtime-broker-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker credential for --profile hosted-harness; not implemented and rejects startup.',
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
