@@ -5683,7 +5683,9 @@ describe('Hosted Harness tool approvals', () => {
   });
 
   it('retains the turn recovery error on cold load of a pending file edit', async () => {
-    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const { server, clientId, answer, status } = await waitingSession();
     vi.mocked(HostedWorkspaceBroker.prototype.execute).mockRejectedValueOnce(
       new Error('lost execution reply'),
@@ -5712,6 +5714,9 @@ describe('Hosted Harness tool approvals', () => {
     ).send({ managedSessionStore: store(), toolProfile: files });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (file_history_pending): {"pendingTurn":"${PROMPT_ID}","pendingUndo":null,"unsettled":"${PROMPT_ID}","takeover":false}`,
+    );
     expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
@@ -6757,6 +6762,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
   it('keeps a bare cold load of a parked Turn inert', async () => {
     await parkToolTurn();
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const server = replacementApp();
     const loaded = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -6766,6 +6774,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (file_history_pending): {"pendingTurn":"${PROMPT_ID}","pendingUndo":null,"unsettled":"${PROMPT_ID}","takeover":false}`,
+    );
     expect(execute).not.toHaveBeenCalled();
     expect(acquireSpy).not.toHaveBeenCalled();
   });
