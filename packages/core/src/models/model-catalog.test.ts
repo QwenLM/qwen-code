@@ -575,6 +575,28 @@ describe('model catalog', () => {
     expect(lookupModelCatalog('qwen3-8-max')?.modalities?.pdf).toBeUndefined();
   });
 
+  it('keeps a curated output pin authoritative for both spellings', () => {
+    // OUTPUT_PATTERNS is written against one spelling, so the twin the
+    // projection commits fell through to models.dev's unadjusted `output` and
+    // outranked the repo's own cap: `glm-4-7` sized every request at 64,000
+    // output tokens against the 16,384 `/^glm-4\.7/` pins `glm-4.7` to.
+    expect(tokenLimit('glm-4-7', 'output')).toBe(16_384);
+    expect(defaultOutputCeiling('glm-4-7')).toBe(16_384);
+    expect(tokenLimit('glm-4-7-flashx', 'output')).toBe(
+      tokenLimit('glm-4.7-flashx', 'output'),
+    );
+    expect(tokenLimit('minimax-m2-5', 'output')).toBe(
+      tokenLimit('minimax-m2.5', 'output'),
+    );
+    expect(tokenLimit('kimi-k2-5', 'output')).toBe(
+      tokenLimit('kimi-k2.5', 'output'),
+    );
+    // The twin is a fallback, not an override: `qwen3-8-max` keeps the `/^qwen/`
+    // family row at 32,768 even though `qwen3.8-max` matches the more specific
+    // `/^qwen3\.\d/` row at 65,536.
+    expect(tokenLimit('qwen3-8-max', 'output')).toBe(32_768);
+  });
+
   it('keeps the ids whose row requires the dot off the alias machinery', () => {
     // A blanket dot->dash fold in normalize() would move `qwen3.5-max` off
     // `/^qwen3\.\d/` (1M input, 64K output) and `glm-5.3-flash` off
