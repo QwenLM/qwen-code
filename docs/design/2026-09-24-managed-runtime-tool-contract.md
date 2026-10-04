@@ -290,6 +290,8 @@ Still follow-up: harness-side `RuntimeBackedTool` wiring, file-history
 settlement, capability-digest verification against the admitted tool set,
 image input support for the synthetic
 `managed-runtime-worker` model, and the artifact delivery track for large
-outputs. For the ordinary Managed host the journal is bounded by the
-caller's acknowledgement (§4.1); the Broker path acknowledges nothing today,
-so bounding a Broker-driven generation's journal remains follow-up.
+outputs. For the ordinary Managed host the journal's payloads are bounded
+by the caller's acknowledgement (§4.1); each entry's reference stays as a
+repeat marker for the worker's lifetime regardless, and the Broker path
+acknowledges nothing today, so bounding a Broker-driven generation's
+journal remains follow-up.

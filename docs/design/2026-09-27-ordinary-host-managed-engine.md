@@ -1031,8 +1031,10 @@ alone says which call took effect.
   backward compatible: workers answer an unknown route with their existing
   error, and hosts that never call it change nothing.
 - A `not_started` outcome is durable evidence that the call did not run, in
-  the outcome resource and in the recorded result; it is no longer reported
-  as an ordinary tool failure.
+  the outcome resource and in the recorded result, and the result the model
+  reads says the call did not run, not 'the tool failed' — the shape of a
+  side effect. The refusal or transport answer remains attached as its
+  message.
 
 #### Risks for later slices
 
@@ -1249,8 +1251,9 @@ M5b:
    and a crash leaves no result the model saw uncommitted.
 3. A call the worker refused, or that reached no worker, commits a not-run
    outcome, settles its checkpoint item, and is recorded and reported as a
-   call that did not run rather than a tool failure; the turn continues. A
-   cancelled call settles as cancelled the same way.
+   call that did not run — the model-facing message says so — rather than
+   like the tool failed; the turn continues. A cancelled call settles as
+   cancelled the same way.
 4. A session blocked on an unknown outcome stays blocked after a clean close
    and restore, and on a fresh open of a crashed child's log: a prompt fails
    with `managed_runtime_outcome_unknown` before any model request, and the

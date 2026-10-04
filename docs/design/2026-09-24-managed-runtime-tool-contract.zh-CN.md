@@ -101,4 +101,4 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 验证新增 `managed-runtime-tool-worker.test.ts`：在真实挂载的路由上用原始 HTTP 回放全部负面共享 fixture；行为用例覆盖在临时工作区真实执行 `read_file`、对未见过的 reference 回答 `unknown`、并入并发的重复 execute、以 409 拒绝同 callId 不同摘要的重试、拒绝未准入工具，以及取消一个在途的前台 shell 命令。额外回归用例验证后台 shell 被拒绝且不留日志条目（包含归一化后的字符串布尔值），验证省略 `is_background`、布尔或字符串 false 均可准入，并验证无效值不会启动命令。
 
-仍为后续工作：Harness 侧 `RuntimeBackedTool` 接线、文件历史结算、对已准入工具集合的 capability digest 校验、合成模型 `managed-runtime-worker` 的图片输入支持，以及大输出的产物交付通道。普通 Managed 宿主的 worker 日志由调用方的确认设界（§4.1）；Broker 路径目前无任何调用方确认，Broker 驱动的一代 runtime 的日志设界仍是后续工作。
+仍为后续工作：Harness 侧 `RuntimeBackedTool` 接线、文件历史结算、对已准入工具集合的 capability digest 校验、合成模型 `managed-runtime-worker` 的图片输入支持，以及大输出的产物交付通道。普通 Managed 宿主的 worker 日志的负载由调用方的确认设界（§4.1）；无论是否被确认，每个条目的 reference 都作为识别重复的标志在 worker 的生命周期内保留；Broker 路径目前无任何调用方确认，Broker 驱动的一代 runtime 的日志设界仍是后续工作。
