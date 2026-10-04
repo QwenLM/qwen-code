@@ -209,13 +209,16 @@ function budgetOutputTokensForWindow(
     estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction);
 
-  // A window the measured prompt already fills is not this layer's to paper
-  // over: `max_tokens: 1` would send a request that can only answer with one
-  // token and report it as a normal success — `generateText` returns no
+  // A window the measured prompt all but fills is not this layer's to paper
+  // over: `max_tokens: 12` would send a request that can only answer with a
+  // stub and report it as a normal success — `generateText` returns no
   // `finishReason`, so `tools/web-fetch.ts` would store that body as the page
   // extract. Leave it uncapped and let a validating backend reject it loudly,
-  // as it did before side queries were budgeted.
-  if (room <= 0) return requestConfig;
+  // as it did before side queries were budgeted. 256 is the smallest budget
+  // that can still carry an answer, and it has to sit below the 3 192 the
+  // tight-window case pins: `MIN_CLAMPED_OUTPUT_TOKENS` (4 000) is a floor that
+  // can itself exceed a tight window, which is what this path must not do.
+  if (room < 256) return requestConfig;
 
   const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
   // Only the window term is this layer's business: when it does not bind,
@@ -233,7 +236,34 @@ function budgetOutputTokensForWindow(
   // the override only when the request carries no output limit of its own.
   if (room >= ceiling) return requestConfig;
 
-  return { ...requestConfig, maxOutputTokens: Math.max(1, room) };
+  // Reasoning is paid out of the same budget. The manual Anthropic route clamps
+  // `budget_tokens` to `max_tokens - 1` and drops thinking below 1 024, so an
+  // unpaired cap goes out as e.g. `max_tokens: 25 536` beside
+  // `budget_tokens: 25 535` — one visible token, `generateJson` returns `{}`,
+  // and `/insight` drops the session without a word; where no manual clamp runs
+  // the same pair is simply invalid (`budget_tokens >= max_tokens`). Cap
+  // thinking at half the room through the request-local knob
+  // `anthropicContentGenerator.buildThinkingConfig` documents for this case and
+  // `chatCompressionService` already ships for its own bounded request — no
+  // other generator reads `thinkingConfig.thinkingBudget`. Below ~2 048 of room
+  // that 1 024 floor leaves no visible output, so leave the request uncapped
+  // and loud rather than silently discarding the reasoning the caller asked
+  // for.
+  const thinking = requestConfig.thinkingConfig;
+  if (!thinking || thinking.includeThoughts === false) {
+    return { ...requestConfig, maxOutputTokens: room };
+  }
+  const thinkingBudget = Math.min(
+    thinking.thinkingBudget ?? room,
+    Math.floor(room / 2),
+  );
+  if (thinkingBudget < 1024) return requestConfig;
+
+  return {
+    ...requestConfig,
+    maxOutputTokens: room,
+    thinkingConfig: { ...thinking, thinkingBudget },
+  };
 }
 
 /**

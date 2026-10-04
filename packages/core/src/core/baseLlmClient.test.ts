@@ -1183,6 +1183,23 @@ describe('BaseLlmClient', () => {
           | undefined
       )?.config?.maxOutputTokens;
 
+    // `thinkingConfig` on that same config: its `thinkingBudget` is the
+    // request-local cap `anthropicContentGenerator` clamps `budget_tokens`
+    // against, so an emitted budget is only usable if this comes down with it.
+    const sentThinking = () =>
+      (
+        mockGenerateContent.mock.calls.at(-1)?.[0] as
+          | {
+              config?: {
+                thinkingConfig?: {
+                  includeThoughts?: boolean;
+                  thinkingBudget?: number;
+                };
+              };
+            }
+          | undefined
+      )?.config?.thinkingConfig;
+
     const askText = (
       model: string,
       tokens: number,
@@ -1198,9 +1215,20 @@ describe('BaseLlmClient', () => {
       });
     };
 
+    // Both keys are read by the code under test — `QWEN_CODE_MAX_OUTPUT_TOKENS`
+    // as the explicit ceiling, `QWEN_IMAGE_TOKEN_ESTIMATE` through
+    // `resolveSlimmingConfig`, where env outranks the mocked settings — so an
+    // ambient value in a dev shell or a CI job decides these cases instead of
+    // the mocks. Clear them per case and put back whatever was there.
+    beforeEach(() => {
+      vi.stubEnv('QWEN_CODE_MAX_OUTPUT_TOKENS', undefined);
+      vi.stubEnv('QWEN_IMAGE_TOKEN_ESTIMATE', undefined);
+    });
+
     // `useWindow` replaces these implementations for good (`clearAllMocks`
     // keeps implementations), so the rest of the file needs them back.
     afterEach(() => {
+      vi.unstubAllEnvs();
       mockConfig.getModel.mockReturnValue('test-model');
       mockConfig.getModelsConfig.mockReturnValue(
         undefined as unknown as ReturnType<Config['getModelsConfig']>,
@@ -1324,7 +1352,8 @@ describe('BaseLlmClient', () => {
       // The issue's second scenario: on an 8_192 window with a 5_000-token
       // prompt, `clampOutputTokensToWindow` floors the room at
       // MIN_CLAMPED_OUTPUT_TOKENS (4_000) and still requests 9_000 total. The
-      // side-query budget floors at 1 instead, so the invariant holds.
+      // side-query budget emits the room itself instead, so the invariant
+      // holds.
       useWindow('deepseek-r1', 8_192);
 
       await askText('deepseek-r1', 5_000);
@@ -1338,14 +1367,28 @@ describe('BaseLlmClient', () => {
       // over-prices as well as under-prices. A 2-byte PNG charged the
       // operator's flat `imageTokenEstimate` next to 5_300 tokens of text
       // estimates 8_300 against an 8_192 window, so `room` is negative while
-      // the real payload would have fit. Emitting `max_tokens: 1` there sends
-      // a request that can only answer with one token and reports it as a
-      // normal success — `generateText` returns no `finishReason`, so
+      // the real payload would have fit. Emitting the budget that arithmetic
+      // leaves sends a request that can only answer with a stub and reports it
+      // as a normal success — `generateText` returns no `finishReason`, so
       // `tools/web-fetch.ts` stores that body as the page extract. Base sent
       // no output limit and a validating backend rejected the overflow loudly.
       useWindow('deepseek-r1', 8_192);
 
       await askText('deepseek-r1', 9_000);
+
+      expect(sentBudget()).toBeUndefined();
+    });
+
+    it('leaves the request uncapped when the room cannot carry an answer', async () => {
+      // The same stub one integer away from the case above: 12 tokens of room
+      // is a positive number, and `max_tokens: 12` still answers with a stub
+      // that reads as complete — `tools/web-fetch.ts` only falls back to the
+      // raw page on a throw, and its sole empty-body guard cannot see a
+      // non-empty one. Base put the 64 000 ceiling on the wire, so
+      // `8_180 + 64_000 > 8_192` was rejected loudly and that fallback fired.
+      useWindow('deepseek-r1', 8_192);
+
+      await askText('deepseek-r1', 8_180);
 
       expect(sentBudget()).toBeUndefined();
     });
@@ -1440,6 +1483,46 @@ describe('BaseLlmClient', () => {
       expect(sentBudget()).toBe(8_187);
     });
 
+    it('pairs the emitted budget with a thinking budget', async () => {
+      // `/insight` sends a whole-session transcript with
+      // `thinkingConfig: { includeThoughts: true }` and no `maxOutputTokens`
+      // (services/insight/generators/DataProcessor.ts). The manual Anthropic
+      // route clamps `budget_tokens` to `max_tokens - 1`, so an unpaired
+      // 25 536 goes out beside `budget_tokens: 25 535` — one visible token,
+      // no `respond_in_schema` call, `generateJson` returns `{}`, and the
+      // session silently disappears from the report.
+      useWindow('qwen3-coder-plus', 65_536);
+
+      await askText('qwen3-coder-plus', 40_000, {
+        config: { thinkingConfig: { includeThoughts: true } },
+      });
+
+      const budget = sentBudget() ?? 0;
+      // `?? budget` is the unpaired arm: without the pairing the whole emitted
+      // budget is what reasoning would take, which is the starvation itself.
+      const thinkingBudget = sentThinking()?.thinkingBudget ?? budget;
+
+      expect(budget).toBe(25_536);
+      expect(thinkingBudget).toBe(12_768);
+      expect(budget - thinkingBudget).toBeGreaterThanOrEqual(1_024);
+    });
+
+    it('leaves a thinking request uncapped when the room cannot host both', async () => {
+      // 8 192 − 7 000 = 1 192 of room. The manual route drops thinking below a
+      // 1 024 `budget_tokens`, so no legal split leaves visible output here:
+      // capping anyway would answer with a stub, and forcing the 1 024 floor
+      // would silently discard the reasoning the caller asked for. Uncapped
+      // keeps `includeThoughts` and fails loudly, as base did.
+      useWindow('deepseek-r1', 8_192);
+
+      await askText('deepseek-r1', 7_000, {
+        config: { thinkingConfig: { includeThoughts: true } },
+      });
+
+      expect(sentBudget()).toBeUndefined();
+      expect(sentThinking()).toEqual({ includeThoughts: true });
+    });
+
     it('budgets against the target window, not the session window', async () => {
       // Side queries default to the fast model, and a same-provider target
       // whose registry entry declares no window inherits the *session* model's
@@ -1523,19 +1606,6 @@ describe('BaseLlmClient', () => {
       // and can even raise the wire value. The override therefore has to be
       // the term the room is compared against, not a value this layer emits.
       const ENV_KEY = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
-      let saved: string | undefined;
-
-      beforeEach(() => {
-        saved = process.env[ENV_KEY];
-      });
-
-      afterEach(() => {
-        if (saved === undefined) {
-          delete process.env[ENV_KEY];
-        } else {
-          process.env[ENV_KEY] = saved;
-        }
-      });
 
       it('caps the budget at the override instead of raising it', async () => {
         process.env[ENV_KEY] = '2000';
