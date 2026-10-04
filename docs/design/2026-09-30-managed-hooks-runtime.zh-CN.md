@@ -136,23 +136,28 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
 
 可信函数 handler 模块本身的求值也有有界预算：`max(manifest function 超时（毫秒），500 ms 下限)`，
-下限避免冷启动但健康的求值被一份为 callback 声明的预算误判。ESM 求值无法取消，
-求值超时或 abort 只弃用等待：operation 在 Runtime 侧结算——释放其 16 个准入名额
-并解除 Runtime `close()` 挂起——但在模块顶层代码实际结束前持续保留 hold；
-永不 settle 的求值在 worker 生命周期内保留 hold。Runtime 以专用编码
+下限避免冷启动但健康的求值被一份为 callback 声明的预算误判。该预算只约束会让出
+事件循环的求值：顶层代码同步阻塞的模块会跑赢自己的计时器，因为 Runtime 只能停止
+等待，无法中断加载。ESM 求值无法取消，求值超时或 abort 只弃用等待：operation 在
+Runtime 侧结算——释放其在 16 个准入名额中占用的那一个，并解除 Runtime `close()`
+挂起——但在模块顶层代码实际结束前持续保留 hold；永不 settle 的求值在 worker
+生命周期内保留 hold。Runtime 以专用编码
 `managed_hook_module_evaluation_timeout` 报告求值超时，
 Harness 据此以 outcome_unknown 围闭该执行，而不是对可能已经运行过的代码出具
-not_started_proven。在任何顶层语句执行前就被拒绝的模块以
-`managed_hook_handler_unavailable` 结算，Harness 记为 not_started_proven；
-而完整求值之后才被拒绝的模块——例如形状或 handlerRevision 校验——虽然其顶层
-副作用已经发生，却仍以同一编码结算，因此该证明并不覆盖它。
+not_started_proven。求值失败的模块以 `managed_hook_handler_unavailable` 结算，
+Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行
+中途被拒绝，还是在完整求值之后才被拒绝（例如形状或 handlerRevision 校验）；
+因此该证明并不覆盖任何已经发生的顶层副作用。
 Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
 （404 `runtime_session_not_found`）时记为已释放且不再重试；被 hold 围闭的
 owner 拒绝（409 `managed_runtime_identity_conflict` 或
-`managed_runtime_provider_operation_failed`）时本次跳过且不记为已释放，
-后续 acquire 会再次尝试释放；其余任何拒绝都会抛出并阻塞替换 activation。
-close 时释放当前 owner 若遇 hold 围闭，则以 Hook recovery-required 条件作答，
-而不是抛出裸 Broker 拒绝，使路由能指明被保留的 hold。
+`managed_runtime_provider_operation_failed`）时本次跳过、写入 daemon 的 stderr
+且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放；其余任何拒绝都会
+抛出并阻塞替换 activation。拥有自己 Runtime owner 的 Hook Session 在 close 时，
+无论被围闭的是它自己还是此前 owner，都以 Hook recovery-required 条件作答，而不是
+抛出裸 Broker 拒绝——于是 DELETE 与 detach 会指明被保留的 hold，并保持 Session
+处于 attached、可重试状态，而不是把它删除。与 MCP 共用 owner 的 Hook Session
+不释放该 broker，其释放由 MCP session 作答，仍报告通用的 close 失败。
 
 Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
 快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare

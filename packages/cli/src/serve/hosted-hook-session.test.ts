@@ -37,6 +37,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
+import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -1240,6 +1241,9 @@ it.each([
     await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
     expect(unacquired.broker.runtime).toBeUndefined();
     const refusal = new HostedWorkspaceBrokerRejection(status, code);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const release = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'release')
       .mockImplementation(async function (this: HostedWorkspaceBroker) {
@@ -1257,10 +1261,23 @@ it.each([
     );
     expect(Boolean(replacement.broker.runtime)).toBe(allowed);
     if (allowed) {
-      // A hold-fenced owner is left unreleased so a later pass retries it; an
-      // absent owner is booked released and must never be attempted again.
+      // Every absorbed refusal is reported on the daemon's default channel,
+      // naming the owner and the refusal.
+      expect(log.mock.calls.flat().join('\n')).toContain(
+        unacquired.broker.runtimeSessionId,
+      );
+      expect(log.mock.calls.flat().join('\n')).toContain(`${status} ${code}`);
+      // A hold-fenced earlier owner stays attached, so close reports recovery
+      // required rather than letting DELETE answer 204 and drop the retry
+      // state; an absent owner is booked released and closes cleanly.
+      if (retried)
+        await expect(replacement.close()).rejects.toBeInstanceOf(
+          HostedHookRecoveryRequiredError,
+        );
+      else await replacement.close();
+      // Cleared after close() so this observes the acquire-path retry rather
+      // than the pass close() already made.
       release.mockClear();
-      await replacement.close();
       await replacement.acquire();
       expect(
         release.mock.contexts.some(
@@ -1272,6 +1289,36 @@ it.each([
     }
   },
 );
+
+it('retries a hold-fenced earlier owner on a later turn without closing', async () => {
+  await hooks.ensureReady();
+  await hooks.close();
+  await reopenSession();
+  const unacquired = new HostedHookSession(options, session, pin);
+  await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
+  const fenced = unacquired.broker.runtimeSessionId;
+  let attempts = 0;
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === fenced) {
+        attempts += 1;
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'managed_runtime_identity_conflict',
+        );
+      }
+    },
+  );
+  await reopenSession();
+  const live = new HostedHookSession(options, session, pin);
+  await live.acquire();
+  expect(attempts).toBe(1);
+  // No close() in between: the retry has to come from the next turn's acquire,
+  // which short-circuits on an already-acquired session.
+  await live.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  expect(attempts).toBe(2);
+});
 
 async function operate(
   managed: ManagedSession,

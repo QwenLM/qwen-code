@@ -1767,6 +1767,29 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('names a retained Hook hold when DELETE cannot release its owner', async () => {
+    const { server, authorize, release } = await hookApp();
+    release.mockImplementation(async () => {
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'managed_runtime_identity_conflict',
+      );
+    });
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    // The generic close code would hide that the Session is still attached
+    // because its Hook owner holds unfinished work.
+    expect(failed.body.code).toBe('hosted_hook_recovery_required');
+    const retry = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(retry.status).toBe(503);
+    expect(retry.body.code).toBe('hosted_hook_recovery_required');
+  });
+
   it('pins dynamic Hook revisions and rejects unscoped operations', async () => {
     const { server, authorize } = await hookApp();
     const operationId = randomUUID();

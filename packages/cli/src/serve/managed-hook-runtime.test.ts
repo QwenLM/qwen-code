@@ -946,6 +946,51 @@ describe('ManagedHookRuntime', () => {
     expect(instance.hasHolds('runtime-session')).toBe(true);
     expect(await instance.control('runtime-session', call)).toEqual(receipt);
   });
+  it('keeps admitting operations after abandoned evaluations release their slots', async () => {
+    const modulePath = path.join(directory, 'stuck-admission-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const stuck = Array.from({ length: 16 }, (_, index) =>
+      request(`stuck-${index}`),
+    );
+    await Promise.all(
+      stuck.map((call) => instance.control('runtime-session', call)),
+    );
+    for (const call of stuck) {
+      expect(await settled(instance, call.operationId)).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      });
+    }
+    // All 16 evaluations are abandoned but still live, so the holds are all
+    // retained while the admission slots are free again.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    const next = request('after-fences');
+    await instance.control('runtime-session', next);
+    const receipt = await settled(instance, next.operationId);
+    // Widening the admission filter to count held evaluations turns this into
+    // the quota refusal, which answers with a result and no error code.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+  });
   it('fails fast when the handler module itself rejects', async () => {
     const modulePath = path.join(directory, 'broken-handler.mjs');
     await writeFile(
