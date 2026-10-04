@@ -1270,11 +1270,20 @@ it.each([
       // A hold-fenced earlier owner stays attached, so close reports recovery
       // required rather than letting DELETE answer 204 and drop the retry
       // state; an absent owner is booked released and closes cleanly.
-      if (retried)
+      if (retried) {
         await expect(replacement.close()).rejects.toBeInstanceOf(
           HostedHookRecoveryRequiredError,
         );
-      else await replacement.close();
+        // The fence is reported before the Session's own owner is released:
+        // releasing it first would leave the kept Session unable to acquire.
+        expect(
+          release.mock.contexts.some(
+            (context): context is HostedWorkspaceBroker =>
+              context instanceof HostedWorkspaceBroker &&
+              context.runtimeSessionId === replacement.broker.runtimeSessionId,
+          ),
+        ).toBe(false);
+      } else await replacement.close();
       // Cleared after close() so this observes the acquire-path retry rather
       // than the pass close() already made.
       release.mockClear();

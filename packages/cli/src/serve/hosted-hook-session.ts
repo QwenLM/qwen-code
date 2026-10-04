@@ -1598,6 +1598,12 @@ export class HostedHookSession {
   async close(): Promise<void> {
     await this.drain();
     await this.releaseEarlierOwners();
+    // An earlier owner still fenced keeps its Runtime owner attached, so a
+    // DELETE that answered 204 here would drop the only state that could ever
+    // retry that release. Report recovery required before releasing anything
+    // else: the Session stays attached with its own Runtime owner, so a later
+    // turn can still run and retry the fenced release.
+    if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
     for (const broker of this.recoveredBrokers.values()) await broker.release();
     this.recoveredBrokers.clear();
     if (this.ownsBroker && this.broker.runtime) {
@@ -1621,11 +1627,6 @@ export class HostedHookSession {
       }
       this.acquired = false;
     }
-    // An earlier owner still fenced keeps its Runtime owner attached, so a
-    // DELETE that answered 204 here would drop the only state that could ever
-    // retry that release. Report recovery required instead; the Session stays
-    // attached and a later turn retries.
-    if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
   }
 
   private definition(pin: ManagedHookCatalogPin) {
