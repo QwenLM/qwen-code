@@ -1084,6 +1084,8 @@ type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
   bridgeResolutionError?: {
     error: Error;
     type: ToolErrorType;
+    /** Resolved deferred-tool target, for per-target retry accounting. */
+    targetName?: string;
   };
 };
 
@@ -2738,6 +2740,7 @@ export class CoreToolScheduler {
         bridgeResolutionError: {
           error: resolution.error,
           type: resolution.errorType,
+          targetName: resolution.targetName,
         },
       };
     }
@@ -2882,6 +2885,25 @@ export class CoreToolScheduler {
     const errorKey = `${toolName}:${causeClass}`;
     const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
     this.validationRetryCounts.set(errorKey, count);
+    // Round-2 R1-3 (PR #13079): when one cause records, decay any
+    // SIBLING-class counter for this tool that has already spent its
+    // threshold (its directive was delivered). Without this decay a spent
+    // truncation counter survives indefinitely and re-fires the truncation
+    // directive on a later FIRST truncation of unrelated content. Gated on
+    // the sibling's own count so an unspent sibling keeps counting toward
+    // its own directive.
+    if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
+      for (const key of [...this.validationRetryCounts.keys()]) {
+        if (
+          key.startsWith(`${toolName}:`) &&
+          key !== errorKey &&
+          (this.validationRetryCounts.get(key) ?? 0) >=
+            VALIDATION_RETRY_LOOP_THRESHOLD
+        ) {
+          this.validationRetryCounts.delete(key);
+        }
+      }
+    }
     return count;
   }
 
@@ -2945,6 +2967,14 @@ export class CoreToolScheduler {
       // the next time those tools were used.
       if (this.validationRetryCounts.size > 0) {
         const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        // A failed bridge envelope keeps the wrapper name on the request;
+        // its resolved target owns the retry counter, so the target must
+        // count as present or the prune would drop a live counter.
+        for (const r of requestsToProcess) {
+          const target = (r as SchedulerToolCallRequestInfo).bridgeResolutionError
+            ?.targetName;
+          if (target) currentToolNames.add(target);
+        }
         for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
           const toolName = sep === -1 ? key : key.slice(0, sep);
@@ -2963,6 +2993,11 @@ export class CoreToolScheduler {
         const key = `${toolName}:${causeClass}`;
         const existingCount = retryErrorsRecordedInBatch.get(key);
         if (existingCount !== undefined) {
+          // A mid-batch validation pass clears the persistent map
+          // (clearRetryCountsForTool); the batch's earlier failures were
+          // real and must survive it, so write the deduped count back
+          // (base-equivalent detection; round-2 R1-2 on PR #13079).
+          this.validationRetryCounts.set(key, existingCount);
           return existingCount;
         }
         const count = this.recordRetryableToolError(toolName, causeClass);
@@ -3019,7 +3054,7 @@ export class CoreToolScheduler {
               ToolErrorType.INVALID_TOOL_PARAMS
             ) {
               const count = recordBatchRetryableToolError(
-                reqInfo.name,
+                reqInfo.bridgeResolutionError?.targetName ?? reqInfo.name,
                 'validation',
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
