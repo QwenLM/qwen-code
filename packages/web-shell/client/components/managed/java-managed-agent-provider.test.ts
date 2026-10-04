@@ -180,6 +180,9 @@ describe('createJavaManagedAgentProvider', () => {
     ['active', 'cancelling', 'cancelling', false, false],
     ['archived', 'completed', 'completed', false, false],
     ['deleting', 'failed', 'failed', false, false],
+    // A terminal turn on an ACTIVE session enables the composer again; the
+    // only canSend: true row, the state a hardcoded false would delete.
+    ['active', 'completed', 'completed', true, false],
   ] as const)(
     'maps %s/%s to usable controls',
     async (status, turnStatus, phase, canSend, canCancel) => {
@@ -209,6 +212,86 @@ describe('createJavaManagedAgentProvider', () => {
       );
     },
   );
+
+  it('maps the session list page, sends cursor and limit, and passes through nextCursor', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: [
+          {
+            sessionId: 'list-1',
+            status: 'ACTIVE',
+            createdAt: 1,
+            updatedAt: 2,
+            lastSequence: 3,
+          },
+        ],
+        hasMore: true,
+        nextCursor: 'cursor-2',
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+
+    const page = await provider.listSessions({
+      clientId: 'client-1',
+      cursor: 'cursor-1',
+      limit: 25,
+    });
+
+    expect(page.nextCursor).toBe('cursor-2');
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]).toEqual(
+      expect.objectContaining({
+        sessionId: 'list-1',
+        capabilities: expect.objectContaining({ canSend: true }),
+      }),
+    );
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe(
+      'https://product.example/api/agent/web-shell/v1/sessions/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(
+      expect.objectContaining({ cursor: 'cursor-1', limit: 25 }),
+    );
+  });
+
+  it('sends the paging cursor verbatim on transcript queries', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        events: [],
+        items: [],
+        lastSequence: 7,
+        hasMore: true,
+        olderCursor: 'older-1',
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+
+    const transcript = await provider.getTranscript('session-1', {
+      clientId: 'client-1',
+      before: 'before-1',
+      limit: 25,
+    });
+
+    expect(transcript.olderCursor).toBe('older-1');
+    expect(transcript.lastEventId).toBe(7);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe(
+      'https://product.example/api/agent/web-shell/v1/transcript/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        cursor: 'before-1',
+        limit: 25,
+      }),
+    );
+  });
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi

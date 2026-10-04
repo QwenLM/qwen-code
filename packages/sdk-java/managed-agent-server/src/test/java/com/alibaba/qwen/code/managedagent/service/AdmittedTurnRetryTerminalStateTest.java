@@ -164,7 +164,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1),
+                                "storage-a", ".", "config-a", 1), "yolo",
                         "hosted-workspace-files/1"));
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(harness.createOrLoad("tenant", "session", false))

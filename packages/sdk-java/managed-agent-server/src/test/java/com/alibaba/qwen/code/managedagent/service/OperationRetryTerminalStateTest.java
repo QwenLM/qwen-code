@@ -162,7 +162,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
-                        1, BOUND_WORKSPACE, TOOL_PROFILE));
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
 
@@ -206,7 +206,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
-                        1, BOUND_WORKSPACE, TOOL_PROFILE));
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
@@ -344,7 +344,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "CLOSED", null, null, 0, 0, 0, 1, 1, null, 1,
-                        BOUND_WORKSPACE, TOOL_PROFILE));
+                        BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(true);
         // completeOperation's retention retirement refuses while the
@@ -397,7 +397,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "CLOSED", null, null, 0, 0, 0, 1, 1, null, 1,
-                        BOUND_WORKSPACE, TOOL_PROFILE));
+                        BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         // This replica could close the workspace — and still must not, for
@@ -486,7 +486,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
-                        1, BOUND_WORKSPACE, TOOL_PROFILE));
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         when(sessionStore.hasLiveWriter("tenant", "session"))
@@ -535,7 +535,7 @@ class OperationRetryTerminalStateTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
-                        1, BOUND_WORKSPACE, TOOL_PROFILE));
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         doThrow(new IllegalStateException("database unavailable"))
