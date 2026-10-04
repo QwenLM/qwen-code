@@ -36,6 +36,11 @@ try {
   writeSync(3, 'unavailable\n');
   process.exit(1);
 }
+// The joined proof rides fd 3 when the parent pipes it; without that pipe
+// the pid listing in cgroup.procs must carry the proof alone.
+try {
+  writeSync(3, 'joined\n');
+} catch {}
 // No deployment command or environment is evaluated before membership.
 const child = spawn(executable, JSON.parse(args), {
   env: JSON.parse(process.env.QWEN_HOOK_COMMAND_ENV),
@@ -78,7 +83,7 @@ export class HookCommandCgroup {
       // rule attach() applies before it joins the name into the root.
       if (
         unitName !== undefined &&
-        (unitName.includes('/') || unitName.includes(''))
+        (unitName.includes('/') || unitName.includes('\0'))
       ) {
         throw new HookCommandIsolationUnavailableError();
       }
@@ -117,7 +122,7 @@ export class HookCommandCgroup {
     unitName: string,
   ): HookCommandCgroup | undefined {
     const resolved = HookCommandCgroup.resolveRoot(root);
-    if (unitName.includes('/') || unitName.includes('')) return undefined;
+    if (unitName.includes('/') || unitName.includes('\0')) return undefined;
     let directory: string;
     try {
       directory = realpathSync(join(resolved, unitName));

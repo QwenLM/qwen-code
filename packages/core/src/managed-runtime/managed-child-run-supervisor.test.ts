@@ -14,6 +14,23 @@ import {
   ManagedChildRunSupervisor,
 } from './managed-child-run-supervisor.js';
 
+// The prober's membership listing seam: ESM namespace objects reject
+// vi.spyOn, so the unreadable-list simulation rides a module mock whose
+// gate only the marker test opens.
+const unreadableLists = vi.hoisted(() => ({ active: false, reads: 0 }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const readFileSync = ((...args: unknown[]) => {
+    if (unreadableLists.active) {
+      unreadableLists.reads += 1;
+      throw new Error('unreadable process list');
+    }
+    return (actual.readFileSync as (...inner: unknown[]) => unknown)(...args);
+  }) as typeof actual.readFileSync;
+  return { ...actual, readFileSync };
+});
+
 let directory: string;
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'child-supervisor-'));
@@ -161,6 +178,77 @@ describe.skipIf(process.platform === 'win32')(
       ).rejects.toBeInstanceOf(HookCommandIsolationUnavailableError);
       expect(removed.value).toBe(true);
       expect(supervisor.size).toBe(0);
+    });
+
+    it('keeps the exit evidence of a process that exits during the membership proof', async () => {
+      const { unit } = await fakeUnit('qwen-bg-shell-fast');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const supervisor = ManagedChildRunSupervisor.create({
+        cgroupRoot: '/root',
+      });
+      const proc = await supervisor.start(
+        {
+          unitName: 'qwen-bg-shell-fast',
+          executable: '/bin/sh',
+          args: ['-c', 'true'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        },
+        {
+          // The proof resolves only after the exit actually ran, so the
+          // constructor's listener can never hear this process.
+          prove: async (child) => {
+            await new Promise((resolve) => child.once('exit', resolve));
+            return true;
+          },
+        },
+      );
+      expect(proc.exited).toBe(true);
+      expect(proc.evidence).toEqual({ exitCode: 0, exitSignal: null });
+    });
+
+    it('proves membership from the launcher marker when the process list is unreadable', async () => {
+      const { unit, removed } = await fakeUnit('qwen-bg-shell-joined');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      unreadableLists.active = true;
+      unreadableLists.reads = 0;
+      let proc: Awaited<ReturnType<ManagedChildRunSupervisor['start']>>;
+      try {
+        const supervisor = ManagedChildRunSupervisor.create({
+          cgroupRoot: '/root',
+        });
+        proc = await supervisor.start({
+          unitName: 'qwen-bg-shell-joined',
+          executable: '/bin/sh',
+          args: ['-c', 'true'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        });
+      } finally {
+        unreadableLists.active = false;
+      }
+      // The real prober consults the list on its first attempt — the
+      // launcher's marker is what let the start resolve past this stub.
+      expect(unreadableLists.reads).toBeGreaterThan(0);
+      for (
+        let attempt = 0;
+        attempt < 200 && proc.evidence === null;
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(proc.evidence).toEqual({ exitCode: 0, exitSignal: null });
+      await writeFile(
+        join(directory, 'qwen-bg-shell-joined', 'cgroup.events'),
+        'populated 0\n',
+      );
+      await expect(proc.terminate(1_000)).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      expect(removed.value).toBe(true);
     });
 
     it('forwards attachment with its root only', () => {
