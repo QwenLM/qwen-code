@@ -1679,6 +1679,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return chain;
     }
 
+    private void settleUnstartedBackgroundProcess(ToolExecutionRecord process,
+            Map<String, Object> result) {
+        Map<String, Object> settled = new LinkedHashMap<>();
+        settled.put("state", "not_started");
+        settled.put("executionStatus", "not_started");
+        settled.put("evidence", result.get("error"));
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            ToolExecutionRecord current = executionRepository
+                    .findByExecutionCallId(process.getExecutionCallId());
+            if (current == null || current.isTerminal()) {
+                return;
+            }
+            if (executionRepository.settlePrepared(current, settled,
+                    clock.instant()) != null) {
+                return;
+            }
+        }
+        throw conflict("runtime_execution_state_conflict",
+                "Background process could not settle with its own generation");
+    }
+
     private void settleBackgroundProcess(ToolExecutionRecord process,
             Map<String, Object> view) {
         Map<String, Object> result = new LinkedHashMap<>();
@@ -3253,6 +3274,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     try {
                         settleExecution(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration(), result);
+                        if ("not_started".equals(result.get("executionStatus"))) {
+                            // The Runtime proved no process ever started:
+                            // without this sibling settle the :process row
+                            // would count as alive forever, and no shell
+                            // release could ever pass busy again (round 6).
+                            ToolExecutionRecord process = executionRepository
+                                    .findByExecutionCallId(
+                                            executing.getExecutionCallId()
+                                                    + ":process");
+                            if (process != null && !process.isTerminal()) {
+                                settleUnstartedBackgroundProcess(process,
+                                        result);
+                            }
+                        }
                     } catch (RuntimeException exception) {
                         markUnknown(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration());

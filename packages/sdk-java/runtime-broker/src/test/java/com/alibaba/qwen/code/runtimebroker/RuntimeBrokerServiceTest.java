@@ -1167,6 +1167,54 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void settlesTheProcessRowWhenTheRuntimeProvesNoStartAndReleasesCleanly()
+            throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            // The Runtime proves it never started: the envelope is the
+            // admitted refusal's not_started shape with its own error.
+            Map<String, Object> notStarted = new LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("responseParts", java.util.List.of());
+            notStarted.put("capture", null);
+            notStarted.put("error", Map.of("message",
+                    "Background Shell requires a delegated Linux cgroup v2 root on this Runtime."));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", notStarted));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", notStarted));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord process = fixture.executionRepository
+                    .findByExecutionCallId(prepared.getExecutionCallId() + ":process");
+            assertEquals(ToolExecutionRecord.State.SETTLED, process.getState(),
+                    "the proven never-started must settle its process row");
+            assertEquals("not_started", process.getResult().get("state"));
+            assertEquals("not_started", process.getExecutionStatus());
+            assertTrue(join(fixture.service.release("harness", "runtime")),
+                    "and the hold goes with it, never a permanent busy");
+        }
+    }
+
+    @Test
     void backgroundStartAdmitsTheProcessRowBesideTheSettledHandle() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
