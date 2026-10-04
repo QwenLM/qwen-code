@@ -60,8 +60,10 @@ class BrokerVirtualThreadPinningTest {
     void guardedBlockingRepositoryCallsMustNotStarveVirtualThreads()
             throws Exception {
         Clock clock = Clock.fixed(START, ZoneOffset.UTC);
+        int carriers = CarrierCount.resolve();
+        int callerCount = carriers + 2;
         sessions = new LatchedSessionRepository(
-                new InMemoryRuntimeSessionRepository());
+                new InMemoryRuntimeSessionRepository(), callerCount);
         service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 new InlineProvisioner(), new InlineTransport(),
@@ -70,8 +72,6 @@ class BrokerVirtualThreadPinningTest {
                 new InMemoryToolExecutionRepository(clock),
                 "broker-pinning", Duration.ofMinutes(1),
                 Duration.ofSeconds(1), clock, () -> "execution");
-        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors());
-        int callerCount = carriers + 2;
         // One Session per caller, so each parks inside its own
         // SessionContext guard — sharing one Session would serialize the
         // callers at the same guard and only one would reach the block.
@@ -139,10 +139,10 @@ class BrokerVirtualThreadPinningTest {
         private final CountDownLatch open;
         private final AtomicInteger waiting = new AtomicInteger();
 
-        LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate) {
+        LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate,
+                int callers) {
             this.delegate = delegate;
-            arrived = new CountDownLatch(
-                    Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors()) + 2);
+            arrived = new CountDownLatch(callers);
             open = new CountDownLatch(1);
         }
 

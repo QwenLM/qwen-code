@@ -124,7 +124,7 @@ class HarnessEventStreamPinningTest {
             throws Exception {
         assumeTrue(virtualThreadsAvailable(),
                 "virtual threads unavailable on this JDK");
-        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors());
+        int carriers = carrierCount();
         int streamCount = carriers + 2;
         List<HarnessEventStream> streams = new ArrayList<>();
         List<Thread> readers = new ArrayList<>();
@@ -206,6 +206,24 @@ class HarnessEventStreamPinningTest {
         } catch (NoSuchMethodException unavailable) {
             return false;
         }
+    }
+
+    // The JDK reads jdk.virtualThreadScheduler.parallelism base-10 while
+    // Integer.getInteger resolves through Integer.decode, so "0100" would
+    // read as 64 while the JVM builds 100 carriers and the witness would
+    // under-size its stream fleet. runtime-broker's CarrierCount is the
+    // same read; this module cannot see that test tree.
+    private static int carrierCount() {
+        String configured =
+                System.getProperty("jdk.virtualThreadScheduler.parallelism");
+        if (configured != null) {
+            try {
+                return Math.max(1, Integer.parseInt(configured.trim()));
+            } catch (NumberFormatException ignored) {
+                // Fall through to the processor-count default.
+            }
+        }
+        return Math.max(1, Runtime.getRuntime().availableProcessors());
     }
 
     private static void marker(String message) {

@@ -12,6 +12,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -24,11 +25,17 @@ import org.junit.jupiter.api.Timeout;
 // inside that guard at a latched resource-handle write; an unrelated
 // virtual-thread probe must still run. Restoring the synchronized
 // BindingRenewal turns this red; BrokerVirtualThreadPinningTest stays green.
+// The arrival latch is sized to the carrier count, not the caller count:
+// under a pinning guard only one caller per carrier can ever arrive, so a
+// caller-sized latch would burn the whole timeout before the probe assert
+// below names the starvation.
 class BrokerRenewalPinningTest {
     private static final RuntimeResourceHandle HANDLE =
             new RuntimeResourceHandle("test-scheduler", 1,
                     Map.of("resourceId", "runtime-resource"));
 
+    private final AtomicReference<Throwable> firstFailure =
+            new AtomicReference<>();
     private LatchedBindingRepository bindings;
     private RuntimeBrokerService service;
 
@@ -46,12 +53,11 @@ class BrokerRenewalPinningTest {
     @Timeout(120)
     void renewalGuardMustNotPinCarriersWhileTheHandleWriteBlocks()
             throws Exception {
-        int carriers = Integer.getInteger(
-                "jdk.virtualThreadScheduler.parallelism",
-                Runtime.getRuntime().availableProcessors());
+        int carriers = CarrierCount.resolve();
         int callerCount = carriers + 2;
         bindings = new LatchedBindingRepository(
-                new InMemoryRuntimeBindingRepository(), callerCount);
+                new InMemoryRuntimeBindingRepository(), carriers,
+                firstFailure);
         // One workspace per caller, so every warm() owns its own binding
         // and its own BindingRenewal guard.
         service = new RuntimeBrokerService(
@@ -71,8 +77,9 @@ class BrokerRenewalPinningTest {
                     try {
                         service.warm(harnessId).toCompletableFuture()
                                 .get(60, TimeUnit.SECONDS);
-                    } catch (Exception ignored) {
+                    } catch (Exception failure) {
                         // Only the guard's carrier behaviour is asserted.
+                        firstFailure.compareAndSet(null, failure);
                     }
                 }));
             }
@@ -87,7 +94,9 @@ class BrokerRenewalPinningTest {
             assertTrue(!probe.isAlive() && probeProgress.get() >= 400,
                     "virtual-thread probe starved by " + callerCount
                             + " warm() callers parked inside BindingRenewal"
-                            + " guards on " + carriers + " carriers");
+                            + " guards on " + carriers + " carriers"
+                            + " (progress=" + probeProgress.get()
+                            + ") — a guard pinned its carrier");
         } finally {
             bindings.open();
             for (Thread caller : callers) {
@@ -102,11 +111,13 @@ class BrokerRenewalPinningTest {
         private final CountDownLatch arrived;
         private final CountDownLatch open = new CountDownLatch(1);
         private final AtomicInteger waiting = new AtomicInteger();
+        private final AtomicReference<Throwable> firstFailure;
 
         LatchedBindingRepository(RuntimeBindingRepository delegate,
-                int callers) {
+                int arrivals, AtomicReference<Throwable> firstFailure) {
             super(delegate);
-            arrived = new CountDownLatch(callers);
+            arrived = new CountDownLatch(arrivals);
+            this.firstFailure = firstFailure;
         }
 
         void open() {
@@ -116,9 +127,12 @@ class BrokerRenewalPinningTest {
         void awaitArrived(long timeout, TimeUnit unit)
                 throws InterruptedException {
             if (!arrived.await(timeout, unit)) {
+                Throwable failure = firstFailure.get();
                 throw new IllegalStateException("callers never reached the"
                         + " latched resource-handle write (waiting="
-                        + waiting.get() + ")");
+                        + waiting.get() + ")"
+                        + (failure == null ? ""
+                                : "; first caller failure: " + failure));
             }
         }
 
