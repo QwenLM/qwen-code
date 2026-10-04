@@ -54,7 +54,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private static final Set<String> TOOL_RESPONSE_FIELDS = Set.of(
             "protocolVersion", "state", "result", "lastSequence");
     private static final Set<String> TOOL_STATES = Set.of("prepared",
-            "executing", "cancel_requested", "settled", "unknown");
+            "executing", "cancel_requested", "settled", "acknowledged",
+            "unknown");
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
     private static final Set<String> CALLER_REFERENCE_FIELDS = Set.of(

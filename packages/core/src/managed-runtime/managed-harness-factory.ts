@@ -220,9 +220,10 @@ export interface ManagedHarnessHandle {
     outcomeRef: ManagedSessionDurableRef,
   ): Promise<HarnessCheckpointV1 | null>;
   /**
-   * Marks unconsumed settled Runtime receipts as consumed after they are
-   * present on the next model request. No-op when the handle is not at
-   * `results_ready`.
+   * Marks unconsumed settled Runtime receipts as consumed once the host has
+   * recorded them durably ready for the model — on the Hosted turn, present
+   * on the next model request; on the local host, committed before the next
+   * model round starts. No-op when the handle is not at `results_ready`.
    */
   consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null>;
   /**
@@ -272,25 +273,24 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       this.assertCurrentActivation();
       let authorization = await this.authority.harnessRunAuthorization();
       // A log without any checkpoint starts here, whether it is empty or
-      // only carries records from slices that wrote none. A checkpoint that
-      // already exists is used as-is; its own wait and wait-resolution gates
-      // continue to apply after this call.
+      // only carries records from slices that wrote none: blocked with no
+      // checkpoint means content from a slice that recorded before this one,
+      // and nothing else reaches the branch.
       if (
         authorization.status === 'initial' ||
         (authorization.status === 'blocked' &&
-          authorization.reason === 'missing_checkpoint' &&
-          this.authority.latestCheckpoint === undefined)
+          authorization.reason === 'missing_checkpoint')
       ) {
         await this.commitInitialBeforeModel();
         authorization = await this.authority.harnessRunAuthorization();
       }
+      if (authorization.status === 'blocked') {
+        throw new ManagedHarnessBlockedError(authorization);
+      }
       if (authorization.status !== 'runnable') {
         throw new ManagedHarnessBlockedError({
           status: 'blocked',
-          reason:
-            authorization.status === 'blocked'
-              ? authorization.reason
-              : 'missing_checkpoint',
+          reason: 'missing_checkpoint',
         });
       }
       return authorization.checkpoint;

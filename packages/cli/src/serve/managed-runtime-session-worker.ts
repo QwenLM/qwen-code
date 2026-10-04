@@ -259,7 +259,13 @@ export class ManagedSessionRuntimeWorker {
     if (worker === undefined) {
       return { executionStatus: 'cancelled', responseParts: [] };
     }
-    return this.executeIn(worker, toolName, input, signal, callId);
+    return this.executeIn(
+      worker,
+      toolName,
+      JSON.parse(JSON.stringify(input)) as Record<string, unknown>,
+      signal,
+      this.referenceFor(callId, input),
+    );
   }
 
   /**
@@ -304,19 +310,9 @@ export class ManagedSessionRuntimeWorker {
     toolName: string,
     input: Record<string, unknown>,
     signal: AbortSignal,
-    callId: string,
+    reference: ManagedToolReference,
   ): Promise<ManagedToolResultPayload> {
     signal.throwIfAborted();
-    // The parameters as the wire carries them: a built invocation can hold
-    // keys whose value is undefined, which JSON drops.
-    input = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
-    const argsDigest = `sha256:${managedToolDigest(input)}`;
-    const reference: ManagedToolReference = {
-      sessionId: this.sessionId,
-      promptId: promptIdContext.getStore() ?? 'unknown',
-      callId,
-      argsDigest,
-    };
     let settled = false;
     let cancelling: Promise<void> | undefined;
     // A cancelled call that has not settled by then has an unknown outcome.
@@ -407,16 +403,30 @@ export class ManagedSessionRuntimeWorker {
     }
   }
 
+  /** The reference identifying one call, built once and reused wholesale. */
+  referenceFor(
+    callId: string,
+    params: Record<string, unknown>,
+  ): ManagedToolReference {
+    const normalized = JSON.parse(JSON.stringify(params)) as Record<
+      string,
+      unknown
+    >;
+    return {
+      sessionId: this.sessionId,
+      promptId: promptIdContext.getStore() ?? 'unknown',
+      callId,
+      argsDigest: `sha256:${managedToolDigest(normalized)}`,
+    };
+  }
+
   /**
    * Tells the worker its caller settled a call durably, so the worker may
    * drop the call's payload. Best-effort: nothing depends on it landing — a
    * worker that never hears it is as correct, and as large, as before. A
    * replaced worker generation answers unknown, which changes nothing either.
    */
-  async acknowledge(
-    callId: string,
-    input: Record<string, unknown>,
-  ): Promise<void> {
+  async acknowledge(reference: ManagedToolReference): Promise<void> {
     let worker: StartedWorker | undefined;
     try {
       worker = this.starting !== undefined ? await this.starting : undefined;
@@ -424,16 +434,6 @@ export class ManagedSessionRuntimeWorker {
       return;
     }
     if (worker === undefined || this.closed) return;
-    const normalized = JSON.parse(JSON.stringify(input)) as Record<
-      string,
-      unknown
-    >;
-    const reference: ManagedToolReference = {
-      sessionId: this.sessionId,
-      promptId: promptIdContext.getStore() ?? 'unknown',
-      callId,
-      argsDigest: `sha256:${managedToolDigest(normalized)}`,
-    };
     try {
       await this.request(worker, 'acknowledge', {
         protocolVersion: 2,
@@ -927,15 +927,18 @@ export function createManagedRuntimeEnvironment(
         });
         return toToolResult(payload);
       }
+      let settleStarted = false;
+      const reference = worker.referenceFor(call.id, params);
       try {
         const payload = await worker.executeIn(
           started,
           call.toolName,
           params,
           signal,
-          call.id,
+          reference,
         );
         // Settled before the model continues, then forgotten by the worker.
+        settleStarted = true;
         await outcomes.settle({
           functionCallId: call.id,
           executionStatus: payload.executionStatus,
@@ -944,7 +947,7 @@ export function createManagedRuntimeEnvironment(
         // Fire-and-forget: the outcome is committed, and nothing in the turn
         // may wait on the worker hearing the receipt — a wedged boot or
         // worker must never hold a settled result back.
-        void worker.acknowledge(call.id, params);
+        void worker.acknowledge(reference);
         const result = toToolResult(payload);
         // As Legacy, a read shows no copy of the file it returns.
         return call.toolName === ToolNames.READ_FILE && !result.error
@@ -956,6 +959,19 @@ export function createManagedRuntimeEnvironment(
           // of the block, which every later open of the log re-applies.
           config.blockManagedSession(error);
           await worker.close().catch(() => undefined);
+          throw error;
+        }
+        if (settleStarted) {
+          // A settled call whose durable settlement failed is as unknowable
+          // for the model as a lost outcome: block, never let it continue on
+          // a result nothing recorded.
+          const blocked = new ManagedRuntimeOutcomeUnknownError(
+            'The durable settlement of a Runtime tool call failed.',
+            { cause: error },
+          );
+          config.blockManagedSession(blocked);
+          await worker.close().catch(() => undefined);
+          throw blocked;
         }
         throw error;
       }

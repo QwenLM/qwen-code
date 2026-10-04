@@ -5065,6 +5065,10 @@ export class Config {
         if (this.sessionWriterShutdownRequested) {
           throw new SessionWriterShutdownError();
         }
+        // A committed receipt outlives its crash: settle what it proves
+        // before the gate reads, so a settled-but-unsettled crash window does
+        // not block on a call whose outcome the log already carries.
+        await this.getManagedRuntimeOutcomes()?.recoverCommittedReceipts();
         // A reopened log answers for itself: Runtime dispatches that never
         // settled block the session again, as the in-memory block already
         // does for the live process. The outcome cannot be learned from a

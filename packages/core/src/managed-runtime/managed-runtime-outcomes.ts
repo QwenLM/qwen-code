@@ -19,7 +19,12 @@ import {
 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { LocalManagedSessionAuthority } from './managed-session-authority.js';
-import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import type { Part } from '@google/genai';
+import type { ToolErrorType } from '../tools/tool-error.js';
+import {
+  assertManagedSessionDurableRef,
+  type ManagedSessionDurableRef,
+} from './managed-session-records.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 
 /** The tool protocol the local host dispatches over. */
@@ -94,6 +99,9 @@ export class LocalManagedRuntimeOutcomes {
     // evidence starts here, covering the committed log. A session whose
     // checkpoint blocks it stops here, before anything is dispatched.
     await this.harness.ensureCheckpoint();
+    // The digest is the first thing that can refuse an inadmissible call:
+    // nothing durable may be written before it passes.
+    const inputDigest = managedToolDigest(input.params);
     // Results committed but the closing steps never ran — a close or crash
     // between the batch's commits and its consumption — join them now:
     // every outcome is already committed, so closing is not replaying.
@@ -206,7 +214,7 @@ export class LocalManagedRuntimeOutcomes {
           modelMessageId: `local-model-message:${promptId}`,
           partIndex: ordinal,
           ordinal,
-          inputDigest: managedToolDigest(input.params),
+          inputDigest,
           progressCursor: null,
           attemptId: `attempt:${promptId}`,
           routeRef,
@@ -273,12 +281,143 @@ export class LocalManagedRuntimeOutcomes {
   }
 
   /**
+   * Below a restore, a crash may stand between a call's commits: the durable
+   * outcome and receipt landed while the checkpoint item never settled, or
+   * both settled while the recorded `tool_result` never landed. The receipts
+   * prove the calls took effect, and nothing that proves it may block — so
+   * the items settle from their receipts, and the missing `tool_result`
+   * records are recorded from the settled outcomes, before any gate reads.
+   */
+  async recoverCommittedReceipts(): Promise<void> {
+    const checkpoint = await this.latestCheckpoint();
+    const phase = checkpoint?.continuation.phase;
+    if (phase === 'await_runtime') {
+      const pending = (checkpoint?.tools?.items ?? []).filter(
+        (item) => item.state !== 'settled',
+      );
+      if (pending.length > 0) {
+        const events = this.session.authority.eventsInSequenceRange(
+          1,
+          this.session.authority.committedSequence,
+        );
+        for (const item of pending) {
+          const receipt = events.find(
+            (event) =>
+              event.kind === 'tool.receipt' &&
+              event.payload['executionCallId'] === item.executionCallId,
+          );
+          if (!receipt) continue;
+          const outcomeRef = assertManagedSessionDurableRef(
+            receipt.payload['toolOutcomeRef'],
+            'tool.receipt.toolOutcomeRef',
+          );
+          await this.harness.resolveAwaitRuntime(
+            item.executionCallId,
+            outcomeRef,
+          );
+        }
+      }
+    }
+    // A settle may outlive its record on its own: the crash between the
+    // resolve commit and the recorder's write leaves no pending item — and
+    // a fully settled continuation reads as results_ready — so the record
+    // check runs below both unconsumed phases, not only below repairs.
+    if (phase === 'await_runtime' || phase === 'results_ready') {
+      await this.restoreRecordedResults();
+    }
+  }
+
+  private async restoreRecordedResults(): Promise<void> {
+    const { session } = this;
+    const events = session.authority.eventsInSequenceRange(
+      1,
+      session.authority.committedSequence,
+    );
+    const bodies: string[] = [];
+    for (const event of events) {
+      if (
+        event.kind !== 'message.committed' ||
+        event.payload['role'] !== 'tool_result'
+      )
+        continue;
+      const ref = assertManagedSessionDurableRef(
+        event.payload['contentRef'],
+        'message.committed.contentRef',
+      );
+      bodies.push((await session.resources.read(ref)).toString());
+    }
+    const checkpoint = await this.latestCheckpoint();
+    const settled = (checkpoint?.tools?.items ?? []).filter(
+      (item) => item.state === 'settled' && item.outcomeRef !== null,
+    );
+    for (const item of settled) {
+      if (bodies.some((body) => body.includes(item.executionCallId))) continue;
+      const outcome = JSON.parse(
+        (await session.resources.read(item.outcomeRef!)).toString(),
+      ) as {
+        result?: {
+          executionStatus?: string;
+          responseParts?: unknown[];
+          error?: { message?: string; type?: string };
+        };
+      };
+      const status = outcome.result?.executionStatus;
+      // The worker marks text parts with a `type` that model parts do not have.
+      const responseParts = (outcome.result?.responseParts ?? []).map(
+        (part): Part => {
+          const { type, ...rest } = part as { type?: unknown } & Record<
+            string,
+            unknown
+          >;
+          return (type === 'text' ? rest : part) as Part;
+        },
+      );
+      // The durable outcome is the recorded history: same tool_result shape
+      // the recorder writes, idempotent by its deterministic id.
+      await session.sink.write({
+        ...session.authority.recordEnvelope,
+        uuid: `recovered-tool-result:${item.executionCallId}`,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: responseParts,
+        },
+        toolCallResult: {
+          callId: item.executionCallId,
+          status:
+            status === 'success'
+              ? 'success'
+              : status === 'cancelled'
+                ? 'cancelled'
+                : 'error',
+          responseParts,
+          error:
+            outcome.result?.error?.message !== undefined
+              ? new Error(outcome.result.error.message)
+              : undefined,
+          errorType:
+            outcome.result?.error?.type === undefined
+              ? undefined
+              : (outcome.result.error.type as ToolErrorType),
+          resultDisplay: undefined,
+        },
+      });
+    }
+  }
+
+  /**
    * Closes a recorded batch: marks the settled receipts consumed and the
    * continuation settled, so the model's next round starts from a checkpoint
    * that names no pending Runtime work. Both steps are no-ops until every
    * call of the batch settled.
    */
   async finalizeBatch(): Promise<void> {
+    // A batch with no admission at all — every call refused before
+    // dispatch — has no checkpoint to close.
+    if (this.session.authority.latestCheckpoint === undefined) return;
     await this.harness.consumeRuntimeResults();
     await this.harness.settleConsumedRuntimeContinuation();
   }

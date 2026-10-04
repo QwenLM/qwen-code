@@ -455,6 +455,11 @@ export class LocalManagedSessionAuthority {
     return this.header;
   }
 
+  /** The envelope fields every record of this session states. */
+  get recordEnvelope(): { readonly cwd: string; readonly version: string } {
+    return { cwd: this.cwd, version: this.version };
+  }
+
   /**
    * True after an append failed. Its records may already be on disk, so this
    * authority accepts no further writes and the Session needs recovery.
