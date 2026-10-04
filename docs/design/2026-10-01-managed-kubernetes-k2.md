@@ -414,11 +414,11 @@ DRAINING, including under a fresh operation claim. Original result/cancel and
 Session release remain available. Transaction failure rolls back journal and seal
 together. The private offline command adds no listener or cloud operation.
 
-The integration preserves upstream V27–V35 byte for byte, including the Java V29
-Hook backfill and main’s V35 Session tool profile migration. Unmerged CSI reservation moves to V36, retirement journal to
-V37, dispatch authorization to V38 and durable worker ACK to V39. Earlier CSI
+The integration preserves upstream V27–V39 byte for byte, including the Java V29
+Hook backfill and main’s V35 Session tool profile and V36–V39 query optimizations. Unmerged CSI reservation moves to V40, retirement journal to
+V41, dispatch authorization to V42 and durable worker ACK to V43. Earlier CSI
 V26-to-V27 and V27-to-V28/V29 runs remain historical source-snapshot evidence;
-the integration needs a fresh V35-to-V39 upgrade test without rewriting any
+the integration needs a fresh V39-to-V43 upgrade test without rewriting any
 already-applied database Flyway history. Verification covers V27 data preservation,
 independent MySQL JVM dispatch races, exact restart retry, conflicting aliases,
 corruption, rollback and LOCAL regression. This slice does not authorize ACTIVE,
@@ -531,7 +531,7 @@ refuse a CSI alias and constrain ownership reads/writes to `LOCAL`. K2a does not
 convert storage profiles.
 
 The implementation is aligned to upstream `a7deb01bc`. Upstream V26 owns the
-public tool-result projection; the CSI migration was then V27 (V36 in this integration, as described above). A new
+public tool-result projection; the CSI migration was then V27 (V40 in this integration, as described above). A new
 independent MySQL 8.4.11 run established V26-to-V27 preservation of the original
 LOCAL holder, binding/session, projection samples, tables and indexes, together
 with current CSI contention and dispatch regressions. Historical V25-to-CSI-V26

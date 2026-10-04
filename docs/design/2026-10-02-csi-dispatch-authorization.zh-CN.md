@@ -44,7 +44,7 @@ CAS 同时比较实际 current 行与 expected、replacement 的授权，伪造 
 
 ## 兼容与影响文件
 
-Managed server 的 Flyway V38（原开发快照为 V30）增加可空列，不回填。私有 Broker schema 及增量
+Managed server 的 Flyway V42（原开发快照为 V30）增加可空列，不回填。私有 Broker schema 及增量
 initializer 同时支持新库和已有库。旧行仍可读取，证据保持缺失；CSI 原任务结算
 必须拒绝这类行，不能推断或补造授权。LOCAL 派发和结果行为保留现有规则。
 

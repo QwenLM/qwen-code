@@ -45,6 +45,42 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord beginSessionRelease(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeSessionRecord expected) {
+        if (!(sessions instanceof InMemoryRuntimeSessionRepository memorySessions)
+                || !(executions instanceof InMemoryToolExecutionRepository)) {
+            throw new IllegalArgumentException("Release requires matching in-memory repositories");
+        }
+        synchronized (memorySessions) {
+            RuntimeSessionRecord current = sessions.findById(
+                    expected.getSession().getScope(),
+                    expected.getRuntimeSessionId());
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()) {
+                return null;
+            }
+            if (current.getState() == RuntimeSessionRecord.State.RELEASING
+                    || current.getState() == RuntimeSessionRecord.State.RELEASED) {
+                return current;
+            }
+            if (current.getState() != RuntimeSessionRecord.State.READY
+                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
+                throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                        "Runtime Session is not ready for release", false);
+            }
+            if (executions.hasActiveByRuntimeSession(current.getBindingId(),
+                    current.getRuntimeGeneration(),
+                    current.getRuntimeSessionId())) {
+                throw new RuntimeBrokerException(409, "runtime_session_busy",
+                        "Runtime Session has an active operation", false);
+            }
+            return sessions.compareAndSet(current, current.withState(
+                    RuntimeSessionRecord.State.RELEASING, clock.instant()));
+        }
+    }
+
+    @Override
     public synchronized RuntimeBindingRecord recoverLost(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord expected) {

@@ -17,6 +17,15 @@ class RuntimeRecoveryTest {
         RuntimeRecoveryContract.verify(new InMemoryRuntimeBindingRepository(),
                 new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(), "memory-recovery");
     }
+
+    @Test
+    void memoryRepositoryHonorsBeginSessionReleaseContract() {
+        RuntimeRecoveryContract.verifyBeginSessionRelease(
+                new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), "memory-release");
+    }
+
     @Test
     void persistedLossEndsExecutionBeforeAnUnavailableObserverResponds() {
         var bindings = new InMemoryRuntimeBindingRepository();
