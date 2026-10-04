@@ -957,7 +957,17 @@ describe('managed-runtime-provider/1', () => {
     });
 
     it('cuts bulk edit confirmation fields head-and-tail and sets hideModify', () => {
-      const editDetails = {
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
         type: 'edit',
         title: 'Edit',
         fileName: 'file.txt',
@@ -979,7 +989,7 @@ describe('managed-runtime-provider/1', () => {
       expect(editDetails.hideModify).toBe(true);
       expect(Array.isArray(editDetails.warnings)).toBe(true);
       expect(
-        editDetails.warnings.some((w: string) => /truncat|omitted/.test(w)),
+        editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
       ).toBe(true);
       expect(editDetails.fileDiff.startsWith('d')).toBe(true);
       expect(editDetails.fileDiff.endsWith('d')).toBe(true);
