@@ -20,6 +20,7 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
@@ -67,6 +68,9 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
 }));
+// child_run is enabled by the H3 enablement slice; background tests flip
+// this per case, per the same harness the core suites use.
+const enablement = vi.hoisted(() => ({ childRun: false }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
@@ -85,6 +89,25 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     acknowledge = broker.acknowledge;
   },
 }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain !== 'child_run' || !enablement.childRun) {
+          actual.assertManagedSessionDomainEnabled(domain);
+        }
+      },
+    };
+  },
+);
 let root: string;
 let session: ManagedSession;
 let harness: ReturnType<typeof createManagedHarnessHandle>;
@@ -213,6 +236,7 @@ beforeEach(async () => {
   turn = createTurn();
 });
 afterEach(async () => {
+  enablement.childRun = false;
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.
@@ -3984,4 +4008,282 @@ it.each([
     )
   )
     expect(broker.fileHistory).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// H3 background Shell flow
+// ---------------------------------------------------------------------------
+
+function backgroundTurnRig(outcome: ToolResultEnvelope) {
+  enablement.childRun = true;
+  const order: string[] = [];
+  const orchestrator = {
+    calls: [] as Array<readonly [string, unknown]>,
+    async admit(params: unknown) {
+      orchestrator.calls.push(['admit', params]);
+    },
+    async dispatchStarted(id: string, runtime: unknown) {
+      orchestrator.calls.push(['dispatchStarted', { id, runtime }]);
+    },
+    async attach(id: string, runtime: unknown, receipt: unknown) {
+      orchestrator.calls.push(['attach', { id, runtime, receipt }]);
+    },
+    async settleFailed(id: string, params: unknown) {
+      orchestrator.calls.push(['settleFailed', { id, params }]);
+    },
+  };
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    rememberAdmission: vi.fn(),
+    request: vi.fn(async (route: string, body: unknown) => {
+      const operation = (body as { operation?: string }).operation;
+      if (route === '/grants' && operation === 'reserve') {
+        order.push('reserve');
+        return { state: 'OPEN' };
+      }
+      if (route === '/grants' && operation === 'renew') {
+        order.push('renew');
+        return { state: 'OPEN' };
+      }
+      if (route === '/grants' && operation === 'close_not_started') {
+        order.push('close_not_started');
+        return { state: 'NOT_STARTED' };
+      }
+      throw new Error('Unexpected publication route ' + route);
+    }),
+  } as unknown as HttpToolPublicationOwner;
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'shell-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockImplementation(async () => {
+    order.push('execute');
+    expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    return outcome;
+  });
+  broker.acknowledgeV3.mockImplementation(async () => {
+    order.push('ack');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+  });
+  const turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts, model, identity) => {
+      order.push(type);
+      const uuid = identity?.uuid ?? randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        model,
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
+      });
+      return uuid;
+    },
+    () => true,
+    { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    orchestrator as never,
+  );
+  return { order, orchestrator, turn };
+}
+
+function backgroundCall() {
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'background-call',
+    args: { command: 'echo hi', is_background: true as const },
+  };
+  const parts: Part[] = [
+    {
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    },
+  ];
+  return { call, parts };
+}
+
+it('admits a background Shell through its child_run orchestrator and lands the detached receipt family', async () => {
+  const { call, parts } = backgroundCall();
+  const detached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Background shell started under unit qwen-bg-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(detached);
+  turn = rig.turn;
+  const result = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    executionStatus: 'success',
+  });
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'attach',
+  ]);
+  const [admit] = rig.orchestrator.calls;
+  expect(admit?.[1]).toMatchObject({
+    shellId: 'shell-execution',
+    executionCallId: 'shell-execution',
+    args: { command: 'echo hi', is_background: true },
+  });
+  const [, dispatch] = rig.orchestrator.calls;
+  expect(dispatch).toMatchObject([
+    'dispatchStarted',
+    {
+      id: 'shell-execution',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    },
+  ]);
+  const [, , attach] = rig.orchestrator.calls;
+  expect(attach?.[1]).toMatchObject({
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  const receipt = (attach?.[1] as { receipt: Record<string, unknown> }).receipt;
+  expect(receipt['executionCallId']).toBe('shell-execution');
+  expect(receipt['bindingGeneration']).toBe('1');
+  expect(receipt['unitName']).toMatch(/^qwen-bg-/);
+  expect(broker.acknowledgeV3).toHaveBeenCalledWith('shell-execution', {
+    executionCallId: 'shell-execution',
+    manifest: null,
+    deliveryStatus: 'blocked',
+    historyRevision: null,
+  });
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'renew',
+    'execute',
+    'tool_result',
+    'ack',
+  ]);
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]!.payload).toMatchObject({
+    executionCallId: 'shell-execution',
+    resultRef: null,
+    resources: [],
+  });
+  const outcomeRef = assertManagedSessionDurableRef(
+    receipts[0]!.payload['toolOutcomeRef'],
+    'background outcome',
+  );
+  const savedOutcome = JSON.parse(
+    (await session.resources.read(outcomeRef)).toString('utf8'),
+  ) as Record<string, unknown>;
+  expect(savedOutcome).toMatchObject({
+    schemaVersion: 1,
+    decision: 'blocked',
+    manifestRef: null,
+  });
+  expect(savedOutcome['envelope']).toEqual(detached);
+});
+
+it('records a proven-unstarted background refuse as start_failed and lands the unstarted family', async () => {
+  const { call, parts } = backgroundCall();
+  const rejectedStart: ToolResultEnvelope = {
+    executionStatus: 'not_started',
+    responseParts: [],
+    capture: null,
+    error: {
+      message:
+        'Background Shell requires a delegated Linux cgroup v2 directory on this Runtime.',
+    },
+  };
+  const rig = backgroundTurnRig(rejectedStart);
+  turn = rig.turn;
+  await turn.execute([call], parts, 'model', new AbortController().signal);
+
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.orchestrator.calls.at(-1)?.[1]).toEqual({
+    id: 'shell-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'renew',
+    'execute',
+    'close_not_started',
+    'tool_result',
+  ]);
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]!.payload).toMatchObject({
+    resultRef: null,
+    resources: [],
+  });
+  expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+});
+
+it('keeps the deliberate refusal while child_run stays disabled', async () => {
+  const stillAdmitted: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [{ text: 'unreached' }],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(stillAdmitted);
+  turn = rig.turn;
+  enablement.childRun = false;
+  const { call, parts } = backgroundCall();
+  const result = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    error: 'Hosted Shell requires one foreground command.',
+  });
+  expect(rig.orchestrator.calls).toHaveLength(0);
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.prepareV3).not.toHaveBeenCalled();
 });

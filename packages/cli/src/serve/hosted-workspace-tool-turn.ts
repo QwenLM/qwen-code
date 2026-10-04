@@ -33,6 +33,7 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -113,6 +114,17 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// H3: background admissions exist only while the child_run domain is
+// enabled for commits; otherwise the turn keeps its foreground refusals.
+function childRunAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('child_run');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface HostedApprovalTurnOptions {
@@ -735,6 +747,7 @@ export class HostedWorkspaceToolTurn {
         ids.add(call.callId);
         let validationError: string | undefined;
         let input: Record<string, unknown>;
+        let backgroundAdmitted = false;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -745,17 +758,32 @@ export class HostedWorkspaceToolTurn {
                 key,
               ),
           );
-          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
-            validationError = 'Hosted Shell requires a nonempty command.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
-          } else if (
+          // H3: a background request is admitted exactly when this Session
+          // owns its child_run orchestrator and the domain is enabled — the
+          // deliberate refusals below keep their texts otherwise.
+          const backgroundRequested =
+            args['is_background'] === true ||
+            (typeof args['is_background'] === 'string' &&
+              args['is_background'].toLowerCase() === 'true');
+          const backgroundIllFormed =
+            !backgroundRequested &&
             args['is_background'] !== undefined &&
             args['is_background'] !== false &&
             !(
               typeof args['is_background'] === 'string' &&
               args['is_background'].toLowerCase() === 'false'
-            )
+            );
+          backgroundAdmitted =
+            backgroundRequested &&
+            this.childRuns !== undefined &&
+            childRunAdmissionsEnabled();
+          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+            validationError = 'Hosted Shell requires a nonempty command.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+          } else if (
+            backgroundIllFormed ||
+            (backgroundRequested && !backgroundAdmitted)
           ) {
             validationError =
               'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
@@ -773,12 +801,18 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
-          if (this.publication && args['is_background'] !== undefined) {
+          if (
+            !backgroundAdmitted &&
+            this.publication &&
+            args['is_background'] !== undefined
+          ) {
             validationError = 'Hosted Shell requires one foreground command.';
           }
-          input = this.publication
-            ? { ...args }
-            : { ...args, is_background: false };
+          input = backgroundAdmitted
+            ? { ...args, is_background: true }
+            : this.publication
+              ? { ...args }
+              : { ...args, is_background: false };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -810,6 +844,7 @@ export class HostedWorkspaceToolTurn {
           argsDigest: `sha256:${managedToolDigest(input)}`,
           publicationId: isShell && this.publication ? randomUUID() : null,
           runtimeCallId,
+          background: mcpInput === undefined && backgroundAdmitted,
         };
       });
     };
@@ -1185,6 +1220,15 @@ export class HostedWorkspaceToolTurn {
             modelCallId: request.call.callId,
             captureId: randomUUID(),
           });
+          // H3: the record intent precedes every physical side effect.
+          if (request.background) {
+            await this.childRuns!.admit({
+              shellId: executionCallId,
+              ownerScopeId: authority.sessionHeader.sessionKey.sessionId,
+              executionCallId,
+              args: request.input,
+            });
+          }
         }
         bindings.push({
           functionCallId: request.call.callId,
@@ -1236,6 +1280,17 @@ export class HostedWorkspaceToolTurn {
           turnId: this.promptId,
           promptId: this.promptId,
         });
+      // H3: dispatch is durable the moment the checkpoint commits.
+      for (const [index, request] of requests.entries()) {
+        if (!request.background) continue;
+        const executionCallId = reserved.get(index)!;
+        const saved = shellBindings.get(executionCallId);
+        if (!saved) continue;
+        await this.childRuns!.dispatchStarted(executionCallId, {
+          runtimeBindingId: saved.runtimeBindingId,
+          generation: saved.bindingGeneration,
+        });
+      }
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;
@@ -1383,16 +1438,28 @@ export class HostedWorkspaceToolTurn {
               throw new Error('Finished publication binding changed.');
             result = parseToolResultEnvelope(finished['result']);
           }
-          responses.push(
-            ...(await this.acceptShell(
-              request.call,
-              executionCallId,
-              saved.publicationId,
-              saved.publicationToken,
-              result,
-              model,
-            )),
-          );
+          if (request.background) {
+            responses.push(
+              ...(await this.acceptBackgroundShell(
+                request,
+                executionCallId,
+                saved,
+                result,
+                model,
+              )),
+            );
+          } else {
+            responses.push(
+              ...(await this.acceptShell(
+                request.call,
+                executionCallId,
+                saved.publicationId,
+                saved.publicationToken,
+                result,
+                model,
+              )),
+            );
+          }
           shellBindings.delete(executionCallId);
           continue;
         }
@@ -1587,6 +1654,206 @@ export class HostedWorkspaceToolTurn {
       inputBytes,
       digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
     };
+  }
+
+  /**
+   * H3 background Shell settlement. A proven unstarted refuse rides the
+   * unstarted family as-is (settled as start_failed on the record); a
+   * settled detached handle lands as the third durable receipt family —
+   * blocked delivery, null resultRef, resolve — with the physical start
+   * attached to the record from the same facts before history is written.
+   */
+  private async acceptBackgroundShell(
+    request: {
+      call: ToolCallRequestInfo;
+      input: Record<string, unknown>;
+    },
+    executionCallId: string,
+    saved: {
+      publicationId: string;
+      publicationToken: string;
+      runtimeBindingId: string;
+      bindingGeneration: string;
+      runtimeCallId: string;
+    },
+    result: ToolResultEnvelope,
+    model: string,
+  ): Promise<Part[]> {
+    if (result.executionStatus === 'not_started' && result.capture === null) {
+      await this.childRuns!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return this.acceptShell(
+        request.call,
+        executionCallId,
+        saved.publicationId,
+        saved.publicationToken,
+        result,
+        model,
+      );
+    }
+    if (
+      result.executionStatus !== 'success' ||
+      result.capture?.captureStatus !== 'detached'
+    ) {
+      throw new Error(
+        `Background Shell settled with an unexpected result shape (${result.executionStatus}).`,
+      );
+    }
+    await this.childRuns!.attach(
+      executionCallId,
+      {
+        runtimeBindingId: saved.runtimeBindingId,
+        generation: saved.bindingGeneration,
+      },
+      {
+        executionCallId,
+        runtimeCallId: saved.runtimeCallId,
+        unitName: `qwen-bg-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
+        bindingGeneration: saved.bindingGeneration,
+        occurredAt: Date.now(),
+      },
+    );
+    const authority = this.session.authority;
+    let receipt = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+    let ref: ManagedSessionDurableRef;
+    let converted: Part[];
+    let messageId: string;
+    let timestamp: string;
+    if (receipt) {
+      ref = assertManagedSessionDurableRef(
+        receipt.payload['toolOutcomeRef'],
+        'original tool outcome',
+      );
+      const savedResult = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      ) as Record<string, unknown>;
+      const history = savedResult['history'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        savedResult['schemaVersion'] !== 1 ||
+        savedResult['decision'] !== 'blocked' ||
+        !isDeepStrictEqual(savedResult['envelope'], result) ||
+        savedResult['manifestRef'] !== null ||
+        receipt.payload['resultRef'] !== null ||
+        (receipt.payload['resources'] !== undefined &&
+          !isDeepStrictEqual(receipt.payload['resources'], [])) ||
+        receipt.payload['historyRevision'] !== receipt.sequence ||
+        typeof history?.['messageId'] !== 'string' ||
+        typeof history['timestamp'] !== 'string' ||
+        typeof history['model'] !== 'string' ||
+        !Array.isArray(history['parts'])
+      )
+        throw new Error('Original background Shell receipt conflicts.');
+      converted = history['parts'] as Part[];
+      messageId = history['messageId'] as string;
+      timestamp = history['timestamp'] as string;
+      model = history['model'] as string;
+    } else {
+      converted = convertToFunctionResponse(
+        request.call.name,
+        request.call.callId,
+        result.responseParts as Part[],
+      );
+      const response = converted[0]?.functionResponse;
+      if (!response || converted.length !== 1)
+        throw new Error('Background Shell result cannot be recorded.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'success',
+      };
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Background Shell result cannot be recorded.');
+      const originalIntent = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.intent' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      if (!originalIntent)
+        throw new Error('Original background Shell intent is missing.');
+      messageId = shellHistoryId(executionCallId);
+      timestamp = new Date(originalIntent.occurredAt).toISOString();
+      const outcome = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          decision: 'blocked',
+          envelope: result,
+          manifestRef: null,
+          history: { messageId, timestamp, model, parts: converted },
+        }),
+      );
+      if (
+        outcome.byteLength >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Background Shell outcome exceeds its limit.');
+      ref = await this.session.resources.publish(
+        'managed-tool-outcome',
+        outcome,
+      );
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: executionCallId,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${executionCallId}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          kind: 'tool.receipt',
+          occurredAt: Date.now(),
+          payload: {
+            executionCallId,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+    }
+    if (!receipt)
+      throw new Error('Original background Shell receipt disappeared.');
+    await this.commit('tool_result', converted, model, {
+      uuid: messageId,
+      timestamp,
+    });
+    await this.harness.resolveAwaitRuntime(executionCallId, ref);
+    try {
+      await this.broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest: null,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Background Shell v3 ACK can be retried after its Session receipt: ' +
+          String(cause),
+      );
+    }
+    return converted;
   }
 
   private async acceptShell(
