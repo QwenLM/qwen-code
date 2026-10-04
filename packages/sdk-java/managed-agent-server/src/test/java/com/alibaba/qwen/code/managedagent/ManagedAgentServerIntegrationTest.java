@@ -1477,6 +1477,108 @@ class ManagedAgentServerIntegrationTest {
         assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
+    // #13319: a restarted model attempt retracts the published prefix of the
+    // message it replaces. Deltas of earlier committed rounds carry smaller
+    // source ids and stay; the retraction is idempotent and advances the
+    // Harness cursor either way.
+    @Test
+    void retractsInBandRetryOutputFromItsFirstDelta() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-inband-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "inband-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "inband-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "6".repeat(64));
+        String owner = "inband-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot_1")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", 1);
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", List.of(
+                        new HarnessEvent(2, "boot_1:epoch_1:2",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "kept"), false,
+                                        null, null, null)),
+                        new HarnessEvent(3, "boot_1:epoch_1:3",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "orphaned "), false,
+                                        null, null, null)),
+                        new HarnessEvent(4, "boot_1:epoch_1:4",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "prefix"), false,
+                                        null, null, null))));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .isPresent();
+
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 5);
+
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .satisfies(events -> {
+                    assertThat(events).filteredOn(event ->
+                                    "boot_1:epoch_1:2".equals(
+                                            event.sourceKey()))
+                            .singleElement()
+                            .satisfies(event -> assertThat(event.data())
+                                    .containsEntry("text", "kept"));
+                    assertThat(events).filteredOn(event ->
+                                    event.sourceKey() != null
+                                            && (event.sourceKey().equals(
+                                                    "boot_1:epoch_1:3")
+                                                    || event.sourceKey().equals(
+                                                            "boot_1:epoch_1:4")))
+                            .allSatisfy(event -> {
+                                assertThat(event.data())
+                                        .containsEntry("text", "");
+                                assertThat(event.itemId()).isNull();
+                                assertThat(event.contentPartId()).isNull();
+                            });
+                });
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(5));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "message".equals(item.type())
+                                && "assistant".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> assertThat(
+                                                part.text()).isEqualTo("kept"))));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
+
+        // A redelivered retraction does not retract again, but the cursor
+        // still advances past it.
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 6);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(6));
+
+        assertThatThrownBy(() -> store.retractHarnessTurnOutput(tenant,
+                session.sessionId(), turn.turnId(), owner, "epoch_other", 3,
+                7)).isInstanceOfSatisfying(IllegalStateException.class,
+                        error -> assertThat(error.getMessage()).contains(
+                                "event epoch changed"));
+    }
+
     @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();

@@ -109,6 +109,13 @@ public class ManagedAgentProperties {
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
+        /**
+         * Turn-level deadline passed to the Harness at prompt admission. An
+         * admitted Turn outliving it is settled by the Harness as a
+         * classified deadline failure, so a stalled model stream cannot pin
+         * a Session forever.
+         */
+        private Duration turnDeadline = Duration.ofMinutes(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -180,6 +187,14 @@ public class ManagedAgentProperties {
 
         public void setHeartbeatInterval(Duration heartbeatInterval) {
             this.heartbeatInterval = heartbeatInterval;
+        }
+
+        public Duration getTurnDeadline() {
+            return turnDeadline;
+        }
+
+        public void setTurnDeadline(Duration turnDeadline) {
+            this.turnDeadline = turnDeadline;
         }
     }
 
@@ -412,8 +427,10 @@ public class ManagedAgentProperties {
         private boolean enabled;
         private String host = "127.0.0.1";
         private int port = 4182;
+        private boolean allowNonLoopback;
         private String token = "";
         private String provisioner = "local-process";
+        private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
@@ -470,6 +487,22 @@ public class ManagedAgentProperties {
 
         public void setPort(int port) {
             this.port = port;
+        }
+
+        public boolean isAllowNonLoopback() {
+            return allowNonLoopback;
+        }
+
+        public void setAllowNonLoopback(boolean allowNonLoopback) {
+            this.allowNonLoopback = allowNonLoopback;
+        }
+
+        public Duration getV3ResultWindow() {
+            return v3ResultWindow;
+        }
+
+        public void setV3ResultWindow(Duration v3ResultWindow) {
+            this.v3ResultWindow = v3ResultWindow;
         }
 
         public String getToken() {
