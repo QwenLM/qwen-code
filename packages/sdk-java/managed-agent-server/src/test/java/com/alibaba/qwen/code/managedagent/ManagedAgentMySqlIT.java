@@ -94,9 +94,14 @@ class ManagedAgentMySqlIT {
                 + " VALUES (?, 'CREATE_SESSION', 'legacy-key',"
                 + " 'legacy-digest', ?, 1)", upgradeTenant, upgradeSession);
         LegacyEvents.insert(jdbc, upgradeTenant, upgradeSession);
-        Flyway.configure().dataSource(dataSource)
+        // First-pass-ness comes from what this run applied, not from the
+        // migrated rows: gating on V15's item_id backfill would let a V15
+        // regression silently switch off its own witnesses. A rerun finds
+        // V2..V15 already applied and executes nothing here.
+        boolean firstPass = Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
-                .target(MigrationVersion.fromVersion("15")).load().migrate();
+                .target(MigrationVersion.fromVersion("15")).load().migrate()
+                .migrationsExecuted > 0;
         LegacyLifecycleCommands.Sessions lifecycle =
                 LegacyLifecycleCommands.insert(jdbc, lifecycleTenant);
         Flyway.configure().dataSource(dataSource)
@@ -105,26 +110,19 @@ class ManagedAgentMySqlIT {
         LegacyHookRecords.insert(jdbc, hooksTenant, hooksSession);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
-        // The data migrations V15, V17 and V29 ran only on the first pass
-        // against a fresh database; a rerun sees their effects in the
-        // earlier run's tenants but cannot re-apply them to this run's
-        // seeds. The assertions that depend on their outcome are skipped on
-        // a rerun, while the rest of this method (consumer_progress,
-        // agent_revision, the idempotency conflict and the fresh-projection
-        // exercises) still exercise the store against this run's
-        // namespaced seeds.
-        boolean legacySeedsBackfilled = jdbc.queryForObject("SELECT COUNT(*)"
-                        + " FROM managed_agent_event WHERE tenant_id = ? AND"
-                        + " session_id = ? AND item_id IS NOT NULL",
-                Integer.class, upgradeTenant, upgradeSession) > 0;
-        if (legacySeedsBackfilled) {
+        // The one-shot backfills in V2, V15, V17 and V29 ran only on the
+        // first pass against a fresh database; a rerun cannot re-apply
+        // them to this run's seeds, so the three legacy backfill witnesses
+        // and the V2-derived consumer_progress count are gated on
+        // firstPass. A rerun still exercises the store through the
+        // idempotency conflict re-seeded below and the fresh-projection
+        // exercises; agent_revision there reads V13's column DEFAULT.
+        if (firstPass) {
             LegacyEvents.assertBackfilled(jdbc, upgradeTenant, upgradeSession);
             LegacyLifecycleCommands.assertMigrated(jdbc, lifecycleTenant,
                     lifecycle);
             LegacyHookRecords.assertBackfilled(jdbc, hooksTenant,
                     hooksSession);
-        }
-        if (legacySeedsBackfilled) {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                             + " managed_agent_consumer_progress WHERE tenant_id = ?"
                             + " AND session_id = ? AND consumer_name = ?",
@@ -142,7 +140,7 @@ class ManagedAgentMySqlIT {
         // workspace-unbound on the first pass; a rerun re-seeds the
         // conflict source explicitly so the probe does not depend on the
         // migration order.
-        if (!legacySeedsBackfilled) {
+        if (!firstPass) {
             jdbc.update("INSERT INTO managed_session_create_scope (tenant_id,"
                             + " idempotency_key, workspace_bound) VALUES (?, ?,"
                             + " FALSE) ON DUPLICATE KEY UPDATE workspace_bound"
@@ -268,7 +266,8 @@ class ManagedAgentMySqlIT {
                         sessionId, "mysql-resource", tokenA)).bytes())
                 .isEqualTo(resourceBytes);
         assertThatThrownBy(() -> inTransaction(transactions,
-                () -> secondInstance.restore("MYSQL-PRIVATE-STORE",
+                () -> secondInstance.restore(
+                        storeTenant.toUpperCase(java.util.Locale.ROOT),
                         workspaceId, sessionId, tokenA)))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
@@ -460,21 +459,19 @@ class ManagedAgentMySqlIT {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         // Reruns: the case-tenant scopes carry a fixed idempotency key and
         // the list assertion expects exactly the fresh Sessions of this run.
-        jdbc.execute("SET FOREIGN_KEY_CHECKS = 0");
-        try {
-            for (String table : List.of("managed_agent_item_part",
-                    "managed_agent_item", "managed_agent_turn",
-                    "managed_agent_event", "managed_agent_snapshot",
-                    "managed_agent_consumer_progress",
-                    "managed_agent_command")) {
-                deleteIfTableExists(jdbc, table,
-                        "tenant_id IN ('case-tenant', 'CASE-TENANT')");
-            }
-            jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id IN"
-                    + " ('case-tenant', 'CASE-TENANT')");
-        } finally {
-            jdbc.execute("SET FOREIGN_KEY_CHECKS = 1");
+        // Every statement here runs on its own connection, so no session
+        // variable can guard this cleanup: the delete list itself must stay
+        // child-first, and every FK to managed_agent_session is RESTRICT.
+        for (String table : List.of("managed_agent_item_part",
+                "managed_agent_item", "managed_agent_turn",
+                "managed_agent_event", "managed_agent_snapshot",
+                "managed_agent_consumer_progress",
+                "managed_agent_command")) {
+            deleteIfTableExists(jdbc, table,
+                    "tenant_id IN ('case-tenant', 'CASE-TENANT')");
         }
+        jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id IN"
+                + " ('case-tenant', 'CASE-TENANT')");
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(

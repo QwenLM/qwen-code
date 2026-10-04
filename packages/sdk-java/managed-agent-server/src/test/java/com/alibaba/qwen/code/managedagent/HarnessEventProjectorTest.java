@@ -28,8 +28,10 @@ class HarnessEventProjectorTest {
                         "part_turn-1_output_text");
         // containsEntry cannot prove absence: the raw update map must never
         // bleed through into the projected, persisted and re-streamed data.
-        assertThat(event.data()).doesNotContainKey("secret")
-                .doesNotContainValue("must-not-leak");
+        // The secret is nested two levels down, so absence is asserted on
+        // the serialized form, which holds at any nesting depth.
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("must-not-leak");
     }
 
     @Test
@@ -63,6 +65,21 @@ class HarnessEventProjectorTest {
 
         assertThat(event.errorCode()).isEqualTo("hosted_harness_error");
         assertThat(event.type()).isEqualTo("turn.failed");
+        assertThat(event.data().toString()).doesNotContain("DROP TABLE");
+    }
+
+    @Test
+    void substitutesTheSafeFallbackCodeForAnOversizeErrorCode() {
+        ProjectedEvent oversize = projector.project(new SourceEvent(5L,
+                "turn_error", Map.of("code", "a".repeat(129), "message",
+                        "tagged"), "prompt", Map.of()), "turn-1");
+        ProjectedEvent atBound = projector.project(new SourceEvent(6L,
+                "turn_error", Map.of("code", "b".repeat(128), "message",
+                        "tagged"), "prompt", Map.of()), "turn-2");
+
+        assertThat(oversize.errorCode()).isEqualTo("hosted_harness_error");
+        assertThat(oversize.type()).isEqualTo("turn.failed");
+        assertThat(atBound.errorCode()).isEqualTo("b".repeat(128));
     }
 
     @Test
