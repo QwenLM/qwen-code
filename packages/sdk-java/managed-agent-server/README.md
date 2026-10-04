@@ -63,7 +63,9 @@ AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-age
 O3 publishes durable Hosted foreground Shell outcomes to Items, events and
 Managed WebShell. Downloads read immutable stdout/stderr after the writer is
 sealed, without reviving a Harness. The API requires a trusted actor and a
-current Workspace read grant; a tenant header alone cannot authorize it.
+current Workspace read grant, checked at request admission and then once per
+`read-revalidation-interval` while a download is in flight; a tenant header
+alone cannot authorize it.
 
 O3 requires O2 publication to be configured, including
 `qwen.managed-agent.tool-publication.verification-bytes-per-second` and
@@ -72,25 +74,41 @@ O2 verification settings are separate from the O3 content-read timeout below.
 
 All settings below use the `qwen.managed-agent.artifacts` prefix:
 
-| Setting                | Default | Meaning                                                                                                                                                       |
-| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                    |
-| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                                                        |
-| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                       |
-| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                                                    |
-| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts. |
+| Setting                      | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                    | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                                                                                                                                                                                                                                                                                            |
+| `publish-original`           | `false` | Approve original stream representations for current Workspace readers.                                                                                                                                                                                                                                                                                                                                                                |
+| `publish-preview`            | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                                                                                                                                                                                                                                                                                               |
+| `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
+| `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
+| `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
-not automatically reproject historical results; content requests always use
-the current read policy. Configure the policy before enabling projection.
+not automatically reproject historical results; content requests use the
+current read policy at admission and once per revalidation window thereafter.
+Configure the policy before enabling projection.
+
+Two sibling knobs tune the same relaxation elsewhere:
+`qwen.managed-agent.events.read-grant-recheck-interval` (default `5s`) bounds
+how often a live event stream re-checks the Workspace read grant — `PT0S`
+restores the per-event check — and
+`qwen.managed-agent.tool-publication.journal-head-authorization` (default
+`false`) switches tool-publication authorization from the journal scan to the
+session journal head's activation columns; enable it only after every writer
+in the fleet runs the V36 schema's code (the rolling-window self-healing is
+covered in the
+[query-amplification design](../../../docs/design/2026-10-02-managed-agent-query-amplification.md)
+§9).
 Original reads are capped at 1 MiB per Range request; full downloads use
 bounded segment buffers and stream with backpressure. Deployments must retain
 O2 roots and validate real OSS and slow-reader limits before enabling this
 feature. O3 does not enable public Shell execution or garbage collection.
 
 Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-projection.md) |
-[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md).
+[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md);
+revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-query-amplification.md) |
+[简体中文](../../../docs/design/2026-10-02-managed-agent-query-amplification.zh-CN.md).
 
 ## Prerequisites
 
