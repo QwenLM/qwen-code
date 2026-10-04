@@ -7,6 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import { buildManagedAutoMemoryIndex } from './indexer.js';
 import {
+  INDEX_TRUNCATION_NOTICE,
+  INDEX_TRUNCATION_WARNING,
+  MAX_INDEX_CHARS,
+  MAX_INDEX_LINE_CHARS,
+} from './index-budget.js';
+import {
   buildManagedAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
@@ -187,6 +193,9 @@ describe('managed auto-memory prompt helpers', () => {
       expect(result).not.toContain('- [Oversized](');
       expect(result).toContain(retainedEntry);
       expect(result).toContain('Only part of it was loaded.');
+      expect(result).toContain(
+        `one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+      );
     },
   );
 
@@ -275,7 +284,7 @@ describe('managed auto-memory prompt helpers', () => {
       { length: 200 },
       (_, i) => `- [Memory ${i}](memory-${i}.md)`,
     );
-    const index = `${entries.join('\n')}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
+    const index = `${entries.join('\n')}${INDEX_TRUNCATION_NOTICE}`;
     const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
 
     for (const entry of entries) {
@@ -292,6 +301,117 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).toContain(retained);
     expect(result).not.toContain('- [Oversized](');
   });
+
+  it.each([
+    ['project', '\r\n'],
+    ['user', '\r\n'],
+    ['team', '\r\n'],
+    ['project', '\r'],
+    ['user', '\r'],
+    ['team', '\r'],
+  ] as const)(
+    'preserves 150-code-unit entry priority in the %s prompt with %j line endings',
+    (scope, newline) => {
+      const entry = (label: string, length: number) => {
+        const prefix = `- [${label}](notes/`;
+        return `${prefix}${'a'.repeat(length - prefix.length - 1)})`;
+      };
+      const long = Array.from({ length: 40 }, (_, i) =>
+        entry(`Long ${i}`, 600),
+      );
+      const ordinary = Array.from({ length: 60 }, (_, i) =>
+        entry(`Ordinary ${i}`, MAX_INDEX_LINE_CHARS),
+      );
+      const render = (index: string) =>
+        buildManagedAutoMemoryPrompt(
+          '/tmp/memory',
+          scope === 'project' ? index : null,
+          scope === 'user'
+            ? { memoryDir: '/tmp/user-memory', indexContent: index }
+            : undefined,
+          scope === 'team'
+            ? { memoryDir: '/tmp/team-memory', indexContent: index }
+            : undefined,
+        );
+      const lines = [...long, ...ordinary];
+      const expected = render(lines.join('\n'));
+      const result = render(lines.join(newline));
+
+      for (const line of ordinary) {
+        expect(expected).toContain(line);
+        expect(result).toContain(line);
+      }
+      expect(result).toBe(expected);
+    },
+  );
+
+  it('does not let CRLF overhead evict an entry from an exactly full LF body', () => {
+    const lines = [
+      'a'.repeat(MAX_INDEX_CHARS - 3 * 150 - 3),
+      ...['A', 'B', 'C'].map((label) => label.repeat(150)),
+    ];
+    const index = lines.join('\n');
+    expect(index).toHaveLength(MAX_INDEX_CHARS);
+    const expected = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      index.replaceAll('\n', '\r\n'),
+    );
+    for (const line of lines) expect(result).toContain(line);
+    expect(result).toBe(expected);
+    expect(result).not.toContain('Only part of it was loaded.');
+  });
+
+  it.each(['\r\n', '\r', '\n\r\n'])(
+    'recognizes the exact writer notice after normalizing %j separators',
+    (separator) => {
+      const first = `- [Long](notes/${'a'.repeat(24_830)}.md)`;
+      const ordinary = '- [Ordinary](notes/ordinary.md)';
+      const body = `${first}\n${ordinary}`;
+      expect(body.length).toBeLessThan(MAX_INDEX_CHARS);
+      const canonical = `${body}\n\n${INDEX_TRUNCATION_WARNING}`;
+      expect(canonical.length).toBeGreaterThan(MAX_INDEX_CHARS);
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        `${body}${separator}${separator}${INDEX_TRUNCATION_WARNING}`,
+      );
+      expect(result).toContain(first);
+      expect(result).toContain(ordinary);
+      expect(result).not.toContain(INDEX_TRUNCATION_WARNING);
+    },
+  );
+
+  it.each(['\n', '\r\n'])(
+    'keeps an under-budget writer omission notice with %j line endings',
+    (newline) => {
+      const entry = '- [Retained](notes/retained.md)';
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        `${entry}${newline}${newline}${INDEX_TRUNCATION_WARNING}`,
+      );
+      expect(result).toContain(entry);
+      expect(result).toContain(INDEX_TRUNCATION_WARNING);
+      expect(result).not.toContain('Only part of it was loaded.');
+    },
+  );
+
+  it.each([
+    [
+      '中'.repeat(MAX_INDEX_CHARS + 1),
+      `${MAX_INDEX_CHARS + 1} UTF-16 code units (limit: ${MAX_INDEX_CHARS})`,
+    ],
+    [
+      Array.from({ length: 201 }, () => '中'.repeat(125)).join('\n'),
+      '201 lines and 25325 UTF-16 code units',
+    ],
+  ])(
+    'reports the actual code-unit count for non-ASCII input',
+    (index, reason) => {
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      expect(result).toContain(reason);
+      expect(result).not.toContain(' KB');
+    },
+  );
 
   it('condensed prompt with empty indexes is significantly shorter than full', () => {
     const condensed = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');

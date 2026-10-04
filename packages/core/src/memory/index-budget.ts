@@ -10,6 +10,7 @@ export const MAX_INDEX_LINES = 200;
 export const MAX_INDEX_CHARS = 25_000;
 export const INDEX_TRUNCATION_WARNING =
   '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
+export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
 
 export function trimIndexToBudget(lines: readonly string[]): string {
   const entries = lines.slice(0, MAX_INDEX_LINES);

@@ -5,11 +5,13 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
-  INDEX_TRUNCATION_WARNING,
+  INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
+  MAX_INDEX_LINE_CHARS,
   trimIndexToBudget,
 } from './index-budget.js';
 
@@ -211,7 +213,7 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
 ];
 
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
-  const trimmed = indexContent.trim();
+  const trimmed = normalizeContent(indexContent).trim();
   const lines = trimmed.split('\n');
   const lineCount = lines.length;
   const charCount = trimmed.length;
@@ -222,23 +224,20 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     return trimmed;
   }
 
-  // The writer's trailing warning is metadata, not a priority entry.
-  const noticeSuffix = ['\n\n', '\r\n\r\n']
-    .map((separator) => `${separator}${INDEX_TRUNCATION_WARNING}`)
-    .find((suffix) => trimmed.endsWith(suffix));
-  const entries = noticeSuffix
-    ? trimmed.slice(0, -noticeSuffix.length).split('\n')
+  // The writer's trailing notice must not compete with its retained entries.
+  const entries = trimmed.endsWith(INDEX_TRUNCATION_NOTICE)
+    ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
   const truncated = trimIndexToBudget(entries);
 
   const reason =
     wasCharTruncated && !wasLineTruncated
-      ? `${(charCount / 1024).toFixed(1)} KB (limit: ${(MAX_INDEX_CHARS / 1024).toFixed(1)} KB) — index entries are too long`
+      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
       : wasLineTruncated && !wasCharTruncated
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
-        : `${lineCount} lines and ${(charCount / 1024).toFixed(1)} KB`;
+        : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line under ~200 chars; move detail into topic files.`;
+  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`;
 }
 
 /**

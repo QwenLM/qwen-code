@@ -31,7 +31,7 @@ import {
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 import {
-  INDEX_TRUNCATION_WARNING,
+  INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
   trimIndexToBudget,
@@ -232,7 +232,7 @@ function assembleIndex(lines: string[]): string {
     return truncated;
   }
 
-  return `${truncated}\n\n${INDEX_TRUNCATION_WARNING}`;
+  return `${truncated}${INDEX_TRUNCATION_NOTICE}`;
 }
 
 export function buildManagedAutoMemoryIndex(
