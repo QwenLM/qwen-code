@@ -217,6 +217,16 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('answers from sufficient current context without weakening verification', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('**Answer From Context First:**');
+    expect(prompt).toContain('reuse prior observations');
+    expect(prompt).toContain('current or post-change state');
+    expect(prompt).toContain('only a summary lacking the needed evidence');
+    expect(prompt).toContain('not verification before claiming a change works');
+  });
+
   it.each([
     [
       'interactive',
@@ -491,6 +501,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(true);
     const prompt = unsandboxed();
     expect(prompt).toContain('# Git Repository');
+    expect(prompt).toContain('## Git as Source of Truth');
+    expect(prompt).toContain('`git log` / `git blame` are authoritative');
     expect(prompt).toMatchSnapshot();
   });
 
@@ -498,6 +510,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = unsandboxed();
     expect(prompt).not.toContain('# Git Repository');
+    expect(prompt).not.toContain('Git as Source of Truth');
+    expect(prompt).not.toMatch(/\bgit (?:log|blame|status|diff|show|add)\b/);
     expect(prompt).toMatchSnapshot();
   });
 

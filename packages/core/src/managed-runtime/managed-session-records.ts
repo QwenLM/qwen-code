@@ -67,6 +67,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'lifecycle.changed',
   'domain.committed',
   'message.delta',
+  'message.retracted',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -668,6 +669,16 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         text: 'rawText',
       },
     },
+    // A published message whose deltas a restarted model attempt replaces
+    // (#13319). `fromSequence` is the journal sequence of the message's first
+    // delta; every delta of the message carries a sequence >= it.
+    'message.retracted': {
+      fields: {
+        messageId: 'id',
+        turnId: 'id',
+        fromSequence: 'sequence',
+      },
+    },
     'action.changed': {
       fields: {
         requestId: 'id',
@@ -766,6 +777,7 @@ const EVENT_ACTORS: Readonly<
   'message.committed': ['harness', 'trusted_entry'],
   'tool.intent': ['harness'],
   'message.delta': ['harness'],
+  'message.retracted': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -787,6 +799,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'message.committed': false,
   'tool.intent': true,
   'message.delta': true,
+  'message.retracted': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -1017,6 +1030,7 @@ function assertPayloadRules(
     case 'message.committed':
     case 'tool.intent':
     case 'message.delta':
+    case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
