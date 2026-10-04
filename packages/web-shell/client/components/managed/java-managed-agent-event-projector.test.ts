@@ -154,6 +154,28 @@ describe('java managed agent event projector', () => {
     ).toBe('tool_started');
   });
 
+  it('lets a settled canonical status outrank the raw hint', () => {
+    // settleTurnItems rewrites item_status when the Turn ends without
+    // touching attributes_json: a tool that was still pending at that
+    // moment must replay by the canonical status, not its frozen hint.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-3',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'completed',
+        content: [],
+        attributes: { status: 'pending' },
+        firstSequence: 3,
+        lastSequence: 3,
+        createdAt: 3,
+        updatedAt: 3,
+      })[0]?.type,
+    ).toBe('tool_completed');
+  });
+
   it('maps canonical events without exposing Java event names', () => {
     expect(
       projectJavaAgentEvent({

@@ -2023,6 +2023,86 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('keeps the stall alert when the summary poll succeeds mid-stall', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let streamHangs = false;
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/sessions/get')) {
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (path.endsWith('/transcript/query')) {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            events: [
+              JSON.parse(javaDelta(1, 'one')),
+              JSON.parse(javaDelta(2, 'two')),
+            ],
+            coveredSequence: 0,
+            hasMore: false,
+            lastSequence: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (path.endsWith('/events/stream')) {
+        if (streamHangs) {
+          // A resubscribe that never yields again: no further gap can
+          // re-assert the alert from the stream side.
+          return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+            status: 200,
+          });
+        }
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(corrupt(3) + corrupt(4) + corrupt(5) + corrupt(6)),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // Three stalls assert the alert.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+      // Freeze the stream mid-stall while the 3s summary poll keeps
+      // succeeding: the poll may only clear errors it raised itself, so
+      // the alert must survive several poll cadences untouched.
+      streamHangs = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clears a transient recovery error once a resync succeeds', async () => {
     vi.useFakeTimers();
     let snapshotCalls = 0;

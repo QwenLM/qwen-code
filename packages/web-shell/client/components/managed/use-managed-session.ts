@@ -229,15 +229,23 @@ export function useManagedSession(
       }
     })();
     void (async () => {
+      // The poll shares the error field with the stream machinery, so it
+      // may only clear what it raised itself: clearing on every success
+      // would flicker a re-asserted stream-stall alert every poll pass.
+      let pollFailed = false;
       while (!abort.signal.aborted) {
         await pause(abort.signal, 3000);
         if (abort.signal.aborted) return;
         try {
-          update({
-            summary: await provider.getSession(sessionId, opts),
-            error: undefined,
-          });
+          const summary = await provider.getSession(sessionId, opts);
+          if (pollFailed) {
+            pollFailed = false;
+            update({ summary, error: undefined });
+          } else {
+            update({ summary });
+          }
         } catch (error) {
+          pollFailed = true;
           fail(error);
         }
       }
