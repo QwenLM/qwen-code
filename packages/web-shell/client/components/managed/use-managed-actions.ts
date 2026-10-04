@@ -116,7 +116,12 @@ export function useManagedActions(
       loadFailures.current = 0;
       return undefined;
     }
-    if (enabled === undefined) return undefined;
+    if (enabled === undefined) {
+      // So is a reload, which is how a user retries from the page: the
+      // reader comes back with the same Session and a fresh retry budget.
+      loadFailures.current = 0;
+      return undefined;
+    }
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
