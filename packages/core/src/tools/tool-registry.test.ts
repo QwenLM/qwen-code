@@ -495,13 +495,7 @@ describe('ToolRegistry', () => {
 
     it('publishes the exact raw identity through getPermissionAliases (#10199)', () => {
       const registry = new ToolRegistry(config);
-      const mcpTool = new DiscoveredMCPTool(
-        {} as CallableTool,
-        'foo:bar',
-        'a.b',
-        'description',
-        {},
-      );
+      const mcpTool = mcp('foo:bar', 'a.b');
       registry.registerTool(mcpTool);
 
       // The exact raw spelling comes first — it is the only spelling the
@@ -519,18 +513,8 @@ describe('ToolRegistry', () => {
       // `normalizeMcpToolName(entry) === name` arm cannot reach, so only the
       // alias channel can disable this tool.
       const legacyName = generateLegacyMcpToolName('mcp__foo:bar__a.b');
-      const disabledConfig = new Config({
-        ...baseConfigParams,
-        disabledTools: [legacyName],
-      });
-      const registry = new ToolRegistry(disabledConfig);
-      const mcpTool = new DiscoveredMCPTool(
-        {} as CallableTool,
-        'foo:bar',
-        'a.b',
-        'description',
-        {},
-      );
+      const registry = registryFor({ disabledTools: [legacyName] });
+      const mcpTool = mcp('foo:bar', 'a.b');
 
       expect(mcpTool.name).not.toBe(legacyName);
       expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
@@ -548,18 +532,8 @@ describe('ToolRegistry', () => {
       const server = 's'.repeat(24);
       const rawName = `mcp__${server}__${'t'.repeat(40)}`;
       const legacyName = generateLegacyMcpToolName(rawName);
-      const disabledConfig = new Config({
-        ...baseConfigParams,
-        disabledTools: [legacyName],
-      });
-      const registry = new ToolRegistry(disabledConfig);
-      const mcpTool = new DiscoveredMCPTool(
-        {} as CallableTool,
-        server,
-        't'.repeat(40),
-        'description',
-        {},
-      );
+      const registry = registryFor({ disabledTools: [legacyName] });
+      const mcpTool = mcp(server, 't'.repeat(40));
 
       // Premise: the permission channel withholds this reduction, and the
       // normalize fallback cannot reach it either — only the ungated

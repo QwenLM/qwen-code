@@ -124,14 +124,25 @@ describe('registry-backed MCP allow ambiguity', () => {
   it.each([false, true])(
     'keeps a raw wildcard within its server boundary (owner app=%s)',
     async (ownerApp) => {
-      const own = tool('foo', '__internal_debug', ownerApp);
-      const foreign = tool('foo_', '_internal_secret');
-      const { pm, registry } = setup('mcp__foo____i*', [own, foreign]);
-      expect(await pm.evaluate(context(own))).toBe('allow');
-      expect(await pm.evaluate(context(foreign))).toBe('default');
-      expect(pm.hasRelevantRules(context(foreign))).toBe(false);
-      registry.removeMcpToolsByServer('foo');
-      expect(await pm.evaluate(context(foreign))).toBe('allow');
+      for (const [rule, server, name, foreignServer, foreignName] of [
+        [
+          'mcp__foo____i*',
+          'foo',
+          '__internal_debug',
+          'foo_',
+          '_internal_secret',
+        ],
+        ['mcp__foo___*', 'foo_', 'release', 'foo', '_deploy'],
+      ]) {
+        const own = tool(server, name, ownerApp);
+        const foreign = tool(foreignServer, foreignName);
+        const { pm, registry } = setup(rule, [own, foreign]);
+        expect(await pm.evaluate(context(own))).toBe('allow');
+        expect(await pm.evaluate(context(foreign))).toBe('default');
+        expect(pm.hasRelevantRules(context(foreign))).toBe(false);
+        registry.removeMcpToolsByServer(server);
+        expect(await pm.evaluate(context(foreign))).toBe('allow');
+      }
     },
   );
 

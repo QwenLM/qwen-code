@@ -1648,13 +1648,7 @@ export function matchesDomainPattern(
 // MCP tool wildcard matching
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The producer-carried identity of an MCP tool. `serverName` is the
- * operator-facing server key from the config; `serverToolName` is the
- * server's own tool name. Carrying these beats re-deriving the boundary
- * from any flattened `mcp__<server>__<tool>` rendering, which cannot tell
- * `foo` from `foo_` once underscores pile up around the separator.
- */
+/** Preserve producer boundaries that flattened underscore spellings lose. */
 export interface McpToolIdentity {
   serverName: string;
   serverToolName: string;
@@ -1677,26 +1671,9 @@ function mcpSegmentSpellings(serverName: string): string[] {
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
  *
- * `toolName` is the registered provider-safe name and `rawToolName` the
- * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
- * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
- * are compared *literally* against those spellings — never through
- * `sanitizeToolNameForProvider`, which is what let a rule for the server
- * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
- * Prefix patterns additionally read the legacy reduction of the raw
- * identity, admitted by `resolveLegacyMcpSpelling` only when `toolAliases`
- * advertises it. Prefixes use the length-preserving legacy substitution of
- * the raw identity, so the injected `___` in a truncated alias never reads
- * as a separator (R12-2).
- *
- * A rule written provider-safe (`mcp__foo_bar`) still matches any server
- * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
- * registered spelling a literal comparison runs against *is* that reduction.
- * PermissionManager rejects ambiguous grants against the live registry via
- * `hasAmbiguousMcpGrant`. Restrictive callers keep the compatibility match.
- * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
- * `disallowedTools`, which is why the gates thread the alias channel (the
- * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
+ * Compare registered/raw spellings literally; do not normalize the rule.
+ * Published legacy spellings preserve saved restrictions. Grants also require
+ * the live registry ambiguity guard; producer identity pins server boundaries.
  */
 export function matchesMcpPattern(
   pattern: string,
@@ -1709,9 +1686,7 @@ export function matchesMcpPattern(
     return true;
   }
 
-  // Exact rules persisted before provider-safe MCP names were introduced
-  // match literally against the tool's exact raw identity — the only
-  // spelling besides the registered name that can vouch for a 3-part rule.
+  // Raw exact identities retain pre-normalization rules.
   if (
     !pattern.endsWith('*') &&
     pattern.split('__').length >= 3 &&
@@ -1721,11 +1696,7 @@ export function matchesMcpPattern(
     return true;
   }
 
-  // Spellings a prefix pattern may match literally: the registered name (what
-  // the model and the UI show, so rules copied from there keep working), the
-  // raw identity when it is known, and its provenance-gated legacy reduction —
-  // the spelling a pre-normalization entry was persisted in. Losing that match
-  // is fail-open on `deny`/`ask`/`disallowedTools`.
+  // Keep raw and published legacy spellings for saved-rule compatibility.
   const spellings =
     rawToolName === undefined || rawToolName === toolName
       ? [toolName]
@@ -1748,43 +1719,28 @@ export function matchesMcpPattern(
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
     const prefix = pattern.slice(0, -1);
-    // A bare `*` is not an MCP pattern: its empty prefix would match every
-    // MCP tool. Reducing patterns through `sanitizeToolNameForProvider` used
-    // to turn it into `tool_`, which matched nothing — keep that.
+    // An empty prefix must not turn a bare `*` into an MCP grant.
     if (prefix === '') {
       return false;
     }
     if (mcpIdentity !== undefined) {
-      // The boundary comes from the producer, not from a flattened spelling:
-      // `mcp__foo_` + `__*` (server `foo_`) and `mcp__foo` + `__*` (server
-      // `foo`) are the same string family under startsWith, and a tool whose
-      // name starts with '_' reads as separator continuation there. The rule
-      // may name its server in any of that key's own spellings.
+      // Leading tool underscores can imitate a sibling server separator.
+      // Read boundaries from the producer rather than splitting the tool name.
       const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
       const segments = prefix.split('__');
       const boundary = serverSpellings
         .map((spelling) => `mcp__${spelling}__`)
         .find((serverPrefix) => prefix.startsWith(serverPrefix));
       if (boundary === undefined) {
-        // Coarse or precise is decided by the producer's own renderings, not
-        // by counting segments of the flattened rule (a trailing `_` the
-        // separator absorbs would fragment the key, and a key containing
-        // `__` would over-count). A prefix that overruns this key's boundary
-        // (`mcp__foo_*` for key `foo`) names no server segment of this key
-        // and must not match; a coarse prefix the key's own rendering still
-        // starts with (`mcp__*`, `mcp__git*`, or a `__`-carrying key's own
-        // name) keeps matching on the advertised spellings.
+        // Coarse prefixes may stop inside this key; an overrun names a sibling.
         const namesThisKey = serverSpellings.some((spelling) =>
           `mcp__${spelling}`.startsWith(prefix),
         );
         return namesThisKey ? matchesPrefixLiterally(prefix) : false;
       }
       const toolPrefix = prefix.slice(boundary.length);
-      // A prefix of pure underscores is separator continuation, not a tool
-      // filter — it reads as this server's own tool only when the rule's own
-      // server segment is this key AND the tool's name actually starts with
-      // that many underscores (otherwise `mcp__foo___*` — server `foo_`'s
-      // whole-server spelling — would reach server `foo`'s `deploy`).
+      // Separator continuation also looks like a real leading tool underscore.
+      // Require both the rule server segment and the producer tool prefix.
       if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
         return (
           serverSpellings.includes(segments[1] ?? '') &&
@@ -1793,11 +1749,7 @@ export function matchesMcpPattern(
           )
         );
       }
-      // The rule's tool side is written in a rendering too, so compare against
-      // the producer's own renderings of its tool name. The registered name's
-      // own tool segment uses the producer's provider-safe server boundary,
-      // independently of the rule spelling, so a prefix reaching the hash or
-      // a truncation cut still matches, the way the unthreaded path does.
+      // Use the registered server boundary to retain hash/truncation suffixes.
       const registeredBoundary = `mcp__${mcpIdentity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
       const registeredToolSegment = toolName.startsWith(registeredBoundary)
         ? toolName.slice(registeredBoundary.length)
@@ -1818,32 +1770,16 @@ export function matchesMcpPattern(
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
   // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
-  // The comparison is server-SEGMENT equality on each spelling, not a
-  // `${pattern}__` prefix compare: a tool name's leading sanitized underscore
-  // reads as separator continuation under prefixing, so a whole-server rule
-  // for key `foo_` would match server `foo`'s tool `_internal` (registered
-  // verbatim `mcp__foo___internal`, no alias channel needed) — the #10199
-  // defect class re-opened (R4-2). Every advertised spelling keeps its server
-  // boundary intact: the raw identity and the provider-safe registered name
-  // are uncut here (the separator survives the 63-char budget for any key up
-  // to 48 chars), and a legacy reduction is only advertised when its head
-  // window pins the boundary down (R12-1), so segment[1] is trustworthy.
+  // Segment equality keeps foo_ separate from foo's leading-underscore tools.
   const patternParts = pattern.split('__');
   if (patternParts.length === 2 && patternParts[0] === 'mcp') {
     if (mcpIdentity !== undefined) {
-      // Exact producer compare: no split of the tool side, so a rule for
-      // server `foo` can never reach server `foo_`'s tools and vice versa.
-      // The rule may name the server in any of that key's own spellings — the
-      // config key, the registered provider-safe rendering, or the legacy one.
+      // The rule may use any of this producer's own server spellings.
       return mcpSegmentSpellings(mcpIdentity.serverName).includes(
         patternParts[1] ?? '',
       );
     }
-    // A server name containing '__' makes this split unreliable, but that is
-    // the accepted provider-safe-name residual (see mcp-tool.ts). The tool
-    // side must still be an MCP name, or a bare mcp__<server> rule reaches
-    // any tool named X__<server>__Y — `matchesRule` enters this arm whenever
-    // the RULE starts with `mcp__`, whatever the tool is (R14-1).
+    // Without producer identity, only MCP names may use the split fallback.
     return spellings.some((spelling) => {
       const spellingParts = spelling.split('__');
       return (
@@ -1883,15 +1819,18 @@ export function hasAmbiguousMcpGrant(
       return false;
     }
     if (rawGrant) {
-      // A lettered tool prefix can flatten foo's leading underscores into
-      // foo_'s server boundary. A whole-server rule keeps its own authority.
+      // A whole-server wildcard keeps its own authority; sibling separators
+      // may overlap real leading tool underscores in either direction.
+      const otherBoundary = `mcp__${other.serverName}__`;
       return (
         prefix !== undefined &&
         prefix !== rawBoundary &&
         prefix.startsWith(rawBoundary) &&
-        prefix.startsWith(`mcp__${other.serverName}__`) &&
-        identity.serverName.startsWith(other.serverName) &&
-        /^_+$/.test(identity.serverName.slice(other.serverName.length))
+        ((identity.serverName.startsWith(other.serverName) &&
+          /^_+$/.test(identity.serverName.slice(other.serverName.length))) ||
+          (prefix === otherBoundary &&
+            other.serverName.startsWith(identity.serverName) &&
+            /^_+$/.test(other.serverName.slice(identity.serverName.length))))
       );
     }
     const otherRawName = `mcp__${other.serverName}__${other.serverToolName}`;
@@ -1957,17 +1896,20 @@ function resolveLegacyMcpSpelling(
   return toolAliases?.includes(legacy) ? legacy : undefined;
 }
 
-/** Match a whole published legacy spelling; wildcard matching is separate. */
-function matchesAdvertisedExactName(
+/** Match published spellings; restrictive-only fallback stays at the caller. */
+function matchesMcpName(
   pattern: string,
+  toolName: string,
   toolAliases: readonly string[] | undefined,
-  rawToolName: string | undefined,
+  identity: McpToolIdentity | undefined,
 ): boolean {
-  if (pattern.endsWith('*') || pattern.split('__').length < 3) {
-    return false;
-  }
-  const legacySpelling = resolveLegacyMcpSpelling(rawToolName, toolAliases);
-  return legacySpelling !== undefined && pattern === legacySpelling;
+  const rawName = resolveRawMcpIdentity(toolName, toolAliases);
+  return (
+    matchesMcpPattern(pattern, toolName, rawName, toolAliases, identity) ||
+    (!pattern.endsWith('*') &&
+      pattern.split('__').length >= 3 &&
+      pattern === resolveLegacyMcpSpelling(rawName, toolAliases))
+  );
 }
 
 // Lossy exact aliases and registered prefixes may restrict multiple tools.
@@ -2021,16 +1963,8 @@ export function matchesToolPattern(
   if (!toolName.startsWith('mcp__')) {
     return pattern === toolName;
   }
-  const rawMcpToolName = resolveRawMcpIdentity(toolName, toolAliases);
   return (
-    matchesMcpPattern(
-      pattern,
-      toolName,
-      rawMcpToolName,
-      toolAliases,
-      mcpIdentity,
-    ) ||
-    matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName) ||
+    matchesMcpName(pattern, toolName, toolAliases, mcpIdentity) ||
     matchesRestrictiveMcpName(pattern, toolName, mcpIdentity)
   );
 }
@@ -2102,11 +2036,7 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    const rawMcpToolName = resolveRawMcpIdentity(
-      canonicalCtxToolName,
-      toolAliases,
-    );
-    const matchesMcpName =
+    const matchedMcpName =
       restrictive && canonicalCtxToolName.startsWith('mcp__')
         ? matchesToolPattern(
             rule.toolName,
@@ -2114,19 +2044,13 @@ export function matchesRule(
             toolAliases,
             mcpIdentity,
           )
-        : matchesMcpPattern(
+        : matchesMcpName(
             rule.toolName,
             canonicalCtxToolName,
-            rawMcpToolName,
             toolAliases,
             mcpIdentity,
-          ) ||
-          matchesAdvertisedExactName(
-            rule.toolName,
-            toolAliases,
-            rawMcpToolName,
           );
-    if (!matchesMcpName) {
+    if (!matchedMcpName) {
       return false;
     }
 

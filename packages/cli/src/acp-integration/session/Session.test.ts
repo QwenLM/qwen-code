@@ -34343,23 +34343,6 @@ describe('Session', () => {
       // must resolve the same channel the scheduler's gate does (#10199);
       // the invocation (and its L4 alias channel) is only built AFTER this
       // check, so the aliases have to come from the tool itself.
-      const executeSpy = vi.fn();
-      const invocation = {
-        params: {},
-        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-        getConfirmationDetails: vi.fn().mockResolvedValue({
-          type: 'mcp',
-          title: 'Confirm MCP Tool Execution',
-          serverName: 'foo.bar',
-          toolName: 'search',
-          toolDisplayName: 'search',
-          permissionRules: [],
-          onConfirm: vi.fn(),
-        }),
-        getDescription: vi.fn().mockReturnValue('search'),
-        toolLocations: vi.fn().mockReturnValue([]),
-        execute: executeSpy,
-      };
       const mcpTool = new core.DiscoveredMCPTool(
         {} as never,
         'foo.bar',
@@ -34368,9 +34351,7 @@ describe('Session', () => {
         {},
       );
       expect(mcpTool.permissionAliases).toEqual(['mcp__foo.bar__search']);
-      const buildSpy = vi
-        .spyOn(mcpTool, 'build')
-        .mockReturnValue(invocation as never);
+      const buildSpy = vi.spyOn(mcpTool, 'build');
 
       mockToolRegistry.getTool.mockReturnValue(mcpTool);
       mockConfig.getApprovalMode = vi
@@ -34409,7 +34390,6 @@ describe('Session', () => {
       );
       // The L1 gate refused up front: the invocation was never built.
       expect(buildSpy).not.toHaveBeenCalled();
-      expect(executeSpy).not.toHaveBeenCalled();
     });
 
     it('respects permission-request hook allow decisions without opening ACP permission dialog', async () => {

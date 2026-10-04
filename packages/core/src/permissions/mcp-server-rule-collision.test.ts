@@ -1133,16 +1133,34 @@ describe('the producer-carried identity channel (R4-2)', () => {
     serverToolName: '_internal',
   };
 
-  it('refuses a whole-server rule for foo against a foo_ tool when identity is present', () => {
-    expect(
-      matchesMcpPattern(
-        'mcp__foo',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(false);
+  it.each<[string, string, string, boolean]>([
+    ['foo_', '_internal', 'mcp__foo', false],
+    ['foo_', '_internal', 'mcp__foo_', true],
+    ['foo_', '_internal', 'mcp__foo__*', false],
+    ['foo_', '_internal', 'mcp__foo___*', true],
+    ['foo_', '_internal', 'mcp__foo____*', false],
+    ['foo_', '_internal', 'mcp__foo____in*', true],
+    ['foo_bar', 'baz', 'mcp__foo', false],
+    ['foo_bar', 'baz', 'mcp__foo_bar', true],
+    ['foo_bar', 'evil', 'mcp__*', true],
+    ['foo_bar', 'evil', 'mcp__foo*', true],
+    ['foo_bar', 'evil', 'mcp__foo__*', false],
+  ])(
+    'matches %s / %s against %s: %s',
+    (serverName, serverToolName, rule, expected) => {
+      expect(
+        matchesMcpPattern(
+          rule,
+          `mcp__${serverName}__${serverToolName}`,
+          undefined,
+          undefined,
+          { serverName, serverToolName },
+        ),
+      ).toBe(expected);
+    },
+  );
+
+  it('keeps restrictive whole-server and match-all wrapper behavior', () => {
     expect(
       matchesToolPattern(
         'mcp__foo',
@@ -1151,86 +1169,11 @@ describe('the producer-carried identity channel (R4-2)', () => {
         fooUnderscoreIdentity,
       ),
     ).toBe(false);
-  });
-
-  it('still matches the foo_ server own whole-server rule', () => {
     expect(
-      matchesMcpPattern(
-        'mcp__foo_',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(true);
-  });
-
-  it('refuses a whole-server wildcard for foo against a foo_ tool when identity is present', () => {
-    expect(
-      matchesMcpPattern(
-        'mcp__foo__*',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(false);
-    // The foo_ whole-server spelling itself keeps working.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo___*',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(true);
-  });
-
-  it('reads a pure-underscore tool prefix as separator continuation, not a tool filter', () => {
-    // `mcp__foo____*` is `mcp__foo__` + `_*`: without the guard it would act
-    // as a tool-prefix wildcard for underscore-led tools on server foo_.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo____*',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(false);
-    // A tool prefix with real characters is a genuine filter.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo____in*',
-        FOO_UNDERSCORE_TOOL,
-        undefined,
-        undefined,
-        fooUnderscoreIdentity,
-      ),
-    ).toBe(true);
-  });
-
-  it('does not over-restrict mid-name underscores: a foo_bar tool answers only its own server rule', () => {
-    // A single mid-key underscore must not be treated as a server boundary.
-    const fooBarIdentity = { serverName: 'foo_bar', serverToolName: 'baz' };
-    expect(
-      matchesMcpPattern(
-        'mcp__foo',
-        'mcp__foo_bar__baz',
-        undefined,
-        undefined,
-        fooBarIdentity,
-      ),
-    ).toBe(false);
-    expect(
-      matchesMcpPattern(
-        'mcp__foo_bar',
-        'mcp__foo_bar__baz',
-        undefined,
-        undefined,
-        fooBarIdentity,
-      ),
+      matchesToolPattern('mcp__*', SAFE_SERVER_TOOL, undefined, {
+        serverName: 'foo_bar',
+        serverToolName: 'evil',
+      }),
     ).toBe(true);
   });
 
@@ -1245,20 +1188,12 @@ describe('the producer-carried identity channel (R4-2)', () => {
   it('a whole-server allow for foo no longer auto-approves foo_ tools end-to-end', async () => {
     const tool = prodTool('foo_', '_internal');
     expect(tool.name).toBe(FOO_UNDERSCORE_TOOL);
-    const identity = {
-      serverName: tool.serverName,
-      serverToolName: tool.serverToolName,
-    };
+    const ctx = producerContext(tool);
+    const identity = ctx.mcpIdentity;
 
     const pm = makePm({ permissionsAllow: ['mcp__foo'] });
 
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-        mcpIdentity: identity,
-      }),
-    ).toBe('default');
+    expect(await pm.evaluate(ctx)).toBe('default');
     // Registration-level check agrees: the foo_ tool is not disabled by a
     // deny written for foo either.
     const pmDeny = makePm({ permissionsDeny: ['mcp__foo'] });
@@ -1278,115 +1213,42 @@ describe('the producer-carried identity channel (R4-2)', () => {
       await pmDeny.getToolRegistrationStatus(
         ownTool.name,
         ownTool.permissionAliases,
-        {
-          serverName: ownTool.serverName,
-          serverToolName: ownTool.serverToolName,
-        },
+        producerContext(ownTool).mcpIdentity,
       ),
     ).toBe('disabled');
   });
 
-  it('keeps the documented match-all and partial-key wildcards working (R13-1)', () => {
-    const identity = { serverName: 'foo_bar', serverToolName: 'evil' };
-    // A prefix that closes no server segment is coarser than any boundary the
-    // producer can speak to, so it still matches every MCP tool.
-    expect(
-      matchesMcpPattern(
-        'mcp__*',
-        SAFE_SERVER_TOOL,
-        undefined,
-        undefined,
-        identity,
-      ),
-    ).toBe(true);
-    expect(
-      matchesToolPattern('mcp__*', SAFE_SERVER_TOOL, undefined, identity),
-    ).toBe(true);
-    expect(
-      matchesMcpPattern(
-        'mcp__foo*',
-        SAFE_SERVER_TOOL,
-        undefined,
-        undefined,
-        identity,
-      ),
-    ).toBe(true);
-    // A prefix that does close a segment still names its own server only.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo__*',
-        SAFE_SERVER_TOOL,
-        undefined,
-        undefined,
-        identity,
-      ),
-    ).toBe(false);
-  });
-
   it('matches a rule written in the registered spelling of an unsafe key (R13-1)', async () => {
     const tool = prodTool('foo:bar', 'a.b');
-    const identity = {
-      serverName: tool.serverName,
-      serverToolName: tool.serverToolName,
-    };
-    // The registered provider-safe spelling is what the UI and the model show,
-    // so a server-level or wildcard rule copied from there keeps matching.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo_bar',
-        tool.name,
-        undefined,
-        tool.permissionAliases,
-        identity,
-      ),
-    ).toBe(true);
-    expect(
-      matchesMcpPattern(
-        'mcp__foo_bar__*',
-        tool.name,
-        undefined,
-        tool.permissionAliases,
-        identity,
-      ),
-    ).toBe(true);
-    // The tool side of a rule is written in a rendering as well.
-    expect(
-      matchesMcpPattern(
-        'mcp__foo_bar__a_b*',
-        tool.name,
-        undefined,
-        tool.permissionAliases,
-        identity,
-      ),
-    ).toBe(true);
-    expect(
-      matchesMcpPattern(
-        'mcp__foo:bar',
-        tool.name,
-        undefined,
-        tool.permissionAliases,
-        identity,
-      ),
-    ).toBe(true);
+    const ctx = producerContext(tool);
+    const identity = ctx.mcpIdentity;
+    for (const rule of [
+      'mcp__foo_bar',
+      'mcp__foo_bar__*',
+      'mcp__foo_bar__a_b*',
+      'mcp__foo:bar',
+    ]) {
+      expect(
+        matchesMcpPattern(
+          rule,
+          tool.name,
+          undefined,
+          tool.permissionAliases,
+          identity,
+        ),
+      ).toBe(true);
+    }
 
     const pm = makePm({ permissionsDeny: ['mcp__foo_bar'] });
 
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-        mcpIdentity: identity,
-      }),
-    ).toBe('deny');
+    expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
   it('reads an all-underscore tool prefix as this server own tool (R13-1)', async () => {
     const tool = prodTool('github', '__debug');
     expect(tool.name).toBe('mcp__github____debug');
-    const identity = {
-      serverName: tool.serverName,
-      serverToolName: tool.serverToolName,
-    };
+    const ctx = producerContext(tool);
+    const identity = ctx.mcpIdentity;
     expect(
       matchesMcpPattern(
         'mcp__github____*',
@@ -1455,13 +1317,7 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
 
     const pm = makePm({ permissionsAllow: ['mcp__foo___*'] });
 
-    expect(
-      await pm.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-        mcpIdentity: { serverName: 'foo', serverToolName: 'deploy' },
-      }),
-    ).toBe('default');
+    expect(await pm.evaluate(producerContext(tool))).toBe('default');
   });
 
   it('decides coarse-vs-foreign from the producer renderings, not a segment count (R17-2)', async () => {
@@ -1503,13 +1359,9 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
 
     const pm = makePm({ permissionsDeny: ['mcp__my__svc*'] });
 
-    expect(
-      await pm.evaluate({
-        toolName: doubleUnderscoreKey.name,
-        toolAliases: doubleUnderscoreKey.permissionAliases,
-        mcpIdentity: { serverName: 'my__svc', serverToolName: 'deploy' },
-      }),
-    ).toBe('deny');
+    expect(await pm.evaluate(producerContext(doubleUnderscoreKey))).toBe(
+      'deny',
+    );
   });
 });
 
@@ -1576,10 +1428,8 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
     'denies %s / %s for %s and leaves the allow direction untouched',
     async (serverName, serverToolName, rule) => {
       const tool = prodTool(serverName, serverToolName);
-      const identity = {
-        serverName: tool.serverName,
-        serverToolName: tool.serverToolName,
-      };
+      const ctx = producerContext(tool);
+      const identity = ctx.mcpIdentity;
       // The rule is a literal prefix of the tool's own registered name.
       expect(tool.name.startsWith(rule.slice(0, -1))).toBe(true);
       expect(matchesToolPattern(rule, tool.name, undefined, identity)).toBe(
@@ -1588,35 +1438,21 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
 
       const deny = makePm({ permissionsDeny: [rule] });
 
-      expect(
-        await deny.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-          mcpIdentity: identity,
-        }),
-      ).toBe('deny');
+      expect(await deny.evaluate(ctx)).toBe('deny');
       expect(
         await deny.isToolEnabled(tool.name, tool.permissionAliases, identity),
       ).toBe(false);
 
       const allow = makePm({ permissionsAllow: [rule] });
 
-      expect(
-        await allow.evaluate({
-          toolName: tool.name,
-          toolAliases: tool.permissionAliases,
-          mcpIdentity: identity,
-        }),
-      ).toBe('default');
+      expect(await allow.evaluate(ctx)).toBe('default');
     },
   );
 
   it('does not let the fallback reach a foreign tool prefix at the key boundary', () => {
     const tool = prodTool('foo_', '_internal');
-    const identity = {
-      serverName: tool.serverName,
-      serverToolName: tool.serverToolName,
-    };
+    const ctx = producerContext(tool);
+    const identity = ctx.mcpIdentity;
     // `mcp__foo___zz*` starts at this key's boundary but is not a literal
     // prefix of `mcp__foo____internal`, so it stays unmatched.
     expect(
@@ -1626,19 +1462,10 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
 
   it('keeps a genuine tool prefix with real characters matching (control)', async () => {
     const tool = prodTool('a__b', '_hidden');
-    const identity = {
-      serverName: tool.serverName,
-      serverToolName: tool.serverToolName,
-    };
+    const ctx = producerContext(tool);
     const deny = makePm({ permissionsDeny: ['mcp__a__b___hid*'] });
 
-    expect(
-      await deny.evaluate({
-        toolName: tool.name,
-        toolAliases: tool.permissionAliases,
-        mcpIdentity: identity,
-      }),
-    ).toBe('deny');
+    expect(await deny.evaluate(ctx)).toBe('deny');
   });
 });
 
