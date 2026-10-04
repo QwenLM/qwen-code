@@ -36,13 +36,16 @@ import org.junit.jupiter.api.Timeout;
 // regardless of the locking shape; the discriminative power lives on
 // JDK 21.
 class SessionEventHubPinningTest {
-    // Past the scheduler's default maxPoolSize of 256: with a pin-capable
-    // shape, compensation cannot serve every parked subscriber on any
-    // realistic host, so the probe starves deterministically.
+    // At or past the scheduler's maxPoolSize (256 by default): with a
+    // pin-capable shape the parked subscribers hold every carrier the
+    // pool may create, so the probe — one virtual thread beyond
+    // SUBSCRIBERS — starves deterministically.
     private static final int SUBSCRIBERS = 300;
     private static final int ROUNDS = 3;
     // Never reached in a run: the publish latch, not the timeout, wakes
-    // every waiter. Bounded well under the test timeout as a last resort.
+    // every waiter (pinned by publishWakesEveryParkedSubscriber in
+    // SessionEventHubTest). Bounded well under the test timeout as a
+    // last resort.
     private static final Duration AWAIT_TIMEOUT = Duration.ofMinutes(1);
 
     @Test
@@ -50,10 +53,11 @@ class SessionEventHubPinningTest {
     void parkedSubscribersMustNotStarveOtherVirtualThreads()
             throws Exception {
         assumeTrue(Integer.getInteger("jdk.virtualThreadScheduler.maxPoolSize",
-                        256) < SUBSCRIBERS,
-                "jdk.virtualThreadScheduler.maxPoolSize is at or above "
+                        256) <= SUBSCRIBERS,
+                "jdk.virtualThreadScheduler.maxPoolSize is above "
                         + SUBSCRIBERS
-                        + "; a pin-capable shape would not starve");
+                        + "; a pin-capable shape would still have a"
+                        + " carrier for the probe");
         SessionEventHub hub = new SessionEventHub();
         int carriers = ForkJoinPool.getCommonPoolParallelism();
         List<SessionEventHub.Subscription> subscriptions =
