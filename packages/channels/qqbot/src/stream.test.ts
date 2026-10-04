@@ -7709,6 +7709,37 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
+  it('reports the sealed head a permanently blocked anchorless-stale completion cannot deliver', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // A proactive turn: no session reply anchor (onPromptStart got no message
+    // id), plus a stale streamState entry owned by an earlier turn, so
+    // onResponseComplete takes its anchorless fallback.
+    streamState(ch).set('s1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 0,
+    });
+    (chp['turnCounter'] as Map<string, number>).set('s1', 1);
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    chp['resolveRoute'] = async () => ({ block: 'permanent' });
+
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+
+    // The fallback used to reach the SendBlock-discarding base path, so a
+    // permanent block looked delivered and the sealed head vanished silently.
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 9 chars of sealed head',
+    );
+    stderrSpy.mockRestore();
+  });
+
   it('logs the head a session death discards from the side buffer', () => {
     const ch = makeChannel();
     const stderrSpy = vi

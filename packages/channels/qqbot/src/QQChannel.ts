@@ -2762,7 +2762,19 @@ export class QQChannel extends ChannelBase {
             this.endMsgSeqSend(captured);
           }
         } else {
-          await super.onResponseComplete(chatId, replyText, sessionId);
+          // super.onResponseComplete types as void and dispatches to the QQ
+          // sendResponseMessage override, which drops the SendBlock — an
+          // anchorless (proactive) stale completion would look delivered to the
+          // catch below, which only sees throws. Send what the base path sends
+          // and route the block through the checked helper.
+          await this.sendFinalSegmentChecked(sessionId, held, () =>
+            this.sendMessageWithReplyContext(
+              chatId,
+              replyText,
+              this.resolveResponseReplyContext(sessionId),
+              this.getResponseSourceLabel(sessionId),
+            ),
+          );
         }
       } catch (e: unknown) {
         this.logLostSealedHead(held?.pre, sessionId, e);
