@@ -2168,7 +2168,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects — Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2212,7 +2212,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4637,7 +4637,8 @@
           "status",
           "createdAt",
           "updatedAt",
-          "lastSequence"
+          "lastSequence",
+          "capabilities"
         ],
         "properties": {
           "creationOperationId": {

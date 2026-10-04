@@ -598,8 +598,9 @@ class ManagedAgentServerIntegrationTest {
         }
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                assertThat(store.findActiveTurn(tenant, sessionId))
-                        .isEmpty());
+                assertThat(store.findActiveTurns(tenant,
+                        java.util.List.of(sessionId)))
+                        .doesNotContainKey(sessionId));
         String closeId = objectMapper.readTree(lifecycle(
                         post("/v1/agents/sessions/{id}/close", sessionId),
                         tenant, "close-active")
@@ -626,7 +627,9 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
-            assertThat(store.findActiveTurn(tenant, sessionId)).isEmpty();
+            assertThat(store.findActiveTurns(tenant,
+                    java.util.List.of(sessionId)))
+                    .doesNotContainKey(sessionId);
             assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                     .isNotNull();
         });
@@ -775,7 +778,10 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.environment.errorCode")
                         .value("runtime_warm_failed"));
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        // The snapshot gate defers a caught-up rewrite until 5s after the
+        // last one, so the trailing non-terminal event takes that long to
+        // be covered.
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
                             .header(TenantContextFilter.HEADER, tenant)
@@ -1037,9 +1043,13 @@ class ManagedAgentServerIntegrationTest {
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.reasoning.delta", Map.of("text", "thought"),
                 false, "thought");
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.output_text.delta", Map.of("text", "final"),
-                false, "final");
+                true, "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
         assertThat(store.findSnapshot(tenant, session.sessionId()))
                 .get().satisfies(snapshot -> assertThat(snapshot.items())
@@ -1121,8 +1131,12 @@ class ManagedAgentServerIntegrationTest {
                     "item.output_text.delta", Map.of("text", text), false,
                     "single:" + text);
         }
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
-                "item.reasoning.delta", Map.of("text", "c"), false,
+                "item.reasoning.delta", Map.of("text", "c"), true,
                 "single:c");
         store.materializeNextBatch(tenant, sessionId, 100);
 
@@ -1255,8 +1269,10 @@ class ManagedAgentServerIntegrationTest {
                 Map.of("code", "runtime_warm_failed"), false,
                 "environment:first:failed");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant,
-                session.sessionId())).get().satisfies(event -> {
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant,
+                        java.util.List.of(session.sessionId())))
+                        .get(session.sessionId())).satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo(second.turnId());
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
