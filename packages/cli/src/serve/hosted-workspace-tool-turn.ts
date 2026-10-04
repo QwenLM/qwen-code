@@ -115,6 +115,9 @@ export interface HostedShellTurnOptions {
   // keyed by their execution identity; they outlive their starting turns
   // exactly like the publisher.
   monitorLoops?: Map<string, HostedMonitorLoop>;
+  // The embedded wake scheduler's tip: a notification input committed
+  // under its observation revision asks the pump to deliver it.
+  monitorWakeKick?: () => void;
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -2015,6 +2018,8 @@ export class HostedWorkspaceToolTurn {
       this.monitors,
       executionCallId,
       executor,
+      undefined,
+      () => this.shell?.monitorWakeKick?.(),
     );
     loops.set(executionCallId, loop);
     await loop.resumeAttached({

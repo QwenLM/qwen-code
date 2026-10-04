@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ManagedSessionEvent,
+  ManagedSessionJsonValue,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H3 of #12827: which accepted inputs are still owed a consumer. An input
 // is consumed exactly when some turn settles under its same turnId — the
@@ -17,7 +20,7 @@ export interface PendingSessionInput {
   readonly turnId: string;
   readonly source: string;
   readonly sequence: number;
-  readonly contentRef: unknown;
+  readonly contentRef: ManagedSessionJsonValue | undefined;
 }
 
 /**

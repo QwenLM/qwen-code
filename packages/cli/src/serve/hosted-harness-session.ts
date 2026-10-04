@@ -65,6 +65,11 @@ import {
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  HostedMonitorWakeScheduler,
+  settlePendingMonitorInputs,
+} from './hosted-monitor-wake.js';
+import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
@@ -151,6 +156,7 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  monitorWake?: HostedMonitorWakeScheduler;
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
    * teardown hand it back; retry-inviting refusals deliberately leave it
@@ -253,6 +259,15 @@ function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
     );
 }
 
+// H3: a monitor notification input is never a parked Turn — the wake pump
+// owns its consumption, so reopen and takeover arithmetic skips it exactly
+// like the close path settles it model-free.
+function isMonitorInput(event: ManagedSessionEvent): boolean {
+  return (
+    event.kind === 'input.accepted' && event.payload['source'] === 'monitor'
+  );
+}
+
 function unsettledInputsThrough(
   session: HostedSession,
   throughSequence: number,
@@ -260,7 +275,7 @@ function unsettledInputsThrough(
   const accepted = new Set<string>();
   const authority = session.managed.authority;
   for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
-    if (event.kind === 'input.accepted')
+    if (event.kind === 'input.accepted' && !isMonitorInput(event))
       accepted.add(event.payload['turnId'] as string);
     if (event.kind === 'turn.settled')
       accepted.delete(event.payload['turnId'] as string);
@@ -848,7 +863,7 @@ async function recoverShellReceipts(
   const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
   let currentPrompt: string | null = null;
   for (const event of events) {
-    if (event.kind === 'input.accepted') {
+    if (event.kind === 'input.accepted' && !isMonitorInput(event)) {
       const turnId = event.payload['turnId'];
       if (typeof turnId === 'string') {
         pending.add(turnId);
@@ -1546,6 +1561,115 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
+      // H3: the embedded wake scheduler of a Monitor-capable Session. A
+      // notification rides its observation revision; the pump delivers it
+      // as an ordinary text turn while the Session idles, queues in the
+      // journal while a turn runs, and leaves the remainder accurately
+      // pending the moment anything is parked or blocked.
+      if (session.monitors && session.shell && brokerOptions) {
+        const wakeBusy = () =>
+          session.active !== undefined ||
+          session.mcpBusy === true ||
+          session.mcpRecovering === true ||
+          session.hooksBusy === true ||
+          session.mcpClosing === true;
+        const wakeBlocked = () =>
+          session.blocked ||
+          session.managed.authority.currentActivation?.phase !== 'active' ||
+          (session.mcp?.hasPendingOperations() ?? false) ||
+          (session.hooks?.hasPendingOperations ?? false);
+        session.monitorWake = new HostedMonitorWakeScheduler({
+          next: async () => {
+            const first = pendingSessionInputs(
+              session.managed.authority.readEvents(),
+            ).find((input) => input.source === 'monitor');
+            if (first === undefined) return undefined;
+            const ref = assertManagedSessionDurableRef(
+              first.contentRef,
+              'monitor wake input',
+            );
+            if (ref.kind !== 'managed-input')
+              throw new Error('Monitor wake input is not an input resource.');
+            const body = object(
+              JSON.parse(
+                (await session.managed.resources.read(ref)).toString('utf8'),
+              ),
+            );
+            if (typeof body?.['text'] !== 'string')
+              throw new Error('Monitor wake input has no text.');
+            return { turnId: first.turnId, text: body['text'] };
+          },
+          state: () =>
+            wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
+          runTurn: async (turn) => {
+            if (wakeBusy() || session.blocked) return 'busy';
+            const abort = new AbortController();
+            session.active = { promptId: turn.turnId, digest: '', abort };
+            try {
+              await executeHostedTurn(
+                session,
+                sessionId,
+                cwd,
+                turn.turnId,
+                turn.text,
+                abort,
+                brokerOptions,
+              );
+            } catch (cause) {
+              if (
+                cause instanceof HostedToolRecoveryRequiredError ||
+                cause instanceof HostedMcpRecoveryRequiredError ||
+                cause instanceof HostedHookRecoveryRequiredError
+              ) {
+                // Something parked mid-turn: a later settle or takeover
+                // consumes the input, exactly like a parked prompt.
+                session.blocked = true;
+                writeStderrLineSafe(
+                  'qwen serve: Monitor wake turn ' +
+                    turn.turnId +
+                    ' is recovery blocked: ' +
+                    String(cause),
+                );
+                return 'settled';
+              }
+              try {
+                await session.managed.sink.write(
+                  record(session, sessionId, 'system', null, {
+                    subtype: 'turn_result',
+                    systemPayload: {
+                      promptId: turn.turnId,
+                      state: 'error',
+                      stopReason: 'error',
+                      endedAt: Date.now(),
+                    },
+                  }),
+                );
+              } catch (settleCause) {
+                session.blocked = true;
+                writeStderrLineSafe(
+                  'qwen serve: Monitor wake turn ' +
+                    turn.turnId +
+                    ' could not settle: ' +
+                    String(settleCause),
+                );
+              }
+            } finally {
+              session.active = undefined;
+            }
+            return 'settled';
+          },
+          failed: (cause) => {
+            session.blocked = true;
+            writeStderrLineSafe(
+              'qwen serve: Monitor wake pump of session ' +
+                sessionId +
+                ' failed: ' +
+                String(cause),
+            );
+          },
+        });
+        session.shell.monitorWakeKick = () => session.monitorWake?.kick();
+      }
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
@@ -1652,7 +1776,7 @@ export function registerHostedHarnessSessionRoutes(
           1,
           restore.throughSequence,
         )) {
-          if (event.kind === 'input.accepted')
+          if (event.kind === 'input.accepted' && !isMonitorInput(event))
             pendingInputs.add(event.payload['turnId'] as string);
           if (event.kind === 'turn.settled')
             pendingInputs.delete(event.payload['turnId'] as string);
@@ -1815,6 +1939,7 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      session.monitorWake?.kick();
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
       refusedAdoptions.delete(sessionId);
@@ -3325,6 +3450,9 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
+    // No wake turn may start once the Session is draining; pending
+    // notifications still settle below before the log closes.
+    session.monitorWake?.close();
     try {
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
@@ -3354,6 +3482,15 @@ export function registerHostedHarnessSessionRoutes(
       // their exits settled through this publisher; it closes last.
       await session.shell?.publisher?.close();
       await session.mcp?.close();
+      // No monitor notification may park the Session: every pending one
+      // settles cancelled here, model-free, before the log closes.
+      if (session.monitors)
+        await settlePendingMonitorInputs({
+          authority: session.managed.authority,
+          sink: session.managed.sink,
+          sessionId: req.params['id'],
+          cwd: session.cwd,
+        });
       await session.managed.close();
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);

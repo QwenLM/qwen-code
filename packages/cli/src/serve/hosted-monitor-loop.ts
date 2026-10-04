@@ -88,6 +88,7 @@ export class HostedMonitorLoop {
     private readonly monitorId: string,
     private readonly executor: MonitorWatchExecutor,
     private readonly clock: MonitorLoopClock = GLOBAL_CLOCK,
+    private readonly onNotification?: () => void,
   ) {}
 
   /** Resolves once every settle queued so far has finished. */
@@ -252,6 +253,8 @@ export class HostedMonitorLoop {
       (this.monitors.record(this.monitorId)?.observationSequence ?? 0) + 1;
     const input = await this.notification(nextSequence, lines);
     await this.monitors.observe(this.monitorId, { lines }, { input });
+    // The wake is live: the embedded scheduler may deliver it now.
+    this.onNotification?.();
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
