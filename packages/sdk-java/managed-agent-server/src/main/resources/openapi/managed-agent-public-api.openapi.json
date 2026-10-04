@@ -2245,7 +2245,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listSessionTaskEvents",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Task events strictly after the cursor, oldest first, published as a committed prefix per task: no event may become visible at or before any previously returned event, page or output_cursor position. 400 invalid_event_cursor rejects a malformed cursor or one from another task. The durable retention floor is the position after the newest expired event, initially the stream start; only an oldest prefix expires. 409 cursor_expired means strictly below that floor, even when no events remain; equality is valid. Its replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. Cursor identity, logical position, payload and accepted schema/projection versions survive rebuilds, restarts and archival; retention may still expire a cursor. Any output-producing task requires capabilities.artifacts. An output event holds back its own expiry and every later event until its full text is durably readable in an Artifact and discoverable by subsequent recovery reads, including through a potentially lagging task projection. Time retention is a target under healthy archival, not an unconditional deletion deadline. Archival failure pins the floor; H3 must bound durable backlog and apply producer backpressure and admission blocking before capacity is exhausted, or leave output-producing tasks disabled. Never silently discard accepted output. After cursor_expired, read one event page from the floor without after and save next_cursor; do not wait for has_more=false because an active producer may never catch up. Then read a fresh task view and discover/read its Artifacts, then resume from the saved page cursor, including events held back by the first page limit, not the new view's output_cursor. If the floor overtakes the reader, restart recovery; never treat another 409 as an empty page. Until older Artifacts can be enumerated and attributed to the task, H3 must prevent rotation beyond the 100 artifact_refs entries; afterward recovery must also enumerate older Artifacts. Recovery is guaranteed while the task and its Artifacts remain readable under their retention and authorization rules. Stage H3 defines stable output segments for joining Artifacts and events without overlap. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
@@ -2404,7 +2404,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "queryWebShellTaskEvents",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Same authorized task semantics as the public task events route, including the durable retention floor, committed-prefix publication, Artifact recovery order and client tolerance of unknown optional fields and event types.",

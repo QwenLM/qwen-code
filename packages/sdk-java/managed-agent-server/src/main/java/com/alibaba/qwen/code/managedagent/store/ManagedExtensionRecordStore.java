@@ -71,7 +71,7 @@ public class ManagedExtensionRecordStore {
     // Parses as strictly as the Session authority's reader: no duplicate
     // keys, no trailing content, no deeper nesting, and, checked after
     // parsing, only finite numbers. The store never accepts a line or a body
-    // that the authority's JSON reader would refuse.
+    // that the authority could not read back.
     private static final ObjectMapper JSON = JsonMapper.builder(JsonFactory
                     .builder().streamReadConstraints(StreamReadConstraints
                             .builder().maxNestingDepth(ManagedSessionStoreModels
@@ -80,17 +80,25 @@ public class ManagedExtensionRecordStore {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
+    private final ManagedTaskEventStore taskEvents;
 
     @Autowired
     public ManagedExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions) {
+            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
+        this.taskEvents = taskEvents;
     }
 
     /** A store beside no public Session table, which announces nothing. */
     ManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, null);
+    }
+
+    /** A store that journals its own task events beside the table. */
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+            AgentStateStore sessions) {
+        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
     public record TaskRow(String taskId, String kind,
@@ -181,16 +189,12 @@ public class ManagedExtensionRecordStore {
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
      * Every record line must be one the authority's reader can parse, and
-     * every event line must pass the checks the authority applies to every
-     * line whatever its kind: the envelope, the event-kind and subtype
-     * vocabularies, the domain checks, the reserved id namespace and the
-     * byte caps. The per-kind payload schemas and subject rules, and the
-     * commit marker's digests, stay the authority's own contract; its
-     * client checks them before it commits, and they are not re-derived
-     * here. A Stage H event must hold its declared place among the
-     * transaction's {@code eventCount} events, and its transaction must
-     * hold only those events and then its commit marker, as the authority
-     * writes it.
+     * every event line one its reader can read back: a line the authority
+     * would refuse at the next open is refused here, so no commit can
+     * brick the Session it writes. A Stage H event must hold its declared
+     * place among the transaction's {@code eventCount} events, and its
+     * transaction must hold only those events and then its commit marker,
+     * as the authority writes it.
      */
     ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
@@ -198,18 +202,11 @@ public class ManagedExtensionRecordStore {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
-        JsonNode lastActivation = null;
         int applied = 0;
+        JsonNode lastActivation = null;
         boolean shaped = true;
         boolean managed = false;
         String lastSubtype = null;
-        // Every event line must be scoped to the committing Session — the
-        // closed-key check both read paths enforce applies at write time
-        // too, so a misscoped line never enters the journal at all.
-        JsonNode sessionScope = JSON.createObjectNode()
-                .put("tenantId", tenantId)
-                .put("workspaceId", workspaceId)
-                .put("sessionId", sessionId);
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
             if (record == null) {
@@ -232,35 +229,26 @@ public class ManagedExtensionRecordStore {
                             + " after the Managed header.");
                 }
                 shaped &= index >= eventCount;
-                // Every line is already within MAX_EVENT_BYTES, which
-                // validateUtf8JsonLines enforces before this runs; only a
-                // commit marker has a tighter cap.
-                if (COMMIT_SUBTYPE.equals(subtype)) {
-                    requireLineBytes(lines[index], index,
-                            ManagedSessionStoreModels.MAX_COMMIT_MARKER_BYTES);
-                }
+                requireLineBytes(lines[index], index,
+                        COMMIT_SUBTYPE.equals(subtype)
+                                ? ManagedSessionStoreModels
+                                        .MAX_COMMIT_MARKER_BYTES
+                                : ManagedSessionStoreModels.MAX_EVENT_BYTES);
                 continue;
             }
             managed = true;
+            requireLineBytes(lines[index], index,
+                    ManagedSessionStoreModels.MAX_EVENT_BYTES);
             require(index < eventCount, "The event of record line "
-                    + (index + 1) + " has an invalid journal position: it is"
-                    + " not one of the transaction's events.");
+                    + (index + 1) + " is not one of the transaction's"
+                    + " events.");
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
             String kind = event.path("kind").textValue();
-            boolean committed = "domain.committed".equals(kind);
-            String domain = committed ? payload.path("domain").textValue()
-                    : null;
+            String domain = "domain.committed".equals(kind)
+                    ? payload.path("domain").textValue() : null;
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            // requireEvent answers a Stage H record event's scope under its
-            // own messages; every other enveloped line is refused under the
-            // message both publication read paths give it.
-            if (event.isObject() && body == null) {
-                require(event.path("v").asInt() == 1
-                        && sessionScope.equals(event.path("sessionKey")),
-                        "Journal event scope conflicts");
-            }
             long occurredAt = requireEvent(event, tenantId, workspaceId,
                     sessionId, firstSequence + index, body == null);
             if (body == null) {
@@ -275,10 +263,13 @@ public class ManagedExtensionRecordStore {
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
-            if (!committed) {
+            if (!"domain.committed".equals(kind)) {
                 continue;
             }
-            requireDomainCommitted(payload, body != null);
+            // Run the payload checks for every domain.committed event, not
+            // only ones with a parseable domain — a line without a textual
+            // domain must not skip into the journal the reader refuses.
+            requireDomainCommitted(payload, domain, body != null);
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"
                         + " Stage H record.");
@@ -393,12 +384,11 @@ public class ManagedExtensionRecordStore {
      * has a record body here.
      */
     private static void requireDomainCommitted(JsonNode payload,
-            boolean stageH) {
-        String domain;
+            String domain, boolean stageH) {
         try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
                     "event.payload");
-            domain = ManagedExtensionRecords.oneOf(payload.get("domain"),
+            ManagedExtensionRecords.oneOf(payload.get("domain"),
                     ManagedExtensionRecords.DOMAINS, "event.payload.domain");
             ManagedExtensionRecords.count(payload.get("version"), 1, 1,
                     "event.payload.version");
@@ -461,6 +451,23 @@ public class ManagedExtensionRecordStore {
         }
         if (List.of("mcp_configuration", "mcp_operation", "hook_registration", "hook_execution").contains(domain)) {
             for (String field : List.of("catalogRef", "argsRef", "resultRef", "planRef", "inputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("child_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("monitor_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "lastObservationRef")) {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
@@ -603,7 +610,8 @@ public class ManagedExtensionRecordStore {
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
                 previous == null ? null : previous.projection(), run,
-                occurredAt);
+                occurredAt,
+                record.path("stopRequested").asBoolean(false));
         JsonNode delivery = run.get("delivery");
         String deliveryTarget = delivery.isNull() ? null
                 : delivery.get("target").textValue();
@@ -659,9 +667,12 @@ public class ManagedExtensionRecordStore {
         }
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
-            announce(tenantId, sessionId,
-                    ManagedExtensionProjection.taskId(recordKey),
-                    projection.state(), revision);
+            String taskId = ManagedExtensionProjection.taskId(recordKey);
+            announce(tenantId, sessionId, taskId, projection.state(),
+                    revision);
+            taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                    projection.state(), projection.runtimeState(),
+                    occurredAt);
         }
     }
 

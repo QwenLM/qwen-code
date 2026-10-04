@@ -157,7 +157,8 @@ public final class PublicationJournalFixture {
         intent.set("argsRef", binding.get("argsRef"));
         append("tool.dispatch",
                 event(1, "activation.changed", activation("active"))
-                        + event(2, "tool.intent", intent) + MARKER, 2,
+                        + event(2, "tool.intent", intent)
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n", 2,
                 List.of(resource(binding.get("argsRef"), args),
                         resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
@@ -201,10 +202,6 @@ public final class PublicationJournalFixture {
                 .put("epoch", 1).put("phase", phase)
                 .put("expiresAt", System.currentTimeMillis() + 180000);
     }
-
-    /** A commit-marker's line, closing each transaction's events. */
-    public static final String MARKER =
-            "{\"subtype\":\"managed_session_commit_v1\"}\n";
 
     public String event(long number, String kind, JsonNode payload) {
         return event(number, kind, payload, binding.get("sessionKey"), 1);

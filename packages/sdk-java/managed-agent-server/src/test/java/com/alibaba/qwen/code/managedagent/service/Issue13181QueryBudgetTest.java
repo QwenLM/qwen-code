@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ACTIVATION_ID;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.MARKER;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
@@ -1018,8 +1017,8 @@ class Issue13181QueryBudgetTest {
         int filler = 30;
         for (int index = 0; index < filler; index++) {
             append("tool.dispatch",
-                    event(journal.sequence + 1, "checkpoint.committed",
-                            JSON.createObjectNode()) + MARKER,
+                    event(journal.sequence + 1, "tool.intent",
+                            JSON.createObjectNode()) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                     1, List.of(), null);
         }
         long head = fixture.jdbc.queryForObject("SELECT MAX(journal_revision)"
@@ -1081,7 +1080,7 @@ class Issue13181QueryBudgetTest {
         // A release committed after the reserve updates the head columns.
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + MARKER,
+                        activation("released")) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.ledger.reset();
@@ -1109,7 +1108,7 @@ class Issue13181QueryBudgetTest {
                 + " FROM qwen_managed_session_journal_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + MARKER,
+                        activation("released")) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
@@ -1155,7 +1154,7 @@ class Issue13181QueryBudgetTest {
                 + " FROM qwen_managed_session_journal_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + MARKER,
+                        activation("released")) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
@@ -1216,7 +1215,7 @@ class Issue13181QueryBudgetTest {
                 + " FROM qwen_managed_session_journal_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("released")) + MARKER,
+                        activation("released")) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
@@ -1232,8 +1231,8 @@ class Issue13181QueryBudgetTest {
         // it must not advance the skewed columns' stamp, or the stale
         // active state would be certified as current.
         append("tool.dispatch",
-                event(journal.sequence + 1, "checkpoint.committed",
-                        JSON.createObjectNode()) + MARKER,
+                event(journal.sequence + 1, "tool.intent",
+                        JSON.createObjectNode()) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(), null);
         var stamped = fixture.jdbc.queryForMap(
                 "SELECT activation_head_revision, journal_revision"
@@ -1262,7 +1261,7 @@ class Issue13181QueryBudgetTest {
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active");
         append("activation.no-expiry",
-                event(journal.sequence + 1, "activation.changed", noExpiry) + MARKER,
+                event(journal.sequence + 1, "activation.changed", noExpiry) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
@@ -1282,7 +1281,7 @@ class Issue13181QueryBudgetTest {
                 .put("expiresAt", "99999999999999999999999999");
         append("activation.overflow",
                 event(journal.sequence + 1, "activation.changed", overflowing)
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
@@ -1298,7 +1297,7 @@ class Issue13181QueryBudgetTest {
                 .put("activationId", ACTIVATION_ID).put("epoch", 1)
                 .put("phase", "active").put("expiresAt", "1e100000000");
         append("activation.exponent",
-                event(journal.sequence + 1, "activation.changed", exponent) + MARKER,
+                event(journal.sequence + 1, "activation.changed", exponent) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
@@ -1312,7 +1311,7 @@ class Issue13181QueryBudgetTest {
                 .put("phase", "active").put("expiresAt", "1e2147483647");
         append("activation.max-exponent",
                 event(journal.sequence + 1, "activation.changed", maxExponent)
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
@@ -1326,7 +1325,7 @@ class Issue13181QueryBudgetTest {
                 .put("phase", "active").put("expiresAt", "1e-100000000");
         append("activation.tiny-fraction",
                 event(journal.sequence + 1, "activation.changed", tinyFraction)
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
@@ -1354,7 +1353,7 @@ class Issue13181QueryBudgetTest {
                 .put("phase", "active")
                 .put("expiresAt", System.currentTimeMillis() - 1000);
         append("activation.expired",
-                event(journal.sequence + 1, "activation.changed", expired) + MARKER,
+                event(journal.sequence + 1, "activation.changed", expired) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         fixture.ledger.reset();
@@ -1409,12 +1408,12 @@ class Issue13181QueryBudgetTest {
         // commit marker's slot): refused, never captured into the head
         // columns.
         assertThatThrownBy(() -> append("activation.misplaced",
-                event(journal.sequence + 1, "checkpoint.committed",
+                event(journal.sequence + 1, "tool.intent",
                         JSON.createObjectNode())
                         + event(journal.sequence + 2, "activation.changed",
                                 activation("released")),
                 1, List.of(), null))
-                .hasMessageContaining("invalid journal position");
+                .hasMessageContaining("is not one of the transaction's events");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
                         + " qwen_managed_session_journal_head", String.class))
                 .isEqualTo("active");
@@ -1428,25 +1427,26 @@ class Issue13181QueryBudgetTest {
                 .put("workspaceId", "workspace-1").put("sessionId", "session-9");
         assertThatThrownBy(() -> append("activation.foreign",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("active"), foreignKey, 1) + MARKER,
+                        activation("active"), foreignKey, 1) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(), null))
-                .hasMessageContaining("Journal event scope conflicts");
+                .hasMessageContaining("The event names another Session.");
         // A version the reader does not know is refused the same way.
         assertThatThrownBy(() -> append("activation.unknown-version",
                 event(journal.sequence + 1, "activation.changed",
                         activation("active"), binding.get("sessionKey"), 2)
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(), null))
-                .hasMessageContaining("Journal event scope conflicts");
+                .hasMessageContaining("event.v must be an integer from 1 to 1.");
         // A key carrying extra fields reads as foreign too, matching the
         // read paths' closed-key comparison.
         ObjectNode paddedKey = binding.get("sessionKey").deepCopy();
         paddedKey.put("junk", 1);
         assertThatThrownBy(() -> append("activation.padded-key",
                 event(journal.sequence + 1, "activation.changed",
-                        activation("active"), paddedKey, 1) + MARKER,
+                        activation("active"), paddedKey, 1) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(), null))
-                .hasMessageContaining("Journal event scope conflicts");
+                .hasMessageContaining("event.sessionKey must be an object"
+                        + " with exactly");
         // The head columns keep the previous activation.
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
                         + " qwen_managed_session_journal_head", String.class))
@@ -1468,7 +1468,7 @@ class Issue13181QueryBudgetTest {
                                 .put("phase", "active-" + "a".repeat(40))
                                 .put("expiresAt",
                                         System.currentTimeMillis() + 180000))
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
@@ -1502,7 +1502,7 @@ class Issue13181QueryBudgetTest {
                                 .put("epoch", 1).put("phase", "active")
                                 .put("expiresAt",
                                         System.currentTimeMillis() + 180000))
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(), null);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_id FROM"
                         + " qwen_managed_session_journal_head", String.class))
@@ -1524,8 +1524,8 @@ class Issue13181QueryBudgetTest {
         int filler = 30;
         for (int index = 0; index < filler; index++) {
             append("tool.dispatch",
-                    event(journal.sequence + 1, "checkpoint.committed",
-                            JSON.createObjectNode()) + MARKER,
+                    event(journal.sequence + 1, "tool.intent",
+                            JSON.createObjectNode()) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                     1, List.of(), null);
         }
         // Simulate a journal last written before migration V36.
@@ -1563,8 +1563,8 @@ class Issue13181QueryBudgetTest {
         int filler = 30;
         for (int index = 0; index < filler; index++) {
             append("tool.dispatch",
-                    event(journal.sequence + 1, "checkpoint.committed",
-                            JSON.createObjectNode()) + MARKER,
+                    event(journal.sequence + 1, "tool.intent",
+                            JSON.createObjectNode()) + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                     1, List.of(), null);
         }
         fixture.ledger.reset();
@@ -1599,7 +1599,7 @@ class Issue13181QueryBudgetTest {
                 .put("expiresAt", String.valueOf(expiry));
         append("activation.string-expiry",
                 event(journal.sequence + 1, "activation.changed", stringExpiry)
-                        + MARKER,
+                        + "{\"subtype\":\"managed_session_commit_v1\"}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
