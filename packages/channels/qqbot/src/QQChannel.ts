@@ -2764,9 +2764,10 @@ export class QQChannel extends ChannelBase {
         } else {
           // super.onResponseComplete types as void and dispatches to the QQ
           // sendResponseMessage override, which drops the SendBlock — an
-          // anchorless (proactive) stale completion would look delivered to the
-          // catch below, which only sees throws. Send what the base path sends
-          // and route the block through the checked helper.
+          // anchorless stale completion (this turn's own reply anchor absent or
+          // past REPLY_MSG_ID_TTL_MS) would look delivered to the catch below,
+          // which only sees throws. Send what the base path sends and route the
+          // block through the checked helper.
           await this.sendFinalSegmentChecked(sessionId, held, () =>
             this.sendMessageWithReplyContext(
               chatId,
@@ -2785,10 +2786,16 @@ export class QQChannel extends ChannelBase {
         // in-try release used to be skipped, leaving this turn's anchor (and
         // its msg_seq counter) behind an in-flight-send veto forever. The
         // `finally` runs after endMsgSeqSend, so the counter this send owns is
-        // reclaimable, and still passes `captured` for the anchored case so a
-        // successor turn's anchor is never dropped.
-        if (captured) this.releaseSessionReplyAnchor(sessionId, captured);
-        else this.releaseSessionReplyAnchor(sessionId);
+        // reclaimable. Identity-gated either way: `captured` for a live anchor,
+        // the raw entry's msgId for one that expired — /clear deletes the
+        // session queue, so a successor turn can install its own anchor while a
+        // wedged send is still in flight, and an unguarded release would delete
+        // it. With no anchor of this turn's at all there is nothing to release.
+        if (captured) {
+          this.releaseSessionReplyAnchor(sessionId, captured);
+        } else if (capturedEntry) {
+          this.releaseSessionReplyAnchor(sessionId, capturedEntry.msgId);
+        }
       }
       return;
     }
@@ -2904,7 +2911,16 @@ export class QQChannel extends ChannelBase {
     // msg_seq and would silently drop the reply tail. If sendMessage throws,
     // ChannelBase's finally still runs onPromptEnd, which releases the anchor
     // (idempotent — a second release here is a no-op).
-    this.releaseSessionReplyAnchor(sessionId);
+    // Identity-gated: /clear deletes the session queue, so a successor turn can
+    // install its own anchor while a wedged final send is still in flight;
+    // releasing by sessionId alone would delete the successor's anchor. Pass
+    // this turn's resolved msgId (the raw entry's for an expired anchor) so
+    // only an anchor that still belongs to this turn is removed. With no anchor
+    // of this turn's, there is nothing to release.
+    const releaseMsgId = capturedMsgId ?? anchorEntry?.msgId;
+    if (releaseMsgId !== undefined) {
+      this.releaseSessionReplyAnchor(sessionId, releaseMsgId);
+    }
   }
 
   /**

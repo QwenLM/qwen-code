@@ -7709,15 +7709,23 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
-  it('reports the sealed head a permanently blocked anchorless-stale completion cannot deliver', async () => {
+  it('reports the sealed head a permanently blocked stale completion with an expired reply anchor cannot deliver', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
-    // A proactive turn: no session reply anchor (onPromptStart got no message
-    // id), plus a stale streamState entry owned by an earlier turn, so
+    // The reachable anchorless-stale route: an inbound turn whose own reply
+    // anchor is past REPLY_MSG_ID_TTL_MS (an inbound QQ envelope always carries
+    // a messageId, so TTL expiry is how the anchor goes missing) while a
+    // predecessor's deferred flush still owns the stale streamState entry, so
     // onResponseComplete takes its anchorless fallback.
+    (
+      chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >
+    ).set('s1', { msgId: 'msg-A', timestamp: Date.now() - (300_000 + 1000) });
     streamState(ch).set('s1', {
       chatId: 'test-chat',
       buffer: '',
@@ -7728,15 +7736,98 @@ describe('round-1 robustness pins', () => {
     (chp['turnCounter'] as Map<string, number>).set('s1', 1);
     stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
     chp['resolveRoute'] = async () => ({ block: 'permanent' });
+    // Branch pin: the anchored-stale path claims the msgId through
+    // beginMsgSeqSend, the anchorless fallback never does. Without this the
+    // test still passes if the fixture drifts to a live anchor, because both
+    // branches route through sendFinalSegmentChecked and neither reaches the
+    // wire.
+    const beginSpy = vi.spyOn(
+      ch as unknown as { beginMsgSeqSend: (msgId: string) => void },
+      'beginMsgSeqSend',
+    );
 
     await onResponseComplete(ch, 'test-chat', '', 's1');
 
     // The fallback used to reach the SendBlock-discarding base path, so a
     // permanent block looked delivered and the sealed head vanished silently.
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(beginSpy).not.toHaveBeenCalled();
+    // The expired anchor is still this turn's, so it is released.
+    expect((chp['sessionReplyMsgId'] as Map<string, unknown>).has('s1')).toBe(
+      false,
+    );
     expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
       'dropping 9 chars of sealed head',
     );
+    stderrSpy.mockRestore();
+  });
+
+  it('keeps a successor anchor installed mid-send by an anchorless-stale completion', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // No session anchor of this turn's at all, plus a stale streamState entry
+    // owned by an earlier turn: onResponseComplete takes its anchorless
+    // fallback.
+    streamState(ch).set('s1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 0,
+    });
+    (chp['turnCounter'] as Map<string, number>).set('s1', 1);
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    chp['resolveRoute'] = async () => {
+      // /clear deletes the session queue, so a successor turn can start while
+      // this wedged final send is still in flight and install its own anchor.
+      onPromptStart(ch, 'test-chat', 's1', 'msg-SUCCESSOR');
+      return { block: 'permanent' };
+    };
+
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+
+    // The unguarded release by sessionId alone deleted the successor's anchor.
+    expect(anchors.get('s1')?.msgId).toBe('msg-SUCCESSOR');
+    stderrSpy.mockRestore();
+  });
+
+  it('keeps a successor anchor installed mid-send by a normal completion', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // This turn owns a live streamState entry with a buffered final segment.
+    streamState(ch).set('s1', {
+      chatId: 'test-chat',
+      buffer: 'HEAD-BODY',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    chp['resolveRoute'] = async () => {
+      onPromptStart(ch, 'test-chat', 's1', 'msg-SUCCESSOR');
+      return { block: 'permanent' };
+    };
+
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+
+    // The unguarded release at the main completion path deleted the
+    // successor's anchor.
+    expect(anchors.get('s1')?.msgId).toBe('msg-SUCCESSOR');
     stderrSpy.mockRestore();
   });
 
