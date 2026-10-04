@@ -808,6 +808,12 @@ export class WeComChannel extends ChannelBase {
     chatId: string,
     threadId?: string,
   ): string {
+    // This switch mirrors SessionRouter.routingKey so an attachment directory
+    // is keyed like the route that owns it. Only `single` consumes the shared
+    // template (singleScopeRoutingKey); `thread`, `chat_thread` and `user`
+    // still hand-duplicate SessionRouter's key shapes there, so a change to
+    // those shapes must be applied here too or an attachment lookup silently
+    // misses the route that stored it.
     switch (this.config.sessionScope) {
       case 'thread':
         return `${this.name}:${threadId || chatId}`;

@@ -2732,11 +2732,12 @@ describe('buffer limit flush (#11)', () => {
     await drain();
   });
 
-  it('counts a capped stash loss once per character, not once per field', async () => {
-    // A limit of 20 against a stash that opens with the 8-char 'T2-HEAD '
-    // prefix: the cap crosses the sealed pre on several chunks, not just the
-    // first, so the pre trim repeats and its double count would accumulate.
-    const ch = makeChannel({ bufferFlushLength: 20 });
+  it('counts a capped stash loss once per character across repeated trims', async () => {
+    // The sealed pre is trimmed by more than one cap: shrinking the limit
+    // between chunks makes a later chunk trim `pre` beyond the text trim, so a
+    // form that charges the pre trim as a second loss accumulates instead of
+    // cancelling out.
+    const ch = makeChannel({ bufferFlushLength: 40 });
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
       string,
@@ -2752,34 +2753,51 @@ describe('buffer limit flush (#11)', () => {
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     const { resolveSend } = await reachStaleStash(ch);
+    const state = (
+      chp['streamState'] as Map<string, { sourceLabel?: string }>
+    ).get('s1')!;
 
-    // `pre` is sealed to the 8-char head, which is a strict prefix of every
-    // later stash, so each cap needs to trim pre too. The loss must be
-    // measured in characters the stash actually held: 7 + 10 + 10 + 10 = 37,
-    // where counting the pre trim again would report 7+11, 10+12, 10+10 ...
-    // and inflate both the line and the cumulative total.
-    onResponseChunk(ch, 'test-chat', 'A'.repeat(19), 's1');
+    // Grow the stash under the 40-char cap, then seal the whole 39-char text
+    // at a boundary.
+    onResponseChunk(ch, 'test-chat', 'A'.repeat(31), 's1');
     onResponseBoundary(ch, 'test-chat', 's1');
-    for (let i = 0; i < 3; i++) {
-      onResponseChunk(ch, 'test-chat', 'B'.repeat(10), 's1');
-    }
+    const sealed = orphanBuffer.get('s1')!;
+    expect(sealed.text.length).toBe(39);
+    expect(sealed.pre).toBe(sealed.text);
+
+    // Shrink the limit to 30 and add 5 chars: 44 -> 30 drops 14 characters,
+    // and the 39-char sealed pre has to be trimmed with the text.
+    state.sourceLabel = 'L'.repeat(9); // limit 30
+    onResponseChunk(ch, 'test-chat', 'B'.repeat(5), 's1');
+
+    // Shrink it again to 20 and add 5 more: 35 -> 20 drops 15, of which the
+    // pre trim (30 -> 20) is a subset of the same characters.
+    state.sourceLabel = 'L'.repeat(19); // limit 20
+    onResponseChunk(ch, 'test-chat', 'C'.repeat(5), 's1');
+
+    // A third chunk at that limit only trims the text: the pre is already
+    // flush with it, so 25 -> 20 drops 5 more.
+    onResponseChunk(ch, 'test-chat', 'D'.repeat(5), 's1');
 
     const stashed = orphanBuffer.get('s1')!;
     expect(stashed.text.length).toBe(20);
-    // The cap keeps the head, so later chunks are trimmed away entirely.
     expect(stashed.text).toBe('T2-HEAD ' + 'A'.repeat(12));
     expect(stashed.pre).toBe(stashed.text);
-    expect(stashed.capDropped).toBe(37);
+    // 14 + 15 + 5 characters really left the stash. The pre trims of 9 and 10
+    // are those same characters, so charging them again would report 53.
+    expect(stashed.capDropped).toBe(34);
     const firstLine = stderrSpy.mock.calls
       .map((c) => String(c[0]))
       .find((line) => line.includes('over the buffer limit'));
-    expect(firstLine).toContain('dropping 7 chars');
+    expect(firstLine).toContain('dropping 14 chars');
+    expect(firstLine).toContain('and its sealed pre');
 
-    // The cumulative summary reports only the drops the first line did not.
+    // The cumulative summary reports only the drops the first line did not:
+    // 34 - 14. The double-counted form would report 53 in total.
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(logged).toContain('30 further chars dropped (37 total)');
-    expect(logged).not.toContain('(74 total)');
+    expect(logged).toContain('20 further chars dropped (34 total)');
+    expect(logged).not.toContain('(53 total)');
 
     stderrSpy.mockRestore();
     resolveSend(mockResponse(true));
@@ -7549,10 +7567,14 @@ describe('round-1 robustness pins', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    // Per-turn label state another test in this file installs; reset it so a
+    // test's delivery content does not inherit a successor's label.
+    responseSourceLabelRef.current = undefined;
     vi.useFakeTimers();
   });
 
   afterEach(() => {
+    responseSourceLabelRef.current = undefined;
     vi.useRealTimers();
   });
 
@@ -7659,6 +7681,86 @@ describe('round-1 robustness pins', () => {
     expect(mockSendQQMessage.mock.calls.length).toBe(before + 1);
     // Delivered under the sealed turn's own label, not the successor's.
     expect(sentContents().at(-1)).toBe('SUB\\-1\nSEALED-HEAD ');
+  });
+
+  it('counts only the payload a carried seal does not hand off as dropped', async () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // A normal production sequence: the chunk is buffered, the boundary seals
+    // exactly that buffer, and the idle flush then sends it as its payload.
+    // The permanent failure hands that seal to handOffSealedPre, which
+    // re-stashes it for onResponseComplete to deliver — so none of the payload
+    // is lost and the loss line must not charge it.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).not.toContain('dropping 4 chars');
+    expect(logged).toContain(
+      'dropping nothing (4 chars preserved in the handoff seal)',
+    );
+    expect(streamState(ch).get('s1')?.sealedPre).toBeUndefined();
+
+    // And the text really is preserved, not merely uncounted: completing the
+    // turn delivers the stashed head.
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    expect(sentContents().at(-1)).toBe('HEAD');
+
+    stderrSpy.mockRestore();
+  });
+
+  it('charges only the payload tail a partial carried seal cannot preserve', async () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    // The boundary seals the 4-char head, then a second chunk arrives before
+    // the idle flush: the payload is 'HEADtail' and the carried seal only
+    // 'HEAD'. The head is preserved by the handoff, the tail really is lost,
+    // so the loss is 4 characters — not the whole 8-char payload.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    onResponseChunk(ch, 'test-chat', 'tail', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('dropping 4 chars');
+    expect(logged).not.toContain('dropping 8 chars');
+
+    // The preserved head is the stash the completion prepends; the tail is gone.
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    expect(sentContents().at(-1)).toBe('HEAD');
+
+    stderrSpy.mockRestore();
   });
 
   it('does not re-arm a live idle timer on a response boundary', () => {

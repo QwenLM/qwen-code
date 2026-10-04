@@ -2296,11 +2296,31 @@ export class QQChannel extends ChannelBase {
           const payloadFoldedIntoSeal =
             state.boundaryClearedInFlight !== undefined &&
             this.ownsLiveTurn(sessionId, state);
+          // The else arm of the handoff below preserves the seal this send
+          // carried: the payload's own head when the drain folded the stash's
+          // `pre` in front of its text (a boundary between a chunk and the idle
+          // flush is a normal sequence, and it leaves exactly that seal on the
+          // entry). handOffSealedPre re-stashes or delivers it, so those
+          // characters are preserved while the rest of the payload is not —
+          // charging the whole payload reports delivered text as lost. No
+          // carried seal preserves nothing, so the whole payload stays a real
+          // loss. Gated on ownsSession like the handoff itself: an unowned
+          // entry's seal is dropped (and logged) by handOffSealedPre.
+          const payloadPreservedBySeal =
+            !payloadFoldedIntoSeal &&
+            carriedSeal !== undefined &&
+            this.ownsSession(sessionId, state)
+              ? Math.min(carriedSeal.length, buffer.length)
+              : 0;
+          const preservedInFlight = payloadFoldedIntoSeal
+            ? buffer.length
+            : payloadPreservedBySeal;
           const droppedInFlight =
             state.buffer.length - this.capturedResidual(state).length;
           const droppedParts: string[] = [];
-          if (!payloadFoldedIntoSeal && buffer.length > 0) {
-            droppedParts.push(`${buffer.length} chars`);
+          const lostInFlight = buffer.length - preservedInFlight;
+          if (lostInFlight > 0) {
+            droppedParts.push(`${lostInFlight} chars`);
           }
           if (droppedInFlight > 0) {
             droppedParts.push(`${droppedInFlight} chars buffered in flight`);
@@ -2309,8 +2329,8 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, ` +
               (droppedParts.length > 0
                 ? `dropping ${droppedParts.join(' plus ')}`
-                : payloadFoldedIntoSeal
-                  ? `dropping nothing (${buffer.length} chars preserved in the handoff seal)`
+                : preservedInFlight > 0
+                  ? `dropping nothing (${preservedInFlight} chars preserved in the handoff seal)`
                   : 'dropping nothing') +
               '\n',
           );
