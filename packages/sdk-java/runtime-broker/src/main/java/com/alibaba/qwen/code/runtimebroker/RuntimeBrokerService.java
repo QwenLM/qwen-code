@@ -543,9 +543,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
                         if (v3) {
-                            if (!"run_shell_command".equals(payload.get("toolName"))
-                                    || Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
-                                throw invalid("runtime_payload_invalid", "Tool v3 requires foreground Shell");
+                            if (!"run_shell_command".equals(payload.get("toolName"))) {
+                                throw invalid("runtime_payload_invalid", "Tool v3 requires Shell");
                             }
                             RuntimePublicationGrant grant = publicationVerifier.verify(record,
                                     publicationId, publicationToken);
@@ -716,6 +715,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.beginControl();
                     }
                     ToolExecutionRecord original = execution;
+                    if (isDetachedCapture(original.getResult())) {
+                        // The detached family has no publication durable of its
+                        // own: the settled handle envelope is canonical, and a
+                        // matching blocked receipt acknowledges exactly it.
+                        if (receipt == null
+                                || !receipt.keySet().equals(Set.of("executionCallId",
+                                        "manifest", "deliveryStatus", "historyRevision"))
+                                || !id.equals(receipt.get("executionCallId"))
+                                || receipt.get("manifest") != null
+                                || !"blocked".equals(receipt.get("deliveryStatus"))
+                                || receipt.get("historyRevision") != null) {
+                            throw conflict("runtime_execution_conflict",
+                                    "Session receipt conflicts with publication");
+                        }
+                        requireUsableLease(context);
+                        return mapFailure(safeStage(() -> transport.acknowledgeV3(
+                                context.lease(), context.session(),
+                                original.getReference(), receipt)),
+                                "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
+                            .whenComplete((ignored, error) -> context.endControl());
+                    }
                     return mapFailure(safeStage(() -> {
                         Map<String, Object> saved = publicationVerifier.receipt(original);
                         if (saved == null || !sameReceipt(saved, receipt)) {
@@ -2808,6 +2828,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             answer.complete(saved);
                             return;
                         }
+                        // A background Shell start settles its handle as the
+                        // detached family: nothing is ever published for it,
+                        // so the status answer is its only durable settle.
+                        if (error == null && status != null && "settled".equals(status.get("state"))
+                                && status.get("result") instanceof Map<?, ?> detached
+                                && isDetachedCapture(detached)) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> saved = (Map<String, Object>) detached;
+                            answer.complete(saved);
+                            return;
+                        }
                         if (error == null && status != null && "unknown".equals(status.get("state"))) {
                             answer.completeExceptionally(evidenceUnavailable());
                             return;
@@ -2827,6 +2858,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private static boolean nonRetryableToolV3(Throwable error) {
         return error != null && unwrap(error) instanceof RuntimeBrokerException failure
                 && !failure.isRetryable();
+    }
+
+    /** The detached capture family: success with a manifest-less capture. */
+    private static boolean isDetachedCapture(Map<?, ?> result) {
+        return result != null && "success".equals(result.get("executionStatus"))
+                && result.get("capture") instanceof Map<?, ?> capture
+                && "detached".equals(capture.get("captureStatus"))
+                && capture.get("manifest") == null;
     }
 
     private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {

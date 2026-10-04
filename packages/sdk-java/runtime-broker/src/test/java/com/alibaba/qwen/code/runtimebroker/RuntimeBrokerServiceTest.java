@@ -20,6 +20,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -1092,6 +1093,76 @@ class RuntimeBrokerServiceTest {
                     next.getExecutionCallId(), ToolExecutionRecord.State.UNKNOWN).getState());
             assertEquals(2, fixture.transport.executeV3Calls.get());
             assertEquals(0, fixture.transport.statusV3Calls.get());
+        }
+    }
+
+    @Test
+    void backgroundV3DetachedHandleSettlesThroughTheStatusAnswer() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                throw new AssertionError("Detached family has no publication receipt to compare");
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord settled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("success", settled.getExecutionStatus());
+            assertEquals("detached",
+                    ((Map<?, ?>) settled.getResult().get("capture")).get("captureStatus"));
+            assertNull(((Map<?, ?>) settled.getResult().get("capture")).get("manifest"));
+            assertTrue(fixture.transport.statusV3Calls.get() >= 1);
+
+            Map<String, Object> receipt = new LinkedHashMap<>();
+            receipt.put("executionCallId", prepared.getExecutionCallId());
+            receipt.put("manifest", null);
+            receipt.put("deliveryStatus", "blocked");
+            receipt.put("historyRevision", null);
+            CompletableFuture<Map<String, Object>> acknowledgement = new CompletableFuture<>();
+            fixture.transport.acknowledgeV3Result = acknowledgement;
+            CompletionStage<Map<String, Object>> pending = fixture.service.acknowledgeExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), receipt);
+            acknowledgement.complete(Map.of("state", "settled"));
+            assertEquals("settled", join(pending).get("state"));
+            Map<String, Object> wrong = new LinkedHashMap<>(receipt);
+            wrong.put("manifest", Map.of("resourceId", "m"));
+            assertEquals("runtime_execution_conflict", failure(fixture.service.acknowledgeExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), wrong)).getCode());
         }
     }
 
@@ -4712,7 +4783,7 @@ class RuntimeBrokerServiceTest {
         public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference, long afterSequence) {
             statusV3Calls.incrementAndGet();
-            return RuntimeTransport.super.statusV3(lease, session, reference, afterSequence);
+            return statusResult;
         }
 
         @Override
