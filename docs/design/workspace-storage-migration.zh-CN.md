@@ -14,7 +14,7 @@
 
 运维关闭 Session 创建、输入准入和派发，结算已接受工作，停止 Harness/journal writer 并防止重启。`retire` 在现有 tenant placement 锁域安装持久 storage 准入 fence，释放精确原 Runtime Session，证明物理 Worker 退役并检查未结算执行/holder。复用可靠 close 的停止回执和有界 claim，不安装永久 Harness close fence。准入和最终元数据检查保留现有 tenant 级 placement 锁：同 tenant 的其他 storage 可能等待这些元数据事务完成；文件扫描和物理退役在锁外运行。未绑定的旧 Session 没有 storage 所有权，不受此 storage fence 约束。旧 FAILED/LOST/RELEASED 记录需要正向停写证据；终态和租约过期不足为证。已有 loss recovery 必须按原协议完成。
 
-创建新迁移操作或 admission fence 之前，检查原 Runtime 状态目录和保留历史目录均为存在的规范目录，并使用未变更的 W1a 读取器证明历史目录身份。不满足条件时在退役任何 placement 之前返回 `migration_state_unavailable` 或 `migration_history_unverified`。有歧义的 birth time 仍不支持。已有操作的查看/回执重放不重复这些前置检查；目标身份仍在外部复制完成后的 prepare 阶段检查。
+创建新迁移操作或 admission fence 之前，检查原 Runtime 状态目录和保留历史目录均为存在的规范目录，并使用未变更的 W1a 读取器证明历史目录身份。 对已有 Runtime 状态目录复用 durable provider 按 UID 确定属主及 POSIX 权限恰为 `0700` 的检查；维护进程以原服务用户运行。前置校验不创建目录，也不修改权限或属主。不满足条件时在退役任何 placement 之前返回 `migration_state_unavailable` 或 `migration_history_unverified`。有歧义的 birth time 仍不支持。已有操作的查看/回执重放不重复这些前置检查；目标身份仍在外部复制完成后的 prepare 阶段检查。
 
 退役后运维进入 W1a 维护 fence，使用外部准备的 Workspace 副本捕获 W1b 证据。`prepare` 验证固定 capture、当前来源、目标副本、迁移资格和历史卷。`promote` 使用新的运行重复验证；旧成功回执不能授权当前转换。维护期间不获取 Runtime。
 

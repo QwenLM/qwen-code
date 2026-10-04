@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.*;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -80,6 +81,9 @@ public final class WorkspaceMigrationStore {
             try {
                 check(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
                         && directory.equals(directory.toRealPath()), code);
+                if ("stateDirectory".equals(field)) {
+                    LocalProcessRuntimeProvisioner.validateStateDirectory(directory);
+                }
             } catch (IOException error) {
                 throw failure(code);
             }

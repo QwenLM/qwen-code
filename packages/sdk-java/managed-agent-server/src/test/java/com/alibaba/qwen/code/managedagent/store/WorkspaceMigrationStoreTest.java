@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -64,7 +65,8 @@ class WorkspaceMigrationStoreTest {
         });
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         Files.createDirectory(temp.resolve("history"));
-        Files.createDirectory(temp.resolve("runtime"));
+        Files.createDirectory(temp.resolve("runtime"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         request = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
                 .put("migrationOperationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
                 .put("fenceOperationId", UUID.randomUUID().toString()).put("captureOperationId", UUID.randomUUID().toString())
@@ -77,6 +79,19 @@ class WorkspaceMigrationStoreTest {
     private WorkspaceMigrationStore store(boolean create) {
         return new WorkspaceMigrationStore(jdbc, manager, guard, new InMemoryRuntimeBindingRepository(),
                 request.toString().getBytes(StandardCharsets.UTF_8), create);
+    }
+
+    @Test
+    void rejectsNonPrivateStateDirectoryBeforeInstallingAnyFence() throws Exception {
+        Path directory = Path.of(request.path("stateDirectory").asText());
+        var permissions = PosixFilePermissions.fromString("rwxr-xr-x");
+        Files.setPosixFilePermissions(directory, permissions);
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_state_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(Files.getPosixFilePermissions(directory)).isEqualTo(permissions);
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
     }
 
     @ParameterizedTest
