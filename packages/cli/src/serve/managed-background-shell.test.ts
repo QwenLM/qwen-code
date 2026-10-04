@@ -248,6 +248,75 @@ function execute(
   });
 }
 
+describe('managed v3 Monitor watch', () => {
+  const MONITOR_INPUT = { command: 'tail -f build.log', is_monitor: true };
+
+  it('settles a started watch with its detached handle and holds the Session', async () => {
+    const ctx = rig();
+    const view = await execute(ctx, MONITOR_INPUT);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'success',
+        capture: { captureStatus: 'detached', manifest: null },
+      },
+    });
+    expect(ctx.supervisor.start).toHaveBeenCalledWith(
+      expect.objectContaining({ unitName: 'qwen-mon-call-1' }),
+    );
+    expect(ctx.publisher.preparedRequests[0]).toMatchObject({
+      capture: { background: true, monitoring: true },
+    });
+    expect(
+      (
+        ctx.executor as unknown as {
+          monitorRegistry: { countBySession(id: string): number };
+        }
+      ).monitorRegistry.countBySession('rs-1'),
+    ).toBe(1);
+
+    // Watch lines land on the open-ended capture as monitor output.
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    spec.onOutput('stdout', Buffer.from('size 1\nsize 2\n'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ctx.sink.writes).toEqual([
+      ['stdout', 'size 1\n'],
+      ['stdout', 'size 2\n'],
+    ]);
+  });
+
+  it('refuses a fifth live watch of one Session', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT, 'call-1');
+    await execute(ctx, MONITOR_INPUT, 'call-2');
+    await execute(ctx, MONITOR_INPUT, 'call-3');
+    await execute(ctx, MONITOR_INPUT, 'call-4');
+    const fifth = await execute(ctx, MONITOR_INPUT, 'call-5');
+    expect(fifth).toMatchObject({
+      result: {
+        executionStatus: 'not_started',
+        error: { message: 'Session already runs 4 Monitor watches.' },
+      },
+    });
+  });
+
+  it('refuses the watch when the Runtime owns no delegated cgroup', async () => {
+    const ctx = rig({ withSupervisor: false });
+    const view = await execute(ctx, MONITOR_INPUT);
+    expect(view).toMatchObject({
+      result: {
+        executionStatus: 'not_started',
+        error: {
+          message:
+            'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+        },
+      },
+    });
+  });
+});
+
 describe('managed v3 background Shell', () => {
   it('slows the pipes while the bounded capture drains', async () => {
     const ctx = rig();

@@ -42,6 +42,8 @@ export interface LocalShellCaptureRequest {
     readonly capturePolicy: 'complete_required';
     /** H3: the open-ended background family, admitted by its child_run record. */
     readonly background?: boolean;
+    /** H3: the same family for a Monitor watch, admitted by its monitor_run record. */
+    readonly monitoring?: boolean;
   };
 }
 

@@ -50,6 +50,8 @@ import {
   type ManagedChildRunSupervisor,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
 
 export class ManagedMcpToolUnknownError extends Error {}
 
@@ -133,6 +135,8 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
 const MANAGED_BACKGROUND_MAX_SHELLS = 8;
+/** Live Monitor watches one Session may hold, by the H3 design contract. */
+const MANAGED_MONITOR_MAX_WATCHES = 4;
 // The bounded capture publishes asynchronously; the pipe feeding it must
 // slow down instead of queueing unboundedly. Sixteen MiB covers a store
 // writing several seconds slower than the process produces, and resume
@@ -204,6 +208,8 @@ export interface ManagedShellCapturePublisher {
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
   private readonly backgroundRegistry: ManagedBackgroundShellRegistry;
+  private readonly monitorRegistry: ManagedMonitorRegistry;
+  private readonly monitorWatcher: ManagedMonitorWatcher | undefined;
   private readonly mcpCalls = new Map<
     string,
     {
@@ -301,9 +307,14 @@ export class ManagedToolExecutor {
     private readonly hooks?: ManagedHookRuntime,
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
     backgroundRegistry?: ManagedBackgroundShellRegistry,
+    monitorRegistry?: ManagedMonitorRegistry,
   ) {
     this.backgroundRegistry =
       backgroundRegistry ?? new ManagedBackgroundShellRegistry();
+    this.monitorRegistry = monitorRegistry ?? new ManagedMonitorRegistry();
+    this.monitorWatcher = backgroundSupervisor
+      ? new ManagedMonitorWatcher(backgroundSupervisor)
+      : undefined;
   }
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -578,6 +589,12 @@ export class ManagedToolExecutor {
     ) {
       return this.executeV3Background(request, tools, normalized);
     }
+    if (
+      tool.validateToolParams(normalized) === null &&
+      normalized['is_monitor'] === true
+    ) {
+      return this.executeV3Monitor(request, tools, normalized);
+    }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({ reference, capture });
@@ -807,6 +824,207 @@ export class ManagedToolExecutor {
       // The handle owns no capture: the live output streams through the
       // child_run record's output manifest instead, and the exit facts
       // settle there, with the same physical evidence.
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    });
+  }
+
+  /**
+   * H3 Monitor watch (v3): the mirror of the background Shell admission —
+   * journaled first, the supervised watch spawns under its own cgroup
+   * unit inside the Session's four-watch quota, its stdout rides the same
+   * bounded capture family, and the call settles with its durable handle
+   * while the registry keeps the Runtime hold. Refusals before any effect
+   * settle as ordinary error results, never as transport errors.
+   */
+  private async executeV3Monitor(
+    request: LocalShellCaptureRequest & {
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    },
+    tools: ManagedToolSet,
+    normalized: Record<string, unknown>,
+  ): Promise<ManagedToolV3View> {
+    const { reference, capture, input } = request;
+    if (this.entries.has(reference.callId)) return this.executeV3(request);
+    const entry: JournalEntry = {
+      version: 3,
+      reference,
+      toolName: request.toolName,
+      input,
+      inputJson: JSON.stringify(input),
+      v3Capture: capture,
+      state: 'prepared',
+      lastSequence: 0,
+      controller: new AbortController(),
+    };
+    this.entries.set(reference.callId, entry);
+    const settle = (result: ToolResultEnvelope): ManagedToolV3View => {
+      entry.v3Result = result;
+      entry.state = 'settled';
+      entry.lastSequence = 1;
+      this.entries.set(reference.callId, entry);
+      return v3View(entry);
+    };
+    if (this.monitorWatcher === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message:
+            'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+        },
+      });
+    }
+    const command = normalized['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch requires a nonempty command.' },
+      });
+    }
+    if (this.capturePublisher === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch capture is unavailable.' },
+      });
+    }
+    if (
+      this.monitorRegistry.countBySession(reference.sessionId) >=
+      MANAGED_MONITOR_MAX_WATCHES
+    ) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Session already runs ${MANAGED_MONITOR_MAX_WATCHES} Monitor watches.`,
+        },
+      });
+    }
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
+    try {
+      prepared = await this.capturePublisher.prepare({
+        reference,
+        capture: { ...capture, background: true, monitoring: true },
+      });
+    } catch (cause) {
+      throw new ManagedToolUnavailableError(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    }
+    if (this.closing || tools.isActive?.() === false) {
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime worker is no longer active.',
+      );
+    }
+    const sink = prepared.sink;
+    const publisher = prepared.publisher ?? this.capturePublisher;
+    const unitName = `qwen-mon-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    let directory = tools.directory;
+    if (
+      typeof normalized['directory'] === 'string' &&
+      normalized['directory'] !== ''
+    ) {
+      if (!tools.admitsDirectory(normalized['directory'])) {
+        return settle({
+          executionStatus: 'not_started',
+          responseParts: [],
+          capture: null,
+          error: {
+            message: `Directory '${normalized['directory']}' is not within any of the registered workspace directories.`,
+          },
+        });
+      }
+      directory = normalized['directory'];
+    }
+    let watchHandle: Awaited<ReturnType<ManagedMonitorWatcher['start']>>;
+    let bufferedBytes = 0;
+    let paused = false;
+    const applyPause = (next: boolean) => {
+      paused = next;
+      const stream = watchHandle?.process?.child.stdout;
+      if (!stream) return;
+      if (next) stream.pause();
+      else stream.resume();
+    };
+    try {
+      watchHandle = await this.monitorWatcher.start(
+        { command },
+        (line) => {
+          const bytes = Buffer.from(`${line}\n`);
+          bufferedBytes += bytes.byteLength;
+          const written = sink.write('stdout', bytes);
+          void written.then(
+            () => {
+              bufferedBytes -= bytes.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+            () => {
+              bufferedBytes -= bytes.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+          );
+          if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
+            applyPause(true);
+        },
+        () => undefined,
+        { unitName, cwd: directory },
+      );
+    } catch (cause) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Monitor watch could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
+    }
+    const watchProcess = watchHandle.process;
+    if (watchProcess === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch reported no supervised unit.' },
+      });
+    }
+    sink.setStarted(watchProcess.child.pid ?? 0);
+    if (paused) applyPause(true);
+    this.monitorRegistry.register({
+      unitName,
+      sessionId: reference.sessionId,
+      process: watchProcess,
+      sink,
+      publisher,
+      identity: prepared.identity,
+    });
+    return settle({
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text: `Monitor watch started under unit ${unitName}. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.`,
+        },
+      ],
       capture: {
         captureStatus: 'detached',
         captureReason: null,

@@ -75,6 +75,7 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
         pid: watch.child.pid ?? 0,
         started: true,
       },
+      process: watch,
       terminate: async () => {
         await watch.terminate(5_000);
       },

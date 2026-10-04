@@ -6,6 +6,7 @@
 
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -38,6 +39,8 @@ export interface MonitorWatchExecutor {
 export interface MonitorWatchHandle {
   /** The physical start receipt the record sets once at attach. */
   readonly receipt: Readonly<Record<string, unknown>>;
+  /** The supervised physical unit, exposed to the worker's own registry. */
+  readonly process?: ManagedChildRunProcess;
   terminate(): Promise<void>;
 }
 

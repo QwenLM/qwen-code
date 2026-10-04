@@ -103,25 +103,29 @@ export class ManagedMonitorRuntime {
         };
       }
       const receipt = await this.registry.terminate(unitName, 5_000);
-      if (!receipt) {
+      if (!receipt || receipt.evidence === null) {
         return { operationId: operation.targetOperationId, state: 'unknown' };
       }
       return {
         operationId: operation.targetOperationId,
         state: 'exited',
         unitName,
-        evidence: receipt,
+        evidence: receipt.evidence,
       };
     }
     const finished = this.registry.describeFinished(unitName);
-    if (finished && finished.sessionId === runtimeSessionId) {
+    if (
+      finished &&
+      finished.sessionId === runtimeSessionId &&
+      finished.receipt.evidence !== null
+    ) {
       // A watch that ended on this worker answers from its retained
       // receipt, for status and stop alike: both are idempotent.
       return {
         operationId: operation.targetOperationId,
         state: 'exited',
         unitName,
-        evidence: finished.receipt,
+        evidence: finished.receipt.evidence,
       };
     }
     return { operationId: operation.targetOperationId, state: 'unknown' };

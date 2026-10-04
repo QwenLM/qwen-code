@@ -12,7 +12,12 @@ import type {
   ChildRunExitEvidence,
   ManagedChildRunProcess,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type {
+  ManagedShellCapturePublisher,
+  ManagedShellCaptureSink,
+} from './managed-runtime-tool-executor.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import {
   ManagedMonitorError,
@@ -40,27 +45,22 @@ function fakeChild(): ChildProcess {
   const stderr = new PassThrough();
   stdout.resume();
   stderr.resume();
+  stdout.end();
+  stderr.end();
   child.stdout = stdout as ChildProcess['stdout'];
   child.stderr = stderr as ChildProcess['stderr'];
   return child;
 }
 
-interface WatchSpec {
-  readonly unitName?: string;
-  readonly sessionId?: string;
-  readonly evidence?: ChildRunExitEvidence | null;
-  readonly terminateEvidence?: ChildRunExitEvidence | null;
-  readonly preExited?: boolean;
-}
-
-function fakeWatch({
-  unitName = UNIT,
-  evidence = null,
-  terminateEvidence = { exitCode: 0, exitSignal: null },
-  preExited = false,
-}: WatchSpec): ManagedChildRunProcess {
+function fakeWatch(
+  spec: {
+    unitName?: string;
+    terminateEvidence?: ChildRunExitEvidence | null;
+    preExited?: ChildRunExitEvidence | null;
+  } = {},
+): ManagedChildRunProcess {
   const child = fakeChild();
-  let current = preExited ? evidence : null;
+  let current = spec.preExited ?? null;
   child.on('exit', (code, signal) => {
     current = {
       exitCode: typeof code === 'number' ? code : null,
@@ -68,7 +68,7 @@ function fakeWatch({
     };
   });
   return {
-    unitName,
+    unitName: spec.unitName ?? UNIT,
     child,
     get exited() {
       return current !== null;
@@ -76,27 +76,76 @@ function fakeWatch({
     get evidence() {
       return current;
     },
-    async terminate(graceMs: number): Promise<ChildRunExitEvidence | null> {
-      if (current === null && terminateEvidence !== null) {
-        current = terminateEvidence;
-        child.emit('exit', terminateEvidence.exitCode, null);
+    async terminate(): Promise<ChildRunExitEvidence | null> {
+      if (current === null && spec.terminateEvidence !== null) {
+        const next = spec.terminateEvidence ?? {
+          exitCode: 0,
+          exitSignal: null,
+        };
+        child.emit('exit', next.exitCode, next.exitSignal);
       }
-      return current && graceMs >= 0 ? current : null;
+      return current;
     },
   } as unknown as ManagedChildRunProcess;
 }
 
+function doubles() {
+  const sink: ManagedShellCaptureSink & { identity: unknown } = {
+    identity: {
+      tenantId: 'tenant',
+      sessionId: 'session',
+      turnId: 'turn',
+      executionCallId: 'exec',
+      callId: 'call',
+      invocationDigest: 'sh',
+      bindingGeneration: '1',
+      captureId: 'capture-1',
+      revision: 1,
+    },
+    async write() {},
+    setStarted() {},
+    setProcessResult() {},
+    failCapture() {},
+    async finish() {},
+    async finalize(
+      executionStatus: ToolResultEnvelope['executionStatus'],
+      responseParts: readonly unknown[],
+    ): Promise<ToolResultEnvelope> {
+      return { executionStatus, responseParts, capture: null };
+    },
+  };
+  const publisher = {
+    async prepare() {
+      throw new Error('unused');
+    },
+    async finish() {},
+    async accept() {
+      throw new Error('unused');
+    },
+  };
+  return {
+    sink,
+    publisher: publisher as unknown as ManagedShellCapturePublisher,
+  };
+}
+
 function register(
   registry: ManagedMonitorRegistry,
-  spec: WatchSpec = {},
-): ManagedChildRunProcess {
-  const watch = fakeWatch(spec);
-  registry.register({
+  spec: Parameters<typeof fakeWatch>[0] & { sessionId?: string } = {},
+) {
+  const process = fakeWatch(spec);
+  const stored = doubles();
+  const completion = registry.register({
     unitName: spec.unitName ?? UNIT,
     sessionId: spec.sessionId ?? SESSION,
-    process: watch,
+    process,
+    sink: stored.sink as ManagedShellCaptureSink,
+    publisher: stored.publisher,
+    identity: stored.sink.identity as Parameters<
+      typeof registry.register
+    >[0]['identity'],
   });
-  return watch;
+  return { process, completion };
 }
 
 describe('ManagedMonitorRuntime', () => {
@@ -137,9 +186,10 @@ describe('ManagedMonitorRuntime', () => {
 
   it('answers exited from evidence after a natural end, idempotently', async () => {
     const registry = new ManagedMonitorRegistry();
-    const watch = register(registry, { evidence: null });
+    const { process, completion } = register(registry);
+    (process.child as EventEmitter).emit('exit', 7, null);
+    await completion;
     const runtime = new ManagedMonitorRuntime(registry);
-    (watch.child as EventEmitter).emit('exit', 7, null);
     const answered = {
       operationId: TARGET,
       state: 'exited',
@@ -160,7 +210,9 @@ describe('ManagedMonitorRuntime', () => {
 
   it('stops with evidence, and keeps an unproven end unknown', async () => {
     const proven = new ManagedMonitorRegistry();
-    register(proven, { terminateEvidence: { exitCode: 0, exitSignal: null } });
+    const { completion } = register(proven, {
+      terminateEvidence: { exitCode: 0, exitSignal: null },
+    });
     const runtime = new ManagedMonitorRuntime(proven);
     expect(await runtime.control(SESSION, operation('monitor-stop'))).toEqual({
       operationId: TARGET,
@@ -168,6 +220,7 @@ describe('ManagedMonitorRuntime', () => {
       unitName: UNIT,
       evidence: { exitCode: 0, exitSignal: null },
     });
+    await completion;
     expect(proven.hasHolds(SESSION)).toBe(false);
 
     const unproven = new ManagedMonitorRegistry();
@@ -180,17 +233,54 @@ describe('ManagedMonitorRuntime', () => {
     expect(unproven.hasHolds(SESSION)).toBe(true);
   });
 
+  it('stay unknown when a natural end carried no evidence', async () => {
+    const registry = new ManagedMonitorRegistry();
+    const child = fakeChild();
+    const stored = doubles();
+    const evidence: ChildRunExitEvidence | null = null;
+    const completion = registry.register({
+      unitName: UNIT,
+      sessionId: SESSION,
+      process: {
+        unitName: UNIT,
+        child,
+        get exited() {
+          return evidence !== null;
+        },
+        get evidence() {
+          return evidence;
+        },
+        async terminate() {
+          return evidence;
+        },
+      } as unknown as ManagedChildRunProcess,
+      sink: stored.sink as ManagedShellCaptureSink,
+      publisher: stored.publisher,
+      identity: stored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+    child.emit('exit');
+    await completion;
+    const runtime = new ManagedMonitorRuntime(registry);
+    expect(await runtime.control(SESSION, operation('monitor-status'))).toEqual(
+      { operationId: TARGET, state: 'unknown' },
+    );
+    expect(registry.hasHolds(SESSION)).toBe(false);
+  });
+
   it('stopSession drains one Session and leaves another alone', async () => {
     const registry = new ManagedMonitorRegistry();
-    register(registry, { unitName: UNIT, sessionId: SESSION });
+    const own = register(registry, { sessionId: SESSION });
     register(registry, {
       unitName: 'qwen-mon-other',
       sessionId: 'other-session',
       terminateEvidence: null,
     });
     await registry.stopSession(SESSION, 100);
+    await own.completion;
     expect(registry.hasHolds(SESSION)).toBe(false);
-    expect((await registry.describeFinished(UNIT))?.receipt).toEqual({
+    expect((await registry.describeFinished(UNIT))?.receipt.evidence).toEqual({
       exitCode: 0,
       exitSignal: null,
     });
