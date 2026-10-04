@@ -428,6 +428,7 @@ export interface components {
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
             title?: string | null;
+            /** @description Each block adds to a 4,000,000-character aggregate budget per command (per-block 1,000,000-character cap applies). */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
@@ -438,6 +439,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
+            /** @description Each block adds to a 4,000,000-character aggregate budget per command (per-block 1,000,000-character cap applies). */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
         };
@@ -449,8 +451,9 @@ export interface components {
             sessionId: string;
             turnId: string;
         };
+        /** @description Arbitrary caller metadata. Accepted and ignored in Phase 1: nothing from it is persisted (the Session title travels in the sibling `title` field). Any shape and any keys are valid. */
         WebShellMetadata: {
-            clientId?: string;
+            [key: string]: unknown;
         } | null;
         /** @description With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics. */
         WebShellAdmission: {

@@ -124,9 +124,10 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
-        // Phase 1 persists only metadata.title; the rest of the request
-        // metadata is accepted and ignored, so no clientId-only contract is
-        // asserted here and immediately discarded.
+        // The WebShell handlers forward no metadata at all (null in its
+        // slot): whatever the client sends is accepted and ignored, so no
+        // clientId-only contract is asserted here and immediately
+        // discarded. The Session title travels in the title field.
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.tenantId(),
                         request.idempotencyKey(), request.agentId(), null,

@@ -85,19 +85,30 @@ class ManagedAgentPropertiesTest {
     void everyDurationFieldDeclaresABindingUnit() {
         // A unit-less numeric override binds as milliseconds unless the
         // field declares its unit; this pin keeps the sweep complete for
-        // future fields too.
-        for (Class<?> nested : ManagedAgentProperties.class
-                .getDeclaredClasses()) {
-            for (java.lang.reflect.Field field : nested
+        // future fields too. getDeclaredClasses() sees direct members only,
+        // so walk the graph transitively, starting at the outer class
+        // itself (a top-level Duration, or one on a depth-2 type such as
+        // RuntimeBroker.WorkspaceMount, must not slip the sweep).
+        var pending = new java.util.ArrayDeque<Class<?>>();
+        var seen = java.util.Collections.newSetFromMap(
+                new java.util.IdentityHashMap<Class<?>, Boolean>());
+        pending.add(ManagedAgentProperties.class);
+        while (!pending.isEmpty()) {
+            Class<?> current = pending.removeFirst();
+            if (!seen.add(current)) {
+                continue;
+            }
+            for (java.lang.reflect.Field field : current
                     .getDeclaredFields()) {
                 if (field.getType() == java.time.Duration.class) {
                     assertThat(field.getAnnotation(
                             org.springframework.boot.convert.DurationUnit.class))
-                            .as(nested.getSimpleName() + "."
+                            .as(current.getSimpleName() + "."
                                     + field.getName())
                             .isNotNull();
                 }
             }
+            pending.addAll(java.util.List.of(current.getDeclaredClasses()));
         }
     }
 
@@ -118,19 +129,18 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void materializeIntervalIsTypedAgainstTheScheduledCadence()
-            throws Exception {
+    void materializeIntervalDrivesTheScheduledCadence() {
+        // The typed field is the cadence's only driving source:
+        // ManagedArtifactConfiguration.messageMaterializerTask schedules
+        // the pass with it on the dedicated single-thread scheduler, and a
+        // property-less boot keeps the shipped 100 ms default.
         assertThat(new ManagedAgentProperties().getEvents()
                 .getMaterializeInterval())
                 .isEqualTo(java.time.Duration.ofMillis(100));
-        // The annotation fallback is the single source of truth; the typed
-        // default must never drift from it.
-        var annotation = com.alibaba.qwen.code.managedagent.service
-                .MessageMaterializer.class.getMethod("materialize")
-                .getAnnotation(
-                        org.springframework.scheduling.annotation.Scheduled.class);
-        assertThat(annotation.fixedDelayString()).isEqualTo(
-                "${qwen.managed-agent.events.materialize-interval:100ms}");
+        assertThat(com.alibaba.qwen.code.managedagent.service
+                .MessageMaterializer.class.getMethods())
+                .noneMatch(method -> method.isAnnotationPresent(
+                        org.springframework.scheduling.annotation.Scheduled.class));
     }
 
     @Test

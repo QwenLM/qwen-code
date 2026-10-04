@@ -884,8 +884,8 @@ public class ManagedAgentService {
             if (totalChars > MAX_AGGREGATE_INPUT_CHARS) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "invalid_input",
-                        "Input exceeds the 4000000 character aggregate"
-                                + " limit.");
+                        "Input exceeds the " + MAX_AGGREGATE_INPUT_CHARS
+                                + " character aggregate limit.");
             }
             result.add(Map.of("type", "text", "text", block.text()));
         }

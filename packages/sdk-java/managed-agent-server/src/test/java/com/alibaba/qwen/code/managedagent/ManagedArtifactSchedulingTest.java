@@ -101,4 +101,60 @@ class ManagedArtifactSchedulingTest {
             context.close();
         }
     }
+
+    // Parks Boot's shared one-thread scheduler with a long-running
+    // @Scheduled sibling: the materialize pass must keep firing on its own
+    // pool. This is the arm the publication/preview parking tests cannot
+    // see — their slow sibling lives on another dedicated scheduler.
+    @Test
+    void materializerKeepsPassingWhileTheSharedDefaultPoolIsParked()
+            throws Exception {
+        var state = mock(AgentStateStore.class);
+        AtomicInteger materialized = new AtomicInteger();
+        when(state.findMaterializationTargets(anyInt()))
+                .thenReturn(List.of(new MaterializationTarget("tenant-1",
+                        "session-1")));
+        doAnswer(invocation -> {
+            materialized.incrementAndGet();
+            return null;
+        }).when(state).materializeNextBatch(eq("tenant-1"), eq("session-1"),
+                anyInt());
+        DefaultPoolHog.parked = new CountDownLatch(1);
+        DefaultPoolHog.release = new CountDownLatch(1);
+        var context = new AnnotationConfigApplicationContext();
+        context.register(SchedulingHarness.class,
+                TaskSchedulingAutoConfiguration.class,
+                com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration.class);
+        context.registerBean(
+                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
+                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties::new);
+        context.registerBean("materializer", MessageMaterializer.class,
+                () -> new MessageMaterializer(state));
+        context.registerBean("defaultPoolHog", DefaultPoolHog.class,
+                DefaultPoolHog::new);
+        try {
+            context.refresh();
+            assertThat(DefaultPoolHog.parked.await(5, TimeUnit.SECONDS))
+                    .isTrue();
+            int before = materialized.get();
+            Thread.sleep(500);
+            DefaultPoolHog.release.countDown();
+            assertThat(materialized.get()).isGreaterThan(before);
+        } finally {
+            DefaultPoolHog.release.countDown();
+            context.close();
+        }
+    }
+
+    static class DefaultPoolHog {
+        static volatile CountDownLatch parked;
+        static volatile CountDownLatch release;
+
+        @org.springframework.scheduling.annotation.Scheduled(
+                fixedDelay = 50)
+        void hog() throws InterruptedException {
+            parked.countDown();
+            release.await(30, TimeUnit.SECONDS);
+        }
+    }
 }

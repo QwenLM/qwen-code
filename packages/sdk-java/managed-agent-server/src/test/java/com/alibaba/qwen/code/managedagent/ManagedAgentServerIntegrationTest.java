@@ -1623,18 +1623,46 @@ class ManagedAgentServerIntegrationTest {
     void acceptsWebShellMetadataWithoutAClientIdOnlyContract()
             throws Exception {
         String tenant = "tenant-metadata-" + UUID.randomUUID();
-        // Phase 1 persists metadata.title only; anything else the client
-        // sends is accepted and ignored instead of validated and dropped.
-        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+        // The WebShell handlers forward no metadata at all (the controller
+        // passes null), so anything a client sends here is accepted and
+        // ignored — neither validated and dropped, nor persisted: a
+        // metadata title does not become the Session's title.
+        MvcResult created = mvc.perform(
+                post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"metadata-create",
                                  "agentId":"qwen-code","input":[],
                                  "metadata":{"clientId":"client-1",
+                                             "other":"trace",
+                                             "title":"metadata-title"}}
+                                """))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").doesNotExist());
+        // Same widened acceptance on the submit handler: a non-clientId
+        // metadata body must not be refused by the (deleted) validator;
+        // the request fails later, on the unknown Session lookup.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"sessionId":"does-not-matter",
+                                 "idempotencyKey":"metadata-submit",
+                                 "agentId":"qwen-code","input":[],
+                                 "metadata":{"clientId":"client-1",
                                              "other":"trace"}}
                                 """))
-                .andExpect(status().isAccepted());
+                .andExpect(status().isNotFound());
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,

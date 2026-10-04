@@ -309,9 +309,13 @@ public class ManagedAgentProperties {
     }
 
     public static class Dispatch {
-        // The scan delay has one source of truth: the placeholder fallback
-        // on HarnessCoordinator.recoverExpiredTurns. No typed field — a dead
-        // second default would drift from it.
+        // No typed scan-delay field. The deployed default comes from
+        // application.yml (`dispatch.scan-delay: '1s'`); the same
+        // "${...scan-delay:1s}" fallback is repeated by three @Scheduled
+        // methods — ActionResponseCoordinator.recover,
+        // HarnessCoordinator.recoverExpiredTurns and
+        // SessionLifecycleCoordinator.recoverOperations — and @Scheduled
+        // reads a bare number as milliseconds, not seconds.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseDuration = Duration.ofSeconds(60);
         @DurationUnit(ChronoUnit.SECONDS)
