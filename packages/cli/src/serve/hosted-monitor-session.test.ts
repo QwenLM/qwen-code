@@ -17,7 +17,10 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  HostedMonitorSession,
+  monitorRebuildAllowed,
+} from './hosted-monitor-session.js';
 
 // monitor_run is enabled by the H3 enablement slice; this suite drives the
 // hosted orchestrator ahead of it, like the core authority suite does.
@@ -371,23 +374,82 @@ describe('HostedMonitorSession', () => {
     });
   });
 
-  it('observes only while attached and skips a commit that changes nothing', async () => {
+  it('commits a recovery-blocked state and rebuilds with a new receipt', async () => {
     const harness = await createHarness();
     await withOrchestrator(harness, async (authority, orchestrator) => {
       await admitCall(orchestrator);
       await orchestrator.dispatchStarted('monitor-1', BINDING);
-      await expect(
-        orchestrator.observe('monitor-1', { size: 1 }),
-      ).rejects.toThrow(ManagedSessionRecordError);
       await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
-      const manifest = await harness.store.publish(
-        'managed-tool-result-manifest',
-        Buffer.from('{"pages":1}', 'utf8'),
-      );
-      await orchestrator.advanceOutput('monitor-1', manifest);
-      const before = committed(authority).revision;
-      await orchestrator.advanceOutput('monitor-1', manifest);
-      expect(committed(authority).revision).toBe(before);
+      await orchestrator.observe('monitor-1', { size: 1024 });
+      const attached = committed(authority).body;
+
+      await orchestrator.blockedRuntimeLost('monitor-1');
+      const blocked = committed(authority).body;
+      expect(blocked).toMatchObject({
+        run: {
+          state: 'recovery_blocked',
+          reason: 'runtime_lost',
+          execution: 'outcome_unknown',
+          runtime: BINDING,
+        },
+      });
+
+      const rebuildBinding = { runtimeBindingId: 'binding-2', generation: '2' };
+      await orchestrator.rebuildFromRuntimeLost('monitor-1', rebuildBinding, {
+        watch: 'restarted',
+      });
+      const rebuilt = committed(authority).body;
+      expect(rebuilt.run).toMatchObject({
+        state: 'running',
+        reason: 'runtime_lost',
+        execution: 'running_attached',
+        runtime: rebuildBinding,
+      });
+      // The watermark survived the rebuild; only the receipt was reminted.
+      expect(rebuilt.observationSequence).toBe(1);
+      expect(rebuilt.lastObservationRef).toEqual(attached.lastObservationRef);
+      expect(rebuilt.startReceiptRef).not.toEqual(attached.startReceiptRef);
+      expect(rebuilt.startReceiptRef?.kind).toBe('managed-runtime-receipt');
     });
+  });
+
+  it('refuses a rebuild from a watch that never lost its Runtime', async () => {
+    const harness = await createHarness();
+    await withOrchestrator(harness, async (_authority, orchestrator) => {
+      await admitCall(orchestrator);
+      await orchestrator.dispatchStarted('monitor-1', BINDING);
+      await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
+      await expect(
+        orchestrator.rebuildFromRuntimeLost('monitor-1', BINDING, {
+          watch: 'restarted',
+        }),
+      ).rejects.toThrow('cannot rebuild from its current state');
+    });
+  });
+
+  it('refuses a rebuild after the run ended', async () => {
+    const harness = await createHarness();
+    await withOrchestrator(harness, async (_authority, orchestrator) => {
+      await admitCall(orchestrator);
+      await orchestrator.dispatchStarted('monitor-1', BINDING);
+      await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
+      await orchestrator.settleQuiet('monitor-1', 'exited');
+      await expect(
+        orchestrator.rebuildFromRuntimeLost('monitor-1', BINDING, {
+          watch: 'restarted',
+        }),
+      ).rejects.toThrow('cannot rebuild from its current state');
+    });
+  });
+
+  it('permits only a known read-only command to be rebuilt', async () => {
+    expect(await monitorRebuildAllowed('du -sh .', os.tmpdir())).toBe(true);
+    expect(await monitorRebuildAllowed('pwd && ls -la', os.tmpdir())).toBe(
+      true,
+    );
+    expect(await monitorRebuildAllowed('rm -rf nowhere', os.tmpdir())).toBe(
+      false,
+    );
+    expect(await monitorRebuildAllowed('', os.tmpdir())).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ import type {
   ManagedSessionCommand,
   ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import { isShellCommandReadOnlyASTInDirectory } from '@qwen-code/qwen-code-core/utils/shellAstParser.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -60,6 +61,18 @@ const TRUSTED: ManagedSessionActor = { class: 'trusted_entry' };
 
 function digest(record: unknown): string {
   return createHash('sha256').update(JSON.stringify(record)).digest('hex');
+}
+
+// H3 rebuild policy: only a Monitor whose command is known read-only may
+// be restarted after a Runtime loss — anything else keeps its blocked
+// holds, so the answer the session gives stays accurate rather than
+// invented. See docs/design/2026-10-03-managed-shell-monitor-runtime.md.
+export async function monitorRebuildAllowed(
+  command: string,
+  cwd: string,
+): Promise<boolean> {
+  if (typeof command !== 'string' || !command.trim()) return false;
+  return isShellCommandReadOnlyASTInDirectory(command, cwd);
 }
 
 export class HostedMonitorSession {
@@ -233,6 +246,63 @@ export class HostedMonitorSession {
         ...previous.run,
         state: 'failed',
         execution: params.started ? 'settled' : 'not_started_proven',
+      },
+    }));
+  }
+
+  /**
+   * The watch's Runtime is gone and nothing proved its end: the run
+   * blocks accurately with runtime_lost until a read-only rebuild (or
+   * a close drain) decides what happens next. The project view reads
+   * degraded meanwhile; the Runtime binding stays named as lost.
+   */
+  blockedRuntimeLost(monitorId: string): Promise<void> {
+    return this.revise(monitorId, (previous) => ({
+      ...previous,
+      run: {
+        ...previous.run,
+        state: 'recovery_blocked',
+        reason: 'runtime_lost',
+        execution: 'outcome_unknown',
+      },
+    }));
+  }
+
+  /**
+   * A rebuild from runtime_lost alone, and only then: a new Runtime
+   * generation starts a fresh watch, mints its own start receipt, and
+   * the observation watermark never replays what it already covered.
+   * Every other state refuses because the H0b rule says a rebuild
+   * starts from outcome_unknown and from no other line.
+   */
+  async rebuildFromRuntimeLost(
+    monitorId: string,
+    runtime: MonitorRuntimeBinding,
+    receipt: Record<string, unknown>,
+  ): Promise<void> {
+    const previous = this.record(monitorId);
+    if (!previous) throw new Error(`Monitor ${monitorId} has no record.`);
+    if (
+      previous.run.execution !== 'outcome_unknown' ||
+      previous.run.reason !== 'runtime_lost'
+    ) {
+      throw new Error(
+        `Monitor ${monitorId} cannot rebuild from its current state.`,
+      );
+    }
+    const startReceiptRef = await this.store.resources.publish(
+      'managed-runtime-receipt',
+      Buffer.from(JSON.stringify(receipt), 'utf8'),
+    );
+    await this.revise(monitorId, (current) => ({
+      ...current,
+      startReceiptRef,
+      run: {
+        ...current.run,
+        state: 'running',
+        reason: 'runtime_lost',
+        execution: 'running_attached',
+        runtime,
       },
     }));
   }
