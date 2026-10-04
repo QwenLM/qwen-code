@@ -19,6 +19,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
@@ -171,21 +172,27 @@ public class ManagedExtensionRecordStore {
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
      * Every record line must be one the authority's reader accepts, whether
-     * or not the transaction carries a Stage H record, because the
-     * authority's reopen scanner checks them all: every event line holds the
-     * shared envelope at its declared place among the transaction's events,
-     * every {@code domain.committed} line names a registered domain and a
-     * version 1 record reference of it, no event ID trespasses on the
-     * {@code <domain>:<count>} space the Stage H chains use, and an unknown
-     * record subtype is tolerated only before the Managed header, as in the
-     * genesis transaction. A Stage H event must hold its declared place
-     * among the transaction's {@code eventCount} events, and its transaction
-     * must hold only those events and then its commit marker, as the
-     * authority writes it.
+     * or not the transaction carries a Stage H record: every line names this
+     * Session at the top level and stays within its kind's byte cap, every
+     * event line holds the shared envelope at its declared place among the
+     * transaction's events with the payload and the subject its kind
+     * requires (all mirrored in {@link ManagedSessionRecords}), every
+     * {@code domain.committed} line names a registered domain and a version
+     * 1 record reference of it, an unknown record subtype is tolerated only
+     * before the Managed header, and the header and the commit marker parse
+     * as the reader parses them, the marker agreeing with the transaction
+     * the request declares. The {@code <domain>:<count>} event IDs come
+     * from the authority's commit gate, not its reader, so they are checked
+     * exactly: only the ID the chain assigns next, or a planted one would
+     * make the authority refuse its own legitimate later revision. A Stage H
+     * event must hold its declared place among the transaction's
+     * {@code eventCount} events, and its transaction must hold only those
+     * events and then its commit marker, as the authority writes it.
      */
     List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
-            long firstSequence, int eventCount, byte[] recordBytes,
-            Function<String, StoredResource> resources) {
+            long firstSequence, long lastSequence, int eventCount,
+            String eventsDigest, String previousCommitDigest,
+            byte[] recordBytes, Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         JsonNode[] records = new JsonNode[lines.length];
@@ -207,15 +214,27 @@ public class ManagedExtensionRecordStore {
                         + " transaction.");
                 requireLineBytes(lines[index], index,
                         ManagedSessionStoreModels.MAX_HEADER_BYTES);
+                try {
+                    ManagedSessionRecords.requireHeader(
+                            record.get("managedSession"), tenantId,
+                            workspaceId, sessionId);
+                } catch (InvalidRecordException error) {
+                    throw rejected(error.getMessage());
+                }
                 header = index;
             }
         }
         List<JsonNode> receipts = new ArrayList<>();
+        Set<String> transactionEventIds = new HashSet<>();
         int stageH = 0;
         boolean shaped = true;
         String lastSubtype = null;
         for (int index = 0; index < records.length; index++) {
             JsonNode record = records[index];
+            require(sessionId.equals(record.path("sessionId").textValue()),
+                    "Record line " + (index + 1)
+                            + " does not name this Session at the top"
+                            + " level.");
             String subtype = record.path("subtype").textValue();
             lastSubtype = subtype;
             if (HEADER_SUBTYPE.equals(subtype)) {
@@ -227,6 +246,14 @@ public class ManagedExtensionRecordStore {
                             + " precedes the Managed header.");
                     requireLineBytes(lines[index], index,
                             ManagedSessionStoreModels.MAX_COMMIT_MARKER_BYTES);
+                    try {
+                        ManagedSessionRecords.requireCommitMarker(
+                                record.get("managedSession"), firstSequence,
+                                lastSequence, eventCount, eventsDigest,
+                                previousCommitDigest);
+                    } catch (InvalidRecordException error) {
+                        throw rejected(error.getMessage());
+                    }
                 } else {
                     // The scanner tolerates a foreign engine's records only
                     // before the genesis transaction's Managed header.
@@ -234,20 +261,41 @@ public class ManagedExtensionRecordStore {
                             "Record line " + (index + 1) + " has the unknown"
                                     + " subtype " + subtype
                                     + " after the Managed header.");
+                    requireLineBytes(lines[index], index,
+                            ManagedSessionStoreModels.MAX_EVENT_BYTES);
                 }
                 shaped &= index >= eventCount;
                 continue;
             }
+            requireLineBytes(lines[index], index,
+                    ManagedSessionStoreModels.MAX_EVENT_BYTES);
             require(index < eventCount, "Record line " + (index + 1)
                     + " is not one of the transaction's events.");
-            require(index > header, "Record line " + (index + 1)
-                    + " precedes the Managed header.");
             JsonNode event = record.path("managedSession");
             long occurredAt = requireEvent(event,
                     firstSequence + index);
             requireOwnSession(event, tenantId, workspaceId, sessionId,
                     "The event names another Session.");
             String kind = event.get("kind").textValue();
+            try {
+                ManagedSessionRecords.requireEventPayload(kind,
+                        event.get("payload"));
+                ManagedSessionRecords.requireEventSubject(kind,
+                        event.get("subject"));
+            } catch (InvalidRecordException error) {
+                throw rejected(error.getMessage());
+            }
+            if ("checkpoint.committed".equals(kind)) {
+                require(event.get("payload").get("coveredSequence")
+                        .longValue() <= firstSequence - 1,
+                        "Record line " + (index + 1) + " covers events not"
+                                + " committed before its transaction.");
+            }
+            String eventId = event.get("eventId").textValue();
+            require(transactionEventIds.add(eventId), "Record line "
+                    + (index + 1)
+                    + " repeats the event ID of another event in the"
+                    + " transaction.");
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
@@ -261,14 +309,12 @@ public class ManagedExtensionRecordStore {
                         ManagedExtensionProjection.RECORD_BODIES
                                 .containsKey(domain));
             }
-            String eventId = event.get("eventId").textValue();
-            require(!RESERVED_EVENT_ID.matcher(eventId).matches()
-                    || domain != null && eventId.startsWith(domain + ":"),
-                    "Record line " + (index + 1) + " takes an event ID"
-                            + " reserved for Stage H records.");
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body == null) {
+                require(!RESERVED_EVENT_ID.matcher(eventId).matches(),
+                        "Record line " + (index + 1) + " takes an event ID"
+                                + " reserved for Stage H records.");
                 continue;
             }
             // A Stage H revision event, which the authority never gives a
@@ -278,8 +324,22 @@ public class ManagedExtensionRecordStore {
             } catch (InvalidRecordException error) {
                 throw rejected(error.getMessage());
             }
-            requireOwnSession(event, tenantId, workspaceId, sessionId,
-                    "The Stage H record names another Session.");
+            // The ID is the one the domain's chain assigns next, exactly:
+            // any other <domain>:<count> ID the authority would refuse, and
+            // a planted one wedges the chain once the authority loads it on
+            // reopen and refuses its own legitimate revision as a repeat.
+            long assigned = jdbc.queryForObject(
+                    "SELECT COALESCE(SUM(revision), 0) FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_scope_key = ? AND domain = ?",
+                    Long.class,
+                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                    domain) + 1;
+            require(eventId.equals(domain + ":" + assigned),
+                    "Record line " + (index + 1) + " takes the event ID "
+                            + eventId + "; the " + domain
+                            + " chain assigns " + domain + ":" + assigned
+                            + " to its next revision.");
             require(stageH == 0, "Record line " + (index + 1)
                     + " commits a second Stage H record revision, which the"
                     + " authority never writes in one transaction.");
@@ -289,7 +349,11 @@ public class ManagedExtensionRecordStore {
                     firstSequence + index, occurredAt, resources);
             stageH++;
         }
-        require(stageH == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
+        // Defense in depth: ManagedSessionStore.validateCommit pins
+        // recordCount == eventCount + 1 outside the genesis, which is the
+        // only transaction a header may appear in, so a transaction with a
+        // header never reaches this rule with an unrouted line.
+        require(header >= 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
         return receipts;
@@ -336,10 +400,10 @@ public class ManagedExtensionRecordStore {
     /**
      * The envelope every journal event line must hold, checked as the
      * authority's reopen reader checks it: a closed event with an optional
-     * subject (which a Stage H revision event never carries), its format
-     * version, its sequence at its declared place, its event ID, a time in
-     * the shared range and its kind against the shared vocabulary. Returns
-     * the time the event occurred.
+     * subject, its format version, its sequence at its declared place, its
+     * event ID, a time in the shared range and its kind against the shared
+     * vocabulary. The per-kind payload, the subject and the top-level
+     * Session are checked beside it. Returns the time the event occurred.
      */
     private static long requireEvent(JsonNode event, long sequence) {
         try {
@@ -651,12 +715,13 @@ public class ManagedExtensionRecordStore {
 
     /**
      * Announces a changed task view on the Session's task-event outbox, in
-     * the same transaction, when the Session has a public resource that is
-     * not deleted or being deleted, so a deleted Session's terminal event
-     * stays its last one. The announcement stays out of the Session event
-     * stream, whose message projection reads it as a content boundary: an
-     * announcement between two streamed text deltas would split the stored
-     * message part. The task-events feed drains this table.
+     * the same transaction, when the tenant's Session exists and is neither
+     * deleted nor being deleted, so a deleted Session accumulates no rows
+     * the task-events feed can never deliver. The announcement stays out of
+     * the Session event stream, whose message projection reads it as a
+     * content boundary: an announcement between two streamed text deltas
+     * would split the stored message part. The task-events feed drains this
+     * table in journal order.
      */
     private void announce(String tenantId, String scopeKey, String sessionId,
             String taskId, String state, long revision, long sequence) {
@@ -666,7 +731,7 @@ public class ManagedExtensionRecordStore {
         }
         jdbc.update("INSERT INTO qwen_managed_session_task_event"
                         + " (session_scope_key, tenant_id, session_id,"
-                        + " task_id, task_state, revision, first_sequence)"
+                        + " task_id, task_state, revision, journal_sequence)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 scopeKey, tenantId, sessionId, taskId, state, revision,
                 sequence);

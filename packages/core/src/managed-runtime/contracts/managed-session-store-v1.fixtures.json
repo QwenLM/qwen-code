@@ -18,6 +18,247 @@
     "minimumLeaseDurationMs": 1000,
     "maximumLeaseDurationMs": 300000
   },
+  "eventKinds": [
+    "input.accepted",
+    "wake.requested",
+    "activation.changed",
+    "model.attempt",
+    "message.committed",
+    "tool.intent",
+    "action.changed",
+    "tool.receipt",
+    "checkpoint.committed",
+    "context.compacted",
+    "cancel.requested",
+    "turn.settled",
+    "config.bound",
+    "lifecycle.changed",
+    "domain.committed",
+    "message.delta"
+  ],
+  "activationSubjectKinds": {
+    "input.accepted": false,
+    "wake.requested": false,
+    "activation.changed": false,
+    "model.attempt": true,
+    "message.committed": false,
+    "tool.intent": true,
+    "message.delta": true,
+    "action.changed": false,
+    "tool.receipt": false,
+    "checkpoint.committed": true,
+    "context.compacted": true,
+    "cancel.requested": false,
+    "turn.settled": false,
+    "config.bound": false,
+    "lifecycle.changed": false,
+    "domain.committed": false
+  },
+  "eventPayloadSchemas": {
+    "input.accepted": {
+      "fields": {
+        "inputId": "id",
+        "turnId": "id",
+        "source": "text",
+        "contentRef": "ref",
+        "deadline": "timeOrNull",
+        "admissionRef": "ref"
+      },
+      "optional": []
+    },
+    "wake.requested": {
+      "fields": {
+        "wakeId": "id",
+        "reason": "text",
+        "subject": "subject",
+        "sourceEventId": "id",
+        "requiredSequence": "sequence"
+      },
+      "optional": []
+    },
+    "activation.changed": {
+      "fields": {
+        "activationId": "id",
+        "epoch": "sequence",
+        "workerId": "id",
+        "subject": "subject",
+        "phase": "text",
+        "leaseDurationMs": "sequenceOrNull",
+        "expiresAt": "timeOrNull",
+        "installRef": "refOrNull",
+        "boundaryRef": "refOrNull",
+        "renewalSeq": "sequence"
+      },
+      "optional": ["renewalSeq"]
+    },
+    "model.attempt": {
+      "fields": {
+        "attemptId": "id",
+        "routeRef": "ref",
+        "inputCheckpointRef": "refOrNull",
+        "state": "text",
+        "usageRef": "refOrNull"
+      },
+      "optional": []
+    },
+    "message.committed": {
+      "fields": {
+        "messageId": "id",
+        "role": "text",
+        "contentRef": "ref",
+        "modelAttemptId": "idOrNull",
+        "parentMessageId": "idOrNull"
+      },
+      "optional": ["modelAttemptId"]
+    },
+    "tool.intent": {
+      "fields": {
+        "executionCallId": "id",
+        "batchId": "id",
+        "ordinal": "sequence",
+        "toolDefinitionRef": "ref",
+        "argsRef": "ref",
+        "outcomeSource": "text"
+      },
+      "optional": []
+    },
+    "action.changed": {
+      "fields": {
+        "requestId": "id",
+        "kind": "text",
+        "source": "text",
+        "inputRevision": "sequence",
+        "optionsRef": "refOrNull",
+        "state": "text",
+        "decisionRef": "refOrNull"
+      },
+      "optional": []
+    },
+    "tool.receipt": {
+      "fields": {
+        "executionCallId": "id",
+        "toolOutcomeRef": "ref",
+        "resultRef": "refOrNull",
+        "resources": "refs",
+        "historyRevision": "sequence"
+      },
+      "optional": []
+    },
+    "checkpoint.committed": {
+      "fields": {
+        "checkpointId": "id",
+        "coveredSequence": "sequence",
+        "previousCheckpointId": "idOrNull",
+        "stateRef": "ref",
+        "boundary": "textOrNull"
+      },
+      "optional": []
+    },
+    "context.compacted": {
+      "fields": {
+        "compactionId": "id",
+        "fromSequence": "sequence",
+        "toSequence": "sequence",
+        "summaryRef": "ref",
+        "replacedMessageIds": "ids",
+        "tokenCountsRef": "refOrNull"
+      },
+      "optional": []
+    },
+    "cancel.requested": {
+      "fields": {
+        "requestId": "id",
+        "target": "json",
+        "reason": "text",
+        "requestedBy": "text"
+      },
+      "optional": []
+    },
+    "turn.settled": {
+      "fields": {
+        "turnId": "id",
+        "outcome": "text",
+        "stopReason": "textOrNull",
+        "resultRef": "refOrNull",
+        "usageRef": "refOrNull",
+        "pendingOwnersRef": "refOrNull"
+      },
+      "optional": []
+    },
+    "config.bound": {
+      "fields": {
+        "revision": "sequence",
+        "previousRevision": "sequenceOrNull",
+        "bundleRef": "ref",
+        "rootSnapshotRef": "ref"
+      },
+      "optional": []
+    },
+    "lifecycle.changed": {
+      "fields": {
+        "operationId": "id",
+        "from": "textOrNull",
+        "to": "text",
+        "reason": "text",
+        "pendingOwnersRef": "refOrNull"
+      },
+      "optional": []
+    },
+    "domain.committed": {
+      "fields": {
+        "domain": "text",
+        "version": "sequence",
+        "operationId": "id",
+        "recordRef": "ref"
+      },
+      "optional": []
+    },
+    "message.delta": {
+      "fields": {
+        "messageId": "id",
+        "turnId": "id",
+        "role": "text",
+        "text": "rawText"
+      },
+      "optional": []
+    }
+  },
+  "activationPhases": ["installing", "active", "released", "revoked"],
+  "modelAttemptStates": ["started", "output_committed", "abandoned"],
+  "actionSources": [
+    "tool_call",
+    "automation_run",
+    "team_plan",
+    "user_operation"
+  ],
+  "actionStates": ["requested", "decided", "cancelled", "expired"],
+  "lifecycleStates": [
+    "idle",
+    "active",
+    "closing",
+    "closed",
+    "archived",
+    "deleting",
+    "deleted",
+    "recovery_blocked"
+  ],
+  "lifecycleTransitions": {
+    "idle": ["active", "closing"],
+    "active": ["idle", "closing"],
+    "closing": ["closed"],
+    "closed": ["archived", "deleting"],
+    "archived": ["closed", "deleting"],
+    "deleting": ["deleted"],
+    "deleted": [],
+    "recovery_blocked": [
+      "idle",
+      "active",
+      "closing",
+      "closed",
+      "archived",
+      "deleting"
+    ]
+  },
   "sessionKey": {
     "tenantId": "tenant-fixture",
     "workspaceId": "workspace-fixture",

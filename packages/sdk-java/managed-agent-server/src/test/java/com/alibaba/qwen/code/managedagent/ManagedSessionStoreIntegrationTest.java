@@ -222,8 +222,8 @@ class ManagedSessionStoreIntegrationTest {
         byte[] resourceBytes = new byte[
                 ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES];
         Arrays.fill(resourceBytes, (byte) 'x');
-        String genesisBytes = "{\"subtype\":\"session_execution_engine\"}\n"
-                + "{\"subtype\":\"managed_session_header_v1\"}\n";
+        String genesisBytes = "{\"subtype\":\"session_execution_engine\","
+                + "\"sessionId\":\"" + SESSION + "\"}\n" + headerLine();
         ObjectNode genesis = genesisRequest(genesisBytes, resourceBytes);
         MvcResult committed = postWithToken("/transactions:commit", TOKEN_A,
                 genesis);
@@ -332,13 +332,24 @@ class ManagedSessionStoreIntegrationTest {
                         .value("managed_session_writer_conflict"));
 
         String turnBytes = "{\"subtype\":\"managed_session_event_v1\","
+                + "\"sessionId\":\"" + SESSION + "\","
                 + "\"managedSession\":{\"v\":1,\"sequence\":1,"
                 + "\"eventId\":\"turn-event:1\",\"sessionKey\":"
                 + "{\"tenantId\":\"" + TENANT + "\",\"workspaceId\":\""
                 + WORKSPACE + "\",\"sessionId\":\"" + SESSION + "\"},"
                 + "\"kind\":\"lifecycle.changed\",\"occurredAt\":1000,"
-                + "\"payload\":{}}}\n"
-                + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+                + "\"payload\":{\"operationId\":\"op-open\",\"from\":null,"
+                + "\"to\":\"idle\",\"reason\":\"opened\","
+                + "\"pendingOwnersRef\":null}}}\n"
+                + "{\"subtype\":\"managed_session_commit_v1\","
+                + "\"sessionId\":\"" + SESSION + "\","
+                + "\"managedSession\":{\"transactionId\":"
+                + "\"transaction-turn\",\"commandId\":\"command-turn\","
+                + "\"operation\":\"turn.submit\",\"contentDigest\":\""
+                + sha256("turn-content")
+                + "\",\"firstSequence\":1,\"lastSequence\":1,"
+                + "\"eventCount\":1,\"eventsDigest\":\"" + "e".repeat(64)
+                + "\",\"previousCommitDigest\":null}}\n";
         ObjectNode turn = transactionRequest(turnBytes, WRITER_A, 1);
         byte[] checkpointBytes = "checkpoint-state"
                 .getBytes(StandardCharsets.UTF_8);
@@ -550,6 +561,23 @@ class ManagedSessionStoreIntegrationTest {
                 .put("workspaceId", WORKSPACE)
                 .put("writerId", writerId)
                 .put("leaseMillis", 60_000);
+    }
+
+    /** The Managed header record, with the body the authority writes. */
+    private static String headerLine() {
+        return "{\"subtype\":\"managed_session_header_v1\",\"sessionId\":\""
+                + SESSION + "\",\"managedSession\":{\"formatVersion\":1,"
+                + "\"minimumReader\":\"managed-session/1\",\"sessionKey\":"
+                + "{\"tenantId\":\"" + TENANT + "\",\"workspaceId\":\""
+                + WORKSPACE + "\",\"sessionId\":\"" + SESSION + "\"},"
+                + "\"engine\":\"managed\",\"definitionRef\":{"
+                + "\"resourceId\":\"definition-1\",\"kind\":"
+                + "\"managed-session-definition\",\"schemaVersion\":1,"
+                + "\"byteLength\":10,\"digest\":\"" + sha256("definition")
+                + "\"},\"rootSnapshotRef\":{\"resourceId\":\"root-1\","
+                + "\"kind\":\"managed-session-root-snapshot\","
+                + "\"schemaVersion\":1,\"byteLength\":4,\"digest\":\""
+                + sha256("root") + "\"},\"createdBy\":\"test\"}}\n";
     }
 
     private ObjectNode genesisRequest(String records, byte[] resourceBytes) {

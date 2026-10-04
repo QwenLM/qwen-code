@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -148,14 +149,79 @@ class ToolPublicationStoreTest {
                         "publicationId", "pub-1")));
         new TransactionTemplate(manager).executeWithoutResult(status -> sessions.acquireWriter("tenant-1", "session-1",
                 WRITER_TOKEN, new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer-1", 300000L)));
-        append("session.create", "{\"subtype\":\"session_execution_engine\"}\n"
-                + "{\"subtype\":\"managed_session_header_v1\"}\n", 0, List.of(), null);
-        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-1").put("outcomeSource", "runtime");
+        append("session.create", engineLine() + headerLine(), 0, List.of(), null);
+        ObjectNode intent = toolIntent("execution-1");
         intent.set("argsRef", binding.get("argsRef"));
         append("tool.dispatch", event(1, "activation.changed", activation("active"))
-                + event(2, "tool.intent", intent) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 2,
+                + event(2, "tool.intent", intent), 2,
                 List.of(resource(binding.get("argsRef"), args), resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
+    }
+
+    /** The faithful shapes a tool.intent's closed payload needs. */
+    private static ObjectNode toolIntent(String executionCallId) {
+        ObjectNode intent = JSON.createObjectNode()
+                .put("executionCallId", executionCallId)
+                .put("batchId", "batch-1").put("ordinal", 1)
+                .put("outcomeSource", "runtime");
+        intent.set("toolDefinitionRef", ref("tool-definition-1",
+                "managed-tool-definition",
+                TextNode.valueOf("tool-definition")));
+        return intent;
+    }
+
+    /** The foreign engine record of the genesis transaction. */
+    private static String engineLine() {
+        return "{\"subtype\":\"session_execution_engine\",\"sessionId\":"
+                + "\"session-1\"}\n";
+    }
+
+    /** The Managed header record, with the body the authority writes. */
+    private static String headerLine() {
+        ObjectNode header = JSON.createObjectNode()
+                .put("formatVersion", 1).put("minimumReader",
+                        "managed-session/1")
+                .put("engine", "managed").put("createdBy", "test");
+        header.putObject("sessionKey").put("tenantId", "tenant-1")
+                .put("workspaceId", "workspace-1").put("sessionId",
+                        "session-1");
+        header.set("definitionRef", ref("session-definition",
+                "managed-session-definition",
+                TextNode.valueOf("session-definition")));
+        header.set("rootSnapshotRef", ref("session-root-snapshot",
+                "managed-session-root-snapshot",
+                TextNode.valueOf("session-root-snapshot")));
+        return JSON.createObjectNode()
+                .put("subtype", "managed_session_header_v1")
+                .put("sessionId", "session-1")
+                .set("managedSession", header) + "\n";
+    }
+
+    /**
+     * The commit marker the authority ends a transaction with, agreeing
+     * with the declared fields the transaction commits under.
+     */
+    private static String markerLine(String transactionId, String operation,
+            String commandId, long first, long last, String eventsDigest,
+            String previousCommitDigest) {
+        ObjectNode marker = JSON.createObjectNode()
+                .put("transactionId", transactionId)
+                .put("commandId", commandId)
+                .put("operation", operation)
+                .put("contentDigest", digest(commandId))
+                .put("firstSequence", first)
+                .put("lastSequence", last)
+                .put("eventCount", last - first + 1)
+                .put("eventsDigest", eventsDigest);
+        if (previousCommitDigest == null) {
+            marker.putNull("previousCommitDigest");
+        } else {
+            marker.put("previousCommitDigest", previousCommitDigest);
+        }
+        return JSON.createObjectNode()
+                .put("subtype", "managed_session_commit_v1")
+                .put("sessionId", "session-1")
+                .set("managedSession", marker) + "\n";
     }
 
     javax.sql.DataSource publicationDataSource() {
@@ -535,11 +601,14 @@ class ToolPublicationStoreTest {
                 .put("historyRevision", sequence + 1).putNull("resultRef");
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.putArray("resources");
-        String records = event(sequence + 1, "tool.receipt", receiptPayload) + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+        String eventsLines = event(sequence + 1, "tool.receipt", receiptPayload);
+        String records = eventsLines + markerLine("transaction-large",
+                "recordToolResult", "execution-1", sequence + 1, sequence + 1,
+                digest(eventsLines), commitDigest);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-large", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
-                digest(records), commitDigest, digest(records), 1, null, 2,
+                digest(eventsLines), commitDigest, digest(records), 1, null, 2,
                 Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)),
                 digest(records), List.of(new ManagedSessionStoreModels.CommitResource(
                         admission.path("resourceId").asText(), "managed-tool-outcome", 1,
@@ -743,12 +812,15 @@ class ToolPublicationStoreTest {
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.set("resultRef", partial ? JSON.nullNode() : manifestRef);
         receiptPayload.putArray("resources").add(manifestRef);
-        String recordBytes = event(sequence + 1, "tool.receipt", receiptPayload) + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+        String eventsLines = event(sequence + 1, "tool.receipt", receiptPayload);
         long receiptSequence = sequence + 1;
+        String recordBytes = eventsLines + markerLine("transaction-receipt",
+                "recordToolResult", "execution-1", receiptSequence,
+                receiptSequence, digest(eventsLines), commitDigest);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-receipt", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), receiptSequence, receiptSequence, 1,
-                digest(recordBytes), commitDigest, digest(recordBytes), 1, null, 2,
+                digest(eventsLines), commitDigest, digest(recordBytes), 1, null, 2,
                 Base64.getEncoder().encodeToString(recordBytes.getBytes(StandardCharsets.UTF_8)),
                 digest(recordBytes), List.of(
                         new ManagedSessionStoreModels.CommitResource(admission.path("resourceId").asText(),
@@ -1405,7 +1477,7 @@ class ToolPublicationStoreTest {
     @Test
     void sameEpochReleasePreventsReserveAndRenew() {
         reserve();
-        append("activation.release", event(3, "activation.changed", activation("released")) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+        append("activation.release", event(3, "activation.changed", activation("released")), 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
         assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1418,7 +1490,7 @@ class ToolPublicationStoreTest {
         var execution = executions.findByExecutionCallId("execution-1");
         assertThat(store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN)).isNotNull();
         ObjectNode expired = activation("active").put("expiresAt", System.currentTimeMillis() - 1_000);
-        append("activation.expire", event(3, "activation.changed", expired) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+        append("activation.expire", event(3, "activation.changed", expired), 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
         assertThatThrownBy(this::reserve).hasMessageContaining("Activation is not active");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1453,6 +1525,27 @@ class ToolPublicationStoreTest {
         assertThat(store.apply(request("close_not_started"), WRITER_TOKEN, null)).isEqualTo(closed);
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null)).isEqualTo(closed);
         assertThatThrownBy(this::reserve).hasMessageContaining("fenced");
+    }
+
+    @Test
+    void closesASettledCancellationThatNeverClaimedADispatch() {
+        ObjectNode second = addSecondExecution();
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN);
+        // The Runtime settled the call as cancelled without ever claiming
+        // its dispatch; the projection's rule proves it never started.
+        jdbc.update("UPDATE qwen_tool_execution SET execution_state ="
+                + " 'SETTLED', execution_status = 'cancelled', result_json ="
+                + " '{\"executionStatus\":\"cancelled\"}', settled_at ="
+                + " CURRENT_TIMESTAMP, record_version = record_version + 1"
+                + " WHERE execution_call_id = 'execution-2'");
+        ObjectNode close = request("close_not_started")
+                .put("publicationId", "pub-2");
+        assertThat(store.apply(close, WRITER_TOKEN, null).path("state")
+                .asText()).isEqualTo("NOT_STARTED");
+        assertThat(store.apply(close, WRITER_TOKEN, null).path("state")
+                .asText()).isEqualTo("NOT_STARTED");
     }
 
     @Test
@@ -1556,7 +1649,13 @@ class ToolPublicationStoreTest {
         ObjectNode next = checkpoint.deepCopy();
         ((ObjectNode) next.path("tools").path("items").get(0)).put("state", "settled");
         JsonNode nextRef = ref("checkpoint-3", "managed-checkpoint", next);
-        append("tool.wait", event(4, "checkpoint.committed", JSON.createObjectNode()) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+        ObjectNode checkpointPayload = JSON.createObjectNode()
+                .put("checkpointId", "checkpoint-3")
+                .put("coveredSequence", 3);
+        checkpointPayload.putNull("previousCheckpointId");
+        checkpointPayload.set("stateRef", nextRef);
+        checkpointPayload.putNull("boundary");
+        append("tool.wait", event(4, "checkpoint.committed", checkpointPayload), 1,
                 List.of(resource(nextRef, next)), "checkpoint-3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Checkpoint execution");
@@ -1626,9 +1725,9 @@ class ToolPublicationStoreTest {
         checkpoint = nextCheckpoint;
         binding.set("checkpointRef", ref("checkpoint-2", "managed-checkpoint", checkpoint));
         second.set("checkpointRef", binding.get("checkpointRef"));
-        ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-2").put("outcomeSource", "runtime");
+        ObjectNode intent = toolIntent("execution-2");
         intent.set("argsRef", binding.get("argsRef"));
-        append("tool.dispatch", event(3, "tool.intent", intent) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+        append("tool.dispatch", event(3, "tool.intent", intent), 1,
                 List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-2");
         String digest = binding.path("requestDigest").asText();
         executions.findOrCreate(ToolExecutionRecord.prepared("execution-2", "idempotency-2", "binding-1", 1,
@@ -1663,8 +1762,32 @@ class ToolPublicationStoreTest {
     }
 
     private ObjectNode activation(String phase) {
-        return JSON.createObjectNode().put("activationId", "activation-1").put("epoch", 1)
-                .put("phase", phase).put("expiresAt", System.currentTimeMillis() + 180000);
+        ObjectNode payload = JSON.createObjectNode()
+                .put("activationId", "activation-1").put("epoch", 1)
+                .put("workerId", "worker-1").put("phase", phase)
+                .put("expiresAt", System.currentTimeMillis() + 180000);
+        payload.set("subject", activationSubject());
+        if ("installing".equals(phase) || "active".equals(phase)) {
+            payload.put("leaseDurationMs", 300_000);
+            payload.set("installRef", ref("activation-install-1",
+                    "managed-activation-install",
+                    TextNode.valueOf("activation-install")));
+            payload.putNull("boundaryRef");
+        } else {
+            payload.putNull("leaseDurationMs");
+            payload.putNull("installRef");
+            payload.set("boundaryRef", ref("activation-boundary-1",
+                    "managed-activation-boundary",
+                    TextNode.valueOf("activation-boundary")));
+        }
+        return payload;
+    }
+
+    /** A faithful activation subject. */
+    private static ObjectNode activationSubject() {
+        return JSON.createObjectNode().put("type", "activation")
+                .put("scopeId", "scope-1")
+                .put("activationId", "activation-1").put("epoch", 1);
     }
 
     private String event(long number, String kind, JsonNode payload) {
@@ -1672,8 +1795,9 @@ class ToolPublicationStoreTest {
                 .put("eventId", "event-" + number).put("occurredAt", 1_000);
         event.set("sessionKey", binding.get("sessionKey"));
         event.set("payload", payload);
-        event.set("subject", JSON.createObjectNode().put("type", "activation").put("activationId", "activation-1").put("epoch", 1));
-        return JSON.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event) + "\n";
+        event.set("subject", activationSubject());
+        return JSON.createObjectNode().put("subtype", "managed_session_event_v1")
+                .put("sessionId", "session-1").set("managedSession", event) + "\n";
     }
 
     record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
@@ -1931,8 +2055,12 @@ class ToolPublicationStoreTest {
         receiptPayload.set("toolOutcomeRef", admission);
         receiptPayload.set("resultRef", manifestRef);
         receiptPayload.putArray("resources").add(manifestRef);
-        String recordBytes = fixture.event(sequence + 1, "tool.receipt", receiptPayload) + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+        String eventsLines = fixture.event(sequence + 1, "tool.receipt",
+                receiptPayload);
         long receiptSequence = sequence + 1;
+        String recordBytes = eventsLines + markerLine("transaction-receipt",
+                "recordToolResult", "execution-1", receiptSequence,
+                receiptSequence, digest(eventsLines), commitDigest);
         var commit =
                 new ManagedSessionStoreModels.CommitTransactionRequest(
                         "workspace-1",
@@ -1947,7 +2075,7 @@ class ToolPublicationStoreTest {
                         receiptSequence,
                         receiptSequence,
                         1,
-                        digest(recordBytes),
+                        digest(eventsLines),
                         commitDigest,
                         digest(recordBytes),
                         1,
@@ -2208,10 +2336,11 @@ class ToolPublicationStoreTest {
     private void twoHistoricalReceipts() {
         ordinaryNotStartedReceipt();
         var outcome = publicResults.claim().orElseThrow().source().outcomeRef();
-        var receipt = JSON.createObjectNode().put("executionCallId", "execution-2").putNull("resultRef");
+        var receipt = JSON.createObjectNode().put("executionCallId", "execution-2").putNull("resultRef")
+                .put("historyRevision", sequence + 1);
         receipt.set("toolOutcomeRef", outcome);
         receipt.putArray("resources");
-        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1, List.of(), null);
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt), 1, List.of(), null);
         jdbc.update("DELETE FROM managed_agent_tool_result");
         jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision=0, o3_backfill_pending=TRUE, o3_backfill_through=NULL");
     }
@@ -2300,11 +2429,12 @@ class ToolPublicationStoreTest {
     void journalRollbackAlsoRollsBackPendingProjectionSource() {
         reserve();
         var ref = ref("rollback-outcome", "managed-tool-outcome", JSON.createObjectNode());
-        ObjectNode receipt = JSON.createObjectNode().put("executionCallId", "execution-1").putNull("resultRef");
+        ObjectNode receipt = JSON.createObjectNode().put("executionCallId", "execution-1").putNull("resultRef")
+                .put("historyRevision", sequence + 1);
         receipt.set("toolOutcomeRef", ref);
         receipt.putArray("resources");
         new TransactionTemplate(manager).executeWithoutResult(status -> {
-            append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+            append("recordToolResult", event(sequence + 1, "tool.receipt", receipt), 1,
                     List.of(resource(ref, JSON.createObjectNode())), null);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(1);
             status.setRollbackOnly();
@@ -2400,7 +2530,7 @@ class ToolPublicationStoreTest {
                 .put("historyRevision", sequence + 1).putNull("resultRef");
         receipt.set("toolOutcomeRef", ref);
         receipt.putArray("resources");
-        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{\"subtype\":\"managed_session_commit_v1\"}\n", 1,
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt), 1,
                 List.of(resource(ref, outcome)), null);
     }
 
@@ -2476,12 +2606,19 @@ class ToolPublicationStoreTest {
         };
     }
 
-    private void append(String operation, String records, int events,
+    private void append(String operation, String eventsLines, int events,
             List<ManagedSessionStoreModels.CommitResource> resources, String checkpointId) {
-        String nextDigest = events == 0 ? null : digest(records);
+        String nextDigest = events == 0 ? null : digest(eventsLines);
+        long first = events == 0 ? 0 : sequence + 1;
+        long last = first + events - (events == 0 ? 0 : 1);
+        String records = events > 0 ? eventsLines
+                + markerLine("transaction-" + revision, operation,
+                        "command-" + revision, first, last, nextDigest,
+                        commitDigest)
+                : eventsLines;
         var request = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-" + revision, operation, "command-" + revision, digest(records),
-                events == 0 ? 0 : sequence + 1, sequence + events, events, nextDigest, commitDigest, nextDigest,
+                first, last, events, nextDigest, commitDigest, nextDigest,
                 events == 0 ? 0 : 1, checkpointId, events == 0 ? 2 : events + 1,
                 Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), digest(records), resources);
         new TransactionTemplate(manager).executeWithoutResult(status -> sessions.commit("tenant-1", "session-1", WRITER_TOKEN, request));

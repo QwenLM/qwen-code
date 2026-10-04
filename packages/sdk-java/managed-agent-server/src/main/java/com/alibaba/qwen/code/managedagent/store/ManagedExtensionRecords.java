@@ -645,13 +645,17 @@ public final class ManagedExtensionRecords {
                 label + " must be an object with exactly " + keys));
     }
 
-    /** A closed object whose optional fields may be absent. */
+    /**
+     * A closed object whose optional fields may be absent; the refusal
+     * names the offending member.
+     */
     static void closedSubset(JsonNode node, Set<String> keys,
             String label) {
         require(node != null && node.isObject(),
-                label + " must be an object with exactly " + keys);
+                label + " must be an object");
         node.fieldNames().forEachRemaining(name -> require(keys.contains(name),
-                label + " must be an object with exactly " + keys));
+                label + " has the unexpected field " + name
+                        + "; its fields must be among " + keys));
     }
 
     static String id(JsonNode node, String label) {
@@ -697,7 +701,7 @@ public final class ManagedExtensionRecords {
         return value.longValueExact();
     }
 
-    private static void digest(JsonNode node, String label) {
+    static void digest(JsonNode node, String label) {
         require(node != null && node.isTextual()
                 && DIGEST.matcher(node.textValue()).matches(),
                 label + " must be a lowercase SHA-256 hex digest");

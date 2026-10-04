@@ -14,8 +14,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -32,12 +34,14 @@ final class ExtensionRecordJournal {
     private final ManagedSessionStore store;
     private final String tenantId;
     private final String workspaceId;
-    private final String sessionId;
+    final String sessionId;
     private long writerGeneration;
     private long journalRevision;
     private long sequence;
     private String lastCommitDigest;
-    private int domainEvents;
+    private String pendingDomain;
+    // The authority assigns each domain's chain IDs from its own count.
+    private final Map<String, Integer> domainEvents = new HashMap<>();
 
     ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
             String workspaceId, String sessionId) {
@@ -49,10 +53,7 @@ final class ExtensionRecordJournal {
 
     /** Acquires the writer and commits the Session's genesis. */
     ExtensionRecordJournal open() {
-        acquire().commit(genesis(
-                "{\"subtype\":\"session_execution_engine\"}\n"
-                        + "{\"subtype\":\"managed_session_header_v1\"}\n",
-                List.of()));
+        acquire().commit(genesis(genesisLines(), List.of()));
         journalRevision = 1;
         return this;
     }
@@ -73,6 +74,44 @@ final class ExtensionRecordJournal {
                 "session.create", "command-genesis", sha256("genesis"), 0, 0,
                 0, null, null, null, 0, null, 2, base64(records),
                 sha256(records), resources);
+    }
+
+    /** The engine and Managed header records of a faithful genesis. */
+    String genesisLines() {
+        return engineLine() + headerLine();
+    }
+
+    /** The foreign engine record, as the authority's container writes it. */
+    String engineLine() {
+        return line("session_execution_engine", JSON.createObjectNode()
+                .put("version", 1).put("engine", "managed"));
+    }
+
+    /** The Managed header record, with the body the authority writes. */
+    String headerLine() {
+        ObjectNode header = JSON.createObjectNode()
+                .put("formatVersion", 1)
+                .put("minimumReader", "managed-session/1")
+                .put("engine", "managed")
+                .put("createdBy", "test");
+        header.putObject("sessionKey").put("tenantId", tenantId)
+                .put("workspaceId", workspaceId).put("sessionId", sessionId);
+        header.set("definitionRef",
+                ref("session-definition", "managed-session-definition",
+                        "session-definition".getBytes(
+                                StandardCharsets.UTF_8)));
+        header.set("rootSnapshotRef",
+                ref("session-root-snapshot", "managed-session-root-snapshot",
+                        "session-root-snapshot".getBytes(
+                                StandardCharsets.UTF_8)));
+        return line("managed_session_header_v1", header);
+    }
+
+    /** A durable reference entry, as the authority composes one. */
+    static ObjectNode ref(String resourceId, String kind, byte[] bytes) {
+        return JSON.createObjectNode().put("resourceId", resourceId)
+                .put("kind", kind).put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", sha256(bytes));
     }
 
     CommitReceipt commitMonitor(String commandId, JsonNode monitor,
@@ -140,9 +179,11 @@ final class ExtensionRecordJournal {
                 .put("byteLength", body.length)
                 .put("digest", sha256(body));
         long next = sequence + 1;
+        pendingDomain = domain;
         ObjectNode event = JSON.createObjectNode().put("v", 1)
                 .put("sequence", next)
-                .put("eventId", domain + ":" + (domainEvents + 1));
+                .put("eventId", domain + ":" + (domainEvents.getOrDefault(
+                        domain, 0) + 1));
         event.putObject("sessionKey").put("tenantId", tenantId)
                 .put("workspaceId", workspaceId).put("sessionId", sessionId);
         event.put("kind", "domain.committed").put("occurredAt", occurredAt);
@@ -150,10 +191,23 @@ final class ExtensionRecordJournal {
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
         editEvent.accept(event);
-        String records = editRecords.apply(line("managed_session_event_v1",
-                event) + line("managed_session_commit_v1",
-                        JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + operation + "-" + commandId;
+        ObjectNode marker = JSON.createObjectNode()
+                .put("transactionId", transactionId)
+                .put("commandId", commandId)
+                .put("operation", operation)
+                .put("contentDigest", sha256(commandId))
+                .put("firstSequence", next)
+                .put("lastSequence", next + extraEvents)
+                .put("eventCount", 1 + extraEvents)
+                .put("eventsDigest", sha256("events-" + commandId));
+        if (lastCommitDigest == null) {
+            marker.putNull("previousCommitDigest");
+        } else {
+            marker.put("previousCommitDigest", lastCommitDigest);
+        }
+        String records = editRecords.apply(line("managed_session_event_v1",
+                event) + line("managed_session_commit_v1", marker));
         List<CommitResource> closure = new ArrayList<>(resources);
         closure.add(new CommitResource(resourceId, "managed-" + domain, 1,
                 body.length, sha256(body), Base64.getEncoder().encodeToString(body)));
@@ -172,7 +226,7 @@ final class ExtensionRecordJournal {
         journalRevision++;
         sequence = request.lastSequence();
         lastCommitDigest = request.commitDigest();
-        domainEvents++;
+        domainEvents.merge(pendingDomain, 1, Integer::sum);
     }
 
     long committedSequence() {

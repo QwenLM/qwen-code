@@ -169,11 +169,12 @@ class ManagedExtensionRecordStoreTest {
                         "event.v is out of range", event -> event.put("v",
                                 2))),
                 Map.entry("an extra payload field", new Refusal(
-                        "event.payload must be an object with exactly",
+                        "payload has the unexpected field extra for"
+                                + " domain.committed",
                         event -> ((ObjectNode) event.get("payload"))
                                 .put("extra", true))),
                 Map.entry("an event subject", new Refusal(
-                        "event must be an object with exactly",
+                        "event.subject has the unexpected field id",
                         event -> event.putObject("subject")
                                 .put("type", "turn").put("id", "turn-1"))),
                 Map.entry("a sequence past its place", new Refusal(
@@ -211,11 +212,14 @@ class ManagedExtensionRecordStoreTest {
                 + " JSON object the Session authority can read", trailing,
                 event -> {
                 }, records -> records);
-        refuse("no commit marker", "has the unknown subtype"
+        refuse("a foreign line where the commit marker belongs",
+                "has the unknown subtype"
                 + " managed_session_note after the Managed header", start,
                 event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
-                        + 1) + "{\"subtype\":\"managed_session_note\"}\n");
+                        + 1) + "{\"subtype\":\"managed_session_note\","
+                        + "\"sessionId\":\"" + sessionIdOf(records)
+                        + "\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         assertRefused("a line among the events that is not one", sessionId,
@@ -224,9 +228,11 @@ class ManagedExtensionRecordStoreTest {
                 () -> journal.commit(journal.request(
                         ExtensionRecordJournal.OPERATION, "refused", start,
                         1_000, event -> {
-                        }, records -> records.replaceFirst("\n",
-                                "\n{\"subtype\":\"managed_session_commit_v1\"}\n"),
-                        1)));
+                        }, records -> {
+                            String marker = records.substring(
+                                    records.indexOf('\n') + 1);
+                            return records.replaceFirst("\n", "\n" + marker);
+                        }, 1)));
     }
 
     @Test
@@ -272,39 +278,89 @@ class ManagedExtensionRecordStoreTest {
         return "[".repeat(depth) + "]".repeat(depth);
     }
 
+    /** The Session the composed record line names at its top level. */
+    private static String sessionIdOf(String records) {
+        int at = records.indexOf("\"sessionId\":\"") + "\"sessionId\":\""
+                .length();
+        return records.substring(at, records.indexOf('"', at));
+    }
+
     /**
-     * Every event line carries the shared envelope, not only the Stage H
-     * one, and every domain.committed line a body the authority could read
-     * back — the rules the authority's reopen scanner checks, refused at
-     * commit time so the journal never holds a line it could not reopen.
+     * Every event line carries the shared envelope and its kind's payload
+     * and subject, every domain.committed line a body the authority could
+     * read back, every line this Session's name at the top level, the
+     * header and the commit marker bodies the reader parses — the rules the
+     * authority's reopen scanner and commit gate check, refused at commit
+     * time so the journal never holds a line it could not reopen. Each
+     * case answers 200 before the mirror and 409 after it.
      */
     @Test
     void refusesJournalLinesTheAuthorityRefusesOnReopen() throws Exception {
         refuseLine("an event line with no envelope",
-                "event must be an object with exactly", 1,
+                "event must be an object", 1,
                 sessionId -> records -> records.replaceFirst("\n",
-                        "\n{\"subtype\":\"managed_session_event_v1\"}\n"));
+                        "\n{\"subtype\":\"managed_session_event_v1\","
+                                + "\"sessionId\":\"" + sessionId + "\"}\n"));
+        refuseLine("an event line with no payload",
+                "payload must be a JSON object", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "lifecycle.changed", null, null)
+                        + "\n"));
+        refuseLine("a lifecycle.changed with an empty payload",
+                "payload.operationId is required for lifecycle.changed", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "lifecycle.changed", "{}", null)
+                        + "\n"));
         refuseLine("an event out of its sequence place",
                 "event.sequence is out of range", 1,
                 sessionId -> records -> records.replaceFirst("\n",
                         "\n" + ordinaryEvent(sessionId, 5, "turn:1",
-                                "lifecycle.changed", "\"payload\":{}")
+                                "lifecycle.changed", lifecyclePayload(),
+                                null)
                                 + "\n"));
         refuseLine("an event of an unknown kind",
                 "event.kind must be one of", 1,
                 sessionId -> records -> records.replaceFirst("\n",
                         "\n" + ordinaryEvent(sessionId, 2, "turn:1",
-                                "not_a_kind", "\"payload\":{}") + "\n"));
+                                "not_a_kind", "{}", null) + "\n"));
         refuseLine("a record of an unknown subtype", "has the unknown"
                 + " subtype not_a_subtype after the Managed header", 1,
                 sessionId -> records -> records.replaceFirst("\n",
-                        "\n{\"subtype\":\"not_a_subtype\"}\n"));
+                        "\n{\"subtype\":\"not_a_subtype\",\"sessionId\":\""
+                                + sessionId + "\"}\n"));
+        refuseLine("an event line without its Session at the top level",
+                "does not name this Session at the top level", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "lifecycle.changed", lifecyclePayload(),
+                                null)
+                                .replaceFirst("\"sessionId\":\"" + sessionId
+                                        + "\",", "")
+                        + "\n"));
+        refuseLine("an event line naming another Session",
+                "does not name this Session at the top level", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "lifecycle.changed", lifecyclePayload(),
+                                null)
+                                .replaceFirst("\"sessionId\":\"" + sessionId
+                                                + "\",",
+                                        "\"sessionId\":\"another-session\",")
+                        + "\n"));
+        String unknownDomain = "\"domain\":\"not_a_domain\",\"version\":1,"
+                + "\"operationId\":\"op-other\",\"recordRef\":{"
+                + "\"resourceId\":\"other-body\",\"kind\":\"managed-other\","
+                + "\"schemaVersion\":1,\"byteLength\":2,\"digest\":\""
+                + ExtensionRecordJournal.sha256("{}") + "\"}";
         refuseLine("a record of an unknown domain",
                 "commits a record of an unknown domain", 1,
                 sessionId -> records -> records.replaceFirst("\n", "\n"
                         + ordinaryEvent(sessionId, 2, "other:1",
-                                "domain.committed",
-                                "\"payload\":{\"domain\":\"not_a_domain\"}")
+                                "domain.committed", "{" + unknownDomain
+                                        + "}",
+                                null)
                         + "\n"));
         String goalState = "\"domain\":\"goal_state\",\"version\":1,"
                 + "\"operationId\":\"op-goal\",\"recordRef\":{"
@@ -312,41 +368,117 @@ class ManagedExtensionRecordStoreTest {
                 + "\"schemaVersion\":1,\"byteLength\":2,\"digest\":\""
                 + ExtensionRecordJournal.sha256("{}") + "\"}";
         refuseLine("a body-less record with an extra payload field",
-                "event.payload must be an object with exactly", 1,
+                "payload has the unexpected field extra for"
+                        + " domain.committed", 1,
                 sessionId -> records -> records.replaceFirst("\n", "\n"
                         + ordinaryEvent(sessionId, 2, "goal_state:1",
                                 "domain.committed",
-                                "\"payload\":{" + goalState + ",\"extra\":true}")
+                                "{" + goalState + ",\"extra\":true}", null)
                         + "\n"));
         refuseLine("a body-less record at version 2",
                 "event.payload.version is out of range", 1,
                 sessionId -> records -> records.replaceFirst("\n", "\n"
                         + ordinaryEvent(sessionId, 2, "goal_state:1",
                                 "domain.committed",
-                                "\"payload\":{" + goalState
+                                "{" + goalState
                                         .replace("\"version\":1",
                                                 "\"version\":2")
-                                        + "}")
+                                        + "}", null)
                         + "\n"));
         refuseLine("an event ID reserved for Stage H records",
                 "takes an event ID reserved for Stage H records", 1,
                 sessionId -> records -> records.replaceFirst("\n", "\n"
-                        + ordinaryEvent(sessionId, 2, "monitor_run:1",
-                                "lifecycle.changed", "\"payload\":{}")
+                        + ordinaryEvent(sessionId, 2, "monitor_run:99",
+                                "lifecycle.changed", lifecyclePayload(),
+                                null)
                         + "\n"));
+        refuseLine("a Stage H event ID the chain did not assign",
+                "the monitor_run chain assigns monitor_run:1 to its next"
+                        + " revision", 0,
+                sessionId -> records -> records.replace("monitor_run:1",
+                        "monitor_run:42"));
+        refuseLine("two events sharing an event ID",
+                "repeats the event ID of another event in the transaction",
+                1,
+                sessionId -> records -> {
+                    String first = records.substring(0,
+                            records.indexOf('\n') + 1);
+                    return first + first.replace("\"sequence\":1",
+                            "\"sequence\":2")
+                            + records.substring(first.length());
+                });
+        refuseLine("a tool.intent without a subject",
+                "tool.intent requires an activation subject", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "tool.intent",
+                                "{\"executionCallId\":\"call-1\","
+                                        + "\"batchId\":\"batch-1\","
+                                        + "\"ordinal\":1,"
+                                        + "\"toolDefinitionRef\":"
+                                        + toolIntentRef() + ",\"argsRef\":"
+                                        + toolIntentRef()
+                                        + ",\"outcomeSource\":\"runtime\"}",
+                                null)
+                        + "\n"));
+        refuseLine("a checkpoint.committed without a subject",
+                "checkpoint.committed requires an activation subject", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "checkpoint.committed", checkpointPayload(1),
+                                null)
+                        + "\n"));
+        refuseLine("a checkpoint covering its own transaction",
+                "covers events not committed before its transaction", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "checkpoint.committed", checkpointPayload(1),
+                                activationSubject())
+                        + "\n"));
+        refuseLine("a commit marker without a body",
+                "commit must be an object", 0,
+                sessionId -> records -> records.substring(0,
+                        records.indexOf('\n') + 1)
+                        + "{\"subtype\":\"managed_session_commit_v1\","
+                        + "\"sessionId\":\"" + sessionId + "\"}\n");
         refuseLine("a commit marker past the shared cap",
                 "exceeds 65536 UTF-8 bytes", 0,
                 sessionId -> records -> records.substring(0,
                         records.indexOf('\n') + 1)
                         + "{\"subtype\":\"managed_session_commit_v1\","
-                        + "\"pad\":\"" + "x".repeat(70_000) + "\"}\n");
+                        + "\"sessionId\":\"" + sessionId + "\",\"pad\":\""
+                        + "x".repeat(70_000) + "\"}\n");
+        refuseLine("a commit marker out of agreement with its request",
+                "commit marker does not agree with the transaction its"
+                        + " request declares", 0,
+                sessionId -> records -> records.replace(
+                        "\"lastSequence\":1,\"eventCount\":1",
+                        "\"lastSequence\":2,\"eventCount\":2"));
+        refuseLine("no event at all between its commit markers",
+                "holds only its events, then its commit marker", 0,
+                sessionId -> records -> {
+                    String marker = records.substring(
+                            records.indexOf('\n') + 1);
+                    return marker + marker;
+                });
+        refuseLine("an event after its commit marker",
+                "holds only its events, then its commit marker", 1,
+                sessionId -> records -> {
+                    String marker = records.substring(
+                            records.indexOf('\n') + 1);
+                    return marker + records.substring(0,
+                            records.indexOf('\n') + 1)
+                            .replace("\"sequence\":1", "\"sequence\":2")
+                            + marker;
+                });
         refuseLine("a second Stage H revision in one transaction",
                 "commits a second Stage H record revision", 1,
                 sessionId -> records -> {
                     String first = records.substring(0,
                             records.indexOf('\n') + 1);
                     String second = first.replace("\"sequence\":1",
-                            "\"sequence\":2");
+                            "\"sequence\":2").replace("monitor_run:1",
+                                    "monitor_run:2");
                     return first + second + records.substring(first.length());
                 });
 
@@ -358,10 +490,27 @@ class ManagedExtensionRecordStoreTest {
                 "body-less", startBody(), 1_000, event -> {
                 }, records -> records.replaceFirst("\n", "\n"
                         + ordinaryEvent(sessionId, 2, "goal_state:1",
-                                "domain.committed",
-                                "\"payload\":{" + goalState + "}")
+                                "domain.committed", "{" + goalState + "}",
+                                null)
                         + "\n"), 1));
         assertThat(revisions(sessionId)).isEqualTo(1);
+    }
+
+    /** The shared ref shape the durable-ref fields carry in these tests. */
+    private static String toolIntentRef() {
+        return new StringBuilder("{\"resourceId\":\"ref-1\",\"kind\":")
+                .append("\"managed-tool-definition\",\"schemaVersion\":1,")
+                .append("\"byteLength\":2,\"digest\":\"")
+                .append(ExtensionRecordJournal.sha256("{}"))
+                .append("\"}").toString();
+    }
+
+    /** A faithful checkpoint.committed payload covering `covered`. */
+    private static String checkpointPayload(int covered) {
+        return "{\"checkpointId\":\"checkpoint-1\",\"coveredSequence\":"
+                + covered
+                + ",\"previousCheckpointId\":null,\"stateRef\":"
+                + toolIntentRef() + ",\"boundary\":null}";
     }
 
     private void refuseLine(String label, String message,
@@ -384,15 +533,36 @@ class ManagedExtensionRecordStoreTest {
                 .required("monitorRun"));
     }
 
-    /** An ordinary event line the way the authority composes one. */
+    /**
+     * An ordinary event line the way the authority composes one: the
+     * Session at the top level, the shared envelope inside, and a payload
+     * and subject of the caller's shape.
+     */
     private String ordinaryEvent(String sessionId, int sequence,
-            String eventId, String kind, String payload) {
-        return "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":"
+            String eventId, String kind, String payloadJson,
+            String subjectJson) {
+        return "{\"subtype\":\"managed_session_event_v1\",\"sessionId\":\""
+                + sessionId + "\",\"managedSession\":"
                 + "{\"v\":1,\"sequence\":" + sequence + ",\"eventId\":\""
                 + eventId + "\",\"sessionKey\":{\"tenantId\":\"" + TENANT
                 + "\",\"workspaceId\":\"" + WORKSPACE + "\",\"sessionId\":\""
                 + sessionId + "\"},\"kind\":\"" + kind
-                + "\",\"occurredAt\":1000," + payload + "}}";
+                + "\",\"occurredAt\":1000"
+                + (payloadJson == null ? "" : ",\"payload\":" + payloadJson)
+                + (subjectJson == null ? "" : ",\"subject\":" + subjectJson)
+                + "}}";
+    }
+
+    /** A faithful lifecycle.changed payload, from nothing to idle. */
+    private static String lifecyclePayload() {
+        return "{\"operationId\":\"op-lifecycle\",\"from\":null,"
+                + "\"to\":\"idle\",\"reason\":\"opened\",\"pendingOwnersRef\":null}";
+    }
+
+    /** A faithful activation subject. */
+    private static String activationSubject() {
+        return "{\"type\":\"activation\",\"scopeId\":\"scope-1\","
+                + "\"activationId\":\"activation-1\",\"epoch\":1}";
     }
 
     @Test
@@ -409,8 +579,79 @@ class ManagedExtensionRecordStoreTest {
                 ManagedExtensionRecordStore.ERROR_REJECTED,
                 "is not one of the transaction's events",
                 () -> journal.commit(journal.genesis(event
-                        + "\n{\"subtype\":\"managed_session_header_v1\"}\n",
+                        + "\n" + journal.headerLine(),
                         revision.resources())));
+    }
+
+    /**
+     * The genesis transaction's own shape rules: its Managed header is one
+     * line, capped and parsed as the reader parses it, everything after it
+     * is a known subtype, and no marker or second header appears. Each case
+     * is a transaction the store accepted and the authority's reopen
+     * reader throws on.
+     */
+    @Test
+    void refusesGenesisLinesTheAuthorityRefusesOnReopen() throws Exception {
+        refuseGenesis("a header past the shared cap",
+                "exceeds 65536 UTF-8 bytes",
+                journal -> {
+                    String header = journal.headerLine();
+                    return journal.engineLine()
+                            + header.substring(0, header.length() - 2)
+                            + ",\"pad\":\"" + "x".repeat(70_000) + "\"}\n";
+                });
+        refuseGenesis("a repeated Managed header",
+                "repeats the Managed header",
+                journal -> journal.headerLine() + journal.headerLine());
+        refuseGenesis("a commit marker before the Managed header",
+                "precedes the Managed header",
+                journal -> "{\"subtype\":\"managed_session_commit_v1\","
+                        + "\"sessionId\":\"" + journal.sessionId + "\"}\n"
+                        + journal.headerLine());
+        refuseGenesis("a foreign record after the Managed header",
+                "has the unknown subtype not_a_subtype after the Managed"
+                        + " header",
+                journal -> journal.headerLine()
+                        + "{\"subtype\":\"not_a_subtype\",\"sessionId\":\""
+                        + journal.sessionId + "\"}\n");
+        refuseGenesis("a header naming another Session",
+                "the genesis transaction belongs to a different session",
+                journal -> journal.engineLine()
+                        + journal.headerLine().replace(TENANT,
+                                "another-tenant"));
+        refuseGenesis("a header at format version 2",
+                "header.formatVersion is not supported by this reader",
+                journal -> journal.engineLine() + journal.headerLine()
+                        .replace("\"formatVersion\":1",
+                                "\"formatVersion\":2"));
+        refuseGenesis("a header naming a newer reader",
+                "header.minimumReader is not supported by this reader",
+                journal -> journal.engineLine() + journal.headerLine()
+                        .replace("managed-session/1", "managed-session/2"));
+
+        // A Managed header line is refused in every later transaction too.
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        assertRefused("a Managed header in an ordinary transaction",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "holds the Managed header outside the genesis transaction",
+                () -> journal.commit(journal.request(
+                        ExtensionRecordJournal.OPERATION, "header", startBody(),
+                        1_000, event -> {
+                        }, records -> records.replaceFirst("\n",
+                                "\n" + journal.headerLine()), 1)));
+    }
+
+    private void refuseGenesis(String label, String message,
+            Function<ExtensionRecordJournal, String> records)
+            throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = new ExtensionRecordJournal(
+                sessionStore, TENANT, WORKSPACE, sessionId).acquire();
+        assertRefused(label, sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED, message,
+                () -> journal.commit(journal.genesis(
+                        records.apply(journal), List.of())));
     }
 
     private record Refusal(String message, Consumer<ObjectNode> editEvent) {
@@ -466,19 +707,39 @@ class ManagedExtensionRecordStoreTest {
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
+        // The first revision commits beside one opening event, so journal
+        // sequence and revision disagree from then on and the exact
+        // ordering key is what the assertion pins.
+        JsonNode first = chain().get(0);
+        CommitTransactionRequest opening = journal.request(
+                ExtensionRecordJournal.OPERATION, "announce-0",
+                ExtensionRecordJournal.bytes(first.required("monitorRun")),
+                first.required("occurredAt").longValue(), event -> {
+                }, records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "opening:1",
+                                "lifecycle.changed", lifecyclePayload(),
+                                null)
+                        + "\n"), 1);
+        journal.commit(opening);
+        journal.committed(opening);
         List<String> expected = new ArrayList<>();
+        List<Long> expectedSequences = new ArrayList<>();
         TaskProjection previous = null;
         int index = 0;
         for (JsonNode revision : chain()) {
-            journal.commitMonitor("announce-" + index++,
-                    revision.required("monitorRun"),
-                    revision.required("occurredAt").longValue());
+            if (index > 0) {
+                journal.commitMonitor("announce-" + index,
+                        revision.required("monitorRun"),
+                        revision.required("occurredAt").longValue());
+            }
             TaskProjection view = ManagedExtensionProjectionContractTest.view(
                     revision.required("view"));
             if (!Objects.equals(previous, view)) {
                 expected.add(view.state());
+                expectedSequences.add(index == 0 ? 1L : index + 2L);
             }
             previous = view;
+            index++;
         }
         List<Map<String, Object>> announced = taskEvents(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
@@ -489,7 +750,8 @@ class ManagedExtensionRecordStoreTest {
         assertThat(announced).allSatisfy(row ->
                 assertThat(row.get("task_id")).isEqualTo(taskId));
         assertThat(announced).extracting(row -> ((Number) row
-                .get("first_sequence")).longValue()).isSorted();
+                .get("journal_sequence")).longValue())
+                .containsExactlyElementsOf(expectedSequences);
         assertThat(state.findEvents(TENANT, sessionId, 0, 100))
                 .extracting(EventRecord::type)
                 .doesNotContain("task.updated");
@@ -515,10 +777,12 @@ class ManagedExtensionRecordStoreTest {
         // The revision committed between the two deltas announced nothing
         // onto the Session event stream, whose interleaved events split a
         // streamed message part, so both deltas keep one output_text Part.
+        // The announcement itself exists, on the outbox only.
         state.materializeNextBatch(TENANT, sessionId, 100);
         assertThat(state.findEvents(TENANT, sessionId, 0, 100))
                 .extracting(EventRecord::type)
                 .doesNotContain("task.updated");
+        assertThat(taskEvents(sessionId)).hasSize(1);
         List<Map<String, Object>> parts = jdbc.queryForList(
                 "SELECT part_id, part_text FROM managed_agent_item_part"
                         + " WHERE tenant_id = ? AND session_id = ?"
@@ -530,9 +794,10 @@ class ManagedExtensionRecordStoreTest {
 
     private List<Map<String, Object>> taskEvents(String sessionId) {
         return jdbc.queryForList("SELECT task_id, task_state, revision,"
-                        + " first_sequence FROM qwen_managed_session_task_event"
+                        + " journal_sequence FROM"
+                        + " qwen_managed_session_task_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " ORDER BY first_sequence, task_id",
+                        + " ORDER BY journal_sequence, task_id",
                 TENANT, sessionId);
     }
 
@@ -562,7 +827,15 @@ class ManagedExtensionRecordStoreTest {
                         .longValue());
         // The revision committed before the delete announced once; the one
         // committed while the Session is being deleted announced nothing.
-        assertThat(taskEvents(sessionId)).hasSize(1);
+        // The surviving row is the first revision's view, not the second's.
+        TaskProjection beforeDelete = ManagedExtensionProjectionContractTest
+                .view(chain.get(0).required("view"));
+        assertThat(taskEvents(sessionId)).singleElement().satisfies(row -> {
+            assertThat(((Number) row.get("revision")).longValue())
+                    .isEqualTo(1L);
+            assertThat(row.get("task_state"))
+                    .isEqualTo(beforeDelete.state());
+        });
         assertThat(state.findEvents(TENANT, sessionId, 0, 100))
                 .extracting(EventRecord::type)
                 .doesNotContain("task.updated")

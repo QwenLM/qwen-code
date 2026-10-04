@@ -169,7 +169,7 @@ export const MANAGED_SESSION_ACTION_SOURCES = [
 export type ManagedSessionActionSource =
   (typeof MANAGED_SESSION_ACTION_SOURCES)[number];
 
-const MANAGED_SESSION_ACTION_STATES = [
+export const MANAGED_SESSION_ACTION_STATES = [
   'requested',
   'decided',
   'cancelled',
@@ -177,6 +177,19 @@ const MANAGED_SESSION_ACTION_STATES = [
 ] as const;
 
 type ManagedSessionActionState = (typeof MANAGED_SESSION_ACTION_STATES)[number];
+
+export const MANAGED_SESSION_ACTIVATION_PHASES = [
+  'installing',
+  'active',
+  'released',
+  'revoked',
+] as const;
+
+export const MANAGED_SESSION_MODEL_ATTEMPT_STATES = [
+  'started',
+  'output_committed',
+  'abandoned',
+] as const;
 
 export interface ManagedSessionKey {
   readonly tenantId: string;
@@ -568,7 +581,7 @@ function assertSubject(
   return fail(`${label}.type must be activation, turn or hook_operation.`);
 }
 
-type FieldKind =
+export type FieldKind =
   | 'id'
   | 'idOrNull'
   | 'ids'
@@ -584,167 +597,174 @@ type FieldKind =
   | 'subject'
   | 'json';
 
-interface PayloadSchema {
+export interface PayloadSchema {
   readonly fields: Readonly<Record<string, FieldKind>>;
   readonly optional?: readonly string[];
 }
 
-const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
-  {
-    'input.accepted': {
-      fields: {
-        inputId: 'id',
-        turnId: 'id',
-        source: 'text',
-        contentRef: 'ref',
-        deadline: 'timeOrNull',
-        admissionRef: 'ref',
-      },
+/**
+ * The per-kind payload contract the reader applies before the payload rules
+ * below; pinned by the shared store fixture so the Java store mirrors it
+ * exactly — a kind or field added here without the fixture fails both
+ * contract tests.
+ */
+export const EVENT_SCHEMAS: Readonly<
+  Record<ManagedSessionEventKind, PayloadSchema>
+> = {
+  'input.accepted': {
+    fields: {
+      inputId: 'id',
+      turnId: 'id',
+      source: 'text',
+      contentRef: 'ref',
+      deadline: 'timeOrNull',
+      admissionRef: 'ref',
     },
-    'wake.requested': {
-      fields: {
-        wakeId: 'id',
-        reason: 'text',
-        subject: 'subject',
-        sourceEventId: 'id',
-        requiredSequence: 'sequence',
-      },
+  },
+  'wake.requested': {
+    fields: {
+      wakeId: 'id',
+      reason: 'text',
+      subject: 'subject',
+      sourceEventId: 'id',
+      requiredSequence: 'sequence',
     },
-    'activation.changed': {
-      fields: {
-        activationId: 'id',
-        epoch: 'sequence',
-        workerId: 'id',
-        subject: 'subject',
-        phase: 'text',
-        leaseDurationMs: 'sequenceOrNull',
-        expiresAt: 'timeOrNull',
-        installRef: 'refOrNull',
-        boundaryRef: 'refOrNull',
-        renewalSeq: 'sequence',
-      },
-      optional: ['renewalSeq'],
+  },
+  'activation.changed': {
+    fields: {
+      activationId: 'id',
+      epoch: 'sequence',
+      workerId: 'id',
+      subject: 'subject',
+      phase: 'text',
+      leaseDurationMs: 'sequenceOrNull',
+      expiresAt: 'timeOrNull',
+      installRef: 'refOrNull',
+      boundaryRef: 'refOrNull',
+      renewalSeq: 'sequence',
     },
-    'model.attempt': {
-      fields: {
-        attemptId: 'id',
-        routeRef: 'ref',
-        inputCheckpointRef: 'refOrNull',
-        state: 'text',
-        usageRef: 'refOrNull',
-      },
+    optional: ['renewalSeq'],
+  },
+  'model.attempt': {
+    fields: {
+      attemptId: 'id',
+      routeRef: 'ref',
+      inputCheckpointRef: 'refOrNull',
+      state: 'text',
+      usageRef: 'refOrNull',
     },
-    'message.committed': {
-      fields: {
-        messageId: 'id',
-        role: 'text',
-        contentRef: 'ref',
-        modelAttemptId: 'idOrNull',
-        parentMessageId: 'idOrNull',
-      },
-      optional: ['modelAttemptId'],
+  },
+  'message.committed': {
+    fields: {
+      messageId: 'id',
+      role: 'text',
+      contentRef: 'ref',
+      modelAttemptId: 'idOrNull',
+      parentMessageId: 'idOrNull',
     },
-    'tool.intent': {
-      fields: {
-        executionCallId: 'id',
-        batchId: 'id',
-        ordinal: 'sequence',
-        toolDefinitionRef: 'ref',
-        argsRef: 'ref',
-        outcomeSource: 'text',
-      },
+    optional: ['modelAttemptId'],
+  },
+  'tool.intent': {
+    fields: {
+      executionCallId: 'id',
+      batchId: 'id',
+      ordinal: 'sequence',
+      toolDefinitionRef: 'ref',
+      argsRef: 'ref',
+      outcomeSource: 'text',
     },
-    'message.delta': {
-      fields: {
-        messageId: 'id',
-        turnId: 'id',
-        role: 'text',
-        text: 'rawText',
-      },
+  },
+  'message.delta': {
+    fields: {
+      messageId: 'id',
+      turnId: 'id',
+      role: 'text',
+      text: 'rawText',
     },
-    'action.changed': {
-      fields: {
-        requestId: 'id',
-        kind: 'text',
-        source: 'text',
-        inputRevision: 'sequence',
-        optionsRef: 'refOrNull',
-        state: 'text',
-        decisionRef: 'refOrNull',
-      },
+  },
+  'action.changed': {
+    fields: {
+      requestId: 'id',
+      kind: 'text',
+      source: 'text',
+      inputRevision: 'sequence',
+      optionsRef: 'refOrNull',
+      state: 'text',
+      decisionRef: 'refOrNull',
     },
-    'tool.receipt': {
-      fields: {
-        executionCallId: 'id',
-        toolOutcomeRef: 'ref',
-        resultRef: 'refOrNull',
-        resources: 'refs',
-        historyRevision: 'sequence',
-      },
+  },
+  'tool.receipt': {
+    fields: {
+      executionCallId: 'id',
+      toolOutcomeRef: 'ref',
+      resultRef: 'refOrNull',
+      resources: 'refs',
+      historyRevision: 'sequence',
     },
-    'checkpoint.committed': {
-      fields: {
-        checkpointId: 'id',
-        coveredSequence: 'sequence',
-        previousCheckpointId: 'idOrNull',
-        stateRef: 'ref',
-        boundary: 'textOrNull',
-      },
+  },
+  'checkpoint.committed': {
+    fields: {
+      checkpointId: 'id',
+      coveredSequence: 'sequence',
+      previousCheckpointId: 'idOrNull',
+      stateRef: 'ref',
+      boundary: 'textOrNull',
     },
-    'context.compacted': {
-      fields: {
-        compactionId: 'id',
-        fromSequence: 'sequence',
-        toSequence: 'sequence',
-        summaryRef: 'ref',
-        replacedMessageIds: 'ids',
-        tokenCountsRef: 'refOrNull',
-      },
+  },
+  'context.compacted': {
+    fields: {
+      compactionId: 'id',
+      fromSequence: 'sequence',
+      toSequence: 'sequence',
+      summaryRef: 'ref',
+      replacedMessageIds: 'ids',
+      tokenCountsRef: 'refOrNull',
     },
-    'cancel.requested': {
-      fields: {
-        requestId: 'id',
-        target: 'json',
-        reason: 'text',
-        requestedBy: 'text',
-      },
+  },
+  'cancel.requested': {
+    fields: {
+      requestId: 'id',
+      target: 'json',
+      reason: 'text',
+      requestedBy: 'text',
     },
-    'turn.settled': {
-      fields: {
-        turnId: 'id',
-        outcome: 'text',
-        stopReason: 'textOrNull',
-        resultRef: 'refOrNull',
-        usageRef: 'refOrNull',
-        pendingOwnersRef: 'refOrNull',
-      },
+  },
+  'turn.settled': {
+    fields: {
+      turnId: 'id',
+      outcome: 'text',
+      stopReason: 'textOrNull',
+      resultRef: 'refOrNull',
+      usageRef: 'refOrNull',
+      pendingOwnersRef: 'refOrNull',
     },
-    'config.bound': {
-      fields: {
-        revision: 'sequence',
-        previousRevision: 'sequenceOrNull',
-        bundleRef: 'ref',
-        rootSnapshotRef: 'ref',
-      },
+  },
+  'config.bound': {
+    fields: {
+      revision: 'sequence',
+      previousRevision: 'sequenceOrNull',
+      bundleRef: 'ref',
+      rootSnapshotRef: 'ref',
     },
-    'lifecycle.changed': {
-      fields: {
-        operationId: 'id',
-        from: 'textOrNull',
-        to: 'text',
-        reason: 'text',
-        pendingOwnersRef: 'refOrNull',
-      },
+  },
+  'lifecycle.changed': {
+    fields: {
+      operationId: 'id',
+      from: 'textOrNull',
+      to: 'text',
+      reason: 'text',
+      pendingOwnersRef: 'refOrNull',
     },
-    'domain.committed': {
-      fields: {
-        domain: 'text',
-        version: 'sequence',
-        operationId: 'id',
-        recordRef: 'ref',
-      },
+  },
+  'domain.committed': {
+    fields: {
+      domain: 'text',
+      version: 'sequence',
+      operationId: 'id',
+      recordRef: 'ref',
     },
-  };
+  },
+};
 
 /**
  * Which actor class may request each kind. The authority still performs every
@@ -771,7 +791,7 @@ const EVENT_ACTORS: Readonly<
   'domain.committed': ['trusted_entry'],
 };
 
-const ACTIVATION_SUBJECT_KINDS: Readonly<
+export const ACTIVATION_SUBJECT_KINDS: Readonly<
   Record<ManagedSessionEventKind, boolean>
 > = {
   'input.accepted': false,
@@ -895,7 +915,7 @@ function assertPayloadRules(
     case 'activation.changed': {
       const phase = assertEnum(
         payload['phase'],
-        ['installing', 'active', 'released', 'revoked'] as const,
+        MANAGED_SESSION_ACTIVATION_PHASES,
         `${at}.phase`,
       );
       const open = phase === 'installing' || phase === 'active';
@@ -921,7 +941,7 @@ function assertPayloadRules(
     case 'model.attempt': {
       const state = assertEnum(
         payload['state'],
-        ['started', 'output_committed', 'abandoned'] as const,
+        MANAGED_SESSION_MODEL_ATTEMPT_STATES,
         `${at}.state`,
       );
       if (state === 'started' && payload['usageRef'] !== null) {
@@ -1123,7 +1143,7 @@ export function assertManagedSessionEventActor(
   }
 }
 
-const LIFECYCLE_TRANSITIONS: Readonly<
+export const LIFECYCLE_TRANSITIONS: Readonly<
   Record<ManagedSessionLifecycleState, readonly ManagedSessionLifecycleState[]>
 > = {
   idle: ['active', 'closing'],

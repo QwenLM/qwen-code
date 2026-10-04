@@ -112,12 +112,15 @@ class ManagedActionsTest {
             request.put("recordDigest", ExtensionRecordJournal.sha256(changed));
             CommitTransactionRequest invalid =
                     json.treeToValue(request, CommitTransactionRequest.class);
-            // A malformed event envelope is refused by the shared record-line
-            // rules before the action applier sees the journal; a malformed
-            // action payload still reaches its own applier's refusal.
-            String expected = "version".equals(field)
-                    ? ManagedExtensionRecordStore.ERROR_REJECTED
-                    : "managed_session_action_rejected";
+            // A malformed event envelope or payload is refused by the
+            // shared record-line rules before the action applier sees the
+            // journal; a malformed action reference still reaches its own
+            // applier's refusal.
+            String expected = switch (field) {
+                case "refVersion", "refLength" ->
+                        "managed_session_action_rejected";
+                default -> ManagedExtensionRecordStore.ERROR_REJECTED;
+            };
             assertThatThrownBy(
                             () ->
                                     journals.commit(

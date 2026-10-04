@@ -255,8 +255,12 @@ public final class ToolPublicationStore {
         String state = "FENCED";
         if ("close_not_started".equals(operation)) {
             ToolExecutionRecord execution = requireExecution(binding, false);
-            require(execution.isSettled() && ("not_started".equals(execution.getExecutionStatus())
-                    || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0),
+            // The same rule the task projection's fixtures pin, in one place.
+            require(execution.isSettled()
+                    && "not_started_proven".equals(ManagedExtensionProjection
+                            .executionOf(execution.getState(),
+                                    execution.getExecutionStatus(),
+                                    execution.getDispatchGeneration())),
                     "Execution has no authoritative not-started proof");
             Long published = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
                     + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);

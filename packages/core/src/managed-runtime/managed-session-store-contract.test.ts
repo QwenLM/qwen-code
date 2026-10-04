@@ -12,7 +12,18 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   type ManagedSessionStoreHttpError,
 } from './http-managed-session-store.js';
-import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
+import {
+  ACTIVATION_SUBJECT_KINDS,
+  EVENT_SCHEMAS,
+  LIFECYCLE_TRANSITIONS,
+  MANAGED_SESSION_ACTION_SOURCES,
+  MANAGED_SESSION_ACTION_STATES,
+  MANAGED_SESSION_ACTIVATION_PHASES,
+  MANAGED_SESSION_EVENT_KINDS,
+  MANAGED_SESSION_LIFECYCLE_STATES,
+  MANAGED_SESSION_LIMITS,
+  MANAGED_SESSION_MODEL_ATTEMPT_STATES,
+} from './managed-session-records.js';
 
 interface ContractFixture {
   contractVersion: number;
@@ -34,6 +45,18 @@ interface ContractFixture {
     minimumLeaseDurationMs: number;
     maximumLeaseDurationMs: number;
   };
+  eventKinds: string[];
+  activationSubjectKinds: Record<string, boolean>;
+  eventPayloadSchemas: Record<
+    string,
+    { fields: Record<string, string>; optional: string[] }
+  >;
+  activationPhases: string[];
+  modelAttemptStates: string[];
+  actionSources: string[];
+  actionStates: string[];
+  lifecycleStates: string[];
+  lifecycleTransitions: Record<string, string[]>;
   sessionKey: {
     tenantId: string;
     workspaceId: string;
@@ -101,6 +124,44 @@ describe('Managed Session store shared contract', () => {
     );
     expect(MANAGED_SESSION_LIMITS.maxCommitMarkerBytes).toBe(
       fixture.limits.maxCommitMarkerBytes,
+    );
+
+    // The Java store mirrors the event vocabulary and payload contract out
+    // of this fixture, so the authority's tables must match it exactly — a
+    // kind or field added on one side only fails here and in
+    // ManagedSessionStoreContractFixtureTest.
+    expect([...MANAGED_SESSION_EVENT_KINDS]).toStrictEqual(fixture.eventKinds);
+    expect(ACTIVATION_SUBJECT_KINDS).toStrictEqual(
+      fixture.activationSubjectKinds,
+    );
+    expect(Object.keys(EVENT_SCHEMAS).sort()).toStrictEqual(
+      Object.keys(fixture.eventPayloadSchemas).sort(),
+    );
+    for (const kind of MANAGED_SESSION_EVENT_KINDS) {
+      const schema = EVENT_SCHEMAS[kind];
+      const shared = fixture.eventPayloadSchemas[kind]!;
+      expect(JSON.parse(JSON.stringify(schema.fields))).toStrictEqual(
+        shared.fields,
+      );
+      expect([...(schema.optional ?? [])]).toStrictEqual(shared.optional);
+    }
+    expect([...MANAGED_SESSION_ACTIVATION_PHASES]).toStrictEqual(
+      fixture.activationPhases,
+    );
+    expect([...MANAGED_SESSION_MODEL_ATTEMPT_STATES]).toStrictEqual(
+      fixture.modelAttemptStates,
+    );
+    expect([...MANAGED_SESSION_ACTION_SOURCES]).toStrictEqual(
+      fixture.actionSources,
+    );
+    expect([...MANAGED_SESSION_ACTION_STATES]).toStrictEqual(
+      fixture.actionStates,
+    );
+    expect([...MANAGED_SESSION_LIFECYCLE_STATES]).toStrictEqual(
+      fixture.lifecycleStates,
+    );
+    expect(JSON.parse(JSON.stringify(LIFECYCLE_TRANSITIONS))).toStrictEqual(
+      fixture.lifecycleTransitions,
     );
 
     for (const resource of fixture.resources) {

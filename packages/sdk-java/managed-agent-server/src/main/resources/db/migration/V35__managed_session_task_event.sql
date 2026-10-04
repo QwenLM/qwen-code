@@ -10,12 +10,15 @@ CREATE TABLE qwen_managed_session_task_event (
     task_id VARCHAR(128) NOT NULL,
     task_state VARCHAR(32) NOT NULL,
     revision BIGINT NOT NULL,
-    first_sequence BIGINT NOT NULL,
+    journal_sequence BIGINT NOT NULL,
     PRIMARY KEY (session_scope_key, task_id, revision)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
--- The drain reads a Session's announcements in journal order.
+-- The drain reads a Session's announcements in journal order: the sequence
+-- of the commit the announcement committed with, which
+-- qwen_managed_session_extension_record.first_sequence is not — that column
+-- is the sequence of each record's first revision.
 CREATE INDEX idx_managed_session_task_event_sequence
     ON qwen_managed_session_task_event (
-        session_scope_key, first_sequence, task_id
+        session_scope_key, journal_sequence, task_id
     );

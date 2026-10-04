@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,10 +15,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
@@ -59,6 +64,42 @@ class ManagedSessionStoreContractFixtureTest {
                 limits.required("minimumLeaseDurationMs").longValue());
         assertEquals(ManagedSessionStoreModels.MAX_LEASE_MILLIS,
                 limits.required("maximumLeaseDurationMs").longValue());
+
+        // The line contract the store mirrors out of this fixture: the
+        // shared event kinds, their payload schemas, the kinds that require
+        // a subject, and the vocabularies the payload rules use.
+        assertEquals(JSON.valueToTree(ManagedExtensionRecords.EVENT_KINDS),
+                contract.required("eventKinds"));
+        assertEquals(JSON.valueToTree(
+                ManagedSessionRecords.ACTIVATION_SUBJECT_KINDS),
+                contract.required("activationSubjectKinds"));
+        assertEquals(JSON.valueToTree(ManagedSessionRecords.ACTIVATION_PHASES),
+                contract.required("activationPhases"));
+        assertEquals(JSON.valueToTree(
+                ManagedSessionRecords.MODEL_ATTEMPT_STATES),
+                contract.required("modelAttemptStates"));
+        assertEquals(JSON.valueToTree(ManagedSessionRecords.ACTION_SOURCES),
+                contract.required("actionSources"));
+        assertEquals(JSON.valueToTree(ManagedSessionRecords.ACTION_STATES),
+                contract.required("actionStates"));
+        assertEquals(
+                JSON.valueToTree(ManagedSessionRecords.LIFECYCLE_STATES),
+                contract.required("lifecycleStates"));
+        assertEquals(JSON.valueToTree(
+                ManagedSessionRecords.LIFECYCLE_TRANSITIONS),
+                contract.required("lifecycleTransitions"));
+        JsonNode schemas = contract.required("eventPayloadSchemas");
+        assertEquals(Set.copyOf(fieldNames(schemas).keySet()),
+                ManagedSessionRecords.PAYLOAD_SCHEMAS.keySet());
+        ManagedSessionRecords.PAYLOAD_SCHEMAS.forEach((kind, schema) -> {
+            JsonNode shared = schemas.required(kind);
+            assertEquals(shared.required("fields"),
+                    JSON.valueToTree(schema.fields()), kind);
+            List<String> optional = new ArrayList<>();
+            shared.required("optional").forEach(
+                    item -> optional.add(item.textValue()));
+            assertEquals(optional, schema.optional(), kind);
+        });
     }
 
     @Test
