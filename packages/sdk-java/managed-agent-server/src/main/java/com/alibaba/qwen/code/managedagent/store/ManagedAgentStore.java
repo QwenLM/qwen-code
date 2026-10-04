@@ -2596,7 +2596,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    private static ContextBinding readBinding(java.sql.ResultSet result)
+    public static ContextBinding readBinding(java.sql.ResultSet result)
             throws java.sql.SQLException {
         String workspaceId = result.getString("workspace_id");
         if (workspaceId == null) {

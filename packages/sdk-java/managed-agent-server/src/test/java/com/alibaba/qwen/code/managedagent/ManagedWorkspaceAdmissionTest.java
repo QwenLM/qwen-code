@@ -105,11 +105,10 @@ class ManagedWorkspaceAdmissionTest {
             enabled.completeSessionMutation(tenant, "RENAME_SESSION", "original-rename", session,
                     SessionMutationKind.RENAME, "original", null);
         });
-        var sha = java.security.MessageDigest.getInstance("SHA-256");
         jdbc.update("INSERT INTO qwen_runtime_storage_fence"
                 + " (tenant_key, storage_key, tenant_id, storage_id, operation_id) VALUES (?, ?, ?, ?, ?)",
-                java.util.HexFormat.of().formatHex(sha.digest(tenant.getBytes(java.nio.charset.StandardCharsets.UTF_8))),
-                java.util.HexFormat.of().formatHex(sha.digest("storage-migration".getBytes(java.nio.charset.StandardCharsets.UTF_8))),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey("storage-migration"),
                 tenant, "storage-migration", UUID.randomUUID().toString());
         assertThat(transaction.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "original-turn", digest, session, List.of(), digest)).turnId()).isEqualTo(original.turnId());

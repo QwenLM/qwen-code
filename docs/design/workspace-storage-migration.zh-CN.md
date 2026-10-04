@@ -10,9 +10,9 @@
 
 ## 维护协议
 
-私有 Java 命令为 `retire`、`prepare`、`promote`、`inspect`、`abort`。版本化请求固定迁移 UUID/摘要、tenant/storage、预期 mount revision、源与目标部署路径、W1a fence UUID、W1b capture UUID 和保留历史卷。同 UUID 改参数冲突。状态为 `RETIRING -> RETIRED -> PREPARING -> PREPARED -> COMPLETED`；漂移进入 `INVALIDATED`，明确取消进入 `ABORTED`。临时 I/O 保留检查点；完成重试返回原回执。
+私有 Java 命令为 `retire`、`prepare`、`promote`、`inspect`、`abort`。版本化请求固定迁移 UUID/摘要、tenant/storage、预期 mount revision、源与目标部署路径、W1a fence UUID、W1b capture UUID 和保留历史卷。同 UUID 改参数冲突。状态为 `RETIRING -> RETIRED -> PREPARING -> PREPARED -> COMPLETED`；漂移进入 `INVALIDATED`，明确取消进入 `ABORTED`。临时 I/O 保留检查点；完成重试返回原回执。对 PREPARED 重试 `prepare` 也返回保存的回执，不重新扫描；只有新的提升尝试执行当前校验。
 
-运维关闭 Session 创建、输入准入和派发，结算已接受工作，停止 Harness/journal writer 并防止重启。`retire` 在现有 tenant placement 锁域安装持久 storage 准入 fence，释放精确原 Runtime Session，证明物理 Worker 退役并检查未结算执行/holder。复用可靠 close 的停止回执和有界 claim，不安装永久 Harness close fence。旧 FAILED/LOST/RELEASED 记录需要正向停写证据；终态和租约过期不足为证。已有 loss recovery 必须按原协议完成。
+运维关闭 Session 创建、输入准入和派发，结算已接受工作，停止 Harness/journal writer 并防止重启。`retire` 在现有 tenant placement 锁域安装持久 storage 准入 fence，释放精确原 Runtime Session，证明物理 Worker 退役并检查未结算执行/holder。复用可靠 close 的停止回执和有界 claim，不安装永久 Harness close fence。准入和最终元数据检查保留现有 tenant 级 placement 锁：同 tenant 的其他 storage 可能等待这些元数据事务完成；文件扫描和物理退役在锁外运行。未绑定的旧 Session 没有 storage 所有权，不受此 storage fence 约束。旧 FAILED/LOST/RELEASED 记录需要正向停写证据；终态和租约过期不足为证。已有 loss recovery 必须按原协议完成。
 
 退役后运维进入 W1a 维护 fence，使用外部准备的 Workspace 副本捕获 W1b 证据。`prepare` 验证固定 capture、当前来源、目标副本、迁移资格和历史卷。`promote` 使用新的运行重复验证；旧成功回执不能授权当前转换。维护期间不获取 Runtime。
 
@@ -22,13 +22,13 @@
 
 目标树唯一例外是根 `.qwen-managed-storage.json`：只能匹配封存源 marker 或本操作固定目标 marker。通过目标文件系统内本操作专有的临时文件、原子替换和目标目录同步发布。重试校验前，先确认该路径不属于封存 capture，再只清除精确名称、普通单链接且有界字节匹配固定 marker 前缀的临时文件。冲突对象拒绝，完整目标清单不忽略任何条目。不得排除其他 `.qwen*` 文件，也不修改原 bundle/源 marker。
 
-最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。反向迁移需要新操作/capture 和更高 revision。
+最终 SQL 事务检查操作所有权、旧 revision/fence、完整来源水位和旧 placement 停写证据，安装目标 root/身份/新 registration UUID，revision 增加一次，持久化完成并清除迁移准入。提交前失败保持旧 fenced 登记；SQL 前 marker 发布可由同一操作续办。abort 保留退役事实和 W1a fence，不删除目标或重开服务。若已取消或失效的操作留下 marker 或临时文件，新操作必须通过外部流程重新准备与新 capture 匹配的目标副本，不接受或删除其他操作的产物。反向迁移需要新操作/capture 和更高 revision。
 
 长文件扫描不持数据库锁；最终条件读取遵循已有锁顺序并执行新的锁内权威检查。只增加 Flyway 迁移，保留 V31 W1b、V32 close 和 V33–V34 定义/回收迁移字节，W1c 新增 V35，V36 为历史 Session 和已完成迁移查询增加索引。
 
 ## 部署与 Runtime 路由
 
-运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有 Node 探针使用现有 Storage 解析器和继承环境，固定真实绝对 QWEN_HOME/历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
+运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有维护进程必须继承与部署相同的规范绝对 QWEN_HOME，路径不能包含符号链接，fileHistoryRoot 必须等于其规范 file-history 目录。私有 Node 探针使用现有 Storage 解析器和该继承环境，固定历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
 
 新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。非唯一 Runtime Session ID 索引先定位候选，再检查完整 tenant/Harness 身份和歧义；单列 VARCHAR(512) 在 utf8mb4 下仅需 2048 字节，不新增摘要字段或回填。独立 Broker 初始化同步 schema，并为已有表补齐索引。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
 

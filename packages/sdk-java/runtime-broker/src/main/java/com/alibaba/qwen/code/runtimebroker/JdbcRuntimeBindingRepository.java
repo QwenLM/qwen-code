@@ -294,8 +294,8 @@ public final class JdbcRuntimeBindingRepository
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO qwen_runtime_storage_fence (tenant_key, storage_key, tenant_id, storage_id, operation_id)"
                     + " VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE operation_id = operation_id")) {
-                statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
-                statement.setString(2, JdbcRepositorySupport.valueKey(storageId));
+                statement.setString(1, storageFenceKey(tenantId));
+                statement.setString(2, storageFenceKey(storageId));
                 statement.setString(3, tenantId);
                 statement.setString(4, storageId);
                 statement.setString(5, operationId);
@@ -316,11 +316,15 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
+    public static String storageFenceKey(String value) {
+        return JdbcRepositorySupport.valueKey(value);
+    }
+
     private static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("SELECT tenant_id, storage_id, operation_id"
                 + " FROM qwen_runtime_storage_fence WHERE tenant_key = ? AND storage_key = ?")) {
-            statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
-            statement.setString(2, JdbcRepositorySupport.valueKey(storageId));
+            statement.setString(1, storageFenceKey(tenantId));
+            statement.setString(2, storageFenceKey(storageId));
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;

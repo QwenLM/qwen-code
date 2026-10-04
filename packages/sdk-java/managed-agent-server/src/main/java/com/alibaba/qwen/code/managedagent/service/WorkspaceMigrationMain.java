@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceMigrationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
@@ -12,7 +13,6 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -78,14 +78,10 @@ public final class WorkspaceMigrationMain {
                     var local = LocalProcessRuntimeProvisioner.durable(List.of("maintenance-never-starts-worker"),
                             stateDirectory, http, false);
                     var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
-                        var found = jdbc.query("SELECT tenant_id, workspace_id, workspace_generation, workspace_storage_id,"
-                                + " cwd_relative, context_config_ref, context_revision FROM managed_agent_session"
-                                + " WHERE tenant_id = ? AND session_id = ?", (row, index) -> new ContextBinding(
-                                row.getString("tenant_id"), row.getString("workspace_id"), row.getLong("workspace_generation"),
-                                row.getString("workspace_storage_id"), row.getString("cwd_relative"),
-                                row.getString("context_config_ref"), row.getLong("context_revision")),
+                        var found = jdbc.query("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                                (row, index) -> ManagedAgentStore.readBinding(row),
                                 request.path("tenantId").asText(), sessionId);
-                        if (found.size() != 1) {
+                        if (found.size() != 1 || found.getFirst() == null) {
                             throw WorkspaceExecutionStore.unavailable();
                         }
                         return found.getFirst();
@@ -100,11 +96,15 @@ public final class WorkspaceMigrationMain {
                 }
                 default -> throw new IllegalArgumentException("Unknown migration command");
             }
-            System.out.println(store.inspect());
         } catch (Exception error) {
-            store.failed(com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.errorCode(error));
+            try {
+                store.failed(com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.errorCode(error));
+            } catch (Exception recordingFailure) {
+                error.addSuppressed(recordingFailure);
+            }
             throw error;
         }
+        System.out.println(store.inspect());
     }
 
     private static String required(String name) {

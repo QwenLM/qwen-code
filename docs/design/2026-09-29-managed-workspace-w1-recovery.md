@@ -154,15 +154,13 @@ Content digests at an old snapshot are never used as the expected digest of a Wo
 
 ## 8. W1c: controlled same-storage relocation
 
-The current files/history migration slice is specified in the [W1c detailed design](workspace-storage-migration.md). It retains the original absolute QWEN_HOME and independent history backup volume; external absolute history keys remain unsupported.
-
 ### 8.1 Supported first case
 
 Move an already verified storage tree to another root on the same trusted host during maintenance. Preserve logical storage and all seven Session binding fields. Keep the private Session Store key unchanged: it is not interchangeable with the product Workspace ID. The target must be authorized deployment data, never a caller-provided browser path.
 
 Start with settled Hosted relative-path file-tool Sessions. Their new file calls already require paths relative to saved cwd, so committed messages do not need rewriting. Inventory all Sessions and resources sharing the storage, including archived Sessions. If any profile or retained asset lacks safe relocation semantics, keep the old mount or block migration. Do not strand an older Session simply because the currently selected one can move.
 
-Shell commands, MCP/Hook configurations, absolute external file-history references, Memory roots and other opaque absolute-path dependencies are excluded from the first migration capability. Hosted relative file history is supported while preserving its independent backup volume and absolute QWEN_HOME. They require profile-specific support. W1c does not upgrade an existing Session's immutable definition to bypass that check.
+The first migration capability supports Hosted relative file history while preserving the original absolute QWEN_HOME and independent backup volume; backup names and original records are not rewritten. Shell commands, MCP/Hook configurations, non-Hosted or external absolute history keys, Memory roots and opaque absolute-path dependencies remain unsupported. See the [W1c detailed design](workspace-storage-migration.md). W1c does not upgrade an existing Session's immutable definition to bypass that check.
 
 ### 8.2 Durable operation
 

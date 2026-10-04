@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.*;
 
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -37,7 +39,8 @@ public final class WorkspaceMigrationStore {
         this.guard = guard;
         this.bindings = bindings;
         request = parse(bytes);
-        check(request.path("version").isIntegralNumber() && request.path("version").asInt() == 1, "invalid_request");
+        check(request.path("version").isIntegralNumber() && request.path("version").canConvertToInt()
+                && request.path("version").asInt() == 1, "invalid_request");
         id = uuid(request, "migrationOperationId");
         tenant = text(request, "tenantId");
         storage = text(request, "storageId");
@@ -84,7 +87,8 @@ public final class WorkspaceMigrationStore {
                     + " request_json, state, source_registration_json, target_registration_id) VALUES (?, ?, ?, ?, ?, 'RETIRING', ?, ?)",
                     id, tenant, storage, hash(bytes), request.toString(), JSON.valueToTree(source).toString(), UUID.randomUUID().toString());
             jdbc.update("INSERT INTO qwen_runtime_storage_fence (tenant_key, storage_key, tenant_id, storage_id, operation_id)"
-                    + " VALUES (?, ?, ?, ?, ?)", hash(tenant), hash(storage), tenant, storage, id);
+                    + " VALUES (?, ?, ?, ?, ?)", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                    JdbcRuntimeBindingRepository.storageFenceKey(storage), tenant, storage, id);
         });
     }
 
@@ -182,15 +186,26 @@ public final class WorkspaceMigrationStore {
                 + " AND work_kind = 'ASSET' AND work_key = ?", Long.class, text(request, "captureOperationId"), assetKey) == 0,
                 "migration_marker_conflict");
         guard.discardMigrationTemporary(path("targetRoot"), marker, id);
-        WorkspaceRecoveryMain.executeWorker(verifyRequest, recovery, (method, params) -> {
-            JsonNode reply = recovery.call(method, params);
-            if ("context".equals(method)) {
-                ObjectNode migration = ((ObjectNode) reply).putObject("migration");
-                migration.put("targetRoot", target.root()).putObject("targetMarker")
-                        .put("digest", hash(marker)).put("byteLength", marker.length);
+        var workerFailure = new AtomicReference<String>();
+        try {
+            WorkspaceRecoveryMain.executeWorker(verifyRequest, recovery, (method, params) -> {
+                JsonNode reply = recovery.call(method, params);
+                if ("failure".equals(method)) {
+                    workerFailure.set(text(params, "code"));
+                }
+                if ("context".equals(method)) {
+                    ObjectNode migration = ((ObjectNode) reply).putObject("migration");
+                    migration.put("targetRoot", target.root()).putObject("targetMarker")
+                            .put("digest", hash(marker)).put("byteLength", marker.length);
+                }
+                return reply;
+            });
+        } catch (RecoveryFailure error) {
+            if ("worker_failed".equals(error.code) && workerFailure.get() != null) {
+                throw failure(workerFailure.get());
             }
-            return reply;
-        });
+            throw error;
+        }
         check(recovery.inspect().path("result").path("authorityCompatible").asBoolean(false), "source_drift");
         if (promote) {
             requireOwner();
@@ -254,6 +269,8 @@ public final class WorkspaceMigrationStore {
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT 32",
                     String.class, tenant, storage, after);
             for (String session : page) {
+                jdbc.query("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                        (row, index) -> ManagedAgentStore.readBinding(row), tenant, session);
                 JsonNode source = WorkspaceRecoveryStore.currentSource(jdbc, tenant, storage, session, true);
                 after = session;
                 if (source.path("head").isNull() && !source.path("retirement").isNull()) {
@@ -357,7 +374,8 @@ public final class WorkspaceMigrationStore {
 
     private void clearFence() {
         check(jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_key = ? AND storage_key = ?"
-                + " AND operation_id = ?", hash(tenant), hash(storage), id) == 1, "migration_conflict");
+                + " AND operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
     }
 
     private Map<String, Object> requireRow(boolean lock) {

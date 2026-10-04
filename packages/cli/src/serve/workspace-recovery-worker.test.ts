@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   recoveryDigest,
   recoveryJson,
@@ -33,6 +33,7 @@ import type { RecoverySessionSource } from './workspace-recovery-session.js';
 
 const temporary: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const root of temporary.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -186,6 +187,43 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it.each(['unset', 'relative', 'symlink', 'different-history'])(
+    'refuses the migration before completion with %s QWEN_HOME',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      await mkdir(home);
+      if (kind === 'symlink') await symlink(home, join(f.root, 'alias'));
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'unset'
+          ? undefined
+          : kind === 'relative'
+            ? '.'
+            : kind === 'symlink'
+              ? join(f.root, 'alias')
+              : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'migration_history_environment_mismatch',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
   it.each(['absolute', 'dangling', 'not-directory', 'hardlink'])(
     'invalidates a fresh unsupported %s entry with its own code and private path',
     async (kind) => {

@@ -19,8 +19,8 @@ final class WorkspaceMigrationAdmission {
 
     static String owner(JdbcTemplate jdbc, String tenant, String storage) {
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, operation_id FROM qwen_runtime_storage_fence"
-                + " WHERE tenant_key = ? AND storage_key = ?", WorkspaceRecoveryStore.hash(tenant),
-                WorkspaceRecoveryStore.hash(storage));
+                + " WHERE tenant_key = ? AND storage_key = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                JdbcRuntimeBindingRepository.storageFenceKey(storage));
         if (rows.isEmpty()) {
             return null;
         }
