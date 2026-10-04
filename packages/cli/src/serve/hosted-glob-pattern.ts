@@ -112,6 +112,9 @@ function alternativesBound(text: string): number {
       range[1] !== undefined
         ? Math.abs(Number(range[2]) - Number(range[1]))
         : Math.abs(range[4].charCodeAt(0) - range[3].charCodeAt(0));
+    // An endpoint past Number's range is ±Infinity, and Infinity - Infinity is
+    // NaN, which the gate's `> bound` test reads as within bound.
+    if (!Number.isFinite(span) || !Number.isFinite(step)) return Infinity;
     return Math.min(Math.floor(span / step) + 1, limit);
   };
 
