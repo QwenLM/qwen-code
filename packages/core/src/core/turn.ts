@@ -719,6 +719,18 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
+      // Keep the no-options call shape: callers without either flag pass
+      // `undefined`, as before either option existed.
+      const sendOptions =
+        this.promptIdentity !== undefined ||
+        this.retractDeliveredOutputOnRetry === true
+          ? {
+              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+              ...(this.retractDeliveredOutputOnRetry
+                ? { retractDeliveredOutputOnRetry: true }
+                : {}),
+            }
+          : undefined;
       const responseStream = await this.chat.sendMessageStream(
         model,
         {
@@ -729,12 +741,7 @@ export class Turn {
         },
         this.prompt_id,
         this.goalContext,
-        {
-          ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
-          ...(this.retractDeliveredOutputOnRetry
-            ? { retractDeliveredOutputOnRetry: true }
-            : {}),
-        },
+        sendOptions,
       );
 
       for await (const streamEvent of responseStream) {
