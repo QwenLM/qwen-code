@@ -1025,11 +1025,16 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
+      const controlSchema = {
+        name: 'tool_call',
+        parameters: { type: 'OBJECT', properties: {} },
+      };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
+        { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema];
+      const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
@@ -1046,14 +1051,12 @@ describe('collectContextData (contextCommand)', () => {
         ),
       );
       // The deficit comes out of the mcp row, not the built-in or skills rows.
-      expect(unscaled.breakdown.builtinTools).toBe(0);
       expect(unscaled.breakdown.mcpTools).toBe(
-        Math.max(
-          0,
-          estimateContextTextTokens(JSON.stringify(declared)) -
-            estimateContextTextTokens(JSON.stringify(skillToolSchema)),
-        ),
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
       );
+      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
+      expect(unscaled.breakdown.builtinTools).toBe(0);
       // With nothing declared the mcp row cannot absorb the whole deficit, so
       // the rest is charged to skills and the window still adds up.
       const undeclared = await collectContextData(
