@@ -438,10 +438,21 @@ export class HostedHookSession {
   private async retryFencedOwners(): Promise<void> {
     if (this.fencedOwners.size === 0) return;
     // Parallel Hooks share one retry pass, and releasedOwners still guards
-    // against releasing an owner twice.
+    // against releasing an owner twice. A refusal here must not escape: this
+    // runs on an already-acquired Session, so failing the turn would let a
+    // stale earlier owner break a healthy live one. Absorb, report, and leave
+    // the owner fenced for the next turn.
     this.retrying ??= (async () => {
       try {
-        for (const id of [...this.fencedOwners]) await this.releaseOwner(id);
+        for (const id of [...this.fencedOwners]) {
+          try {
+            await this.releaseOwner(id);
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: earlier Hook owner release retry failed, left attached: ${id} ${String(cause)}`,
+            );
+          }
+        }
       } finally {
         this.retrying = undefined;
       }

@@ -152,8 +152,10 @@ Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而�
 （404 `runtime_session_not_found`）时记为已释放且不再重试；被 hold 围闭的
 owner 拒绝（409 `managed_runtime_identity_conflict` 或
 `managed_runtime_provider_operation_failed`）时本次跳过、写入 daemon 的 stderr
-且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放；其余任何拒绝都会
-抛出并阻塞替换 activation。拥有自己 Runtime owner 的 Hook Session 在 close 时，
+且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放。获取路径上的其余
+任何拒绝都会抛出并阻塞替换 activation；而后续回合的重试趟改为吸收并上报该拒绝、
+让 owner 保持围闭状态——因为那一趟运行在已获取的 Session 上，不能因一个陈旧
+owner 而让健康的活回合失败。拥有自己 Runtime owner 的 Hook Session 在 close 时，
 无论被围闭的是它自己还是此前 owner，都以 Hook recovery-required 条件作答，而不是
 抛出裸 Broker 拒绝——于是 DELETE 与 detach 会指明被保留的 hold，并保持 Session
 处于 attached、可重试状态，而不是把它删除。与 MCP 共用 owner 的 Hook Session

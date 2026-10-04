@@ -1320,6 +1320,49 @@ it('retries a hold-fenced earlier owner on a later turn without closing', async 
   expect(attempts).toBe(2);
 });
 
+it('keeps a live turn working when a fenced owner retry is refused again', async () => {
+  await hooks.ensureReady();
+  await hooks.close();
+  await reopenSession();
+  const unacquired = new HostedHookSession(options, session, pin);
+  await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
+  const fenced = unacquired.broker.runtimeSessionId;
+  let attempts = 0;
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId !== fenced) return;
+      attempts += 1;
+      // First pass is a hold fence (absorbed); the retry answers a refusal
+      // outside the tolerated set, which must not reach the live turn.
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        attempts === 1
+          ? 'managed_runtime_identity_conflict'
+          : 'runtime_session_busy',
+      );
+    },
+  );
+  await reopenSession();
+  const live = new HostedHookSession(options, session, pin);
+  await live.acquire();
+  expect(attempts).toBe(1);
+  await live.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  expect(attempts).toBe(2);
+  // The stale owner's refusal is absorbed and reported, the hook still
+  // dispatches, and the Session is not left recovery-blocked.
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+  expect(live.hasPendingOperations).toBe(false);
+  expect(log.mock.calls.flat().join('\n')).toContain(fenced);
+  // The owner stays fenced, so a later turn retries it again.
+  await live.fire(HookEventName.PreToolUse, 'call-2', {}, signal());
+  expect(attempts).toBe(3);
+});
+
 async function operate(
   managed: ManagedSession,
   target: HostedHookSession,

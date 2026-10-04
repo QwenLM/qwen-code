@@ -206,8 +206,11 @@ as released and never retried. A refusal from a hold-fenced owner (409
 `managed_runtime_identity_conflict` or
 `managed_runtime_provider_operation_failed`) is skipped for that pass, reported
 on the daemon's stderr, and left unreleased, so each later turn of that Hook
-Session attempts the release again. Any other refusal propagates and blocks the
-replacement activation. Closing a Hook Session that owns its Runtime owner
+Session attempts the release again. On the acquisition path any other refusal
+propagates and blocks the replacement activation; on a later turn's retry pass
+it is absorbed and reported instead, leaving the owner fenced, because that
+pass runs on an already-acquired Session and must not fail a healthy live turn
+for a stale owner's sake. Closing a Hook Session that owns its Runtime owner
 answers a hold fence — its own or an earlier owner's — with the Hook
 recovery-required condition rather than a bare Broker refusal, so DELETE and
 detach report the retained hold and keep the Session attached and retryable
