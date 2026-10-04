@@ -5,8 +5,11 @@ spring:
     url: '${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3306/qwen_managed_agent}'
     username: '${SPRING_DATASOURCE_USERNAME:qwen}'
     password: '${SPRING_DATASOURCE_PASSWORD:}'
-    hikari:
-      maximum-pool-size: '${QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE:20}'
+    druid:
+      max-active: '${QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE:20}'
+      # Hikari's connection-timeout (30s) equivalent: fail fast instead of
+      # Druid's default unbounded pool wait.
+      max-wait: 30000
   flyway:
     enabled: true
   lifecycle:
@@ -50,6 +53,7 @@ qwen:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
       deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
+      journal-head-authorization: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_JOURNAL_HEAD_AUTHORIZATION:false}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
@@ -62,6 +66,8 @@ qwen:
       request-timeout: '30s'
       heartbeat-interval: '30s'
       turn-deadline: '${QWEN_MANAGED_AGENT_HARNESS_TURN_DEADLINE:30m}'
+    artifacts:
+      read-revalidation-interval: '5s'
     dispatch:
       scan-delay: '1s'
       lease-duration: '60s'
@@ -73,6 +79,7 @@ qwen:
       poll-interval: '5s'
       heartbeat-interval: '15s'
       stream-timeout: '30m'
+      read-grant-recheck-interval: '5s'
       batch-interval: '75ms'
       materialize-interval: '100ms'
       batch-max-events: 64
@@ -81,8 +88,10 @@ qwen:
       enabled: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED:false}'
       host: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST:127.0.0.1}'
       port: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT:4182}'
+      allow-non-loopback: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK:false}'
       token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN:}'
       provisioner: '${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}'
+      v3-result-window: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW:30m}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       workspace-generation: '${QWEN_MANAGED_AGENT_WORKSPACE_GENERATION:1}'
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'

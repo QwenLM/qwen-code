@@ -59,7 +59,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -313,6 +313,17 @@ class ManagedAgentApiContractTest {
             }
         }
         assertThat(responders).isEqualTo(2);
+    }
+
+    @Test
+    void transcriptContractPromisesTheFullTailPastTheSnapshot() {
+        // The cursor-less transcript serves every event after the Snapshot;
+        // a server-side paging change that leaves this published sentence
+        // stale must turn the suite red, so pin the sentence itself.
+        String description = CONTRACT.operation("webShellTranscript").node()
+                .path("description").asText();
+        assertThat(description).contains("and every event after it");
+        assertThat(description).contains("limit bounds the page of events");
     }
 
     @Test
@@ -1239,8 +1250,9 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
         awaitIdle(tenant, sessionId);
-        TurnRecord first = store.findLatestTurn(tenant, sessionId)
-                .orElseThrow();
+        TurnSummary first = java.util.Objects.requireNonNull(
+                store.findLatestTurns(tenant, java.util.List.of(sessionId))
+                        .get(sessionId));
         // The fixture Harness runs one Turn per Session, so the second Turn
         // is written as a failed dispatch would leave it.
         String second = "turn_" + UUID.randomUUID().toString()

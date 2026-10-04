@@ -242,7 +242,7 @@ writer_credential_invalid`（常数时间比较）。密钥为空时保持
 
 ### 4.4 审批的持久会话属主（G4）
 
-- Flyway `V36__managed_session_creator.sql`：
+- Flyway `V40__managed_session_creator.sql`：
   `ALTER TABLE managed_agent_session ADD COLUMN creator_actor_key
 VARBINARY(2048) NULL;`（与
   `managed_workspace_create_command.actor_id` 同类型）。
@@ -298,7 +298,7 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
   token。服务器启动时记录解析出的模式与守卫结果。
 - 在公网面启用 `signed` 模式需要在浏览器流量前放置持有签名密钥的
   代理或 sidecar；签名配方即 §4.1 固定的三头形式。
-- 现有数据库经 V36 迁移；迁移前的会话通过遗留属主回退继续工作。
+- 现有数据库经 V40 迁移；迁移前的会话通过遗留属主回退继续工作。
 
 ## 6. 风险与缓解
 
@@ -342,7 +342,7 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
 3. 设置 `internal-server.port` 后，公网端口上 `/internal/**` 不可达；
    公网地址非回环且为 open 模式时，broker 拒绝启动。
 4. hosted 会话的审批可由其创建者经 HTTP 应答，且其他 actor 不能；
-   无属主记录的会话（open 模式匿名创建，或 V36 之前创建）允许租户内
+   无属主记录的会话（open 模式匿名创建，或 V40 之前创建）允许租户内
    任意调用方应答，与其读 ACL 一致；迁移前的 workspace 会话保持现有
    行为。
 5. `createHttpManagedSessionStores({ baseUrl: 'http://<非回环>' })`
