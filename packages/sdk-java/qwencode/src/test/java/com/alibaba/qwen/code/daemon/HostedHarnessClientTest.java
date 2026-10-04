@@ -419,6 +419,29 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void parsesAnAbandonedRuntimeRecoveryAsCancellable() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAbandonedRuntimeRecovery()));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            // A terminally fenced record keeps its distinction: the report
+            // parses, and the coordinator may drive the cancellation over it.
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isCancellationReady());
+            assertFalse(recovery.isContinuationReady());
+            assertEquals("abandoned", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+        }
+    }
+
+    @Test
     void cancelsRecoveredRuntimeWithExactWireRequest() {
         AtomicReference<String> method = new AtomicReference<>();
         AtomicReference<String> body = new AtomicReference<>();
@@ -903,6 +926,24 @@ class HostedHarnessClientTest {
                 + "\"progressCursor\":\"cursor-2\","
                 + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
+    }
+
+    private static String sessionJsonWithAbandonedRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"abandoned\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {

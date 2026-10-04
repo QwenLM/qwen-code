@@ -18,6 +18,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import {
   stopParkedRuntimeExecutions,
+  settleParkedTurnCancelled,
   recoverHostedRuntimeTurn,
 } from './hosted-runtime-recovery.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
@@ -441,7 +442,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each([undefined, { state: 'unknown' }])(
+  it.each([undefined, { state: 'unknown' } as const])(
     'reports an execution the Broker cannot account for as unknown (%s)',
     async (status) => {
       await parkAtAwaitRuntime();
@@ -615,12 +616,13 @@ describe('recoverHostedRuntimeTurn', () => {
       });
     const replacement = await open('boot-2', false);
     try {
-      const broker = await stopParkedRuntimeExecutions({
+      const { broker, unobserved } = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: PROMPT_ID,
         brokerOptions,
       });
       expect(broker.runtimeSessionId).toBe('hooks-old-owner');
+      expect(unobserved.size).toBe(0);
       expect(cancel).toHaveBeenCalledOnce();
       expect(cancel).toHaveBeenCalledWith(EXECUTION_ID);
       // Issuing the cancel is not proof of the stop: a status read must
@@ -753,7 +755,7 @@ describe('recoverHostedRuntimeTurn', () => {
       // the terminal poll could ever observe more: accepted without proof
       // of a stop, unlike a still-reconcilable unknown — and unlike the old
       // sentinel fold, never read back as "the Broker never knew it".
-      await stopParkedRuntimeExecutions({
+      const { unobserved } = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: PROMPT_ID,
         brokerOptions,
@@ -766,6 +768,75 @@ describe('recoverHostedRuntimeTurn', () => {
         expect(authorization.checkpoint.continuation.phase).toBe(
           'await_runtime',
         );
+      // The fence ends the wait, but no stop was observed: the settle must
+      // journal an honest unobservable outcome for it — never the cancelled
+      // record a proved stop earns.
+      expect([...unobserved]).toEqual([EXECUTION_ID]);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      expect(String(response?.['error'])).not.toContain(
+        'cancelled with its owner',
+      );
+      const settled = await replacement.authority.harnessRunAuthorization();
+      expect(settled.status).toBe('runnable');
+      if (settled.status === 'runnable')
+        expect(settled.checkpoint.continuation.phase).not.toBe('await_runtime');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('journals a proved stop as cancelled with its owner', async () => {
+    await parkAtAwaitRuntime();
+    let stopped = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => ({ state: stopped ? 'settled' : 'executing' }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+      async () => {
+        stopped = true;
+      },
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      // The stop was observed: nothing lands in the unobserved set, and the
+      // settle certifies the cancellation.
+      expect(unobserved.size).toBe(0);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('cancelled');
+      expect(String(response?.['error'])).toContain('cancelled with its owner');
     } finally {
       await replacement.close();
     }

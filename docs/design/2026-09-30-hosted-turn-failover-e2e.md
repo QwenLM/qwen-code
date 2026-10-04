@@ -81,8 +81,14 @@ takeover is implemented for contract completeness but has no E2E mode.
   and reports it by name, since no registered session exists to retire it;
   the record drains on the next successful load of that Session, and only
   session retirement discharges an abandonment otherwise.
-  Executions the Broker cannot account for report `unknown`, the coordinator
-  blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
+  Executions the Broker still cannot account for report `unknown`, the
+  coordinator blocks the Turn as `managed_runtime_recovery_blocked`, and
+  nothing replays. A record the Broker fenced terminally instead reports
+  `known` with `status.state: "abandoned"` — a distinct wire state the
+  client's validator accepts — so the coordinator can drive the
+  cancellation over it: the stop accepts the fence without observing a
+  stop, and the settle journals that execution's outcome as unobservable
+  rather than certifying a cancellation nobody witnessed.
 - **Continue runs the model from `results_ready`; cancel settles without new
   work.** `managed-runtime/continue` validates the prompt, checkpoint and
   activation identities, admits the continuation with a 200 receipt, then

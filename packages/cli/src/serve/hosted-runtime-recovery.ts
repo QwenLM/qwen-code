@@ -29,13 +29,26 @@ import {
 /** The parked turn is not one this recovery can drive; the caller 409s. */
 class RecoveryDeclined extends Error {}
 
+/** The states a recovery report may advertise: exactly the vocabulary the
+ * hosted client's validator accepts (HostedHarnessClient's
+ * RUNTIME_EXECUTION_STATES). The broker's wider union folds into it at the
+ * report boundary — a still-reconcilable `unknown` becomes outcome
+ * `unknown` with no status, so the compiler rejects any new broker state
+ * that nobody folded deliberately. */
+export type HostedRuntimeRecoveryExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned';
+
 export interface HostedRuntimeRecoveryExecution {
   functionCallId: string;
   toolName: string;
   executionCallId: string;
   runtimeSessionId: string;
   outcome: 'known' | 'unknown';
-  status?: { state: string };
+  status?: { state: HostedRuntimeRecoveryExecutionState };
 }
 
 export interface HostedRuntimeRecoveryReport {
@@ -174,6 +187,10 @@ export async function settleParkedTurnCancelled(input: {
   sessionId: string;
   cwd: string;
   promptId: string;
+  /** Executions the stop step accepted on the Broker's terminal fence alone
+   * — no stop was ever observed for them, so they journal an honest
+   * unobservable outcome instead of a cancellation nobody witnessed. */
+  unobserved?: ReadonlySet<string>;
 }): Promise<void> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   if (authorization.status !== 'runnable') return;
@@ -198,11 +215,14 @@ export async function settleParkedTurnCancelled(input: {
       .filter((id): id is string => typeof id === 'string'),
   );
   for (const item of pending) {
+    const observed = !input.unobserved?.has(item.executionCallId);
     const parts = convertToFunctionErrorResponse(
       item.toolName,
       item.functionCallId,
       [],
-      'The Runtime execution was cancelled with its owner.',
+      observed
+        ? 'The Runtime execution was cancelled with its owner.'
+        : "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner.",
     );
     const response = parts[0]?.functionResponse;
     if (!response || parts.length !== 1) {
@@ -210,7 +230,7 @@ export async function settleParkedTurnCancelled(input: {
     }
     response.response = {
       ...response.response,
-      executionStatus: 'cancelled',
+      executionStatus: observed ? 'cancelled' : 'unknown',
     };
     const outcomeRef = await input.session.resources.publish(
       'managed-tool-outcome',
@@ -250,7 +270,13 @@ export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
-}): Promise<HostedWorkspaceBroker> {
+}): Promise<{
+  broker: HostedWorkspaceBroker;
+  /** Executions accepted as complete only because the Broker fenced the
+   * record terminally: no stop was observed for these, so the caller must
+   * not journal them as cancelled. */
+  unobserved: Set<string>;
+}> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   if (
     authorization.status !== 'runnable' ||
@@ -263,19 +289,24 @@ export async function stopParkedRuntimeExecutions(input: {
     authorization.checkpoint.tools?.items ?? [],
     input.brokerOptions,
   );
-  // Terminal for the stop's purposes — the Broker never knew it, the result
-  // is durable, or the record is fenced permanently. The pre-cancel skip
-  // and the post-cancel poll must agree on this or one side lies.
+  // Terminal for the stop's purposes — the Broker never knew it or the
+  // result is durable. A permanently fenced record ends the wait too, but
+  // the stop was never observed for it, so it is reported separately rather
+  // than certified. The pre-cancel skip and the post-cancel poll must agree
+  // on this or one side lies.
   const stopComplete = (state: { state: string } | undefined): boolean =>
-    state === undefined ||
-    state.state === 'settled' ||
-    state.state === 'abandoned';
+    state === undefined || state.state === 'settled';
+  const unobserved = new Set<string>();
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
     if (before?.state === 'unknown')
       throw new Error('Runtime execution outcome is unknown.');
+    if (before?.state === 'abandoned') {
+      unobserved.add(item.executionCallId);
+      continue;
+    }
     if (stopComplete(before)) continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
@@ -283,6 +314,10 @@ export async function stopParkedRuntimeExecutions(input: {
       const status = await broker.status(item.executionCallId);
       if (status?.state === 'unknown')
         throw new Error('Runtime execution outcome is unknown.');
+      if (status?.state === 'abandoned') {
+        unobserved.add(item.executionCallId);
+        break;
+      }
       if (stopComplete(status)) break;
       if (Date.now() >= deadline) {
         throw new Error(
@@ -292,7 +327,7 @@ export async function stopParkedRuntimeExecutions(input: {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  return broker;
+  return { broker, unobserved };
 }
 
 /**
@@ -349,7 +384,10 @@ export async function recoverHostedRuntimeTurn(input: {
     throw cause;
   }
   const pending = items.filter((item) => item.state === 'in_progress');
-  const states = new Map<string, { state: string } | undefined>();
+  const states = new Map<
+    string,
+    { state: HostedRuntimeRecoveryExecutionState } | undefined
+  >();
   let acquiredRuntime = false;
   if (passive && items.length > 0) {
     // A replacement Broker answers status, cancel and release only for a
@@ -378,7 +416,9 @@ export async function recoverHostedRuntimeTurn(input: {
         // distinction so the coordinator can cancel over it.
         states.set(
           item.executionCallId,
-          status?.state === 'unknown' ? undefined : status,
+          status === undefined || status.state === 'unknown'
+            ? undefined
+            : { state: status.state },
         );
       }
     } else {
