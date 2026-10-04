@@ -167,6 +167,82 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void answersCursorExpiredRatherThanAGappedPageWhenTheFloorMoved()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("race-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        // The floor stands at 2 when the read begins and at 7 once the
+        // events have loaded: an expiry that deleted everything through 7
+        // happened mid-read, so the contract's 409 must stand where a
+        // gapped page previously was — the marker flips at the read itself
+        // because that is what concurrent expiry means here.
+        final java.util.concurrent.atomic.AtomicBoolean readHappened =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        ManagedTaskEventStore racing = new ManagedTaskEventStore(jdbc) {
+            @Override
+            public CursorPositions positions(String tenantId,
+                    String session, String task) {
+                return new CursorPositions(9, readHappened.get() ? 7 : 2,
+                        List.of());
+            }
+
+            @Override
+            public EventPage read(String tenantId, String session,
+                    String task, long afterSequence, int limit) {
+                readHappened.set(true);
+                return new EventPage(List.of(), false);
+            }
+        };
+        ManagedTaskService service = new ManagedTaskService(agents, records,
+                racing);
+        String cursor = ManagedTaskEventStore.encodeCursor(taskId, 2);
+        assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
+                TENANT, sessionId, taskId, cursor, 10))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("cursor_expired");
+                });
+    }
+
+    @Test
+    void pagesFreshEventsAgainstTheRealJournal() throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("fresh-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        var page = tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, null, 10);
+        assertThat(page.data()).hasSize(1);
+        assertThat(page.nextCursor()).isEqualTo(
+                ManagedTaskEventStore.encodeCursor(taskId, 1));
+        // An as-of-now explicit cursor still admits: the floor did not move
+        // past it while the read was happening.
+        assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, page.nextCursor(), 10).data()).isEmpty();
+    }
+
+    @Test
     void commitsAndProjectsAChildRunChain() throws Exception {
         byte[] args = "{\"command\":\"yes\"}"
                 .getBytes(StandardCharsets.UTF_8);
