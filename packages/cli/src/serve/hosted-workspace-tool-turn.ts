@@ -361,6 +361,11 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
+  /** Whether this Session runs one of the `/2` search profiles. */
+  private get searchProfile(): boolean {
+    return isHostedWorkspaceSearchProfile(this.profile);
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
@@ -848,8 +853,12 @@ export class HostedWorkspaceToolTurn {
     if (this.hooks && this.approval) {
       calls = await Promise.all(
         calls.map(async (call) => {
-          if (!hostedApprovalAsks(this.approval!.settings, call.name))
-            return call;
+          const asks = hostedApprovalAsks(
+            this.approval!.settings,
+            call.name,
+            this.searchProfile,
+          );
+          if (!asks) return call;
           const output = await this.hooks!.fire(
             HookEventName.PermissionRequest,
             `${this.promptId}:${call.callId}`,
@@ -1176,7 +1185,11 @@ export class HostedWorkspaceToolTurn {
             inputRefs.delete(index);
             if (
               this.approval &&
-              hostedApprovalAsks(this.approval.settings, request.call.name)
+              hostedApprovalAsks(
+                this.approval.settings,
+                request.call.name,
+                this.searchProfile,
+              )
             )
               askAgain.add(index);
           }
@@ -2199,12 +2212,13 @@ export class HostedWorkspaceToolTurn {
     );
     const approval = this.approval;
     if (!approval) return refusals;
+    const searchProfile = this.searchProfile;
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (
         refusals[index] ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name)
+        !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
       )
         continue;
       asked = true;

@@ -63,6 +63,11 @@ worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持
 - 结果在到达网络、模型或持久记录之前改写为 Session 工作目录相对路径。Runtime
   宿主的物理目录布局不得泄露给 Harness；对搜索工具而言路径本身就是结果。
 
+Hosted 搜索将遍历和匹配放在可终止的 worker thread 中，每个搜索目录的执行
+上限为五秒。取消或超时会先终止该线程，再返回工具结果，因此 glob 回溯匹配
+不会阻塞 Runtime 的 status 和 cancel 路由。超时返回模型可纠正的错误，提示
+缩小 pattern 或 path；普通 CLI 保留原有的进程内搜索行为。
+
 Core 的忽略规则以 Session 目录为根。位于仓库子目录的 Session 不继承祖先
 目录的 `.gitignore`，依赖文件可能占满扫描上限；Session 自己的忽略文件仍
 生效。本切片不承诺仓库根目录的忽略语义。宽泛 glob 仅列出的外指软链接（如 venv
@@ -90,7 +95,7 @@ glob 的结果是路径列表。当序列化后的结果将超过 64 KiB 的 Ses
 
 - CLI Harness：profile 接受与固定、声明、获取前的参数校验、有界截断。
 - CLI worker：准入、范围约束、Workspace 相对输出。
-- Core：`GlobTool` 新增可选的 `containmentRoot` 构造选项；普通 CLI 不设置
+- Core：`GlobTool` 新增可选的 `containmentRoot` 和 `executionTimeoutMs` 构造选项；普通 CLI 不设置
   它，外部 glob 仍需权限确认。
 - Workspace 恢复：W1 恢复通过与创建、加载相同的共享 profile 判断接受 `/2`。
 - Java：不变。生产 connector 仍固定 `hosted-workspace-files/1`；是否为公开

@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
-import { globStream, escape } from 'glob';
+import { existsSync } from 'node:fs';
+import { Worker } from 'node:worker_threads';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -28,7 +29,13 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { isPathWithinRoot } from '../utils/workspaceContext.js';
+import {
+  searchGlobDirectory,
+  type GlobDirectorySearch,
+  type GlobDirectoryReply,
+  type GlobPath,
+} from './glob-search.js';
+export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
@@ -38,12 +45,6 @@ const normalizePathForComparison = (p: string) =>
   process.platform === 'win32' || process.platform === 'darwin'
     ? p.toLowerCase()
     : p;
-
-// Subset of 'Path' interface provided by 'glob' that we can implement for testing
-export interface GlobPath {
-  fullpath(): string;
-  mtimeMs?: number;
-}
 
 /**
  * Sorts file entries based on recency and then alphabetically.
@@ -98,6 +99,8 @@ export interface GlobToolOptions {
    * keeps external globs, which ask for permission instead.
    */
   containmentRoot?: string;
+  /** Runs each search in a terminable worker; ordinary CLI callers omit it. */
+  executionTimeoutMs?: number;
 }
 
 class GlobToolInvocation extends BaseToolInvocation<
@@ -110,6 +113,7 @@ class GlobToolInvocation extends BaseToolInvocation<
     private config: Config,
     params: GlobToolParams,
     private readonly containmentRoot?: string,
+    private readonly executionTimeoutMs?: number,
   ) {
     super(params);
     this.fileService = config.getFileService();
@@ -150,140 +154,80 @@ class GlobToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  /**
-   * Runs glob search in a single directory and returns filtered entries.
-   */
   private async globInDirectory(
     searchDir: string,
     pattern: string,
     signal: AbortSignal,
     entryLimit: number,
   ): Promise<{ entries: GlobPath[]; hitLimit: boolean }> {
-    let effectivePattern = pattern;
-    const fullPath = path.join(searchDir, effectivePattern);
-    if (fs.existsSync(fullPath)) {
-      effectivePattern = escape(effectivePattern);
+    const options: GlobDirectorySearch = {
+      searchDir,
+      pattern,
+      entryLimit,
+      projectRoot: this.config.getTargetDir(),
+      fileFilteringOptions: this.getFileFilteringOptions(),
+      containmentRoot: this.containmentRoot,
+    };
+    const timeoutMs = this.executionTimeoutMs;
+    if (timeoutMs === undefined) {
+      return searchGlobDirectory(options, this.fileService, signal);
     }
 
-    const projectRoot = this.config.getTargetDir();
-    const fileFilteringOptions = this.getFileFilteringOptions();
-
-    // Prune ignored directories DURING traversal (glob's `childrenIgnored`)
-    // rather than only post-filtering the results. Delegating to
-    // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
-    // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
-    // gitignore→glob pattern conversion cannot reproduce these correctly.
-    const isTraversalIgnored = (entry: {
-      fullpath(): string;
-      isDirectory(): boolean;
-    }): boolean => {
-      try {
-        const relativePath = path.relative(projectRoot, entry.fullpath());
-        // Never prune paths outside the project root (e.g. an external search
-        // dir); ignore rules are only defined relative to the root.
-        if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
-          return false;
-        }
-        // Append trailing '/' for directories so the ignore library matches
-        // directory-only patterns like `node_modules/`.
-        const ignorePath = entry.isDirectory()
-          ? relativePath + '/'
-          : relativePath;
-        return this.fileService.shouldIgnoreFile(
-          ignorePath,
-          fileFilteringOptions,
-        );
-      } catch (error) {
-        // Fail open: if an ignore check throws, don't prune. The post-filter
-        // below is the source of truth, so a missed prune only costs a little
-        // extra traversal, whereas a false prune would hide real matches and
-        // be indistinguishable from a legitimately empty result.
-        debugLogger.debug(
-          `traversal ignore check failed for ${entry.fullpath()}: ${getErrorMessage(error)}`,
-        );
-        return false;
-      }
-    };
-
-    // Containment is judged per walked entry, not on the pattern: `..`,
-    // `[.][.]`, `\.\.` and brace alternatives all resolve to an entry whose
-    // lexical path leaves the root, and a file reached through a symlinked
-    // directory has a parent whose realpath does. Pruning both keeps an
-    // outside entry from being walked, reported or counted.
-    const root = this.containmentRoot;
-    const realpaths = new Map<string, string | null>();
-    const realpathOf = (target: string): string | null => {
-      let real = realpaths.get(target);
-      if (real === undefined) {
-        try {
-          real = fs.realpathSync(target);
-        } catch {
-          real = null;
-        }
-        realpaths.set(target, real);
-      }
-      return real;
-    };
-    const escapesRoot = (full: string, self: boolean): boolean => {
-      if (root === undefined) return false;
-      if (!isPathWithinRoot(full, root)) return true;
-      const realRoot = realpathOf(root) ?? root;
-      // Judge a listed entry by its parent's realpath, so a merely listed
-      // outward symlink (a venv's `bin/python`) stays visible; judge a
-      // directory about to be entered by its own.
-      const real = self
-        ? realpathOf(full)
-        : (() => {
-            const parent = realpathOf(path.dirname(full));
-            return parent === null
-              ? null
-              : path.join(parent, path.basename(full));
-          })();
-      return real === null || !isPathWithinRoot(real, realRoot);
-    };
-
-    const isAllowedByFileFilters = (entry: GlobPath): boolean => {
-      const relativePath = path.relative(projectRoot, entry.fullpath());
-      return (
-        this.fileService.filterFiles([relativePath], fileFilteringOptions)
-          .length > 0
+    signal.throwIfAborted();
+    // A timer on the matching thread cannot interrupt a backtracking regexp.
+    const workerFile = path.join(
+      resolveBundleDir(import.meta.url),
+      'glob-search-worker.js',
+    );
+    // tsx must register its loader inside a worker running source files.
+    const workerEntry =
+      import.meta.url.endsWith('.ts') && !existsSync(workerFile)
+        ? new URL(
+            `data:text/javascript,${encodeURIComponent(
+              `import { register } from ${JSON.stringify(import.meta.resolve('tsx/esm/api'))}; register(); await import(${JSON.stringify(new URL('./glob-search-worker.ts', import.meta.url).href)});`,
+            )}`,
+          )
+        : workerFile;
+    const worker = new Worker(workerEntry, { workerData: options });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort = () => {};
+    try {
+      return await new Promise<{ entries: GlobPath[]; hitLimit: boolean }>(
+        (resolve, reject) => {
+          onAbort = () => reject(signal.reason);
+          worker.once('message', (reply: GlobDirectoryReply) =>
+            resolve({
+              entries: reply.entries.map((entry) => ({
+                fullpath: () => entry.path,
+                mtimeMs: entry.mtimeMs,
+              })),
+              hitLimit: reply.hitLimit,
+            }),
+          );
+          worker.once('error', () =>
+            reject(new Error('Glob search worker failed.')),
+          );
+          worker.once('exit', () =>
+            reject(new Error('Glob search worker exited before a result.')),
+          );
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Glob search exceeded ${timeoutMs / 1000} seconds. Narrow the pattern or path and retry.`,
+                ),
+              ),
+            timeoutMs,
+          );
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        },
       );
-    };
-
-    const stream = globStream(effectivePattern, {
-      cwd: searchDir,
-      withFileTypes: true,
-      nodir: true,
-      stat: true,
-      nocase: true,
-      dot: true,
-      follow: false,
-      signal,
-      ignore: {
-        ignored: (entry) =>
-          escapesRoot(entry.fullpath(), false) || isTraversalIgnored(entry),
-        childrenIgnored: (entry) =>
-          escapesRoot(entry.fullpath(), true) || isTraversalIgnored(entry),
-      },
-    }) as AsyncIterable<GlobPath> & { destroy?: () => void };
-
-    const entries: GlobPath[] = [];
-    let hitLimit = false;
-    for await (const entry of stream) {
-      if (!isAllowedByFileFilters(entry)) {
-        continue;
-      }
-      if (entries.length >= entryLimit) {
-        hitLimit = true;
-        break;
-      }
-      entries.push(entry);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      await worker.terminate();
     }
-    if (hitLimit) {
-      stream.destroy?.();
-    }
-
-    return { entries, hitLimit };
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -503,6 +447,7 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
       this.config,
       params,
       this.options.containmentRoot,
+      this.options.executionTimeoutMs,
     );
   }
 }

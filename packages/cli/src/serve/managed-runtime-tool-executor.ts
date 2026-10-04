@@ -370,10 +370,14 @@ export class ManagedToolExecutor {
      * case (a sibling Session's files are never this Session's business);
      * anywhere else inside the mount — a linked dependency's real location
      * — keeps the pre-containment behavior of reading through the symlink.
+     * `ownDirectory` is the caller's canonical Session directory, so a
+     * sibling bound at an ancestor of it can be told apart from one that
+     * delimits a private area.
      */
     private readonly ownsAnotherSessionDir?: (
       sessionId: string,
       realPath: string,
+      ownDirectory: string,
     ) => Promise<boolean>,
   ) {}
 
@@ -883,9 +887,11 @@ export class ManagedToolExecutor {
         // it, and glob's own pattern/output containment below covers every path
         // it does consume.
         entry.toolName !== GlobTool.Name &&
-        typeof params['file_path'] === 'string' &&
-        !path.isAbsolute(params['file_path'].trim())
+        typeof params['file_path'] === 'string'
       ) {
+        // Only a relative input needs resolving, and `path.resolve` hands an
+        // absolute one back unchanged — so the containment below judges every
+        // spelling a producer can send, not just the Harness's normalized one.
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
@@ -904,10 +910,8 @@ export class ManagedToolExecutor {
         const realTarget = await realpathDeepestExisting(
           params['file_path'] as string,
         );
-        const relative = path.relative(
-          await realpathDeepestExisting(directory),
-          realTarget,
-        );
+        const realDirectory = await realpathDeepestExisting(directory);
+        const relative = path.relative(realDirectory, realTarget);
         if (
           relative === '..' ||
           relative.startsWith(`..${path.sep}`) ||
@@ -929,7 +933,11 @@ export class ManagedToolExecutor {
             );
           if (
             !inMount ||
-            (await this.ownsAnotherSessionDir?.(tools.sessionId, realTarget))
+            (await this.ownsAnotherSessionDir?.(
+              tools.sessionId,
+              realTarget,
+              realDirectory,
+            ))
           ) {
             throw new Error(
               `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
@@ -1246,7 +1254,10 @@ export function createManagedToolSet(
         new WriteFileTool(config),
         new EditTool(config),
         // The walk never leaves the Session, whatever the pattern spells.
-        new GlobTool(config, { containmentRoot: directory }),
+        new GlobTool(config, {
+          containmentRoot: directory,
+          executionTimeoutMs: 5_000,
+        }),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),

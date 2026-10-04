@@ -77,6 +77,13 @@ invariants hold there, because Glob's own validation admits external paths:
   reaching the wire, the model, or the durable record. The Runtime host's physical layout
   must not leak to the Harness; for a search tool the paths are the payload.
 
+Hosted searches run their traversal and matching in a terminable worker thread
+with a five-second deadline per search directory. Cancellation or deadline expiry
+terminates that thread before returning the tool outcome, keeping Runtime status
+and cancel routes responsive even when glob matching backtracks. A deadline
+returns a correctable error asking the model to narrow the pattern or path; the
+ordinary CLI keeps its existing in-process search behavior.
+
 Core ignore filtering is rooted at the Session directory. A Session below
 the repository root does not inherit ancestor `.gitignore` rules; dependency
 files may consume the scan limit. Its own ignore files still apply. This
@@ -111,7 +118,7 @@ existing omitted path still applies.
 - CLI Harness: profile acceptance and pinning, declaration, pre-acquisition
   argument validation, bounded truncation.
 - CLI worker: admission, containment, Workspace-relative output.
-- Core: `GlobTool` gains an opt-in `containmentRoot` constructor option; the
+- Core: `GlobTool` gains opt-in `containmentRoot` and `executionTimeoutMs` constructor options; the
   ordinary CLI does not set it and keeps external globs behind permission.
 - Workspace recovery: W1 recovery accepts the `/2` profiles through the same
   shared profile predicates as creation and load.
