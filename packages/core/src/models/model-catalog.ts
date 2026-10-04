@@ -186,11 +186,14 @@ function readCache(cachePath: string): ModelCatalog | undefined {
  * `tokenLimit('qwen2.5-72b-instruct')` answered 262,144 instead of the
  * catalog's own 131,072, and the vision twin degraded to text-only.
  *
- * Only a version boundary is respelled. The digit run before the separator has
- * to be the last one in the prefix and the run after it has to be a whole
- * segment, so a size suffix is never mistaken for a minor version
- * (`gemma-4-26b-a4b-it` gets no alias). Returns undefined when the key carries
- * no version to respell.
+ * The digit run before the separator has to be the last one in the prefix and
+ * the run after it has to be a whole segment, so a size suffix is never
+ * mistaken for a minor version (`gemma-4-26b-a4b-it` gets no alias). A dated
+ * id's trailing date run qualifies too, so `grok-4.20-0309-reasoning` also
+ * commits `grok-4.20.0309-reasoning`, a spelling no vendor publishes. It stays
+ * harmless because the alias is byte-identical to its twin and the projection
+ * never aliases over a key it committed itself. Returns undefined when the key
+ * carries no version to respell.
  */
 export function versionSpellingAlias(key: string): string | undefined {
   const dotted = key.replace(/^(.*\d)-(\d+(?=-|$))/, '$1.$2');
