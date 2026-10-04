@@ -144,6 +144,36 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void theThreeScanDelaySchedulesShareOneFallback() {
+        // The Dispatch comment claims the three sites read the identical
+        // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
+        // true when one fallback is retuned without the others.
+        String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
+        assertThat(scanDelayFallback(
+                com.alibaba.qwen.code.managedagent.service
+                        .ActionResponseCoordinator.class)).isEqualTo(expected);
+        assertThat(scanDelayFallback(
+                com.alibaba.qwen.code.managedagent.service
+                        .HarnessCoordinator.class)).isEqualTo(expected);
+        assertThat(scanDelayFallback(
+                com.alibaba.qwen.code.managedagent.service
+                        .SessionLifecycleCoordinator.class))
+                .isEqualTo(expected);
+    }
+
+    private static String scanDelayFallback(Class<?> coordinator) {
+        return java.util.Arrays.stream(coordinator.getDeclaredMethods())
+                .map(method -> method.getAnnotation(
+                        org.springframework.scheduling.annotation
+                                .Scheduled.class))
+                .filter(java.util.Objects::nonNull)
+                .map(org.springframework.scheduling.annotation.Scheduled
+                        ::fixedDelayString)
+                .filter(value -> value.contains("dispatch.scan-delay"))
+                .findFirst().orElseThrow();
+    }
+
+    @Test
     void droppedConfigSurfacesStayDropped() {
         // The kubernetes* and cliEntry blocks had no consumer; they come
         // back only together with their provisioner/invocation.

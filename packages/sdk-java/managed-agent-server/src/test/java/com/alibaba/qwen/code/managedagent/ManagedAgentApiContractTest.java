@@ -605,6 +605,17 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        // The widened metadata contract: a body with keys beyond clientId
+        // is both served (202) and schema-valid. exchange() validates
+        // sub-300 request bodies, so re-tightening WebShellMetadata to
+        // additionalProperties: false turns this arm red.
+        exchange(drift, "webShellCreateSession", 202,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"contract-web-metadata",
+                 "agentId":"qwen-code","input":[],
+                 "metadata":{"clientId":"client-1","other":"trace"}}
+                """);
         MockHttpServletResponse webShellStream = stream(drift,
                 "webShellStreamEvents",
                 post(WEB_SHELL + "/events/stream").header(TENANT, tenant),
@@ -1438,6 +1449,62 @@ class ManagedAgentApiContractTest {
                             StandardCharsets.UTF_8))
                     .at("/error/code").asText())
                     .isEqualTo("session_not_found");
+        }
+    }
+
+    @Test
+    void webShellSubmitAcceptsTheWidenedMetadataShape() throws Exception {
+        // The exact body the integration suite posts to /turns/submit for
+        // the metadata widening must conform to the published
+        // WebShellSubmitRequest: re-tightening WebShellMetadata (or the
+        // request's additionalProperties) turns this red.
+        assertThat(CONTRACT.validate(
+                "#/components/schemas/WebShellSubmitRequest",
+                objectMapper.readTree("""
+                        {"sessionId":"00000000-0000-4000-8000-000000000000",
+                         "idempotencyKey":"metadata-submit",
+                         "input":[{"type":"input_text","text":"hi"}],
+                         "metadata":{"clientId":"client-1","other":"trace"}}
+                        """))).isEmpty();
+    }
+
+    @Test
+    void thePublishedAggregateBudgetIsTheEnforcedOne() throws Exception {
+        String tenant = "tenant-contract-budget-" + UUID.randomUUID();
+        String sessionId = json(webShell(tenant, "/sessions/create",
+                "{\"idempotencyKey\":\"budget-create\","
+                        + "\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .get("sessionId").asText();
+        String block = "{\"type\":\"input_text\",\"text\":\""
+                + "x".repeat(1_000_000) + "\"}";
+        String oversized = "{\"idempotencyKey\":\"budget-submit\","
+                + "\"sessionId\":\"" + sessionId + "\",\"input\":["
+                + (block + ",").repeat(4) + block + "]}";
+        // The enforced number is read out of the 400 the server returns,
+        // so no copy of the constant lives in this test.
+        String message = json(webShell(tenant, "/turns/submit", oversized))
+                .path("error").path("message").asText();
+        var enforcedMatcher = java.util.regex.Pattern
+                .compile("exceeds the (\\d+) character aggregate limit")
+                .matcher(message);
+        assertThat(enforcedMatcher.find())
+                .as("400 message names the budget: %s", message).isTrue();
+        long enforced = Long.parseLong(enforcedMatcher.group(1));
+        for (String schema : List.of("CreateSessionRequest",
+                "InputMessageEventRequest", "WebShellCreateRequest",
+                "WebShellSubmitRequest")) {
+            String description = CONTRACT.node("/components/schemas/"
+                    + schema + "/properties/input/description").asText();
+            var published = java.util.regex.Pattern
+                    .compile("([0-9,]+)-character aggregate")
+                    .matcher(description);
+            assertThat(published.find())
+                    .as("%s input description publishes the budget", schema)
+                    .isTrue();
+            assertThat(Long.parseLong(published.group(1).replace(",", "")))
+                    .as("%s published aggregate matches the enforced one",
+                            schema)
+                    .isEqualTo(enforced);
         }
     }
 

@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -26,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -769,6 +771,11 @@ class ManagedAgentServerIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
+                // The sibling title field, not metadata.title, is the
+                // Session's title surface: pinned positively here because
+                // @JsonInclude(NON_NULL) would otherwise make a dropped
+                // title indistinguishable from an ignored one.
+                .andExpect(jsonPath("$.title").value("web"))
                 .andExpect(jsonPath("$.activeTurn.status")
                         .value("completed"))
                 .andExpect(jsonPath("$.environment.state").value("failed"))
@@ -1769,18 +1776,61 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.title").doesNotExist());
         // Same widened acceptance on the submit handler: a non-clientId
         // metadata body must not be refused by the (deleted) validator;
-        // the request fails later, on the unknown Session lookup.
+        // the request fails later, on the unknown Session lookup. The body
+        // is otherwise exactly what the published WebShellSubmitRequest
+        // schema allows — ManagedAgentApiContractTest pins that shape.
         mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"sessionId":"does-not-matter",
+                                {"sessionId":"00000000-0000-4000-8000-000000000000",
                                  "idempotencyKey":"metadata-submit",
-                                 "agentId":"qwen-code","input":[],
+                                 "input":[{"type":"input_text","text":"hi"}],
                                  "metadata":{"clientId":"client-1",
                                              "other":"trace"}}
                                 """))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void anOversizedDurableRecordIsAdmittedThenRejectedByTheHarness()
+            throws Exception {
+        // The 4M aggregate is an admission ceiling only: a command whose
+        // serialized prompt exceeds the Hosted Harness's 64 KiB
+        // durable-record limit is accepted and persisted, then fails the
+        // Turn when the Harness refuses it (413 -> hosted_harness_rejected).
+        String tenant = "tenant-oversized-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"oversized-create",
+                                 "agentId":"qwen-code","input":[]}
+                                """))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"oversized-submit\","
+                                + "\"sessionId\":\"" + sessionId + "\","
+                                + "\"input\":[{\"type\":\"input_text\","
+                                + "\"text\":\"" + "x".repeat(100_000)
+                                + "\"}]}"))
+                .andExpect(status().isAccepted());
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"sessionId\":\"" + sessionId
+                                        + "\"}"))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.activeTurn.status")
+                                .value("failed"))
+                        .andExpect(jsonPath("$.activeTurn.errorCode")
+                                .value("hosted_harness_rejected")));
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
@@ -1875,6 +1925,21 @@ class ManagedAgentServerIntegrationTest {
         public Admission submit(String tenantId, String sessionId,
                 String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
+            // The real Hosted Harness refuses a prompt whose durable record
+            // exceeds the Session store's inline limit with a 413; mirror
+            // that here so the admission-vs-delivery gap is observable.
+            try {
+                if (new ObjectMapper().writeValueAsBytes(input).length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
+                    DaemonHttpException tooLarge =
+                            mock(DaemonHttpException.class);
+                    when(tooLarge.getStatusCode()).thenReturn(413);
+                    throw tooLarge;
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException
+                    error) {
+                throw new IllegalStateException(error);
+            }
             promptIds.put(sessionId, promptId);
             boolean held = input.stream().anyMatch(block ->
                     "hold".equals(block.get("text")));

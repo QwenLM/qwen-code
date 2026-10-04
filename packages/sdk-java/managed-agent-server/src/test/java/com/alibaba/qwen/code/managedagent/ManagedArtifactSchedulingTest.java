@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
@@ -102,6 +104,27 @@ class ManagedArtifactSchedulingTest {
         }
     }
 
+    @Test
+    void messageMaterializerTaskSchedulesAtTheTypedInterval() {
+        // The typed property, not a hardcoded constant, is the cadence:
+        // mutating messageMaterializerTask to schedule with a literal
+        // Duration turns this red.
+        var properties = new com.alibaba.qwen.code.managedagent.config
+                .ManagedAgentProperties();
+        properties.getEvents().setMaterializeInterval(
+                java.time.Duration.ofMillis(10));
+        org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler
+                scheduler = mock(org.springframework.scheduling.concurrent
+                        .ThreadPoolTaskScheduler.class);
+        new com.alibaba.qwen.code.managedagent.config
+                .ManagedArtifactConfiguration().messageMaterializerTask(
+                        scheduler,
+                        new MessageMaterializer(mock(AgentStateStore.class)),
+                        properties);
+        verify(scheduler).scheduleWithFixedDelay(any(Runnable.class),
+                eq(java.time.Duration.ofMillis(10)));
+    }
+
     // Parks Boot's shared one-thread scheduler with a long-running
     // @Scheduled sibling: the materialize pass must keep firing on its own
     // pool. This is the arm the publication/preview parking tests cannot
@@ -138,8 +161,12 @@ class ManagedArtifactSchedulingTest {
                     .isTrue();
             int before = materialized.get();
             Thread.sleep(500);
+            // Sample while the hog still parks the shared pool: reading
+            // after the release races with the freed thread running the
+            // overdue pass.
+            int after = materialized.get();
             DefaultPoolHog.release.countDown();
-            assertThat(materialized.get()).isGreaterThan(before);
+            assertThat(after).isGreaterThan(before);
         } finally {
             DefaultPoolHog.release.countDown();
             context.close();
