@@ -13,6 +13,7 @@ import {
   type WaitingToolCall,
 } from '../core/coreToolScheduler.js';
 import type { ToolCallRequestInfo } from '../core/turn.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
@@ -399,6 +400,39 @@ describe('CodeModeOnly scheduler dispatch', () => {
     });
     expect(completed).toHaveBeenCalledOnce();
     expect(fnResponse()?.response?.['output']).toContain('nested output');
+  }, 10_000);
+
+  it('records no nested code_mode result when the call is outside a Goal turn', async () => {
+    const recordToolResult = vi.fn();
+    const { run } = setup(
+      [
+        new MockTool({
+          name: 'read_probe',
+          kind: Kind.Read,
+          params: { type: 'object', additionalProperties: false },
+          execute: async () => ({
+            llmContent: 'nested output',
+            returnDisplay: 'nested output',
+          }),
+        }),
+      ],
+      {
+        configure: (config) =>
+          vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+            recordToolResult,
+          } as unknown as ChatRecordingService),
+      },
+    );
+
+    await run(
+      'exec-nogoal',
+      'prompt-nogoal',
+      'const result = await tools.read_probe({}); text(result.output);',
+    );
+
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1]?.callId),
+    ).not.toContain('exec-nogoal:code:1');
   }, 10_000);
 
   it('runs Promise.all reads in one scheduler batch', async () => {

@@ -245,6 +245,21 @@ describe('Goal verifier evidence window', () => {
     ).toBe('external_fact');
   });
 
+  it('classifies a legacy direct exec result from its response name alone', () => {
+    // No assistant partner carries this call id anywhere in the chain, so the
+    // structured response name is the only thing that can identify script output.
+    const legacy = record('legacy-exec', 'tool_result', { turnId: 'turn-3' });
+    legacy.message = {
+      parts: [
+        { functionResponse: { name: 'exec', response: { output: '42' } } },
+      ],
+    };
+    const window = build([legacy]);
+    expect(
+      window.evidence.find((entry) => entry.uuid === legacy.uuid)?.proofKind,
+    ).toBe('execution_output');
+  });
+
   it('spends the budget on the serialized record, its comma and each new turn id, to the byte', () => {
     const records = [
       tool('older', 'turn-2', 'é"\n'.repeat(50)),
