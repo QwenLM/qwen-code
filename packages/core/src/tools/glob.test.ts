@@ -823,6 +823,36 @@ describe('GlobTool', () => {
       },
     );
 
+    it('searches when the containment root is a symlink to the search dir', async () => {
+      // `createManagedToolSet` passes the raw target directory as the
+      // containment root while the search directories are canonicalized, so
+      // one directory reaches the walk under two spellings. Judging walked
+      // entries only against the raw spelling prunes the whole walk and
+      // answers "No files found" with no error.
+      await fs.symlink('session', path.join(tempRootDir, 'link'));
+      const linked = path.join(tempRootDir, 'link');
+      const containedByLink = () =>
+        new GlobTool(mockConfig, { containmentRoot: linked });
+
+      const result = await run(
+        { pattern: '**/*', path: session },
+        containedByLink(),
+      );
+      expect(result.collectedFilePaths).toContain(
+        path.join(session, 'src', 'index.ts'),
+      );
+
+      // The realpath arm still holds under the linked spelling.
+      const escaping = await run(
+        { pattern: 'peek/**/*', path: session },
+        containedByLink(),
+      );
+      expect(escaping.collectedFilePaths ?? []).not.toContain(
+        path.join(tempRootDir, 'web', 'secret.txt'),
+      );
+      expect(String(escaping.llmContent)).not.toContain('sibling');
+    });
+
     it('leaves the ordinary tool able to search outside', async () => {
       const result = await run({
         pattern: '[.][.]/web/secret.txt',
