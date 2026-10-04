@@ -308,10 +308,11 @@ keep reading the rows of a session being deleted.
   byte-length tripwire, not a per-line parse of the intermediate revisions:
   a line carrying a foreign scope in a journal written before this change
   would be caught by the legacy scan but not re-read after the head is
-  backfilled. Commits now reject foreign-scoped `activation.changed` lines
-  (the only lines whose payload the head persists), so the residual is
-  confined to journals already written by a misbehaving writer — and such a
-  writer could equally have written correctly scoped forgeries.
+  backfilled. Commits now reject any misscoped or unknown-version event
+  line (an `activation.changed` line is the only one whose payload the head
+  persists), so the residual is confined to journals already written by a
+  misbehaving writer — and such a writer could equally have written
+  correctly scoped forgeries.
 - Follow-up: move the seal/finish stream rehash off the request thread
   (requires an asynchronous seal contract — issue #13242), and consider
   splitting `ManagedAgentStore` as noted in the issue.

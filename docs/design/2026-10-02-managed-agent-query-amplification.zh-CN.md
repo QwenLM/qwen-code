@@ -81,5 +81,5 @@ Managed Agent Runtime Broker 的四条热路径把数据库工作量放大到远
 - 突发期间落后的 snapshot 会把 `listPublicItems` 的实时性最多推迟 1000 条已覆盖事件;读侧在 Turn 边界收敛,涓流取完时经重选规则在 `SNAPSHOT_REFRESH_MILLIS` 内收敛。
 - 第 6 节的遗留扫描回退会让迁移前的 journal 在首次授权或 activation 变更前保持旧成本;这是有意选择,以避免对 journal 字节做数据迁移。
 - 滚动部署:pre-V35 旧二进制的 commit 不维护 head 的 activation 列,因此旧二进制仍在写入时这些列可能变陈旧。`activation_head_revision` 时间戳记录这些列反映到哪个 journal revision,因此这种 head 无法通过时间戳检查,授权回退重扫 journal 并重新回填——提前打开开关也会逐会话自愈,而不是把陈旧状态认证为有效。`journal-head-authorization` 开关(默认关)仍然作为刻意的运维开关发布;待集群全部运行 V35 代码后打开,残余偏差会被检测并修复而非被信任。
-- 第 6 节 head 路径的链式证明是带旧式遍历字节长度触发器的计数,而非对中间 revision 的逐行解析:在本变更之前写入的 journal 若含外部作用域的行,旧式扫描能捕获,而 head 回填后不再重读。现在提交侧会拒绝外部作用域的 `activation.changed` 行(head 只持久化这类行的载荷),因此残余只限于已被行为不端的写入方写入的 journal——而这样的写入方同样能写出作用域正确的伪造行。
+- 第 6 节 head 路径的链式证明是带旧式遍历字节长度触发器的计数,而非对中间 revision 的逐行解析:在本变更之前写入的 journal 若含外部作用域的行,旧式扫描能捕获,而 head 回填后不再重读。现在提交侧拒绝任何作用域错误、版本未知的事件行(head 只持久化 `activation.changed` 行的载荷),因此残余只限于已被行为不端的写入方写入的 journal——而这样的写入方同样能写出作用域正确的伪造行。
 - 后续:把 seal/finish 流重哈希移出请求线程(需要异步 seal 契约——issue #13242);并如 issue 所述考虑拆分 `ManagedAgentStore`。
