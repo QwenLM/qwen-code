@@ -245,10 +245,14 @@ export class HostedChildRunSession {
     }));
   }
 
-  /** A live run line never loops: identical steps alternate the two live states. */
+  /** A live run line never loops: identical steps alternate the two live
+   * states, and a terminal line is never stepped back to life. */
   private step(state: ChildRun['run']['state']): {
     readonly state: ChildRun['run']['state'];
   } {
+    if (state === 'settled' || state === 'failed' || state === 'cancelled') {
+      return { state };
+    }
     return { state: state === 'running' ? 'waiting' : 'running' };
   }
 

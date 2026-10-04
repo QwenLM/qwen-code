@@ -248,6 +248,17 @@ describe('HostedChildRunSession', () => {
           settledAt: 5_000,
         },
       ]);
+
+      // A replayed advance landing after the exit leg is the
+      // replay-after-restart shape: it may resend the same manifest, but it
+      // must never step the terminal run line back to live.
+      await orchestrator.advanceOutput('shell-1', manifestB);
+      const replayed = committed(authority);
+      expect(replayed.body.outputRef).toEqual(manifestB);
+      expect(replayed.body.run).toMatchObject({
+        state: 'settled',
+        execution: 'settled',
+      });
     });
   });
 
