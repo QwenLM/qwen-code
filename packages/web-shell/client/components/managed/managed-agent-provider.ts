@@ -108,6 +108,7 @@ export interface ManagedAgentPendingAction {
   policyRevision: string;
   expiresAt: number;
   options: Array<{ id: string; label: string }>;
+  inputPreview?: { text: string; truncated: boolean; byteLength: number };
 }
 
 export interface ManagedAgentProvider {

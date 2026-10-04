@@ -135,6 +135,10 @@ const EN: Messages = {
     'Only the Session creator can answer this approval.',
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
+  'managed.approval.previewComplete': (v) =>
+    `Input preview: ${v?.bytes ?? 0} bytes.`,
+  'managed.approval.previewTruncated': (v) =>
+    `Input preview truncated. Full input: ${v?.bytes ?? 0} bytes.`,
   'managed.result.range': (v) => `Bytes ${v?.start}–${v?.end} of ${v?.total}`,
   'managed.result.outputs': 'Outputs',
   'managed.result.view': 'View output',
@@ -4360,6 +4364,10 @@ const ZH: Messages = {
   'managed.approval.retry': '重新读取审批',
   'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
+  'managed.approval.previewComplete': (v) =>
+    `输入预览：${v?.bytes ?? 0} 字节。`,
+  'managed.approval.previewTruncated': (v) =>
+    `输入预览已截断，完整输入共 ${v?.bytes ?? 0} 字节。`,
   'managed.result.range': (v) => `字节 ${v?.start}–${v?.end}，共 ${v?.total}`,
   'managed.result.outputs': '输出',
   'managed.result.view': '查看输出',

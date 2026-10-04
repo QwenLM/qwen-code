@@ -1921,7 +1921,8 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toEqual({
-    v: 1,
+    v: 2,
+    inputRef: (await checkpoint()).approval!.invocationRef,
     requestId,
     turnId: 'prompt',
     functionCallId: 'call-1',
@@ -2081,6 +2082,15 @@ it.each(['allow', 'deny'])(
     const requestId = await requested();
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options.v).toBe(1);
+    expect(options).not.toHaveProperty('inputRef');
     const approvedRef = (await checkpoint()).approval!.invocationRef!;
     const approved = (await session.resources.read(approvedRef)).toString();
     expiresAt = 2;
@@ -2121,7 +2131,7 @@ it.each(['allow', 'deny'])(
   },
 );
 
-it('asks one call at a time in the model order', async () => {
+it('binds successive approvals for the same tool to their own inputs', async () => {
   const batch = [
     {
       ...calls[1],
@@ -2129,7 +2139,11 @@ it('asks one call at a time in the model order', async () => {
       callId: 'call-0',
       args: { file_path: 'new.txt', content: 'new' },
     },
-    calls[1],
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'second.txt', content: 'second' },
+    },
   ];
   turn = createTurn(false, { mode: 'default' });
   const running = turn.execute(
@@ -2142,6 +2156,14 @@ it('asks one call at a time in the model order', async () => {
   );
   const first = await requested(1);
   expect(actionIds()).toEqual([first]);
+  const firstOptions = JSON.parse(
+    (
+      await session.resources.read(session.authority.action(first)!.optionsRef!)
+    ).toString(),
+  );
+  expect(firstOptions.inputRef).toEqual(
+    (await checkpoint()).approval!.invocationRef,
+  );
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   const options = JSON.parse(
@@ -2151,7 +2173,23 @@ it('asks one call at a time in the model order', async () => {
       )
     ).toString(),
   );
-  expect(options).toMatchObject({ functionCallId: 'call-1', toolName: 'edit' });
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'write_file',
+    inputRef: (await checkpoint()).approval!.invocationRef,
+  });
+  expect(options.inputRef).not.toEqual(firstOptions.inputRef);
+  for (const [ref, input] of [
+    [firstOptions.inputRef, batch[0].args],
+    [options.inputRef, batch[1].args],
+  ] as const) {
+    const captured = JSON.parse((await session.resources.read(ref)).toString());
+    expect(JSON.parse(captured.payloadJson)).toEqual({
+      toolName: 'write_file',
+      input,
+    });
+  }
   await resolveHostedAction(session, waiters, second, answer('deny'));
   const responses = await running;
   expect(broker.execute).toHaveBeenCalledOnce();
@@ -3134,10 +3172,25 @@ it('runs PreToolUse after approval and asks again for changed arguments', async 
   expect(fire.mock.calls.map(([event]) => event)).toEqual([
     HookEventName.PermissionRequest,
   ]);
+  const original = (await checkpoint()).approval!.invocationRef!;
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   expect(second).not.toBe(first);
   const revised = (await checkpoint()).approval!.invocationRef!;
+  expect(revised).not.toEqual(original);
+  for (const [requestId, inputRef] of [
+    [first, original],
+    [second, revised],
+  ] as const) {
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options).toMatchObject({ v: 2, inputRef });
+  }
   expect(
     JSON.parse(
       JSON.parse((await session.resources.read(revised)).toString())

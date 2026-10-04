@@ -2799,7 +2799,11 @@ export class HostedWorkspaceToolTurn {
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
     const createdAt = Date.now();
     const options: HostedActionOptions = {
-      v: 1,
+      ...(['read_file', 'write_file', 'edit', 'run_shell_command'].includes(
+        call.name,
+      )
+        ? { v: 2 as const, inputRef }
+        : { v: 1 as const }),
       requestId,
       turnId: this.promptId,
       functionCallId: call.callId,

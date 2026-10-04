@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   ManagedSessionConflictError,
   type ManagedSessionAction,
@@ -101,8 +102,7 @@ export function hostedApprovalAsks(
 }
 
 /** The Action's `optionsRef` resource, enough to project it without asking. */
-export interface HostedActionOptions {
-  readonly v: 1;
+interface HostedActionOptionsBase {
   readonly requestId: string;
   readonly turnId: string;
   readonly functionCallId: string;
@@ -116,6 +116,12 @@ export interface HostedActionOptions {
     readonly label: string;
   }>;
 }
+
+export type HostedActionOptions = HostedActionOptionsBase &
+  (
+    | { readonly v: 1 }
+    | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+  );
 
 function decisionBytes(
   optionId: string,
