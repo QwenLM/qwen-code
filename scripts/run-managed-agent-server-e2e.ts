@@ -1036,7 +1036,7 @@ try {
     ): [string, number] {
       const row = runMysql(
         mysqlPort,
-        `SELECT last_active_at, record_version FROM qwen_runtime_session WHERE runtime_session_id = ${sqlString(runtimeSessionId)}`,
+        `SELECT last_active_at, record_version FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id = ${sqlString(runtimeSessionId)}`,
       ).split('\t');
       if (row.length !== 2 || row[1].length === 0)
         throw new Error(`Runtime session row missing (${runtimeSessionId})`);
