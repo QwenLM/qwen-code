@@ -1030,6 +1030,42 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellChangeCwd", 401,
                 post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant), webCwdBadKeyBody);
+        // The key-form refusals themselves, pinned with a trusted actor on
+        // both surfaces: public header and WebShell body field both answer
+        // invalid_idempotency_key below 129 chars; the WebShell body field
+        // alone answers invalid_request at 129+ (the disclosed divergence).
+        String publicBadKey = exchange(drift, "changeSessionCwd", 400,
+                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "key with space"), cwdBody);
+        assertThat(json(publicBadKey).at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
+        String publicLongKeyBody = exchange(drift, "changeSessionCwd", 400,
+                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "k".repeat(129)), cwdBody);
+        assertThat(json(publicLongKeyBody).at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
+        String webBadKeyBody2 = "{\"sessionId\":\"" + webBoundId
+                + "\",\"idempotencyKey\":\"not a key\","
+                + " \"cwdRelative\":\"services/api\","
+                + "\"expectedContextRevision\":1}";
+        String webBad = exchange(drift, "webShellChangeCwd", 400,
+                post(WEB_SHELL + "/sessions/cwd/change")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                webBadKeyBody2);
+        assertThat(json(webBad).at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
+        String webLongKeyBody = "{\"sessionId\":\"" + webBoundId
+                + "\",\"idempotencyKey\":\"" + "k".repeat(129) + "\","
+                + " \"cwdRelative\":\"services/api\","
+                + "\"expectedContextRevision\":1}";
+        String webLong = exchange(drift, "webShellChangeCwd", 400,
+                post(WEB_SHELL + "/sessions/cwd/change")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                webLongKeyBody);
+        assertThat(json(webLong).at("/error/code").asText())
+                .isEqualTo("invalid_request");
         exchange(drift, "webShellChangeCwd", 409,
                 post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant).principal(actor),

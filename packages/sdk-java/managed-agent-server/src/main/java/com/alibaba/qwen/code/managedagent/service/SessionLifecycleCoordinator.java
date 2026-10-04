@@ -185,6 +185,17 @@ public class SessionLifecycleCoordinator {
             runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
                     operation.targetCwdRelative());
         } catch (RuntimeBrokerException error) {
+            // A transient probe failure is not the verdict the terminal
+            // refusal promises: hand it to the delivery machine's bounded
+            // retry instead of writing a permanent failure.
+            if (error.isRetryable()) {
+                LOG.info("Managed Session cwd change probe deferred"
+                                + " tenant={} session={} operation={}"
+                                + " code={} {}", tenantId, sessionId,
+                        operationId, error.getCode(),
+                        error.getMessage());
+                throw error;
+            }
             if (store.failCwdChangeOperation(tenantId, sessionId, operationId,
                     owner, operation.claimGeneration(), error.getCode())) {
                 LOG.info("Managed Session cwd change refused tenant={}"

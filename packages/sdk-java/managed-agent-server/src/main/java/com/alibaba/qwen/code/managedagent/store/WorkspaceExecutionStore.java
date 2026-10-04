@@ -282,6 +282,17 @@ public class WorkspaceExecutionStore {
                 "Workspace execution authority is unavailable.", false);
     }
 
+    // A probe's momentary I/O failure is not the structural verdict the
+    // terminal refusal promises: it retries through the delivery machine,
+    // keeping the cause for the log. Structural refusals keep
+    // unavailable().
+    public static RuntimeBrokerException unavailableTransient(
+            Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace mount cannot be verified right now.", true,
+                cause);
+    }
+
     private static RuntimeBrokerException busy() {
         return new RuntimeBrokerException(409, "workspace_busy",
                 "Workspace storage is held by another tool turn.", true);

@@ -847,8 +847,12 @@ public class ManagedAgentStore implements AgentStateStore {
                     "context_revision_conflict",
                     "The Session context revision has changed.");
         }
+        // A requested permission Action is busy too — the sibling
+        // lifecycle admission refuses in exactly this state (409
+        // turn_active), so the directory change must hold as well.
         if (hasOpenOperation(tenantId, sessionId)
-                || hasActiveTurn(tenantId, sessionId)) {
+                || hasActiveTurn(tenantId, sessionId)
+                || hasDecidableAction(session)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "session_context_busy",
                     "The Session has an active Turn or operation.");
@@ -903,11 +907,13 @@ public class ManagedAgentStore implements AgentStateStore {
         long expected = operation.expectedContextRevision() == null ? -1
                 : operation.expectedContextRevision();
         String failure = null;
-        if (binding == null || !"ACTIVE".equals(session.status())
-                || binding.getContextRevision() != expected) {
+        if (binding == null || !"ACTIVE".equals(session.status())) {
+            failure = "workspace_unavailable";
+        } else if (binding.getContextRevision() != expected) {
             failure = "context_revision_conflict";
         } else if (hasOpenOperation(tenantId, sessionId, operationId)
-                || hasActiveTurn(tenantId, sessionId)) {
+                || hasActiveTurn(tenantId, sessionId)
+                || hasDecidableAction(session)) {
             failure = "session_context_busy";
         } else if (!hasCwdChangeRegistryFacts(session)) {
             failure = "workspace_unavailable";

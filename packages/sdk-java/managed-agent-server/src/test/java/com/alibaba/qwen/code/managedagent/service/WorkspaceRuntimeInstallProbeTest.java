@@ -86,9 +86,9 @@ class WorkspaceRuntimeInstallProbeTest {
     }
 
     // When verified recovery is enabled, the probe re-runs the storage
-    // guard's mount verification of the Session's binding, exactly as
-    // `resolve()` does — the target directory differs from it here, so the
-    // guard call cannot be satisfied by the target instead.
+    // guard's mount verification of the **candidate** binding only — the
+    // target directory differs from the current one here, so no current-
+    // binding call can hide behind it.
     @Test
     void aGuardedMountVerifiesTheProbeTarget() throws Exception {
         Path root = Files.createDirectory(temporary.resolve("mount"))
@@ -112,6 +112,9 @@ class WorkspaceRuntimeInstallProbeTest {
         org.mockito.Mockito.verify(guard).verify(
                 org.mockito.ArgumentMatchers.argThat(candidate ->
                         "services/b".equals(candidate.getCwdRelative())));
+        // The negative half: no second guard call, in particular none
+        // against the current binding (would permanently refuse the escape).
+        org.mockito.Mockito.verifyNoMoreInteractions(guard);
 
         org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
                 .when(guard).verify(
@@ -162,10 +165,16 @@ class WorkspaceRuntimeInstallProbeTest {
         org.mockito.Mockito.verify(guard).verify(
                 org.mockito.ArgumentMatchers.argThat(candidate ->
                         "next".equals(candidate.getCwdRelative())));
+        // And never against the destroyed current binding.
+        org.mockito.Mockito.verifyNoMoreInteractions(guard);
     }
 
     // The worker's install runs fs.access(R_OK|X_OK); the shared rule must
-    // refuse everything it would — before any claim can be stranded.
+    // refuse everything it would — before any claim can be stranded, each
+    // conjunct refusing alone: search-only is refused (read check), read-
+    // only is refused (search check), nothing is refused (both), r-x is
+    // accepted. uid-0 hosts bypass POSIX checks, so the gate measures the
+    // seal's own effect instead of trusting attribute-view support.
     @Test
     void theProbeRefusesAnUnreadableOrUnsearchableTarget() throws Exception {
         org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file
@@ -173,17 +182,46 @@ class WorkspaceRuntimeInstallProbeTest {
                 .contains("posix"));
         Path root = Files.createDirectory(temporary.resolve("mount"))
                 .toRealPath();
-        Path sealed = Files.createDirectory(root.resolve("sealed"));
-        Files.setPosixFilePermissions(sealed,
+        Path probe = Files.createDirectory(root.resolve("probe"));
+        Files.setPosixFilePermissions(probe,
                 java.nio.file.attribute.PosixFilePermissions
                         .fromString("---------"));
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                !Files.isReadable(probe) || !Files.isExecutable(probe),
+                "POSIX permission checks are not enforced for this uid");
+
+        Path nothing = Files.createDirectory(root.resolve("nothing"));
+        Files.setPosixFilePermissions(nothing,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("---------"));
+        Path searchOnly = Files.createDirectory(root.resolve("search-only"));
+        Files.setPosixFilePermissions(searchOnly,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("--x------"));
+        Path readOnly = Files.createDirectory(root.resolve("read-only"));
+        Files.setPosixFilePermissions(readOnly,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("r--------"));
+        Path allowed = Files.createDirectory(root.resolve("allowed"));
+        Files.setPosixFilePermissions(allowed,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("r-x------"));
         try {
             WorkspaceRuntimeResolver resolver = resolver(root);
-            assertProbeRefused(resolver, "sealed");
+            assertProbeRefused(resolver, "nothing");
+            assertProbeRefused(resolver, "search-only");
+            assertProbeRefused(resolver, "read-only");
+            assertThatCode(() -> resolver.verifyInstallable(
+                    binding("allowed"), "allowed"))
+                    .doesNotThrowAnyException();
         } finally {
-            Files.setPosixFilePermissions(sealed,
-                    java.nio.file.attribute.PosixFilePermissions
-                            .fromString("rwx------"));
+            var restore = java.nio.file.attribute.PosixFilePermissions
+                    .fromString("rwx------");
+            Files.setPosixFilePermissions(probe, restore);
+            Files.setPosixFilePermissions(nothing, restore);
+            Files.setPosixFilePermissions(searchOnly, restore);
+            Files.setPosixFilePermissions(readOnly, restore);
+            Files.setPosixFilePermissions(allowed, restore);
         }
     }
 

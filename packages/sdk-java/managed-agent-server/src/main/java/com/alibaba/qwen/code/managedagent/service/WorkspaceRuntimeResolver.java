@@ -115,7 +115,7 @@ final class WorkspaceRuntimeResolver {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
@@ -132,7 +132,7 @@ final class WorkspaceRuntimeResolver {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 

@@ -434,6 +434,37 @@ class WorkspaceRuntimeTest {
         authority.assertHeld(session.workspace(), fixture.record());
     }
 
+    // The shared directory rule also fences the acquire path before the
+    // storage claim: a sealed directory refuses before installContext or
+    // ownership.claim can run.
+    @Test
+    void refusesAnUnreadableSessionDirectoryBeforeClaimingStorage() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file
+                .FileSystems.getDefault().supportedFileAttributeViews()
+                .contains("posix"));
+        SessionRecord session = createSession("storage", "sealed");
+        java.nio.file.Path sealed = java.nio.file.Files.createDirectory(
+                temp.resolve("sealed"));
+        java.nio.file.Files.setPosixFilePermissions(sealed,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("---------"));
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                !java.nio.file.Files.isReadable(sealed)
+                        || !java.nio.file.Files.isExecutable(sealed),
+                "POSIX permission checks are not enforced for this uid");
+        try {
+            var fixture = transport(session);
+            assertUnavailable(() -> fixture.transport().acquire(
+                    fixture.lease(), fixture.record().getSession()));
+            verify(fixture.http(), never()).installContext(any(), any(),
+                    any(), any());
+        } finally {
+            java.nio.file.Files.setPosixFilePermissions(sealed,
+                    java.nio.file.attribute.PosixFilePermissions
+                            .fromString("rwx------"));
+        }
+    }
+
     @Test
     void refusesMissingOrLinkedSessionDirectoryBeforeClaimingStorage() throws Exception {
         for (String cwd : List.of("missing", "link")) {

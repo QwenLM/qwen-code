@@ -359,6 +359,10 @@ class HostedPublicWorkspaceIT {
         // installs the committed binding on its fresh Runtime Session, so
         // the turn's file writes land only in the changed directory — a
         // stale-runtime reuse would land them back in the original one.
+        // The sentinel makes the direction discriminating: identical bytes
+        // flowed through both Turns of the fixture model otherwise.
+        Files.writeString(roots.get(0).resolve("child")
+                .resolve("proof.txt"), "sentinel");
         String laterTurn = request("POST",
                 "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.input.message", "input",
@@ -369,11 +373,10 @@ class HostedPublicWorkspaceIT {
         assertThat(Files.readString(roots.get(0).resolve("child2")
                 .resolve("proof.txt"))).isEqualTo("after");
         assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
-        // The initial Turn's own file stays where it was written —
-        // evidence the later Turn escaped to the committed directory
-        // instead of reusing the pre-change installation back in `child`.
+        // The sentinel survives: a reused pre-change installation would
+        // have overwritten it with the fixture's "before"->"after".
         assertThat(Files.readString(roots.get(0).resolve("child")
-                .resolve("proof.txt"))).isEqualTo("after");
+                .resolve("proof.txt"))).isEqualTo("sentinel");
     }
 
     private static void assertRefusal(JsonNode refusal, String code) {

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
@@ -742,6 +743,23 @@ class ManagedCwdChangeOperationTest {
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn", "digest", legacyId, List.of(), "payload");
         assertThat(admitted.turnId()).isNotBlank();
+
+        // The workspace==null gate is load-bearing: with a non-action
+        // open operation on the unbound Session, a Turn is still admitted.
+        String olderId = fixture.store.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create-2", "digest-2", "qwen-code",
+                null, null, List.of(), null).sessionId();
+        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state,"
+                + " admission_stage, delivery_state, session_status_before,"
+                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
+                + " 'CLOSE', 'actor', 'close-key', 'digest',"
+                + " 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0,"
+                + " 0)", TENANT, olderId, "close-op");
+        var second = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
+                "turn-2", "digest-2", olderId, List.of(), "payload-2");
+        assertThat(second.turnId()).isNotBlank();
     }
 
     // A terminally failed operation releases both admission surfaces: the
@@ -783,6 +801,100 @@ class ManagedCwdChangeOperationTest {
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn", "digest", turnId, List.of(), "payload");
         assertThat(admitted.turnId()).isNotBlank();
+    }
+
+    // A requested permission Action holds the Session busy at admission
+    // (exactly like the sibling lifecycle's 409 turn_active) and at the
+    // settlement re-check; an answered-or-expired one releases it.
+    @Test
+    void aRequestedActionBlocksAdmissionAndSettlement() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        long future = System.currentTimeMillis() + 86_400_000L;
+        begin(fixture, sessionId, "key", "digest", "services/b", 1);
+        fixture.insertAction(sessionId, "approval-1", future);
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
+                "digest-2", "services/c", 1))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+
+        String secondId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, secondId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        OperationRecord claimed = claim(fixture, secondId, operationId,
+                "owner");
+        fixture.insertAction(secondId, "approval-2", future);
+        assertThat(settle(fixture, secondId, operationId, "owner",
+                claimed.claimGeneration()).failureCode())
+                .isEqualTo("session_context_busy");
+        assertThat(fixture.store.requireSession(TENANT, secondId)
+                .workspace().getContextRevision()).isEqualTo(1);
+
+        fixture.jdbc.update("DELETE FROM managed_agent_action WHERE"
+                + " action_id = 'approval-2'");
+        // The typed failure is terminal for that row; a re-issue over the
+        // same Session settles now that the Action is gone.
+        String reissued = begin(fixture, secondId, "key-r", "digest-r",
+                "services/b", 1).operation().operationId();
+        OperationRecord released = claim(fixture, secondId, reissued,
+                "owner");
+        assertThat(settle(fixture, secondId, reissued, "owner",
+                released.claimGeneration()).completed()).isTrue();
+        assertThat(fixture.store.requireSession(TENANT, secondId)
+                .workspace().getContextRevision()).isEqualTo(2);
+    }
+
+    // A binding detached between claim and commit is workspace_unavailable,
+    // not context_revision_conflict: the Session has no Workspace at all.
+    @Test
+    void settlementFailsWorkspaceUnavailableWhenTheBindingDisappears() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        OperationRecord claimed = claim(fixture, sessionId, operationId,
+                "owner");
+        fixture.jdbc.update("UPDATE managed_agent_session SET"
+                + " workspace_id = NULL, workspace_generation = NULL,"
+                + " workspace_storage_id = NULL, cwd_relative = NULL,"
+                + " context_config_ref = NULL, context_revision = NULL,"
+                + " workspace_config_ref = NULL, workspace_policy_ref ="
+                + " NULL WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(settle(fixture, sessionId, operationId, "owner",
+                claimed.claimGeneration()).failureCode())
+                .isEqualTo("workspace_unavailable");
+        assertFailed(fixture, sessionId, operationId,
+                "workspace_unavailable");
+    }
+
+    // The settlement's wide busy barrier also counts a second open
+    // operation — a permission-action response here cannot ride underneath
+    // a committed directory change either.
+    @Test
+    void settlementBlocksOnAnotherOpenOperation() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state,"
+                + " admission_stage, delivery_state, session_status_before,"
+                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
+                + " 'ACTION_RESPONSE', 'actor', 'action-key', 'digest',"
+                + " 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0, 0)",
+                TENANT, sessionId, "action-op");
+        OperationRecord claimed = claim(fixture, sessionId, operationId,
+                "owner");
+        assertThat(settle(fixture, sessionId, operationId, "owner",
+                claimed.claimGeneration()).failureCode())
+                .isEqualTo("session_context_busy");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo("services/api");
     }
 
     // A Workspace detached between admission and settlement is a typed
@@ -894,7 +1006,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(warmer.verified).containsExactly("services/b");
         assertThat(warmer.bindings.get(0).getWorkspaceId()).isEqualTo(WS);
 
-        warmer.refuse(WorkspaceExecutionProbe.unavailable());
+        warmer.refuse(WorkspaceExecutionStore.unavailable());
         String secondId = fixture.createBoundSession(TENANT, WS);
         String second = begin(fixture, secondId, "key", "digest", "gone",
                 1).operation().operationId();
@@ -959,6 +1071,11 @@ class ManagedCwdChangeOperationTest {
         assertThat(fixture.store.findDeliverableOperations(System.currentTimeMillis(), 10))
                 .isEmpty();
         coordinator.dispatch(TENANT, sessionId, operationId);
+        OperationRecord after = fixture.store.findOperation(TENANT,
+                sessionId, operationId).orElseThrow();
+        assertThat(after.state()).isEqualTo("COMPLETED");
+        assertThat(after.resultContextRevision()).isEqualTo(2);
+        assertThat(after.failureCode()).isNull();
         assertThat(fixture.events(sessionId).stream()
                 .map(fixture::event)
                 .filter(event -> "session.context.changed"
@@ -1101,6 +1218,16 @@ class ManagedCwdChangeOperationTest {
                             .StandardCharsets.UTF_8), read, create);
         }
 
+        void insertAction(String sessionId, String actionId,
+                long expiresAtMillis) {
+            jdbc.update("INSERT INTO managed_agent_action (tenant_id,"
+                            + " session_id, action_id, state, options_json,"
+                            + " created_at) VALUES (?, ?, ?, 'requested', ?,"
+                            + " 0)", TENANT, sessionId, actionId,
+                    mapper.valueToTree(java.util.Map.of("expiresAt",
+                            expiresAtMillis)).toString());
+        }
+
         void insertTurn(String sessionId, String turnId, String status) {
             jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
                             + " session_id, turn_id, prompt_id, input_json,"
@@ -1205,10 +1332,4 @@ class ManagedCwdChangeOperationTest {
         }
     }
 
-    private static final class WorkspaceExecutionProbe {
-        private static RuntimeBrokerException unavailable() {
-            return new RuntimeBrokerException(409, "workspace_unavailable",
-                    "workspace", false);
-        }
-    }
 }

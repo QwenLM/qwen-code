@@ -101,9 +101,12 @@ class WorkspaceRuntimeResolutionPivotTest {
         OperationRecord claimed = store.claimOperation(TENANT, sessionId,
                 admitted.operationId(), "owner", Duration.ofMillis(6000))
                 .orElseThrow();
-        assertThat(store.completeCwdChangeOperation(TENANT, sessionId,
-                admitted.operationId(), "owner",
-                claimed.claimGeneration()).completed()).isTrue();
+        var outcome = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource))
+                .execute(status -> store.completeCwdChangeOperation(TENANT,
+                        sessionId, admitted.operationId(), "owner",
+                        claimed.claimGeneration()));
+        assertThat(outcome.completed()).isTrue();
 
         ContextBinding pivoted = resolver.resolve(sessionId).binding();
         assertThat(pivoted.getCwdRelative()).isEqualTo("services/b");
