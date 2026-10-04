@@ -4580,11 +4580,75 @@ describe('replyMsgId cleanup timer', () => {
         // The captured 10-char head ('stale-tail') is folded into the handoff
         // seal and delivered separately, so it is not dropped here: only the 5
         // chars that arrived after the capture are (15 in the buffer - 10
-        // preserved). Counting the whole buffer would report those 10 twice.
+        // preserved). The same branch folds the 11-char payload itself into
+        // that seal, so the payload is preserved too and must not be reported
+        // as dropped — only the 5 post-capture chars are actually lost.
         const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-        expect(logged).toContain('dropping 11 chars');
-        expect(logged).toContain('plus 5 chars buffered in flight');
+        expect(logged).not.toContain('dropping 11 chars');
+        expect(logged).toContain('dropping 5 chars buffered in flight');
         expect(logged).not.toContain('plus 15 chars buffered in flight');
+        // And the payload really is preserved, not merely uncounted from the
+        // log: it is the handoff stash's sealed head (payload + residual).
+        const stash = (
+          chp['streamOrphanBuffer'] as Map<string, { pre?: string }>
+        ).get('session-sealed-residual');
+        expect(stash?.pre).toBe('test bufferstale-tail');
+
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('does not count a payload a boundary re-seal preserves in the handoff', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-sealed-payload',
+          msgId: 'msg-SP',
+          turn: 1,
+        });
+        // captureBoundaryClear flags 'payload' (no live residual: the entry's
+        // buffer is empty at the boundary) and ownsLiveTurn holds, so the
+        // permanent-failure arm re-seals the whole payload below and preserves
+        // it. Marking the empty buffer lets the boundary classify as 'payload'
+        // rather than 'residual'.
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        turnCounter.set('session-sealed-payload', 1);
+        const activePromptSessions = chp['activePromptSessions'] as Set<string>;
+        activePromptSessions.add('session-sealed-payload');
+        state.buffer = '';
+
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: PermFailureState,
+            logLabel: string,
+          ) => void
+        )('session-sealed-payload', 'test buffer', state, 'test');
+        // Boundary clears the bridge's collection with no buffer-resident
+        // residual: only the in-flight payload is stripped and re-sealed.
+        (chp['captureBoundaryClear'] as (sessionId: string) => void)(
+          'session-sealed-payload',
+        );
+        // Three chars arrive after the capture: they are the only real loss
+        // (the payload is folded into the handoff seal and delivered).
+        state.buffer = 'xyz';
+        expect(state.boundaryClearedInFlight).toBe('payload');
+        await vi.advanceTimersByTimeAsync(0);
+
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).not.toContain('dropping 11 chars');
+        expect(logged).toContain('dropping 3 chars buffered in flight');
+        const stash = (
+          chp['streamOrphanBuffer'] as Map<string, { pre?: string }>
+        ).get('session-sealed-payload');
+        expect(stash?.pre).toBe('test buffer');
 
         stderrSpy.mockRestore();
         vi.useRealTimers();

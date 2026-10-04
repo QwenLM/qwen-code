@@ -981,6 +981,109 @@ describe('idle-flush timer', () => {
     expect(body['msg_id']).toBeUndefined();
     stderrSpy.mockRestore();
   });
+
+  it('expires a stale streamState anchor so a later window goes out unanchored', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const st = chp['streamState'] as Map<
+      string,
+      {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        msgIdTimestamp?: number;
+        replyContext?: { chatId: string; msgId: string; timestamp: number };
+        turn: number;
+      }
+    >;
+
+    // The entry was created while the anchor was still fresh (as
+    // createStreamState, and the transient re-buffer / boundary-keep paths,
+    // do) and the anchor then aged past the TTL while the entry stayed alive —
+    // a streamState entry can outlive the 300s window on the deferred/parked
+    // paths. The next window's flush reads the entry's msgId as the override,
+    // so without a TTL gate at the read site that expired anchor goes back on
+    // the wire as a passive reply to a long-gone message.
+    const stale = Date.now() - (300_000 + 1000);
+    sessionAnchors.set('sess-A', { msgId: 'msg-STALE', timestamp: stale });
+    st.set('sess-A', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-STALE',
+      msgIdTimestamp: stale,
+      // A live reply context is deliberately present: an expired override must
+      // go out unanchored, NOT fall back to this entry (that fallback is the
+      // re-parenting the override parameter exists to prevent).
+      replyContext: {
+        chatId: 'test-chat',
+        msgId: 'msg-CTX',
+        timestamp: Date.now(),
+      },
+      turn: 0,
+    });
+
+    onResponseChunk(ch, 'test-chat', 'late ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect(body['msg_id']).toBeUndefined();
+    expect(body['msg_seq']).toBeUndefined();
+  });
+
+  it('keeps a streamState anchor inside the TTL so a later window stays anchored', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const st = chp['streamState'] as Map<
+      string,
+      {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        msgIdTimestamp?: number;
+        turn: number;
+      }
+    >;
+
+    // Same shape as the stale case, but the anchor is inside the TTL: the
+    // override must still anchor the send (the read-site gate is a TTL check,
+    // not a blanket ban on the override).
+    const fresh = Date.now();
+    sessionAnchors.set('sess-A', { msgId: 'msg-FRESH', timestamp: fresh });
+    st.set('sess-A', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-FRESH',
+      msgIdTimestamp: fresh,
+      turn: 0,
+    });
+
+    onResponseChunk(ch, 'test-chat', 'chunk ', 'sess-A');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect(body['msg_id']).toBe('msg-FRESH');
+    expect(body['msg_seq']).toBe(1);
+  });
 });
 
 describe('onToolCall flush', () => {
@@ -3869,9 +3972,19 @@ describe('cancel/flush coordination', () => {
           s: string,
           t: string,
           a?: string | null,
+          ts?: number,
         ) => Promise<void>;
       }
-    ).deliverCancelledStash('test-chat', 's1', 'STASHED-HEAD', 'msg-A');
+    ).deliverCancelledStash(
+      'test-chat',
+      's1',
+      'STASHED-HEAD',
+      'msg-A',
+      // The caller asserts this anchor is still live (the read site expires it
+      // against this capture time); the aged session entry above only drives
+      // the TTL sweep this test exercises.
+      Date.now(),
+    );
     await drain();
 
     // One sweep tick lands inside a backoff sleep, where no send is awaiting
@@ -6632,6 +6745,48 @@ describe('a superseded head must keep its own reply anchor', () => {
     expect(headBodies).toHaveLength(1);
     expect(headBodies[0]!['msg_id']).toBeUndefined();
   });
+
+  it("expires a stale superseded head's own anchor when the handoff delivers it", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const stale = Date.now() - (300_000 + 1000);
+    const state = {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-STALE',
+      msgIdTimestamp: stale,
+      turn: 1,
+      sealedPre: 'SEALED-HEAD ',
+    };
+    streamState(ch).set('sess-1', state as never);
+    (chp['turnCounter'] as Map<string, number>).set('sess-1', 1);
+    sessionAnchors.set('sess-1', { msgId: 'msg-STALE', timestamp: stale });
+
+    // No prompt is active, so no completion can consume a re-stash: the handoff
+    // delivers the seal on this turn's own anchor. That anchor outlived the
+    // TTL, so the delivery must expire it to an unanchored active send instead
+    // of putting the expired msg_id back on the wire.
+    (
+      ch as unknown as {
+        handOffSealedPre: (st: unknown, s: string) => void;
+      }
+    ).handOffSealedPre(state, 'sess-1');
+    await drain();
+
+    const bodies = sentBodies().filter(
+      (b) =>
+        (b['markdown'] as { content?: string } | undefined)?.content ===
+        'SEALED-HEAD ',
+    );
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!['msg_id']).toBeUndefined();
+  });
 });
 
 describe('completedTurns lifetime', () => {
@@ -7041,9 +7196,16 @@ describe('flush-chain guards pinned by witness tests', () => {
           s: string,
           t: string,
           a?: string | null,
+          ts?: number,
         ) => Promise<void>;
       }
-    ).deliverCancelledStash('test-chat', 'sess-1', 'STASHED-HEAD', 'msg-A');
+    ).deliverCancelledStash(
+      'test-chat',
+      'sess-1',
+      'STASHED-HEAD',
+      'msg-A',
+      Date.now(),
+    );
     await drain();
 
     // A successor turn starts on the same session and releases msg-A's anchor.

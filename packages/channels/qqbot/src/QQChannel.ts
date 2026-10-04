@@ -145,6 +145,15 @@ interface QQStreamState {
    */
   msgId?: string;
   /**
+   * Capture time of the anchor in `msgId` (the sessionReplyMsgId entry's
+   * timestamp, written with it by createStreamState). Carried alongside
+   * because an entry can outlive the 300s REPLY_MSG_ID_TTL_MS on the
+   * deferred/parked paths; the flush and sealed-head read sites TTL-check
+   * the override through this value so a stale anchor expires to an
+   * unanchored active send instead of going out on an expired msg_id.
+   */
+  msgIdTimestamp?: number;
+  /**
    * Turn generation this entry belongs to (see turnCounter). A leftover
    * entry from a previous turn (e.g. a deferred send parked the session
    * in pendingStreamDelete and a new turn started before it settled)
@@ -998,6 +1007,7 @@ export class QQChannel extends ChannelBase {
     replyContext?: QQReplyContext,
     sourceLabel?: string,
     msgIdOverride?: string,
+    msgIdOverrideTimestamp?: number,
   ): Promise<SendBlock | undefined> {
     // <noreply> suppression
     if (text.trim() === '<noreply>') {
@@ -1022,15 +1032,33 @@ export class QQChannel extends ChannelBase {
     // that message. When absent, use the explicit reply context — the
     // async-local inbound context, the active prompt's message, or the
     // chat-level latest entry resolved by the caller.
+    //
+    // The override is TTL-checked against its capture time, exactly like the
+    // reply-context entry below: a streamState entry can outlive the 300s
+    // window on the deferred/parked paths, and its anchor must then expire to
+    // an unanchored active send (a slow turn must never keep sending chunks
+    // with an expired msg_id). A supplied override always forces `entry`
+    // undefined — an expired one must NOT fall back to the reply context or
+    // the chat-level entry, which would re-parent the send onto the message
+    // this parameter exists to avoid.
+    const overrideFresh =
+      msgIdOverride !== undefined &&
+      msgIdOverrideTimestamp !== undefined &&
+      Date.now() - msgIdOverrideTimestamp < QQChannel.REPLY_MSG_ID_TTL_MS;
     const entry =
-      msgIdOverride || replyContext?.chatId !== chatId
+      msgIdOverride !== undefined || replyContext?.chatId !== chatId
         ? undefined
         : replyContext;
-    const msgId =
-      msgIdOverride ??
-      (entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+    const msgId = overrideFresh
+      ? msgIdOverride
+      : entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
         ? entry.msgId
-        : undefined);
+        : undefined;
+    if (msgIdOverride !== undefined && !overrideFresh) {
+      process.stderr.write(
+        `[QQ:${this.name}] per-session reply anchor expired for ${sanitizeLogText(chatId, 64)}, sending without msg_id\n`,
+      );
+    }
     if (entry && !msgId) {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
@@ -1655,17 +1683,25 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     text: string,
     anchor?: string | null,
+    anchorTimestamp?: number,
   ): Promise<void> {
     // Capture the anchor once, before the first attempt: a successor turn can
     // overwrite sessionReplyMsgId while a re-attempt is pending, and this
     // turn's text must not go out under the successor's anchor.
-    const sessionAnchor = this.resolveSessionReplyAnchor(sessionId).msgId;
+    const { entry: sessionAnchorEntry, msgId: sessionAnchor } =
+      this.resolveSessionReplyAnchor(sessionId);
     // A caller that knows which turn this text belongs to overrides the lookup
     // above: by the time such a caller runs, a successor may already own the
     // session anchor. `null` means the caller knows there is none — deliver
     // unanchored rather than under the successor's msg_id.
     const captured =
       anchor === undefined ? sessionAnchor : (anchor ?? undefined);
+    // The capture time the read site TTL-checks the override against. An anchor
+    // this method resolved itself is already TTL-checked; an explicit one
+    // carries the caller's timestamp (handOffSealedPre passes the state's), and
+    // an expired override then goes unanchored instead of on a stale msg_id.
+    const capturedTimestamp =
+      anchor === undefined ? sessionAnchorEntry?.timestamp : anchorTimestamp;
     // The attribution label and the reply context are read from per-turn state
     // the successor turn replaces (activePrompts, and the reply context map via
     // getResponseMessageId), so both are captured for the same reason as the
@@ -1698,6 +1734,7 @@ export class QQChannel extends ChannelBase {
               undefined,
               sourceLabel,
               captured,
+              capturedTimestamp,
             );
           } else {
             // Same entry point sendResponseMessage uses, with the reply context
@@ -2091,6 +2128,7 @@ export class QQChannel extends ChannelBase {
       state.replyContext,
       state.sourceLabel,
       state.msgId,
+      state.msgIdTimestamp,
     )
       .then(() => {
         // This send carried the sealed pre-boundary head (the drain folded it
@@ -2191,10 +2229,34 @@ export class QQChannel extends ChannelBase {
           // 'residual', and the handoff seal below preserves and delivers it
           // separately, so counting it here would report the same characters
           // twice. Only the buffer beyond the captured residual is lost here.
+          //
+          // The same holds for the payload itself in the branch below that
+          // folds it into the handoff seal (`boundaryClearedInFlight` set while
+          // this entry still owns the live turn): the seal is then delivered or
+          // re-stashed, so those characters are preserved, not dropped, and
+          // counting them would report the payload as lost while the operator
+          // still receives it. Only the in-flight text beyond the captured
+          // residual is genuinely lost in that branch.
+          const payloadFoldedIntoSeal =
+            state.boundaryClearedInFlight !== undefined &&
+            this.ownsLiveTurn(sessionId, state);
           const droppedInFlight =
             state.buffer.length - this.capturedResidual(state).length;
+          const droppedParts: string[] = [];
+          if (!payloadFoldedIntoSeal && buffer.length > 0) {
+            droppedParts.push(`${buffer.length} chars`);
+          }
+          if (droppedInFlight > 0) {
+            droppedParts.push(`${droppedInFlight} chars buffered in flight`);
+          }
           process.stderr.write(
-            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${buffer.length} chars${droppedInFlight > 0 ? ` plus ${droppedInFlight} chars buffered in flight` : ''}\n`,
+            `[QQ:${this.name}] ${logLabel} delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, ` +
+              (droppedParts.length > 0
+                ? `dropping ${droppedParts.join(' plus ')}`
+                : payloadFoldedIntoSeal
+                  ? `dropping nothing (${buffer.length} chars preserved in the handoff seal)`
+                  : 'dropping nothing') +
+              '\n',
           );
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Drop everything — including any residual buffer that arrived concurrently.
@@ -2219,10 +2281,7 @@ export class QQChannel extends ChannelBase {
           // only while this state still owns the live turn: a superseded
           // entry's text is abandoned with its permanent failure and must not
           // be injected into a successor's reply.
-          if (
-            state.boundaryClearedInFlight !== undefined &&
-            this.ownsLiveTurn(sessionId, state)
-          ) {
+          if (payloadFoldedIntoSeal) {
             state.sealedPre = this.sealClearedPayload(
               buffer,
               this.capturedResidual(state),
@@ -2644,7 +2703,8 @@ export class QQChannel extends ChannelBase {
           this.dropOrphanStash(sessionId, held);
         }
       }
-      const captured = this.resolveSessionReplyAnchor(sessionId).msgId;
+      const { entry: capturedEntry, msgId: captured } =
+        this.resolveSessionReplyAnchor(sessionId);
       try {
         if (captured) {
           // Keep the [sender · task] attribution: sendMessage hardcodes an
@@ -2662,6 +2722,7 @@ export class QQChannel extends ChannelBase {
               undefined,
               segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
               captured,
+              capturedEntry?.timestamp,
             );
           } finally {
             this.endMsgSeqSend(captured);
@@ -2750,6 +2811,7 @@ export class QQChannel extends ChannelBase {
               undefined,
               sourceLabel,
               capturedMsgId,
+              anchorEntry?.timestamp,
             );
           } finally {
             this.endMsgSeqSend(capturedMsgId);
@@ -2835,11 +2897,15 @@ export class QQChannel extends ChannelBase {
     // so a long stream's later windows fall back to the active send path
     // instead of sending chunks with an expired msg_id.
     let anchor: string | undefined;
+    let anchorTimestamp: number | undefined;
     const { entry: anchorEntry, msgId: freshAnchor } =
       this.resolveSessionReplyAnchor(sessionId);
     if (anchorEntry) {
       if (freshAnchor !== undefined) {
         anchor = freshAnchor;
+        // Carry the capture time so the flush/sealed-head read sites can
+        // expire this anchor when the entry outlives the TTL.
+        anchorTimestamp = anchorEntry.timestamp;
       } else {
         // Drop the stale anchor through the release path so its orphaned
         // msg_seq counter is purged too (a raw delete would leave it behind).
@@ -2860,6 +2926,9 @@ export class QQChannel extends ChannelBase {
       timer: null,
       retryCount: 0,
       msgId: anchor,
+      ...(anchorTimestamp !== undefined
+        ? { msgIdTimestamp: anchorTimestamp }
+        : {}),
       turn: currentTurn,
       ...(replyContext ? { replyContext } : {}),
       ...(segment?.sourceLabel ? { sourceLabel: segment.sourceLabel } : {}),
@@ -3045,6 +3114,7 @@ export class QQChannel extends ChannelBase {
         sessionId,
         sealed,
         state.msgId ?? null,
+        state.msgIdTimestamp,
       );
       return;
     }
