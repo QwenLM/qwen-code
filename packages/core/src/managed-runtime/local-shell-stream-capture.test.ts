@@ -49,6 +49,9 @@ interface Rig {
   readonly resources: LocalManagedSessionResourceStore;
   failManifestPublishesAfter: number;
   refuseSegments: boolean;
+  holdFirstStderrPage(): void;
+  readonly firstStderrPageSeen: Promise<void>;
+  releaseFirstStderrPage(): void;
 }
 
 const IDENTITY = {
@@ -72,6 +75,15 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
   });
   const pages: Buffer[] = [];
   const manifests: Array<Record<string, unknown>> = [];
+  let holdStderrPage = false;
+  let markFirstStderrPageSeen: () => void = () => undefined;
+  let releaseFirstStderrPage: () => void = () => undefined;
+  const firstStderrPageSeen = new Promise<void>((resolve) => {
+    markFirstStderrPageSeen = resolve;
+  });
+  const firstStderrPageReleased = new Promise<void>((resolve) => {
+    releaseFirstStderrPage = resolve;
+  });
   const rigState: Rig = {
     captured: null as unknown as LocalShellStreamCapture,
     segments: [],
@@ -81,6 +93,13 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
     resources: real,
     failManifestPublishesAfter: Number.POSITIVE_INFINITY,
     refuseSegments: false,
+    holdFirstStderrPage: () => {
+      holdStderrPage = true;
+    },
+    firstStderrPageSeen,
+    releaseFirstStderrPage: () => {
+      releaseFirstStderrPage();
+    },
   };
   let manifestPublishes = 0;
   const resources: ManagedSessionResourceStore = {
@@ -91,15 +110,26 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
       ) {
         return Promise.reject(new Error('writable store is gone'));
       }
-      return real.publish(kind, bytes).then((ref) => {
-        if (kind === MANAGED_TOOL_RESULT_KINDS.page) pages.push(bytes);
-        if (kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
-          manifests.push(
-            JSON.parse(bytes.toString()) as Record<string, unknown>,
-          );
-        }
-        return ref;
-      });
+      const persist = () =>
+        real.publish(kind, bytes).then((ref) => {
+          if (kind === MANAGED_TOOL_RESULT_KINDS.page) pages.push(bytes);
+          if (kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+            manifests.push(
+              JSON.parse(bytes.toString()) as Record<string, unknown>,
+            );
+          }
+          return ref;
+        });
+      if (
+        kind === MANAGED_TOOL_RESULT_KINDS.page &&
+        holdStderrPage &&
+        bytes.includes('"streamId":"stderr"')
+      ) {
+        holdStderrPage = false;
+        markFirstStderrPageSeen();
+        return firstStderrPageReleased.then(persist);
+      }
+      return persist();
     },
     read: (ref: ManagedSessionDurableRef) => real.read(ref),
   };
@@ -276,6 +306,64 @@ describe('LocalShellStreamCapture', () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it('stops loudly instead of folding a mid-flush segment into an in-flight page', async () => {
+    // A manifest revision flushes both streams, so the reviser's await can
+    // straddle an append on the flushed stream's own queue. The segment
+    // arriving in that window must begin a fresh pending page; folding it
+    // into the in-flight page counts it into accounting the page does not
+    // carry, a lie the manifest validator must refuse loudly.
+    const r = await rig({ segmentsPerPage: 10 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    const mib = (fill: number) => Buffer.alloc(1024 * 1024, fill);
+    const digest = (fill: number) =>
+      createHash('sha256').update(mib(fill)).digest('hex');
+    await r.captured.write('stdout', mib(1));
+    await r.captured.write('stderr', mib(2));
+    r.holdFirstStderrPage();
+    const finishingOut = r.captured.finish('stdout', true);
+    // finish('stdout') revises the manifest, which flushes stderr's first
+    // pending page; the hold stops at the flush's own publish await.
+    await r.firstStderrPageSeen;
+    await r.captured.write('stderr', mib(3));
+    r.releaseFirstStderrPage();
+    await finishingOut;
+    const firstStderrPage = r.pages
+      .map(
+        (page) =>
+          JSON.parse(page.toString()) as {
+            streamId: string;
+            segments: Array<{ digest: string }>;
+          },
+      )
+      .find((page) => page.streamId === 'stderr')!;
+    expect(firstStderrPage.streamId).toBe('stderr');
+    expect(firstStderrPage.segments.map((segment) => segment.digest)).toEqual([
+      digest(2),
+    ]);
+    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    await r.captured.finish('stderr', true);
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture).toMatchObject({
+      captureStatus: 'partial',
+      captureReason: 'storage_failed',
+    });
+    const stderrSegments = r.pages
+      .map(
+        (page) =>
+          JSON.parse(page.toString()) as {
+            streamId: string;
+            segments: Array<{ digest: string }>;
+          },
+      )
+      .filter((page) => page.streamId === 'stderr')
+      .flatMap((page) => page.segments.map((segment) => segment.digest));
+    expect(stderrSegments).toEqual([digest(2), digest(3)]);
   });
 
   it('continues the page cursor and links every page to its manifest slot', async () => {

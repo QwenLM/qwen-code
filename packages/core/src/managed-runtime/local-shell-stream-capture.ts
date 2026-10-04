@@ -248,7 +248,10 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
 
   /**
    * Publishes the contents of the pending page without refreshing the
-   * manifest — `publish` calls back here rather than recursing.
+   * manifest. Every accounting read derives from the batch spliced out up
+   * front: an append landing mid-`await` — possible when a manifest
+   * revision flushes this stream from the other stream's queue — starts a
+   * fresh pending page instead of being counted here and then discarded.
    */
   private async flushPage(state: StreamState): Promise<void> {
     if (state.pendingSegments.length === 0) return;
@@ -256,6 +259,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     if (state.pages.length >= MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream) {
       throw new Error('size_limit');
     }
+    const segments = state.pendingSegments.splice(0);
     const page = parseToolResultPage({
       toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
       type: 'page',
@@ -263,7 +267,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       streamId: state.id,
       firstOrdinal: state.pageOrdinal,
       offset: state.pageOffset,
-      segments: state.pendingSegments,
+      segments,
     });
     const bytes = Buffer.from(JSON.stringify(page));
     if (bytes.byteLength > MANAGED_TOOL_RESULT_LIMITS.maxPageBytes) {
@@ -273,24 +277,27 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       MANAGED_TOOL_RESULT_KINDS.page,
       bytes,
     );
-    const byteLength = state.pendingSegments.reduce(
+    const byteLength = segments.reduce(
       (length, segment) => length + segment.byteLength,
       0,
     );
     state.pages.push({
       ref,
-      segmentCount: state.pendingSegments.length,
+      segmentCount: segments.length,
       byteLength,
     });
     state.pageOffset += byteLength;
-    state.pageOrdinal += state.pendingSegments.length;
-    state.pendingSegments.length = 0;
+    state.pageOrdinal += segments.length;
   }
 
   /**
    * Publishes the next manifest revision: `unknown` and `open` while
    * running, settled fields once sealed. Only a pending revision gains a
-   * successor, by the shared `isToolResultManifestSuccessor` rules.
+   * successor, by the shared `isToolResultManifestSuccessor` rules. The
+   * manifest validator requires each descriptor's pages to add up to its
+   * stored byte length, so every pending page flushes first — including
+   * the other stream's, which is why `flushPage` derives its accounting
+   * from the batch it splices out before awaiting.
    */
   private async publish(
     executionStatus: 'success' | 'error' | 'cancelled' | 'unknown',
