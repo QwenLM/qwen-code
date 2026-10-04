@@ -1745,8 +1745,11 @@ export function registerHostedHarnessSessionRoutes(
         // strand is silent until retirement.
         noteOwedAdoption(session, sessionId);
         await managed.close();
+        const unsettledThrough = workspaceProfile
+          ? restore.throughSequence
+          : managed.authority.committedSequence;
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${JSON.stringify({ incompletePublication, unsettled: [...unsettledInputsThrough(session, workspaceProfile ? restore.throughSequence : managed.authority.committedSequence)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: restore.throughSequence })}`,
+          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${JSON.stringify({ incompletePublication, unsettled: [...unsettledInputsThrough(session, unsettledThrough)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: unsettledThrough })}`,
         );
         error(res, 409, 'hosted_turn_recovery_required');
         return;

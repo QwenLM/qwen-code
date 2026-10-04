@@ -995,8 +995,8 @@ class ManagedSessionStoreHttpClient {
    * with a short jittered backoff, all inside one `requestTimeoutMs`
    * budget, so a wedged endpoint blocks no longer than before. Commits are
    * deliberately not retried here; their callers handle the outcome
-   * themselves, and anything else refuses on the first failure exactly as
-   * before.
+   * themselves. A terminal failure names the endpoint and, once a retry
+   * actually ran, the attempt count.
    */
   private async withRetry<T>(
     retryable: boolean,
@@ -1021,8 +1021,11 @@ class ManagedSessionStoreHttpClient {
           attempt >= 3 ||
           Date.now() >= deadline
         ) {
-          if (transient && attempt > 1) {
-            const detail = `Managed Session Store ${method} ${path} failed after ${attempt} attempts: ${error instanceof Error ? error.message : String(error)}`;
+          if (transient) {
+            const detail =
+              attempt > 1
+                ? `Managed Session Store ${method} ${path} failed after ${attempt} attempts: ${error instanceof Error ? error.message : String(error)}`
+                : `Managed Session Store ${method} ${path} failed: ${error instanceof Error ? error.message : String(error)}`;
             if (error instanceof ManagedSessionStoreHttpError)
               throw new ManagedSessionStoreHttpError(
                 error.status,

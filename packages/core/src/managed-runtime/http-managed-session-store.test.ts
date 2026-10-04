@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1144,6 +1145,84 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('retries a resource read whose response body drops mid-stream', async () => {
+    const bytes = Buffer.from('{"captured":true}');
+    const ref = {
+      resourceId: 'segment-mid-stream',
+      kind: 'managed-tool-result-content',
+      schemaVersion: 1,
+      byteLength: bytes.byteLength,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+    let dropped = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/writers:acquire'))
+        return jsonResponse({
+          writerGeneration: 1,
+          leaseUntil: Date.now() + 300_000,
+          journalRevision: 0,
+          committedSequence: 0,
+          activationEpoch: 0,
+        });
+      if (url.endsWith('/writers:seal'))
+        return jsonResponse({
+          writerGeneration: 1,
+          state: 'SEALED',
+          replayed: false,
+        });
+      if (url.includes('/resources/')) {
+        if (dropped) {
+          dropped = false;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(bytes.subarray(0, 4));
+                controller.error(new TypeError('terminated'));
+              },
+            }),
+            {
+              status: 200,
+              headers: {
+                'Cache-Control': 'no-store',
+                'Content-Type': 'application/octet-stream',
+              },
+            },
+          );
+        }
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            'Cache-Control': 'no-store',
+            'Content-Type': 'application/octet-stream',
+            'X-Qwen-Resource-Kind': ref.kind,
+            'X-Qwen-Resource-Schema-Version': String(ref.schemaVersion),
+            'X-Qwen-Resource-Digest': ref.digest,
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/resources/'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('blocks a wedged read for no longer than one requestTimeoutMs', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>((input, init) =>
@@ -1172,12 +1251,13 @@ describe('HTTP Managed Session store', () => {
       await expect(handle.read()).rejects.toThrow(
         ManagedSessionStoreTransportError,
       );
+      await expect(handle.read()).rejects.toThrow(/GET \/restore\?/);
       expect(Date.now() - started).toBeLessThan(400);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).includes('/restore?'),
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
     } finally {
       await stores.close();
     }
