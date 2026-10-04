@@ -1235,6 +1235,11 @@ export class ExtensionStore {
           delete policy.managedSecretNames;
           delete policy.managedDirectory;
           restorePreservedActivationSurface(policy);
+          if (policy.artifactGeneration === undefined) {
+            // Discovery may describe a returning artifact, so preserve the
+            // next install's activation without declaring the artifact absent.
+            policy.preserveActivationOnNextInstall = true;
+          }
           for (const name of handBackNames) options.onManagedHandBack?.(name);
           changed = true;
         }

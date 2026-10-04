@@ -2979,6 +2979,104 @@ describe('ExtensionStore', () => {
     ).toBeUndefined();
   });
 
+  it.each(['same-id', 're-keyed-hand-back', 're-keyed-install'] as const)(
+    'preserves restored declaration activation on the next install: %s',
+    async (mode) => {
+      const store = makeStore();
+      const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+      const managed = {
+        ...identity,
+        id: mode === 're-keyed-hand-back' ? 'c2'.repeat(32) : identity.id,
+        source: 'managed' as const,
+      };
+      const user = {
+        ...identity,
+        id: mode === 're-keyed-install' ? 'c3'.repeat(32) : identity.id,
+      };
+      const legacyRule = `!${legacyWorkspaceRule(workspacePath('legacy'))}*`;
+      await writeProjection({ [identity.name]: rules(legacyRule) });
+      await store.setDefaultActivations([identity], 'disabled');
+      const declared = await store.setWorkspaceActivations(
+        [identity],
+        workspacePath('a'),
+        'disabled',
+      );
+      expect(declared.extensions[identity.id].declarationOnly).toBe(true);
+
+      const claimed = await store.ensureInitialized([managed]);
+      expect(claimed.extensions[managed.id].declarationOnly).toBeUndefined();
+      expect(
+        claimed.extensions[managed.id].preserveActivationOnNextInstall,
+      ).toBeUndefined();
+      await store.setDefaultActivation(managed, 'enabled', {
+        clearLegacyPathRules: true,
+      });
+      await store.setWorkspaceActivation(
+        managed,
+        workspacePath('a'),
+        'enabled',
+      );
+      const handedBack = await store.ensureInitialized([identity], {
+        managedAbsenceProven: true,
+      });
+      expect(handedBack.extensions[identity.id].managed).toBeUndefined();
+      const restored = {
+        defaultActivation: 'disabled',
+        workspaceOverrides: { [workspacePath('a')]: 'disabled' },
+        legacyPathRules: [legacyRule],
+      };
+      expect(handedBack.extensions[identity.id]).toMatchObject(restored);
+
+      const installed = await install(makeStore(), user);
+      expect(installed.extensions).toEqual({
+        [user.id]: {
+          name: user.name,
+          artifactGeneration: installed.generation,
+          ...restored,
+        },
+      });
+      await expect(
+        fsp.readFile(
+          path.join(extensionsDir, user.name, 'qwen-extension.json'),
+          'utf8',
+        ),
+      ).resolves.toBe('{}');
+    },
+  );
+
+  it('keeps a returning artifact protected when restoring future install activation', async () => {
+    const store = makeStore();
+    const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+    const previousName = 'previous-user-copy';
+    const previousDirectory = path.join(extensionsDir, previousName);
+    await mkdirWithVersion(previousDirectory, 'untouched');
+    await store.ensureInitialized([{ ...identity, name: previousName }]);
+    await store.ensureInitialized([identity]);
+    await store.ensureInitialized([{ ...identity, source: 'managed' }]);
+    const handedBack = await store.ensureInitialized([identity], {
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]).toMatchObject({
+      artifactDirectory: previousName,
+      preserveActivationOnNextInstall: true,
+    });
+    expect(handedBack.extensions[identity.id].declarationOnly).toBeUndefined();
+
+    await expect(
+      install(store, { ...identity, id: 'c2'.repeat(32) }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(handedBack);
+    expect(await readVersion(previousDirectory)).toBe('untouched');
+    expect(fs.existsSync(path.join(extensionsDir, identity.name))).toBe(false);
+
+    await store.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+    });
+    expect(fs.existsSync(previousDirectory)).toBe(false);
+  });
+
   it('restores the whole pre-managed activation surface when the managed identity is withdrawn', async () => {
     const store = makeStore();
     const identity = { id: 'c2'.repeat(32), name: 'surfaced' };
