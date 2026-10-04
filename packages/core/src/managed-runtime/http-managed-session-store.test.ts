@@ -1503,6 +1503,18 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
+  it('rejects a journal that does not match the durable head', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    server.headOverrides['committedSequence'] = 99;
+    await expect(journal.read()).rejects.toThrow(
+      /do not match the durable head/,
+    );
+    await session.close();
+  });
+
   it('rejects an empty transaction page while the journal head is ahead', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -1609,8 +1621,9 @@ describe('HTTP Managed Session store', () => {
       remoteCode: 'managed_session_resource_missing',
     } satisfies Partial<ManagedSessionStoreHttpError>);
 
-    // The 409 landed before anything committed: the head is unmoved and the
-    // earlier staged body is still there, so a retry can post it.
+    // The 409 landed before anything committed, so the failed commit released
+    // nothing: the head is unmoved and the previously staged body is still
+    // readable.
     await expect(journal.read()).resolves.toMatchObject({
       committed: session.authority.committedSequence,
     });
@@ -1641,6 +1654,7 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
+  readonly headOverrides: Record<string, unknown> = {};
   readonly pageOverrides: Record<string, unknown> = {};
   readonly receiptOverrides: Record<string, unknown> = {};
   transactionReads = 0;
@@ -1700,6 +1714,7 @@ class FakeManagedSessionStore {
         ...(this.recoveryDetailCode === null
           ? {}
           : { recoveryDetailCode: this.recoveryDetailCode }),
+        ...this.headOverrides,
       });
     }
     if (suffix === '/recovery:block') {
