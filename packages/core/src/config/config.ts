@@ -1104,6 +1104,13 @@ export interface ConfigParameters {
    * Managed session has no tools.
    */
   managedRuntimeEnvironment?: (config: Config) => ExecutionEnvironment;
+  /**
+   * Called by a Managed session's Runtime machinery when a worker's stop
+   * could not be proven (`quarantined: true`) and when the reaper proves it
+   * (`false`, with the same reason). The host quarantines the engine on the
+   * first and lifts it on the second. Ignored for any other engine.
+   */
+  onManagedEngineQuarantine?: (quarantined: boolean, reason: Error) => void;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2736,6 +2743,10 @@ export class Config {
     config: Config,
   ) => ExecutionEnvironment;
   private managedRuntimeEnvironment?: ExecutionEnvironment;
+  private readonly onManagedEngineQuarantine?: (
+    quarantined: boolean,
+    reason: Error,
+  ) => void;
   private managedRuntimeClosing?: Promise<void>;
   private managedSessionBlock?: Error;
   private restoredFileHistory = false;
@@ -3299,6 +3310,10 @@ export class Config {
     this.managedRuntimeEnvironmentFactory =
       params.sessionExecutionEngine === 'managed'
         ? params.managedRuntimeEnvironment
+        : undefined;
+    this.onManagedEngineQuarantine =
+      params.sessionExecutionEngine === 'managed'
+        ? params.onManagedEngineQuarantine
         : undefined;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
@@ -5944,6 +5959,33 @@ export class Config {
   /** Why this Managed session is blocked, or undefined while it is not. */
   getManagedSessionBlock(): Error | undefined {
     return this.managedSessionBlock;
+  }
+
+  /**
+   * Quarantines the engine that hosts this Managed session: a Runtime
+   * worker's stop could not be proven, so no new Managed session may run
+   * beside work nobody can account for. Cleared with the same reason once
+   * the reaper proves the stop.
+   */
+  reportManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).reportManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(true, reason);
+  }
+
+  /** Lifts a quarantine reported with this very reason. */
+  clearManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).clearManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(false, reason);
   }
 
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {

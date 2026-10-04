@@ -35,8 +35,9 @@ the Managed host and its tests, registers and enables nothing, and leaves M5,
 M6 and the delivery schedule where the scheduling update put them. M5a, the
 first part of M5, adds the Runtime-backed tools and their tests: it registers
 no engine and no daemon route, its tools run only in a host already selected
-as Managed, and it leaves M5b, M5c, M6 and the delivery schedule where the
-scheduling update put them.
+as Managed. M5c, physical stop, follows it, ahead of M5b: it registers and
+enables nothing either, and it leaves M5b, M6 and the delivery schedule where
+the scheduling update put them.
 
 Design for the Managed execution engine of ordinary `qwen serve` hosts, the
 part of #12737 that [paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)
@@ -53,9 +54,10 @@ implemented in #12935, with the #12995 follow-up. Slice M2, the child-process
 host, is implemented in #13131. The M5 section below updates M5's worker
 ownership, sharing, cleanup and session-isolation requirements, as the host
 decision asked before implementation, and splits M5 into three parts; the first,
-M5a, is implemented in #13167. The rest of M5 and M6 are deferred
-proposals; each lands with its own design update after rescheduling. The M2
-update is based on `afb911a3c8`, the M5 update on `f3bf699476`.
+M5a, is implemented in #13167, and the third, M5c, below under "physical
+stop", ahead of the second. M5b and M6 remain deferred proposals; each lands
+with its own design update after rescheduling. The M2 update is based on
+`afb911a3c8`, the M5 update on `f3bf699476`, the M5c update on `2c591ecc08`.
 
 The reference implementation is the branch
 `doudouOUC/qwen-code:feature/managed-agents-p0-p8` at `032392a673`. This
@@ -234,20 +236,20 @@ The B2d invariants hold. In addition:
 
 ### Slice plan
 
-M1 to M4 are implemented and retained; M2, M4 and M5a landed ahead of the
-priority review described in Status without registering the engine. M5b, M5c
+M1 to M4 are implemented and retained; M2, M4, M5a and M5c landed ahead of
+the priority review described in Status without registering the engine. M5b
 and M6 are deferred until that review; the dependency order and exit checks
 below do not schedule their implementation. Reference commits describe the original port;
 the linked host decision supersedes the old in-process M2 approach.
 
-| Slice                                                          | Deliverable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Exit check                                                                                                                                                                                                                                                                                                                                                                                    | Reference                                                                                                                                                                                       |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M1 — preconditions** (#12861)                                | Legacy refusal of a `managed` owner record; worktree reset purpose marking; the Live task decision; this design.                                                                                                                                                                                                                                                                                                                                                                                                                                             | See the M1 acceptance criteria.                                                                                                                                                                                                                                                                                                                                                               | `2f00ac26e3` (refusal, reworked to positive evidence)                                                                                                                                           |
-| **M2 — child-process ACP host** (#13131)                       | At most one on-demand Managed child per workspace runtime using the existing spawn factory and ACP transport, with workspace environment isolation and complete host lifecycle; the host accepts only Managed sessions, records them through M4 with the owner and receipt, and its tool registry refuses every tool, whichever path registers it; keep Hosted on its independent Harness.                                                                                                                                                                   | ACP suites stay green; create, prompt, close and dispose through the child, which exits by its own shutdown with its whole process tree released, its environment writes kept in its own process. A failed child leaves the daemon and unrelated Legacy sessions usable. Other workspaces' isolation, worker-descendant cleanup (with M5) and whole-tree resource use are verified before M6. | [Host recommendation](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5858038609); [First-worker scope](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5864516602) |
-| **M3 — strict configuration snapshot** (#12883)                | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                              | `a836081466`, `306cf17546`, `d48161bc4a`                                                                                                                                                        |
-| **M4 — Managed Session log recording** (#12935)                | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                            | `e98cda5c95`, `1ed806ca85`, `f501d9694d`                                                                                                                                                        |
-| **M5 — Runtime-backed tools** (M5a: #13167; M5b, M5c deferred) | A session-exclusive local Runtime worker launched by the Managed child lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                                                                     | Tool file writes and Shell processes run only in the worker; host-side worker provisioning and session recording remain allowed. Cancellation has physical-stop evidence; a lost result blocks the session.                                                                                                                                                                                   | `7786edd123`, `5dde5c8dd7`, `174e072ac4`                                                                                                                                                        |
-| **M6 — the engine** (deferred)                                 | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.          | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
+| Slice                                                                       | Deliverable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Exit check                                                                                                                                                                                                                                                                                                                                                                                                                     | Reference                                                                                                                                                                                       |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M1 — preconditions** (#12861)                                             | Legacy refusal of a `managed` owner record; worktree reset purpose marking; the Live task decision; this design.                                                                                                                                                                                                                                                                                                                                                                                                                                             | See the M1 acceptance criteria.                                                                                                                                                                                                                                                                                                                                                                                                | `2f00ac26e3` (refusal, reworked to positive evidence)                                                                                                                                           |
+| **M2 — child-process ACP host** (#13131)                                    | At most one on-demand Managed child per workspace runtime using the existing spawn factory and ACP transport, with workspace environment isolation and complete host lifecycle; the host accepts only Managed sessions, records them through M4 with the owner and receipt, and its tool registry refuses every tool, whichever path registers it; keep Hosted on its independent Harness.                                                                                                                                                                   | ACP suites stay green; create, prompt, close and dispose through the child, which exits by its own shutdown with its whole process tree released, its environment writes kept in its own process. A failed child leaves the daemon and unrelated Legacy sessions usable. Other workspaces' isolation, worker-descendant cleanup (with M5) and whole-tree resource use are verified before M6.                                  | [Host recommendation](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5858038609); [First-worker scope](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5864516602) |
+| **M3 — strict configuration snapshot** (#12883)                             | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                                                               | `a836081466`, `306cf17546`, `d48161bc4a`                                                                                                                                                        |
+| **M4 — Managed Session log recording** (#12935)                             | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                                                             | `e98cda5c95`, `1ed806ca85`, `f501d9694d`                                                                                                                                                        |
+| **M5 — Runtime-backed tools** (M5a: #13167; M5c: this update; M5b deferred) | A session-exclusive local Runtime worker launched by the Managed child lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes and waits for their process groups to exit; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                          | Tool file writes and Shell processes run only in the worker; host-side worker provisioning and session recording remain allowed. Cancellation has physical-stop evidence; a crash of the child or the worker leaves no Shell process group the ledger cannot name (except the accepted spawn-to-callback window); an unprovable stop keeps the engine quarantined while a reaper retries it; a lost result blocks the session. | `7786edd123`, `5dde5c8dd7`, `174e072ac4`                                                                                                                                                        |
+| **M6 — the engine** (deferred)                                              | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.                                           | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
 
 M2 and M3 are independent of each other. M4 and M5 need M2 for the host that
 drives them; the M4 recording itself landed first (see the M4 section). M6
@@ -809,17 +811,17 @@ validates a request before it changes anything.
 M5 lets the first-phase tools through the Managed host's registry and executes
 them in a Runtime worker the session owns. Like M2, it registers nothing at
 the daemon sites, so no session selects Managed before M6. It lands in three
-parts, in this order, each with its own exit check:
+parts, each with its own exit check; M5c landed ahead of M5b:
 
 - **M5a, tools in the worker** (#13167): the session's worker, the four
   Runtime-backed tools, and the block on an unknown outcome while the host
   runs.
-- **M5b, durable outcomes**: the intent and the `await_runtime` checkpoint
-  before a call is dispatched, the result committed before the model
-  continues, and a block that survives a restore.
-- **M5c, physical stop**: cancellation that waits for the Shell's process
-  group to exit, and cleanup after the Managed child or the worker crashes
-  that relies on neither.
+- **M5b, durable outcomes** (deferred): the intent and the `await_runtime`
+  checkpoint before a call is dispatched, the result committed before the
+  model continues, and a block that survives a restore.
+- **M5c, physical stop** (this update): cancellation that waits for the
+  Shell's process group to exit, and cleanup after the Managed child or the
+  worker crashes that relies on neither.
 
 #### Worker ownership, sharing and isolation
 
@@ -863,9 +865,9 @@ parts, in this order, each with its own exit check:
   tree before the session's log is finished or handed off: SIGTERM to every
   known process group, which the worker answers by stopping its calls and
   exiting, then SIGKILL after the grace period. A stop the registry cannot
-  prove, such as a process group that outlives the deadline or a worker that
-  died before the registry saw its process tree, is logged and the log is
-  still finished; M5c keeps the engine quarantined on it. Once the worker
+  prove on its own, such as a process group that outlives the deadline, goes
+  through the ledger and the sweeps below, and one that stays unproven keeps
+  the engine quarantined. Once the worker
   exited, the host sends nothing to the port it held, which any process may
   take: a call in flight then has an unknown outcome. Since the exit is seen
   only after the port is free, the host also reads no result or state from an
@@ -921,8 +923,9 @@ parts, in this order, each with its own exit check:
   it, with a 4xx answer, or that reaches no worker, fails without having run;
   a call cancelled while the worker starts returns at once and is not sent.
 - **Cancellation.** An aborted call sends `cancel` and waits until the worker
-  reports it settled. In M5a that settlement is the worker's word; M5c adds
-  the process-group evidence.
+  reports it settled. A settled cancel of a v2 Shell call is proven: since
+  M5c the worker reports one only once the Shell's whole process group, not
+  just its leader, is gone, as "Physical stop" below specifies.
 - **Unknown outcome.** When the host cannot learn how a call ended, because
   the worker exited or stopped answering, answered `unknown`, or did not
   settle a cancelled call within 15 seconds, it reports no result. The session
@@ -946,15 +949,137 @@ parts, in this order, each with its own exit check:
   request is authorized. The addition is backward compatible: other clients
   ignore it.
 
+#### Physical stop (M5c)
+
+M5c gives a settled cancel and every close process-group evidence, and makes
+a crash of the Managed child, of the session's worker, or of both leave no
+Shell process group that a later sweep cannot attribute — apart from the
+accepted spawn-to-callback window named below. Like M5a, it
+registers and enables nothing. On POSIX everything below names process
+groups; Windows has none, and the ledger names a command's leader instead,
+whose exit after `taskkill /t` is the stop evidence its close already waits
+for. The POSIX behavior is verified with real processes; the Windows paths
+are exercised by unit doubles only, and a Windows host still needs the
+real-process verification before M6.
+
+- **The worker keeps a ledger of its Shell process groups.** The host starts
+  each worker with a ledger file of its own under the project's runtime temp
+  directory (`<project temp>/managed-runtime/<incarnation>.json`), named in
+  the launch environment. At boot the worker writes itself — pid, process
+  group, incarnation and start time — synchronously. When a Shell reports its
+  pid through the tool's pid callback, before the invocation can settle or
+  answer another request, the worker adds the call's group the same way: a
+  temporary file rewritten and renamed onto the ledger, never an append.
+  The ledger keeps every group until the group provably dies, not until its
+  call settles, so a backgrounded command that outlives its leader stays
+  attributed to the worker that started it. Pruning and the settle proof
+  judge the group, not just the id: a live leader provably younger than the
+  record's start proves its pid recycled and resolves the record as the
+  group's death, without a signal. A group the table cannot date — leader
+  gone, no survivor old enough — keeps its entry for the close to judge,
+  never dropped by the watch, because that shape cannot be told from work
+  the session itself backgrounded late. Only where the process table is
+  unreadable, or on Windows, does liveness stay the evidence. A clean close
+  proves every
+  tracked group gone — a call's own cancellation first, SIGKILL for what is
+  left — and then deletes the ledger; a close that cannot prove one leaves
+  the completed truth on disk and lets the host judge. A crash between a
+  Shell's spawn and its pid callback can still lose a group: the window is
+  the handful of instructions from `spawn` to the callback, no request can
+  interleave, and it is accepted.
+- **A settled cancel carries the group's exit evidence.** A v2 call that
+  ends after a cancel — through the `cancel` route or because the worker is
+  closing — is journaled settled only once no member of its process group
+  answers `process.kill(-pgid, 0)` or the id provably outlived the group
+  through recycling, or it is not journaled settled at all:
+  the worker keeps it in `cancel_requested` while it polls, up to 10
+  seconds, inside the host's 15-second settle budget. A group that outlives
+  the budget makes the call's outcome unknown: the session blocks, the host
+  stops the worker, and the ledger entry names the group for the sweeps. A
+  call that settles without a cancel needs no group evidence, as before.
+- **The host sweeps a dead worker's ledger.** Whenever the session's worker
+  exits, however it ended — crash, close or replacement — the host reads
+  its ledger, SIGKILLs every group still named there and proves each one
+  empty before it deletes the file. A group the signal cannot reach or that
+  outlives the proof budget is an unproven stop; the ledger stays. The pid
+  is fresh from the exit the host just witnessed, so the sweep cannot
+  mistake a recycled id for the worker's group.
+- **A new child sweeps older ledgers, relying on neither.** At every
+  session-environment creation a Managed child sweeps the project's ledger
+  directory, in the background, so a wasted worker's debris finds its sweep
+  however long this child has been up. The startup sweep judges only ledgers
+  this process never launched: a worker this child itself started, however
+  it later ends, is its own sweep's business.
+  For each file: a ledger whose worker is not running is
+  swept as above; a ledger whose pid still runs is swept together with the
+  worker when the pid is provably that worker — the `managed-runtime-worker`
+  marker on the command line and a process at least as old as its record —
+  because only a worker orphaned when its child died gets that far; anything
+  else means the pid was recycled, and the ledger is resolved without a
+  kill, and no live group is ever signalled while the process table itself
+  went missing. The ledger's worker record names its launcher as `hostPid`:
+  a live pid that still answers for an ACP child makes the ledger that
+  child-led sibling's own sweep, and this one holds it untouched. A group
+  whose live leader provably postdates the record was likewise recycled and
+  is resolved without a kill: the recorded group was born before the worker
+  wrote it down, the leader's age is a one-sided test, and no two-sided
+  window can be talked into killing a group the id outlived. A group that
+  outlived its leader with no old-enough member to date it is held
+  unproven, signalled by nothing — that shape cannot be told from the
+  late-backgrounded work it may still be. The startup sweep judges
+  only ledgers this process never launched: a worker this child itself
+  started, however it later ends, has its own sweep. A sweep the child
+  cannot prove quarantines the engine as below. The age checks use the
+  process table's elapsed-seconds column and allow a few seconds of
+  birth-to-record lag and whole-second truncation; a laptop suspended
+  between the crash and the restart disturbs neither clock.
+- **An unproven stop quarantines the engine until it is proven.** A stop
+  the host cannot prove — a close that fails, a sweep that fails, a ledger
+  that outlives its budget — is reported through the session Config to the
+  Managed host, which keeps a reaper retrying the remaining groups every
+  second and refuses every new Managed session with -32024
+  `session_execution_engine_unavailable`, naming the quarantine as the
+  reason. The refusal lifts when the reaper proves the last group gone.
+  Sessions already open still close, and one blocked on an unknown outcome
+  stays blocked. The quarantine lives in the Managed child: how the Bridge
+  and the daemon learn it is M6's contract, with the engine's registration.
+  A group no one can ever kill, one running as another user, keeps the
+  engine quarantined and the ledger on disk: an operator sees it, and no
+  new Managed session runs untracked work beside it.
+
+M5a had no ledger, and its settled cancel was the worker's word that the
+call ended: a Shell member that ignored SIGTERM survived its leader's exit,
+and a worker that crashed left the Shell process groups it started orphaned
+where the child's registry, which knows only the groups it saw in a
+snapshot, could not name them. M5c removes both gaps. What it does not
+change: the worker's own group is still the registry's to stop, and a shell
+started by a command inside another Shell is not the tool's — both stay
+inside the registry's tree snapshot while the worker lives, and inside the
+ledger's groups once it is swept.
+
+On POSIX the worker's Shells run on a PTY, so a worker that dies also takes
+its foreground Shell group down with it: the hangup is the kernel's work,
+not the child's, and an armed member dies as fast as a plain one. The
+ledger's worth shows where the PTY model does not reach: the cancel whose
+whole group is asked to be proven dead before it settles, wherever a member
+ignores the escalation; the Shells a Windows registry kills with
+`taskkill`; and any Shell that ever runs without a PTY. What stays out of
+both coverages: a command that daemonizes itself off the worker's process
+tree (double-fork, `setsid`) is nobody's ledger entry and no PTY's
+foreground either, and a dead worker keeps no trace of it — that residual
+is unchanged from M5a and recorded here rather than claimed away.
+
 #### Risks for later slices
 
 - A turn that meets an unknown outcome loses the results of the calls before
   it in the same batch: the host records results when the batch ends, and the
   tail repair drops what was never committed. M5b commits each result as it
   settles.
-- A worker that crashes leaves the Shell process groups it started, and the
-  child's registry knows only the groups it saw in a snapshot. M5c makes the
-  cleanup cover them.
+- The ledger, and the whole sweep model, is a crash-recovery record, not a
+  security boundary: a Shell command runs with the worker's own
+  permissions, so it can rewrite or delete the ledger or kill the worker
+  outright, exactly as it can already kill its own process group. M6
+  decides whether the engine's registration hardens this.
 - The worker runs its tools with their defaults rather than the user's
   settings: Shell timeouts and heartbeats, output truncation, file filtering
   and encoding. M6 must carry those settings to the worker or defer a
@@ -987,8 +1112,11 @@ parts, in this order, each with its own exit check:
   run without a model, so they decline media input, and its results keep text
   and part lists only.
 - On Windows the registry kills the worker's tree with `taskkill` instead of
-  asking it to stop, so its calls do not settle first. Windows cleanup is
-  verified with M5c.
+  asking it to stop, so its calls do not settle first. M5c's ledger and
+  sweeps record and reap the leaders there, and a settled cancel waits for
+  the leader's exit, but every Windows stop path is exercised by unit
+  doubles only: a Windows host still needs the real-process cleanup
+  verification, for cancel, worker crash and child crash, before M6.
 - Results carry only model content, up to 1 MiB, and a call's parameters at
   most 256 KiB, so a larger Write fails before it runs.
 - The worker is bound to the session's directory at boot, and the session
@@ -1006,14 +1134,14 @@ parts, in this order, each with its own exit check:
 
 ## Files and consumers
 
-| Slice | Files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| M1    | core `utils/sessionStorageUtils.ts`, `services/sessionService.ts`, `services/chatRecordingService.ts`; CLI `serve/routes/session.ts`                                                                                                                                                                                                                                                                                                                                                                                            |
-| M2    | CLI `llm.tsx`, `config/config.ts`, `acp-integration/acpAgent.ts` and the new `serve/managed-engine-channel-factory.ts`; core `config/config.ts`, `tools/tool-registry.ts` and `core/client.ts`                                                                                                                                                                                                                                                                                                                                  |
-| M3    | CLI `config/settings.ts`, `config/mcpJson.ts`, `config/storage-paths-lite.ts`, `config/config.ts`, and the new `config/read-config-file.ts`, `config/approval-mode-value.ts` and `config/managed-compatibility.ts`; core `extension/extension-store.ts` and `utils/envVarResolver.ts`                                                                                                                                                                                                                                           |
-| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `services/session-transcript-reader.ts` and `utils/sessionStorageUtils.ts`; `managed-runtime/managed-session-record-sink.ts`, `managed-session-message-projection.ts` and `managed-session-authority.ts` (one export)                                                                                                                                                                                                                                              |
-| M5    | M5a: core `services/execution-environment.ts`, `services/local-execution-environment.ts`, `tools/execution-tool.ts`, `tools/tool-registry.ts`, `config/config.ts` and `core/llm-chat.ts`; CLI `llm.tsx`, `config/config.ts`, `config/shared-env-keys.ts`, `acp-integration/acpAgent.ts`, `acp-integration/session/Session.ts`, `serve/managed-runtime-attestation-worker.ts` and the new `serve/managed-runtime-session-worker.ts`. M5b and M5c: the Managed Session log, Harness checkpoints and CLI `serve/managed-runtime-*` |
-| M6    | CLI `serve/session-execution-engine-selector.ts`, `serve/run-qwen-serve.ts` and `serve/server.ts`, which register the M2 factory; the host's restore path, workspace-change handler and command decisions in `acp-integration/acpAgent.ts` and `config/config.ts`                                                                                                                                                                                                                                                               |
+| Slice | Files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1    | core `utils/sessionStorageUtils.ts`, `services/sessionService.ts`, `services/chatRecordingService.ts`; CLI `serve/routes/session.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| M2    | CLI `llm.tsx`, `config/config.ts`, `acp-integration/acpAgent.ts` and the new `serve/managed-engine-channel-factory.ts`; core `config/config.ts`, `tools/tool-registry.ts` and `core/client.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| M3    | CLI `config/settings.ts`, `config/mcpJson.ts`, `config/storage-paths-lite.ts`, `config/config.ts`, and the new `config/read-config-file.ts`, `config/approval-mode-value.ts` and `config/managed-compatibility.ts`; core `extension/extension-store.ts` and `utils/envVarResolver.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `services/session-transcript-reader.ts` and `utils/sessionStorageUtils.ts`; `managed-runtime/managed-session-record-sink.ts`, `managed-session-message-projection.ts` and `managed-session-authority.ts` (one export)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| M5    | M5a: core `services/execution-environment.ts`, `services/local-execution-environment.ts`, `tools/execution-tool.ts`, `tools/tool-registry.ts`, `config/config.ts` and `core/llm-chat.ts`; CLI `llm.tsx`, `config/config.ts`, `config/shared-env-keys.ts`, `acp-integration/acpAgent.ts`, `acp-integration/session/Session.ts`, `serve/managed-runtime-attestation-worker.ts` and the new `serve/managed-runtime-session-worker.ts`. M5c: CLI `serve/managed-runtime-ledger.ts`, `serve/managed-runtime-session-worker.ts`, `serve/managed-runtime-tool-executor.ts`, `serve/managed-runtime-attestation-worker.ts`, `acp-integration/acpAgent.ts` and `config/config.ts` (the hostPolicy pass-through); core `config/config.ts` (the quarantine sink only). M5b: the Managed Session log, Harness checkpoints and CLI `serve/managed-runtime-*` |
+| M6    | CLI `serve/session-execution-engine-selector.ts`, `serve/run-qwen-serve.ts` and `serve/server.ts`, which register the M2 factory; the host's restore path, workspace-change handler and command decisions in `acp-integration/acpAgent.ts` and `config/config.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 No daemon route or REST shape changes in any slice. M1 changes no public
 classification: its refusals use the existing
@@ -1150,6 +1278,28 @@ M5a:
    lost is learned by reference without running again; a refused call and one
    that reached no worker fail without running, and one cancelled while the
    worker started ends cancelled without being sent.
+5. Build, typecheck and focused tests pass, and mutating each of these
+   behaviors fails a test.
+
+M5c:
+
+1. Cancelling a turn whose Shell ignores SIGTERM settles the call only once
+   its process group is proven gone, not just its leader; M5a's settle
+   needed no such proof. A group that stays past the 10-second budget turns
+   the call's outcome unknown, blocks the session and stays named in the
+   ledger.
+2. Through a paired Bridge with real children, the worker keeps the Shell's
+   process group in its ledger while the call runs; killing the worker
+   mid-Shell sweeps its groups, removes the ledger and blocks the session
+   with `managed_runtime_outcome_unknown`.
+3. Killing the Managed child mid-Shell lets the worker stop the call with
+   group evidence, exit and leave the ledger deleted; starting the next
+   Managed child sweeps a ledger the worker could not finish, without
+   touching a group whose id was recycled.
+4. A stop the sweep cannot prove — injected to fail — keeps the ledger,
+   refuses a new Managed session with -32024
+   `session_execution_engine_unavailable` naming the quarantine, and lifts
+   the refusal once the reaper proves the group gone.
 5. Build, typecheck and focused tests pass, and mutating each of these
    behaviors fails a test.
 

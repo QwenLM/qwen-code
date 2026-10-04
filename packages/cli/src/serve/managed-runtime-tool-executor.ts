@@ -29,6 +29,11 @@ import {
   registerSessionProjectDir,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import {
+  GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+  type ManagedRuntimeLedger,
+} from './managed-runtime-ledger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -42,6 +47,8 @@ import {
   ManagedMcpError,
   parseManagedMcpControl,
 } from './managed-mcp-runtime.js';
+
+const debugLogger = createDebugLogger('MANAGED_TOOL_EXECUTOR');
 
 export class ManagedMcpToolUnknownError extends Error {}
 
@@ -280,12 +287,33 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
+    private readonly options: {
+      /**
+       * The worker's ledger of its Shell process groups. Present only in a
+       * Managed session's Runtime worker (boot v1), never in a Hosted one.
+       */
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    } = {},
   ) {}
 
-  static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
+  static forWorkspace(
+    workspaceCwd: string,
+    runtimeInstanceId: string,
+    options?: {
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    },
+  ) {
     // Boot v1 configures its one directory at startup, as it always has.
     const tools = createManagedToolSet(workspaceCwd, runtimeInstanceId);
-    return new ManagedToolExecutor(async () => tools);
+    return new ManagedToolExecutor(
+      async () => tools,
+      undefined,
+      undefined,
+      undefined,
+      options,
+    );
   }
 
   hasTool(toolName: string): boolean {
@@ -758,6 +786,23 @@ export class ManagedToolExecutor {
       ),
       this.provider?.close(),
     ]);
+    if (this.options.ledger) {
+      // Leave nothing behind: what a call's own cancellation did not stop,
+      // SIGKILL does, and only a proven-empty ledger is deleted. An unproven
+      // group keeps the ledger truth on disk for the host's sweep to judge.
+      const remaining = await this.options.ledger.killOutstanding();
+      if (remaining.length === 0) {
+        this.options.ledger.complete();
+      } else {
+        debugLogger.warn(
+          `Managed Runtime worker could not prove ${
+            remaining.length
+          } Shell process group(s) stopped: ${remaining
+            .map((group) => group.pgid)
+            .join(', ')}`,
+        );
+      }
+    }
   }
 
   private static isCancelRequested(entry: JournalEntry): boolean {
@@ -776,6 +821,8 @@ export class ManagedToolExecutor {
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
+    /** The Shell's process-group leader, when this call is one with a ledger. */
+    let shellPgid: number | undefined;
     try {
       const params = structuredClone(entry.input);
       if (
@@ -802,17 +849,36 @@ export class ManagedToolExecutor {
       const invoke = () =>
         sessionIdContext.run(sessionId, () => {
           const invocation = tool.build(params);
-          return entry.version === 3 && entry.captureSink
-            ? (invocation as ShellToolInvocation).execute(
-                entry.controller.signal,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                entry.captureSink,
-              )
-            : invocation.execute(entry.controller.signal);
+          if (entry.version === 3 && entry.captureSink) {
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              entry.captureSink,
+            );
+          }
+          if (entry.toolName === ShellTool.Name && this.options.ledger) {
+            const ledger = this.options.ledger;
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              (pid) => {
+                // Before any settle step of this call can run, the group is
+                // durable for the host's sweeps: the pid leads the group.
+                shellPgid = pid;
+                ledger.addGroup({
+                  pgid: pid,
+                  callId: entry.reference.callId,
+                  startedAt: Date.now(),
+                });
+              },
+            );
+          }
+          return invocation.execute(entry.controller.signal);
         });
       const history = this.fileHistories.get(entry.reference.sessionId);
       let result: ToolResult;
@@ -858,6 +924,26 @@ export class ManagedToolExecutor {
           message: error instanceof Error ? error.message : String(error),
         },
       };
+    }
+    if (
+      entry.version === 2 &&
+      shellPgid !== undefined &&
+      entry.controller.signal.aborted &&
+      this.options.ledger
+    ) {
+      // A settled cancel carries the group's exit evidence: the call is
+      // journaled settled only once no member of the Shell's process group
+      // answers. A group that outlives the budget makes the outcome unknown:
+      // the session blocks and the ledger entry keeps naming the group.
+      const state = await this.options.ledger.waitForGroupExit(
+        shellPgid,
+        this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+      );
+      if (state !== 'gone') {
+        entry.state = 'unknown';
+        entry.lastSequence++;
+        return;
+      }
     }
     if (entry.version === 3) {
       try {

@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -35,6 +36,12 @@ import type {
   ManagedRuntimeWorkerBoot,
   ManagedRuntimeWorkerReady,
 } from './managed-runtime-attestation-worker.js';
+import {
+  MANAGED_RUNTIME_LEDGER_ENV,
+  startLedgerReaper,
+  sweepStaleLedgers,
+  sweepWorkerLedger,
+} from './managed-runtime-ledger.js';
 import type {
   ManagedToolReference,
   ManagedToolResultPayload,
@@ -67,6 +74,25 @@ interface StartedWorker {
    * so nothing is sent there again.
    */
   readonly gone: AbortSignal;
+  /** The ledger file this worker keeps its Shell process groups in. */
+  readonly ledgerPath?: string;
+}
+
+/**
+ * How the session's workers report to their host an engine that can admit no
+ * new Managed sessions: `report` on a stop that could not be proven, `lift`
+ * with the same reason once the reaper proves it.
+ */
+export interface ManagedEngineQuarantineSink {
+  report(reason: Error): void;
+  lift(reason: Error): void;
+}
+
+/** The session-worker's shares of the environment's options. */
+export interface ManagedSessionRuntimeWorkerOptions {
+  /** Where each worker incarnation's ledger file lives; set by the host. */
+  readonly ledgerDir?: string;
+  readonly quarantine?: ManagedEngineQuarantineSink;
 }
 
 interface WorkerResponse {
@@ -232,12 +258,15 @@ export class ManagedSessionRuntimeWorker {
   private readonly registry = new ProcessRegistry();
   private starting?: Promise<StartedWorker>;
   private closed = false;
+  /** Every ledger file this session ever named, swept when the worker exits. */
+  private readonly ledgerPaths = new Set<string>();
 
   constructor(
     private readonly sessionId: string,
     private readonly directory: string,
     private readonly launch: () => ManagedRuntimeWorkerLaunch = currentCliWorkerLaunch,
     private readonly cancelSettleTimeoutMs = CANCEL_SETTLE_TIMEOUT_MS,
+    private readonly options: ManagedSessionRuntimeWorkerOptions = {},
   ) {}
 
   /**
@@ -380,24 +409,70 @@ export class ManagedSessionRuntimeWorker {
 
   /**
    * Terminates the process tree of every worker the session started and
-   * waits until each is gone.
+   * waits until each is gone. Then sweeps every ledger its workers kept:
+   * whatever the registry could not name, the ledger does.
    */
   async close(): Promise<void> {
     this.closed = true;
     // A worker that is starting is in the registry from its spawn on, and a
     // launch that has not spawned yet finds the registry draining.
+    const failures: unknown[] = [];
     try {
       await this.registry.shutdown();
     } catch (error) {
       // A worker that had to be killed, as Windows always does, is gone all
       // the same; only a tree that could not be proven gone is a failure.
-      const failures = error instanceof AggregateError ? error.errors : [error];
-      const unproven = failures.filter(
-        (failure) => !(failure instanceof ProcessExitError),
+      const parts = error instanceof AggregateError ? error.errors : [error];
+      failures.push(
+        ...parts.filter((part) => !(part instanceof ProcessExitError)),
       );
-      if (unproven.length > 0) {
-        throw new AggregateError(unproven, 'The Runtime worker did not stop.');
+    }
+    for (const ledgerPath of [...this.ledgerPaths]) {
+      try {
+        await sweepWorkerLedger(ledgerPath, { exitWitnessed: true });
+      } catch (error) {
+        const reason = toRuntimeError(error);
+        failures.push(reason);
+        this.reportUnproven(ledgerPath, reason);
       }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'The Runtime worker did not stop.');
+    }
+  }
+
+  /** Ledger paths whose unproven stop is already reported and being retried. */
+  private readonly unprovenLedgerPaths = new Set<string>();
+
+  /**
+   * Reports a stop the ledger's sweep could not prove: the engine is
+   * quarantined while a reaper keeps retrying, and lifted with the same
+   * reason once every group the ledger names is gone. One report per ledger
+   * path at a time — the exit hook and close() race each other to it.
+   */
+  private reportUnproven(ledgerPath: string, reason: Error): void {
+    if (this.unprovenLedgerPaths.has(ledgerPath)) return;
+    this.unprovenLedgerPaths.add(ledgerPath);
+    this.options.quarantine?.report(reason);
+    startLedgerReaper(
+      () => sweepWorkerLedger(ledgerPath, { exitWitnessed: true }),
+      () => {
+        this.unprovenLedgerPaths.delete(ledgerPath);
+        this.options.quarantine?.lift(reason);
+      },
+    );
+  }
+
+  /**
+   * Sweeps the ledger of a worker that exited between calls: whatever it
+   * left running is no session's future work, so its groups die now.
+   */
+  private async sweepDeadWorkerLedger(worker: StartedWorker): Promise<void> {
+    if (!worker.ledgerPath) return;
+    try {
+      await sweepWorkerLedger(worker.ledgerPath, { exitWitnessed: true });
+    } catch (error) {
+      this.reportUnproven(worker.ledgerPath, toRuntimeError(error));
     }
   }
 
@@ -452,24 +527,40 @@ export class ManagedSessionRuntimeWorker {
     if (this.starting) return this.starting;
     const starting = this.launchWorker();
     this.starting = starting;
-    // A worker that failed to start, or exited between calls, is replaced.
+    // A worker that failed to start, or exited between calls, is replaced;
+    // one that exited with a ledger full of groups is swept, however it died.
     const forget = () => {
       if (this.starting === starting && !this.closed) this.starting = undefined;
     };
-    void starting.then(({ tracked }) => tracked.exited.then(forget), forget);
+    void starting.then(
+      (worker) => worker.tracked.exited.then(() => this.sweepAfterExit(worker)),
+      forget,
+    );
     return starting;
   }
 
-  /** Stops `worker` and lets the next call start a new one in its place. */
-  private forget(worker: StartedWorker): void {
-    void worker.tracked.terminate().catch(() => undefined);
+  /**
+   * Fires when a worker's exit is witnessed — start()'s own observation, the
+   * dominant between-calls path — and sweeps its ledger exactly once, with
+   * its replacement clearing `starting` only on the session's behalf.
+   */
+  private sweepAfterExit(worker: StartedWorker): void {
+    void this.sweepDeadWorkerLedger(worker);
     void this.starting?.then(
       (current) => {
         if (current === worker && !this.closed) this.starting = undefined;
       },
-      // A replacement that failed to start is forgotten by start() itself.
+      // A replacement that failed to start has no exit to witness.
       () => undefined,
     );
+  }
+
+  /** Stops `worker` and lets the next call start a new one in its place. */
+  private forget(worker: StartedWorker): void {
+    void worker.tracked
+      .terminate()
+      .catch(() => undefined)
+      .then(() => this.sweepAfterExit(worker));
   }
 
   private async launchWorker(): Promise<StartedWorker> {
@@ -496,12 +587,27 @@ export class ManagedSessionRuntimeWorker {
       OWNED_MANAGED_RUNTIME_ROUTES.map((route) => [route.key, route.path]),
     );
     const launch = this.launch();
+    const ledgerPath = this.options.ledgerDir
+      ? path.join(this.options.ledgerDir, `${boot.runtimeIncarnation}.json`)
+      : undefined;
+    if (ledgerPath !== undefined) {
+      // Fail before spawn: a worker without its ledger cannot be swept.
+      mkdirSync(path.dirname(ledgerPath), { recursive: true });
+      this.ledgerPaths.add(ledgerPath);
+      launchedLedgerPaths.add(ledgerPath);
+    }
     const reservation = this.registry.reserve();
     let child;
     try {
       child = spawn(launch.command, [...launch.args], {
         cwd: this.directory,
-        env: launch.env ?? process.env,
+        env:
+          ledgerPath === undefined
+            ? (launch.env ?? process.env)
+            : {
+                ...(launch.env ?? process.env),
+                [MANAGED_RUNTIME_LEDGER_ENV]: ledgerPath,
+              },
         // The IPC channel carries no messages: the worker exits when it closes.
         stdio: ['pipe', 'pipe', 'inherit', 'ipc'],
         detached: process.platform !== 'win32',
@@ -540,6 +646,7 @@ export class ManagedSessionRuntimeWorker {
         routes,
         incarnationHeader: MANAGED_RUNTIME_INCARNATION_HEADER.toLowerCase(),
         gone: gone.signal,
+        ledgerPath,
       };
       const attested = await this.request(worker, 'attest', {
         protocolVersion: 2,
@@ -741,6 +848,10 @@ function readReady(
   });
 }
 
+function toRuntimeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 function settledResult(body: unknown): ManagedToolResultPayload | undefined {
   const view = body as
     | { state?: unknown; result?: ManagedToolResultPayload }
@@ -790,6 +901,41 @@ export function toToolResult(payload: ManagedToolResultPayload): ToolResult {
   };
 }
 
+/** The ledgers every worker of this process was ever launched with. */
+const launchedLedgerPaths = new Set<string>();
+
+/** Ledger dirs whose failed startup sweep already has a reaper armed. */
+const armedStaleSweeps = new Set<string>();
+
+/**
+ * The startup-side sweep of a project's ledger directory, run at every
+ * environment creation: it judges only ledgers this process never launched
+ * (the skip set is live by reference, grown before every spawn), so a
+ * sibling child's crash-debris finds one of these sweeps however long this
+ * child has been up. Its own workers' ledgers have their own sweeps,
+ * however they end. A failure quarantines the engine, and one reaper per
+ * directory keeps retrying while its remainders stay unproven.
+ */
+function sweepStaleRuntimeLedgers(
+  ledgerDir: string,
+  quarantine: ManagedEngineQuarantineSink,
+): void {
+  const options = { skip: launchedLedgerPaths };
+  void sweepStaleLedgers(ledgerDir, options).catch((error: unknown) => {
+    if (armedStaleSweeps.has(ledgerDir)) return;
+    armedStaleSweeps.add(ledgerDir);
+    const reason = toRuntimeError(error);
+    quarantine.report(reason);
+    startLedgerReaper(
+      () => sweepStaleLedgers(ledgerDir, options),
+      () => {
+        armedStaleSweeps.delete(ledgerDir);
+        quarantine.lift(reason);
+      },
+    );
+  });
+}
+
 /**
  * The environment of a Managed session's tools: each call is prepared and
  * permission-checked in this process with the real tool, then runs with its
@@ -803,10 +949,24 @@ export function createManagedRuntimeEnvironment(
   // The worker is bound to this directory for its lifetime, so the host
   // judges a Shell `directory` against the same one.
   const sessionDirectory = config.getTargetDir();
+  const ledgerDir = path.join(
+    config.storage.getProjectTempDir(),
+    'managed-runtime',
+  );
+  const quarantine: ManagedEngineQuarantineSink = {
+    report: (reason) => config.reportManagedEngineQuarantine(reason),
+    lift: (reason) => config.clearManagedEngineQuarantine(reason),
+  };
+  // The stale ledgers an earlier child left behind are swept in the
+  // background at every environment creation; a stop the sweep cannot prove
+  // quarantines the engine before the next admission.
+  sweepStaleRuntimeLedgers(ledgerDir, quarantine);
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),
     sessionDirectory,
     launch,
+    CANCEL_SETTLE_TIMEOUT_MS,
+    { ledgerDir, quarantine },
   );
   const prepared = new LocalExecutionEnvironment(config, {
     toolNames: MANAGED_RUNTIME_TOOL_NAMES,

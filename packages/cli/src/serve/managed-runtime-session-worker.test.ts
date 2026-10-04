@@ -5,14 +5,21 @@
  */
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { processBootLoaderEnv } from '../config/shared-env-keys.js';
 import { createServer } from 'node:http';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
+import {
+  LedgerSweepUnprovenError,
+  processGroupLiveness,
+  testInternals,
+} from './managed-runtime-ledger.js';
 import {
   createManagedRuntimeEnvironment,
   currentCliWorkerLaunch,
@@ -20,6 +27,7 @@ import {
   ManagedSessionRuntimeWorker,
   toToolResult,
   type ManagedRuntimeWorkerLaunch,
+  type ManagedSessionRuntimeWorkerOptions,
 } from './managed-runtime-session-worker.js';
 
 // A worker that speaks boot v1 and the tool v2 routes, scripted per test.
@@ -32,6 +40,7 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const boot = JSON.parse(Buffer.concat(chunks).toString());
 log({ boot: boot.runtimeIncarnation, pid: process.pid });
+if (mode === 'log-ledger-env') log({ ledgerEnv: process.env['QWEN_MANAGED_RUNTIME_LEDGER'] ?? null });
 const settled = (text) => ({
   protocolVersion: 2,
   state: 'settled',
@@ -214,6 +223,7 @@ describe.skipIf(process.platform === 'win32')(
         pid?: number;
         port?: number;
         closed?: boolean;
+        ledgerEnv?: string | null;
         route?: string;
         request?: unknown;
       }>
@@ -655,6 +665,180 @@ describe.skipIf(process.platform === 'win32')(
         closing.execute('read_file', { file_path: 'a.txt' }, signal),
       ).rejects.toThrow('closing');
     });
+
+    describe('physical stop', () => {
+      const signal = new AbortController().signal;
+      const sleeperChildren: Array<ReturnType<typeof spawn>> = [];
+
+      afterEach(() => {
+        for (const child of sleeperChildren.splice(0)) {
+          if (child.pid !== undefined) killGroup(child.pid);
+        }
+      });
+
+      function spawnSleeper(): number {
+        const child = spawn('sleep', ['300'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        child.on('exit', () => undefined);
+        if (child.pid === undefined) throw new Error('spawn failed');
+        sleeperChildren.push(child);
+        return child.pid;
+      }
+
+      function killGroup(pgid: number): void {
+        try {
+          process.kill(-pgid, 'SIGKILL');
+        } catch {
+          try {
+            process.kill(pgid, 'SIGKILL');
+          } catch {
+            // gone already
+          }
+        }
+      }
+
+      function ledgerWorker(
+        mode: string,
+        options: ManagedSessionRuntimeWorkerOptions,
+      ) {
+        const created = new ManagedSessionRuntimeWorker(
+          SESSION_ID,
+          root,
+          launch(mode),
+          undefined,
+          options,
+        );
+        workers.push(created);
+        return created;
+      }
+
+      async function incarnation(): Promise<string> {
+        const [{ boot }] = await logged();
+        if (boot === undefined) throw new Error('no worker booted');
+        return boot;
+      }
+
+      it('names the worker its own ledger file in the launch environment', async () => {
+        const ledgerDir = path.join(root, 'ledgers');
+        const created = ledgerWorker('log-ledger-env', { ledgerDir });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const [entry] = (await entries()).filter(
+          (item) => item.ledgerEnv !== undefined,
+        );
+        const ledgerEnv = entry?.ledgerEnv;
+        expect(ledgerEnv).toBeTruthy();
+        expect(ledgerEnv!.startsWith(`${ledgerDir}${path.sep}`)).toBe(true);
+        expect(ledgerEnv!.endsWith('.json')).toBe(true);
+        // The host names the file; only the worker ever writes it.
+        expect(existsSync(ledgerEnv!)).toBe(false);
+      });
+
+      it('sweeps the ledger of a worker that exits between calls', async () => {
+        // The dominant crash path: the exit observer fires without any call
+        // in flight, long before close(). Its groups die with it.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('exit-after-call', {
+          ledgerDir,
+          quarantine,
+        });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        const sleeperPid = spawnSleeper();
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: 42424242,
+            pgid: 42424242,
+            incarnation: 'incarnation-1',
+            startedAt: Date.now(),
+          },
+          [{ pgid: sleeperPid, callId: 'call-1', startedAt: Date.now() }],
+        );
+
+        const deadline = Date.now() + 10_000;
+        while (
+          processGroupLiveness(sleeperPid) !== 'gone' ||
+          existsSync(workFile)
+        ) {
+          if (Date.now() > deadline) {
+            throw new Error('the exit-between-calls sweep never landed');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(quarantine.report).not.toHaveBeenCalled();
+        sleeperChildren.length = 0;
+      });
+
+      it('sweeps the process groups a stopped worker left in its ledger', async () => {
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        const sleeperPid = spawnSleeper();
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: 42424242,
+            pgid: 42424242,
+            incarnation: 'incarnation-1',
+            startedAt: Date.now(),
+          },
+          [{ pgid: sleeperPid, callId: 'call-1', startedAt: Date.now() }],
+        );
+
+        await created.close();
+
+        expect(processGroupLiveness(sleeperPid)).toBe('gone');
+        expect(existsSync(workFile)).toBe(false);
+        expect(quarantine.report).not.toHaveBeenCalled();
+        sleeperChildren.length = 0;
+      });
+
+      it('quarantines the engine while a stop stays unproven and lifts once proven', async () => {
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        // A truth the sweep can neither trust nor resolve: bytes it cannot
+        // read, so nothing may be swept.
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+
+        await expect(created.close()).rejects.toThrow(/did not stop/);
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+        const reason = quarantine.report.mock.calls[0]![0] as Error;
+        expect(reason).toBeInstanceOf(LedgerSweepUnprovenError);
+        expect(quarantine.lift).not.toHaveBeenCalled();
+
+        // The truth heals: a valid ledger whose groups are all already gone
+        // lets the reaper prove the stop and lift the quarantine it raised.
+        const healerIncarnation = await incarnation();
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: 42424242,
+            pgid: 42424242,
+            incarnation: healerIncarnation,
+            startedAt: Date.now(),
+          },
+          [],
+        );
+        const deadline = Date.now() + 10_000;
+        while (quarantine.lift.mock.calls.length === 0) {
+          if (Date.now() > deadline) {
+            throw new Error('reaper never proved the stop');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(quarantine.lift).toHaveBeenCalledWith(reason);
+        expect(existsSync(workFile)).toBe(false);
+      });
+    });
   },
 );
 
@@ -965,6 +1149,139 @@ describe.skipIf(process.platform === 'win32')(
         .map((line) => JSON.parse(line) as { pid?: number });
       expect(() => process.kill(pid!, 0)).toThrow();
     });
+
+    it('sweeps the stale worker ledgers of an earlier child when it starts', async () => {
+      const previous = process.env['QWEN_RUNTIME_DIR'];
+      process.env['QWEN_RUNTIME_DIR'] = path.join(root, 'runtime');
+      try {
+        const sweeperConfig = new Config({
+          sessionId: '11111111-2222-3333-4444-555555555555',
+          targetDir: root,
+          cwd: root,
+          debugMode: false,
+          model: 'test-model',
+          usageStatisticsEnabled: false,
+          telemetry: { enabled: false },
+          deferTelemetryInitialization: true,
+        });
+        const ledgerDir = path.join(
+          sweeperConfig.storage.getProjectTempDir(),
+          'managed-runtime',
+        );
+        await mkdir(ledgerDir, { recursive: true });
+        const child = spawn('sleep', ['300'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        child.on('exit', () => undefined);
+        if (child.pid === undefined) throw new Error('spawn failed');
+        const stalePid = child.pid;
+        const workFile = path.join(ledgerDir, 'stale.json');
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: 42424243,
+            pgid: 42424243,
+            incarnation: 'incarnation-2',
+            startedAt: Date.now(),
+          },
+          [{ pgid: stalePid, callId: 'call-stale', startedAt: Date.now() }],
+        );
+        try {
+          environment = createManagedRuntimeEnvironment(sweeperConfig, () => ({
+            command: process.execPath,
+            args: [script],
+            env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+          }));
+          // The stale ledger's group is the earlier worker's: its processes
+          // die before this engine runs anything.
+          const deadline = Date.now() + 15_000;
+          const settled = () =>
+            processGroupLiveness(stalePid) === 'gone' && !existsSync(workFile);
+          while (!settled()) {
+            if (Date.now() > deadline) {
+              throw new Error('startup sweep never reaped the stale group');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(existsSync(workFile)).toBe(false);
+          await environment.dispose();
+
+          // A ledger landing after the first sweep still finds a sweep on
+          // the next environment's creation: the guard is the live skip set,
+          // not a once-per-process stamp.
+          const later = spawn('sleep', ['300'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          later.unref();
+          later.on('exit', () => undefined);
+          if (later.pid === undefined) throw new Error('spawn failed');
+          const laterPid = later.pid;
+          const laterFile = path.join(ledgerDir, 'stale-2.json');
+          testInternals.writeLedgerDocument(
+            laterFile,
+            {
+              pid: 42424246,
+              pgid: 42424246,
+              incarnation: 'incarnation-3',
+              startedAt: Date.now(),
+            },
+            [{ pgid: laterPid, callId: 'call-stale-2', startedAt: Date.now() }],
+          );
+          const laterConfig = new Config({
+            sessionId: '22222222-3333-4444-5555-666666666666',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          environment = createManagedRuntimeEnvironment(laterConfig, () => ({
+            command: process.execPath,
+            args: [script],
+            env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+          }));
+          const laterSettled = () =>
+            processGroupLiveness(laterPid) === 'gone' && !existsSync(laterFile);
+          while (!laterSettled()) {
+            if (Date.now() > deadline) {
+              throw new Error('no sweep ran for a ledger created mid-life');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(existsSync(laterFile)).toBe(false);
+          try {
+            process.kill(-laterPid, 'SIGKILL');
+          } catch {
+            try {
+              process.kill(laterPid, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        } finally {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            try {
+              process.kill(child.pid, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        }
+      } finally {
+        if (previous === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = previous;
+        }
+      }
+    });
   },
 );
 
@@ -1010,6 +1327,24 @@ describe('toToolResult', () => {
       error: { message: 'exited 1' },
     });
   });
+
+  it.each([
+    ['error', { message: 'boom' }, 'boom'],
+    ['error', undefined, 'The tool call failed.'],
+    ['not_started', { message: 'refused' }, 'refused'],
+    ['cancelled', undefined, 'The tool call was cancelled.'],
+  ] as const)(
+    'reports a %s call as an error',
+    (executionStatus, error, message) => {
+      expect(
+        toToolResult({ executionStatus, responseParts: [], error }),
+      ).toEqual({
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      });
+    },
+  );
 
   it.each([
     ['error', { message: 'boom' }, 'boom'],

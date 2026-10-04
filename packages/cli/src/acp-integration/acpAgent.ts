@@ -3963,6 +3963,29 @@ class QwenAgent implements Agent {
     ApprovalMode
   >();
   private managedShuttingDown = false;
+  /**
+   * The reasons this Managed engine admits no new work: one per Runtime
+   * worker stop nobody could prove, lifted by the same reason once the
+   * group's death is proven.
+   */
+  private readonly managedEngineQuarantineReasons = new Set<Error>();
+
+  private setManagedEngineQuarantine(
+    quarantined: boolean,
+    reason: Error,
+  ): void {
+    if (quarantined) {
+      this.managedEngineQuarantineReasons.add(reason);
+      debugLogger.error(
+        '[ACP] Managed engine quarantined; no new Managed sessions:',
+        reason,
+      );
+    } else if (this.managedEngineQuarantineReasons.delete(reason)) {
+      debugLogger.debug(
+        `[ACP] Managed engine quarantine lifted: ${reason.message}`,
+      );
+    }
+  }
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
@@ -4036,6 +4059,16 @@ class QwenAgent implements Agent {
     }
     if (this.managedShuttingDown) {
       throw new SessionWriterUnavailableError();
+    }
+    const quarantine = this.managedEngineQuarantineReasons
+      .values()
+      .next().value;
+    if (quarantine !== undefined) {
+      throw new RequestError(
+        -32024,
+        `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${quarantine.message}).`,
+        { errorKind: 'session_execution_engine_unavailable' },
+      );
     }
   }
 
@@ -15375,7 +15408,13 @@ class QwenAgent implements Agent {
             // Only the Managed host accepts `managed`: its tools run in the
             // session's Runtime worker.
             ...(executionEngine === 'managed' && this.managedRuntimeEnvironment
-              ? { managedRuntimeEnvironment: this.managedRuntimeEnvironment }
+              ? {
+                  managedRuntimeEnvironment: this.managedRuntimeEnvironment,
+                  onManagedEngineQuarantine: (
+                    quarantined: boolean,
+                    reason: Error,
+                  ) => this.setManagedEngineQuarantine(quarantined, reason),
+                }
               : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }

@@ -4818,6 +4818,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'A Managed ACP host is available only to a private managed ACP parent.',
       );
     });
+
+    it('quarantines new Managed sessions until the unproven stop is proven', async () => {
+      await setupSessionMocks('managed-host-quarantine');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        // The session's Config carries the host's quarantine sink.
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        expect(hostPolicy?.onManagedEngineQuarantine).toBeDefined();
+
+        const reason = new Error('the worker stop could not be proven');
+        hostPolicy!.onManagedEngineQuarantine!(true, reason);
+        // A session already open still closes while the engine is
+        // quarantined: close governs no admission.
+        await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: 'managed-host-quarantine',
+        });
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('quarantined'),
+          data: { errorKind: 'session_execution_engine_unavailable' },
+        });
+        // A second reason piles on: admission stays refused.
+        const second = new Error('another ledger survived');
+        hostPolicy!.onManagedEngineQuarantine!(true, second);
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({ code: -32024 });
+        expect(loadCliConfig).toHaveBeenCalledTimes(1);
+
+        // Proving one stop lifts only its reason; the other still holds.
+        hostPolicy!.onManagedEngineQuarantine!(false, second);
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({ code: -32024 });
+        // Proving the last one reopens admission.
+        hostPolicy!.onManagedEngineQuarantine!(false, reason);
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        expect(loadCliConfig).toHaveBeenCalledTimes(2);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
   });
 
   it.each([false, true])(
