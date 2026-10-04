@@ -880,6 +880,10 @@ describe('AppContainer State Management', () => {
   });
 
   afterEach(() => {
+    generatePromptSuggestionMock.mockReset();
+    startSpeculationMock.mockReset();
+    acceptSpeculationMock.mockReset();
+    logSpeculationMock.mockReset();
     if (originalStdoutIsTTY === undefined) {
       delete (process.stdout as { isTTY?: unknown }).isTTY;
     } else {

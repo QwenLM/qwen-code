@@ -183,6 +183,20 @@ describe('OverlayFs', () => {
       expect(existsSync(neverWritten)).toBe(false);
     });
 
+    it('skips a registered parent path that becomes a directory', async () => {
+      const parent = join(testDir, 'src');
+      const parentOverlayPath = await overlay.redirectWrite(parent);
+      const nestedFile = join(parent, 'app.ts');
+      await writeFile(await overlay.redirectWrite(nestedFile), 'nested edit');
+
+      // Registering the parent before its child is realistic for a tool that
+      // first targets a path as a file, then creates a nested file beneath it.
+      // The child's redirect creates the parent's overlay path as a directory.
+      expect(existsSync(parentOverlayPath)).toBe(true);
+      expect(await overlay.applyToReal()).toEqual([nestedFile]);
+      expect(await readFile(nestedFile, 'utf-8')).toBe('nested edit');
+    });
+
     it('counts only the files it attempted when one entry has nothing behind it', async () => {
       // A registered path with no overlay file is skipped, so it must not inflate
       // the total: the count sits next to the path list, and "1 of 2" beside one

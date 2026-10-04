@@ -122,6 +122,31 @@ describe('acceptSpeculation', () => {
     expect(state.status).toBe('completed');
   });
 
+  it('accepts completed speculation when a registered parent becomes a directory', async () => {
+    const cwd = await makeCwd();
+    const overlay = new OverlayFs(cwd);
+    dirs.push(overlay.getOverlayDir());
+
+    const parent = join(cwd, 'src');
+    await overlay.redirectWrite(parent);
+    const nestedFile = join(parent, 'app.ts');
+    await writeFile(await overlay.redirectWrite(nestedFile), 'nested edit');
+
+    const { client, addHistory } = makeLlmClient();
+    const state = makeState(cwd, overlay, [
+      { role: 'user', parts: [{ text: 'hi' }] },
+    ]);
+    // The production caller accepts the state after speculation has completed.
+    state.status = 'completed';
+
+    const result = await acceptSpeculation(state, client);
+
+    expect(result.filesApplied).toEqual([nestedFile]);
+    expect(await readFile(nestedFile, 'utf-8')).toBe('nested edit');
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    expect(state.status).toBe('completed');
+  });
+
   it('cleans up the overlay even when applyToReal throws', async () => {
     const cwd = await makeCwd();
     const overlay = new OverlayFs(cwd);

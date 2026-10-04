@@ -10,7 +10,7 @@
  * or the real filesystem.
  */
 
-import { mkdir, copyFile, rm } from 'node:fs/promises';
+import { mkdir, copyFile, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -111,7 +111,19 @@ export class OverlayFs {
       // creates the directory -- so a redirected write that then failed leaves an
       // entry with no overlay file behind it. There is no edit to land and no false
       // success to prevent, so counting it would reject edits that did land.
-      if (!existsSync(overlayPath)) {
+      let overlayStat;
+      try {
+        overlayStat = await stat(overlayPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          continue;
+        }
+        failed.push(realPath);
+        firstError ??= err;
+        continue;
+      }
+      // A later nested redirect can create a registered parent as a directory.
+      if (overlayStat.isDirectory()) {
         continue;
       }
       try {
