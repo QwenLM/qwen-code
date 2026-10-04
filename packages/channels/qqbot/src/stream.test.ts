@@ -7654,6 +7654,61 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
+  it('re-attempts a transiently blocked final segment before reporting the sealed-head loss', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    // The route can resolve on a later attempt (token refresh), so the
+    // completion must re-attempt instead of ending the turn as if the segment
+    // had been delivered.
+    let routeCalls = 0;
+    chp['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: 'transient' };
+    };
+
+    const completion = onResponseComplete(ch, 'test-chat', '', 's1');
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(4000);
+      await drain();
+    }
+    await completion;
+
+    expect(routeCalls).toBeGreaterThan(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 9 chars of sealed head',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('reports the sealed head a permanently blocked final segment cannot deliver', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    stash(ch, { turn: 1, text: 'HEAD-BODY', pre: 'HEAD-BODY' });
+    // A permanently unavailable route resolves to a block instead of throwing,
+    // so only an explicit loss log can make the dropped sealed head observable.
+    chp['resolveRoute'] = async () => ({ block: 'permanent' });
+
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 9 chars of sealed head',
+    );
+    stderrSpy.mockRestore();
+  });
+
   it('logs the head a session death discards from the side buffer', () => {
     const ch = makeChannel();
     const stderrSpy = vi

@@ -2748,13 +2748,15 @@ export class QQChannel extends ChannelBase {
           // streamState/flushingSessions check cannot see this send.
           this.beginMsgSeqSend(captured);
           try {
-            await this.sendMessageWithReplyContext(
-              chatId,
-              replyText,
-              undefined,
-              segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
-              captured,
-              capturedEntry?.timestamp,
+            await this.sendFinalSegmentChecked(sessionId, held, () =>
+              this.sendMessageWithReplyContext(
+                chatId,
+                replyText,
+                undefined,
+                segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
+                captured,
+                capturedEntry?.timestamp,
+              ),
             );
           } finally {
             this.endMsgSeqSend(captured);
@@ -2846,13 +2848,15 @@ export class QQChannel extends ChannelBase {
           // this msgId's counter is still being used.
           this.beginMsgSeqSend(capturedMsgId);
           try {
-            await this.sendMessageWithReplyContext(
-              chatId,
-              remaining,
-              undefined,
-              sourceLabel,
-              capturedMsgId,
-              anchorEntry?.timestamp,
+            await this.sendFinalSegmentChecked(sessionId, held, () =>
+              this.sendMessageWithReplyContext(
+                chatId,
+                remaining,
+                undefined,
+                sourceLabel,
+                capturedMsgId,
+                anchorEntry?.timestamp,
+              ),
             );
           } finally {
             this.endMsgSeqSend(capturedMsgId);
@@ -2867,11 +2871,13 @@ export class QQChannel extends ChannelBase {
               `[QQ:${this.name}] per-session reply anchor expired for final segment of ${sanitizeLogText(sessionId, 64)}\n`,
             );
           }
-          await this.sendResponseMessage(
-            chatId,
-            remaining,
-            sessionId,
-            sourceLabel,
+          await this.sendFinalSegmentChecked(sessionId, held, () =>
+            this.sendMessageWithReplyContext(
+              chatId,
+              remaining,
+              this.resolveResponseReplyContext(sessionId),
+              sourceLabel,
+            ),
           );
         }
       } catch (e: unknown) {
@@ -2905,6 +2911,53 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] dropping ${head.length} chars of sealed head: delivery failed (${sanitizeLogText(error instanceof Error ? error.message : String(error), 160)}) for ${sanitizeLogText(sessionId, 64)}\n`,
     );
+  }
+
+  /**
+   * Act on the route class a completion-path send reports. A blocked send never
+   * reached the wire but throws nothing, so without this the final segment is
+   * indistinguishable from a delivered one: the sealed head's loss log is
+   * bypassed and the turn is reported delivered. A transient block (token
+   * refresh failure) can clear on a later attempt, so it is re-attempted under
+   * the same maxFlushRetries bound deliverCancelledStash uses; a permanent
+   * block, or exhaustion, reports the sealed head this path consumed instead of
+   * dropping it silently. The caller holds the msg_seq counter across the whole
+   * call and releases the anchor only after it returns, so a re-attempt cannot
+   * restart at seq 1 (QQ dedupes on msg_id + msg_seq).
+   */
+  private async sendFinalSegmentChecked(
+    sessionId: string,
+    held: QQOrphanStash | undefined,
+    send: () => Promise<SendBlock | undefined>,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      const blocked = await send();
+      if (blocked === undefined) return;
+      if (
+        blocked === 'permanent' ||
+        (this.maxFlushRetries > 0 && attempt >= this.maxFlushRetries)
+      ) {
+        this.logLostSealedHead(
+          held?.pre,
+          sessionId,
+          new Error(
+            blocked === 'permanent'
+              ? 'outgoing route permanently blocked'
+              : 'outgoing route blocked, retries exhausted',
+          ),
+        );
+        return;
+      }
+      const delay =
+        attempt > 1 ? QQChannel.IDLE_FLUSH_BACKOFF_MS : QQChannel.IDLE_FLUSH_MS;
+      process.stderr.write(
+        `[QQ:${this.name}] final segment blocked by unresolved route (attempt ${attempt}), retrying in ${delay}ms for ${sanitizeLogText(sessionId, 64)}\n`,
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        timer.unref?.();
+      });
+    }
   }
 
   private streamBufferLimit(state: QQStreamState): number {
