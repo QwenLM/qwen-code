@@ -84,4 +84,9 @@ export class ManagedMonitorRegistry {
   async stopSession(sessionId: string, graceMs: number): Promise<void> {
     await this.physical.stopSession(sessionId, graceMs);
   }
+
+  /** The worker-end drain: stop every watch everywhere, like the Shells. */
+  async stopAll(graceMs: number): Promise<void> {
+    await this.physical.stopAll(graceMs);
+  }
 }

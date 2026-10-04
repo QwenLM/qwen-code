@@ -19,9 +19,8 @@ import type {
 // derived from the execution identity, splits stdout into the lines the
 // observation loop buffers (with the Legacy partial-line cap), and reports
 // the watch's physical end exactly once — natural exit versus mid-run
-// failure. The watch's retained output Artifact rides the output leg when
-// that lands; stderr is discarded here, as only stdout carries
-// observations — the Legacy watch's own discipline. See
+// failure. The durable capture keeps both streams byte-exact; only stdout
+// carries observation lines — the Legacy watch's own discipline. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
 /** A partial line beyond this many bytes is dropped, like the Legacy cap. */
@@ -54,8 +53,8 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
       env: sanitizeChildEnv(),
       cwd,
       onOutput: (stream, chunk) => {
+        identity?.onChunk?.(stream, chunk);
         if (stream !== 'stdout') return;
-        identity?.onChunk?.(chunk);
         remainder += decoder.write(chunk);
         let at = remainder.indexOf('\n');
         while (at >= 0) {

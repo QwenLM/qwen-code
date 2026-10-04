@@ -524,6 +524,11 @@ export class HostedShellPublisher {
         `Monitor ${executionCallId} has no registered observation watch.`,
       );
     background.observer = observer;
+    // Lines that arrived before the observation arm attached were kept in
+    // the remainder rather than dropped; they replay here, in order.
+    if (background.remainder.length > 0) {
+      this.fanMonitorLines(background, Buffer.alloc(0));
+    }
   }
 
   /**
@@ -532,7 +537,9 @@ export class HostedShellPublisher {
    * a chunk ends inside it; a blank line consumes no observation, exactly
    * like the Legacy emit path (the durable stream holds its bytes
    * regardless); the watch-side remainder survives across chunks, and the
-   * Legacy partial-line cap is honored.
+   * Legacy partial-line cap is honored. Until an observer registers, the
+   * decoded text accumulates in the remainder — the start-to-attach
+   * window is small — so those lines replay instead of dying unseen.
    */
   private fanMonitorLines(
     background: {
@@ -545,9 +552,9 @@ export class HostedShellPublisher {
     },
     chunk: Buffer,
   ): void {
+    background.remainder += background.decoder.write(chunk);
     const observer = background.observer;
     if (!observer) return;
-    background.remainder += background.decoder.write(chunk);
     let at = background.remainder.indexOf('\n');
     while (at >= 0) {
       const line = background.remainder.slice(0, at);
@@ -638,6 +645,12 @@ export class HostedShellPublisher {
         exitCode: physical['exitCode'] as number | null,
         exitSignal: physicalSignalName(physical['signal'] as number | null),
       };
+      // A null pair is no evidence at all: the worker's end-without-proof
+      // path reports exactly that, and settling it as an exit would either
+      // be refused by the record or would record an exit nothing proved.
+      if (evidence.exitCode === null && evidence.exitSignal === null) {
+        evidence = null;
+      }
       sink.setStarted(1);
       sink.setProcessResult({
         exitCode: physical['exitCode'] as number | null,

@@ -44,13 +44,13 @@ export interface MonitorWatchExecutor {
       readonly unitName: string;
       readonly cwd?: string;
       /**
-       * Raw stdout bytes, ahead of any line decode: the durable capture
-       * reproduces the command's stdout exactly — no line splitting, no
-       * dropped blanks, no lost tail — while onLine keeps the Legacy
-       * observation-line semantics. (Round-5 finding: a capture rebuilt
-       * from lines cannot do both.)
+       * Raw bytes of both streams, ahead of any line decode: the durable
+       * capture reproduces the command's output exactly — no line
+       * splitting, no dropped blanks, no lost tail — while onLine keeps
+       * the Legacy stdout-only observation-line semantics. (Round-5
+       * finding: a capture rebuilt from lines cannot do both.)
        */
-      readonly onChunk?: (chunk: Buffer) => void;
+      readonly onChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
     },
   ): Promise<MonitorWatchHandle>;
 }
@@ -165,7 +165,9 @@ export class HostedMonitorLoop {
    * Resumes the observation lifecycle for a watch whose admission arm
    * already committed intent, dispatch and the start receipt (the hosted
    * turn path). This loop must never re-commit any of those: a record
-   * without its start receipt refuses instead of silently minting one.
+   * without its start receipt refuses instead of silently minting one. A
+   * record the publisher already settled — the watch ended before its
+   * observer could register — has nothing left to resume.
    */
   async resumeAttached(params: MonitorLoopParams): Promise<void> {
     this.params = params;
@@ -175,6 +177,9 @@ export class HostedMonitorLoop {
       throw new Error(
         `Monitor ${this.monitorId} has no attached watch to resume.`,
       );
+    }
+    if (record.stopReason !== null) {
+      return;
     }
     this.handle = await this.executor.start(
       params.args,

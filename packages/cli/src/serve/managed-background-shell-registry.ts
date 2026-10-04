@@ -223,9 +223,11 @@ export class ManagedBackgroundShellRegistry {
           ? undefined
           : {
               message:
-                evidence?.exitSignal !== null
-                  ? `Background Shell terminated with ${evidence?.exitSignal}.`
-                  : 'Background Shell exited nonzero.',
+                evidence === null
+                  ? 'Background Shell ended without exit evidence.'
+                  : evidence.exitSignal !== null
+                    ? `Background Shell terminated with ${evidence.exitSignal}.`
+                    : 'Background Shell exited nonzero.',
             },
       );
       try {

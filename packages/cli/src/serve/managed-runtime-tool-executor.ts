@@ -733,14 +733,27 @@ export class ManagedToolExecutor {
         capture: { ...capture, background: true },
       });
     } catch (cause) {
-      throw new ManagedToolUnavailableError(
-        cause instanceof Error ? cause.message : String(cause),
-      );
+      // A refusal before any effect settles as an ordinary result, never a
+      // transport error: parking the entry here would hold the Session's
+      // Runtime forever and wedge its close.
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Background Shell capture could not be prepared: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
     }
     if (this.closing || tools.isActive?.() === false) {
-      throw new ManagedToolUnavailableError(
-        'Managed Runtime worker is no longer active.',
-      );
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime worker is no longer active.',
+        },
+      });
     }
     const sink = prepared.sink;
     const publisher = prepared.publisher ?? this.capturePublisher!;
@@ -926,14 +939,24 @@ export class ManagedToolExecutor {
         capture: { ...capture, background: true, monitoring: true },
       });
     } catch (cause) {
-      throw new ManagedToolUnavailableError(
-        cause instanceof Error ? cause.message : String(cause),
-      );
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Monitor watch capture could not be prepared: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
     }
     if (this.closing || tools.isActive?.() === false) {
-      throw new ManagedToolUnavailableError(
-        'Managed Runtime worker is no longer active.',
-      );
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime worker is no longer active.',
+        },
+      });
     }
     const sink = prepared.sink;
     const publisher = prepared.publisher ?? this.capturePublisher;
@@ -960,20 +983,23 @@ export class ManagedToolExecutor {
     let paused = false;
     const applyPause = (next: boolean) => {
       paused = next;
-      const stream = watchHandle?.process?.child.stdout;
-      if (!stream) return;
-      if (next) {
-        if (!stream.isPaused()) stream.pause();
-      } else if (stream.isPaused()) {
-        stream.resume();
+      const child = watchHandle?.process?.child;
+      if (!child) return;
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream) continue;
+        if (next) {
+          if (!stream.isPaused()) stream.pause();
+        } else if (stream.isPaused()) {
+          stream.resume();
+        }
       }
     };
-    const acceptChunk = (chunk: Buffer) => {
+    const acceptChunk = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
       bufferedBytes += chunk.byteLength;
       // The launcher-exit flushStdio resumes the paused pipe; re-assert
       // the pause behind every delivered chunk, like the Shell path.
       if (paused) applyPause(true);
-      const written = sink.write('stdout', chunk);
+      const written = sink.write(stream, chunk);
       const release = () => {
         bufferedBytes -= chunk.byteLength;
         if (paused && bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES)
@@ -1165,6 +1191,7 @@ export class ManagedToolExecutor {
       this.mcp?.hasHolds(sessionId) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
       this.backgroundRegistry.hasHolds(sessionId) ||
+      this.monitorRegistry.hasHolds(sessionId) ||
       [...this.entries.values()].some(
         (entry) =>
           entry.reference.sessionId === sessionId &&
@@ -1241,16 +1268,21 @@ export class ManagedToolExecutor {
       ),
       this.provider?.close(),
       this.backgroundRegistry.stopAll(5_000),
+      this.monitorRegistry.stopAll(5_000),
     ]);
   }
 
   /**
-   * Ordered close of one Session's background Shells, bounded per drain.
-   * The activation release gate calls this before refusing, so a close
-   * that can prove its stops never wedges on holds that ended.
+   * Ordered close of one Session's background Shells and Monitor watches,
+   * bounded per drain. The activation release gate calls this before
+   * refusing, so a close that can prove its stops never wedges on holds
+   * that ended.
    */
   async stopBackgroundSession(sessionId: string): Promise<void> {
-    await this.backgroundRegistry.stopSession(sessionId, 5_000);
+    await Promise.all([
+      this.backgroundRegistry.stopSession(sessionId, 5_000),
+      this.monitorRegistry.stopSession(sessionId, 5_000),
+    ]);
   }
 
   private static isCancelRequested(entry: JournalEntry): boolean {

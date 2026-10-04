@@ -166,7 +166,9 @@ interface Rig {
   readonly process: ManagedChildRunProcess;
 }
 
-function rig(options: { withSupervisor?: boolean } = {}): Rig {
+function rig(
+  options: { withSupervisor?: boolean; prepareRejects?: boolean } = {},
+): Rig {
   const process = fakeProcess('qwen-bg-call-1');
   const sink = fakeSink();
   const publisher = {
@@ -176,6 +178,9 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
     async prepare(request: unknown) {
       publisher.prepares += 1;
       publisher.preparedRequests.push(request);
+      if (options.prepareRejects === true) {
+        throw new Error('publisher route is gone');
+      }
       return { identity: IDENTITY, sink, publisher: undefined };
     },
     async finish(_identity: unknown, envelope: ToolResultEnvelope) {
@@ -313,9 +318,102 @@ describe('managed v3 Monitor watch', () => {
       },
     });
   });
+
+  it('captures the watch’s stderr byte for byte, like the Shell path', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    spec.onOutput('stdout', Buffer.from('size 42\n'));
+    spec.onOutput('stderr', Buffer.from('du: cannot read\n'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ctx.sink.writes).toEqual([
+      ['stdout', 'size 42\n'],
+      ['stderr', 'du: cannot read\n'],
+    ]);
+  });
+
+  it('settles the admission instead of parking it when the capture cannot be prepared', async () => {
+    const ctx = rig({ prepareRejects: true });
+    const view = await execute(ctx, MONITOR_INPUT);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Monitor watch capture could not be prepared: publisher route is gone',
+        },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    // The same call re-answers from the settled journal, never as a parked
+    // 'prepared' entry waiting on nothing.
+    const again = await execute(ctx, MONITOR_INPUT);
+    expect(again.state).toBe('settled');
+  });
+
+  it('holds and drains a live watch on the release route', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+    await ctx.executor.stopBackgroundSession('rs-1');
+    expect(ctx.publisher.finished).toHaveLength(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('drains a live watch when the worker closes', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+    await ctx.executor.close();
+    expect(ctx.publisher.finished).toHaveLength(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
 });
 
 describe('managed v3 background Shell', () => {
+  it('settles the admission instead of parking it when the capture cannot be prepared', async () => {
+    const ctx = rig({ prepareRejects: true });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Background Shell capture could not be prepared: publisher route is gone',
+        },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    const again = await execute(ctx);
+    expect(again.state).toBe('settled');
+  });
+
+  it('settles the start when the worker closes mid-admission', async () => {
+    const ctx = rig();
+    // The close lands between the entry gate and the admission recheck:
+    // it must never park the entry either.
+    vi.spyOn(ctx.publisher, 'prepare').mockImplementationOnce(async () => {
+      (ctx.executor as unknown as { closing: boolean }).closing = true;
+      return { identity: IDENTITY, sink: ctx.sink, publisher: undefined };
+    });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: { message: 'Managed Runtime worker is no longer active.' },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
   it('slows the pipes while the bounded capture drains', async () => {
     const ctx = rig();
     const stdout = ctx.process.child.stdout!;
