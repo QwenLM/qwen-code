@@ -78,7 +78,7 @@ export function writeWithBackupSync(
 
   try {
     const mode =
-      existing && fs.lstatSync(targetPath).isFile()
+      existing && fs.lstatSync(targetPath, { throwIfNoEntry: false })?.isFile()
         ? existing.mode & 0o777
         : undefined;
     fs.writeFileSync(tempPath, content, {

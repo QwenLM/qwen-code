@@ -20,6 +20,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
+    mkdtempSync: vi.fn(actual.mkdtempSync),
     writeFileSync: vi.fn(actual.writeFileSync),
     chmodSync: vi.fn(actual.chmodSync),
     copyFileSync: vi.fn(actual.copyFileSync),
@@ -35,6 +36,7 @@ describe('writeWithBackup', () => {
   let targetPath: string;
 
   beforeEach(() => {
+    vi.mocked(fs.mkdtempSync).mockImplementation(nativeFs.mkdtempSync);
     vi.mocked(fs.writeFileSync).mockImplementation(nativeFs.writeFileSync);
     vi.mocked(fs.chmodSync).mockImplementation(nativeFs.chmodSync);
     vi.mocked(fs.copyFileSync).mockImplementation(nativeFs.copyFileSync);
@@ -66,6 +68,23 @@ describe('writeWithBackup', () => {
       expect(fs.readFileSync(targetPath, 'utf8')).toBe(content);
       expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
     }
+  });
+
+  it('publishes a new file when the target disappears before the mode probe', () => {
+    nativeFs.writeFileSync(targetPath, 'old');
+    vi.mocked(fs.mkdtempSync).mockImplementationOnce((...args) => {
+      const directory = nativeFs.mkdtempSync(...args);
+      nativeFs.unlinkSync(targetPath);
+      return directory;
+    });
+
+    writeWithBackupSync(targetPath, 'new');
+
+    expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+    expect(fs.chmodSync).not.toHaveBeenCalled();
+    expect(fs.copyFileSync).not.toHaveBeenCalled();
+    expect(fs.renameSync).toHaveBeenCalledOnce();
+    expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
   });
 
   it.each(['ENOSYS', 'ENOTSUP'])(
@@ -191,7 +210,7 @@ describe('writeWithBackup', () => {
       (mask) => {
         const previousMask = process.umask(mask);
         try {
-          for (const mode of [0o600, 0o640, 0o644]) {
+          for (const mode of [0o600, 0o640, 0o644, 0o666]) {
             nativeFs.writeFileSync(targetPath, 'old');
             nativeFs.chmodSync(targetPath, mode);
             vi.mocked(fs.renameSync).mockImplementation((...args) => {
