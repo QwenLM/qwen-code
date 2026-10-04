@@ -621,12 +621,12 @@ describe('model catalog', () => {
   it('keeps a release date off the alias machinery', () => {
     // models.dev publishes dated ids whose last dash-then-digits boundary is
     // the release date, not a minor version. Respelling it commits a spelling
-    // no vendor publishes while the one a proxy plausibly sends
-    // (`grok-4-20-0309-reasoning`) stays uncovered, so the run has to be too
-    // long to be a minor version for the alias to fail closed. Pinned on the
-    // committed grok ids rather than a synthetic one, and on both spellings:
-    // the guard must not fall through to the id's other boundary and respell
-    // that instead.
+    // no vendor publishes, so a date fails closed under both of its shapes:
+    // the compact `MMDD` run is too long to be a minor version, and a full
+    // `-YYYY-MM-DD` tail is refused before the run length is consulted. Pinned
+    // on the committed grok ids rather than a synthetic one, and on both
+    // spellings: the guard must not fall through to the id's other boundary
+    // and respell that instead.
     expect(
       versionSpellingAlias('grok-4.20-0309-non-reasoning'),
     ).toBeUndefined();
@@ -634,6 +634,10 @@ describe('model catalog', () => {
       versionSpellingAlias('grok-4.20.0309-non-reasoning'),
     ).toBeUndefined();
     expect(versionSpellingAlias('kimi-k2-0905')).toBeUndefined();
+    // The day of a full date is one or two digits, so the run-length test
+    // alone reads it as a minor version. Three committed gpt-4o ids carry one.
+    expect(versionSpellingAlias('gpt-4o-2024-11-20')).toBeUndefined();
+    expect(versionSpellingAlias('gpt-4.1-2025-04-14')).toBeUndefined();
     // The guard stays narrow enough to keep respelling real minor versions,
     // including a leading-zero one (`0` is a date digit but not a date run).
     expect(versionSpellingAlias('qwen2-5-72b-instruct')).toBe(

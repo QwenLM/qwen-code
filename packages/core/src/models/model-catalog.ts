@@ -179,9 +179,8 @@ function readCache(cachePath: string): ModelCatalog | undefined {
  * date rather than a version: models.dev publishes dated ids such as
  * `grok-4.20-0309-non-reasoning`, whose last dash-then-digits boundary is the
  * date. Respelling that boundary commits a spelling no vendor or mirror
- * publishes while still missing the one a proxy plausibly sends
- * (`grok-4-20-0309-reasoning`), so a date fails closed instead. A leading zero
- * is not part of the test — `doubao-seed-2.0-code` is a real dotted minor.
+ * publishes, so a date fails closed instead. A leading zero is not part of the
+ * test — `doubao-seed-2.0-code` is a real dotted minor.
  */
 function isMinorVersionRun(run: string): boolean {
   return run.length <= 2;
@@ -199,20 +198,27 @@ function isMinorVersionRun(run: string): boolean {
  * `tokenLimit('qwen2.5-72b-instruct')` answered 262,144 instead of the
  * catalog's own 131,072, and the vision twin degraded to text-only.
  *
- * Only a version boundary is respelled. The digit run before the separator has
- * to be the last one in the prefix, the run after it has to be a whole segment,
- * and that run has to be short enough to be a minor version, so neither a size
- * suffix (`gemma-4-26b-a4b-it`) nor a release date
- * (`grok-4.20-0309-non-reasoning`) gets an alias. Returns undefined when the
- * key carries no version to respell.
+ * Only a version boundary is respelled. The key must not end in a release date,
+ * the digit run before the separator has to be the last one in the prefix, the
+ * run after it has to be a whole segment, and that run has to be short enough
+ * to be a minor version, so neither a size suffix (`gemma-4-26b-a4b-it`) nor a
+ * release date (`grok-4.20-0309-non-reasoning`, `gpt-4o-2024-11-20`) gets an
+ * alias. Returns undefined when the key carries no version to respell.
  */
 export function versionSpellingAlias(key: string): string | undefined {
+  // A full `-YYYY-MM-DD` date ends in a one- or two-digit day, which the
+  // run-length test below reads as a minor version. Respelling it would commit
+  // a key no vendor publishes, so a dated id keeps its regex answer.
+  if (/-\d{4}-\d{1,2}-\d{1,2}$/.test(key)) {
+    return undefined;
+  }
   const dotted = /^(.*\d)-(\d+)(?=-|$)/.exec(key);
   if (dotted) {
     // A date run returns here instead of falling through to the dashed branch
     // below: that branch respells the *other* boundary of the same id, so
-    // falling through would trade one unreachable key for a second one
-    // (`grok-4.20-0309-non-reasoning` -> `grok-4-20-0309-non-reasoning`).
+    // falling through would commit a second key no vendor publishes
+    // (`grok-4.20-0309-non-reasoning` -> `grok-4-20-0309-non-reasoning`). A
+    // dated id keeps its regex answer under both spellings.
     return isMinorVersionRun(dotted[2])
       ? `${dotted[1]}.${dotted[2]}${key.slice(dotted[0].length)}`
       : undefined;
