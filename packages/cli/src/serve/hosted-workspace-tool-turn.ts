@@ -243,7 +243,7 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'monitor',
     description:
-      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. The watch is admitted only on Sessions whose Monitor path is enabled.',
+      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. Observations aggregate by one-second-or-longer debounce windows, so `max_events` counts windows, not lines; `idle_timeout_ms` bounds the silent stretch between windows ending the watch. The watch is admitted only on Sessions whose Monitor path is enabled.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
