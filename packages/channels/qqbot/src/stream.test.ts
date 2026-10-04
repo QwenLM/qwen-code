@@ -2321,6 +2321,22 @@ describe('error recovery paths', () => {
     expect(completedTurns.size).toBe(0);
   });
 
+  it('disconnect() logs the buffered stream text length it drops', () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'buffered tail', 'sess-1');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    (ch as unknown as { disconnect: () => void }).disconnect();
+
+    expect(capturedStderr()).toContain(
+      'dropping 13 chars of buffered stream text on disconnect for sess-1',
+    );
+    expect(streamState(ch).size).toBe(0);
+    stderrSpy.mockRestore();
+  });
+
   it('onSessionDied cleans up stream state for dead session', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -4413,8 +4429,10 @@ describe('verified fix regressions', () => {
 
     // A residual arrives behind the in-flight send, so the settle re-arms the
     // park and reschedules the flush. Invalidating the scheduled retry's
-    // reconnect generation makes idleFlush discard it, leaving the park flag
-    // and the residual entry behind — the state this fix defends against.
+    // reconnect generation makes idleFlush take the parked-residual re-arm
+    // branch (not the discard branch), so the park flag and the residual entry
+    // survive for the completion path below to take over — the state this test
+    // exercises.
     onResponseChunk(ch, 'test-chat', 'tail', 'sess-A');
     resolveSend!(mockResponse(true));
     await drain();

@@ -448,6 +448,35 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     expect(logged).toContain('makes every session shared');
   });
 
+  it('with multiSession, warns of the conflict instead of prescribing sessionScope: thread', () => {
+    // multiSession pins sessionScope to 'user' at parse time, so obeying the
+    // normal advice would make the channel fail to start. The warning must
+    // name the mutual exclusion and never tell the operator to set 'thread'.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'user',
+      multiSession: true,
+    });
+    expect(ch.config.sessionScope).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain('multiSession requires sessionScope');
+    expect(logged).toContain('mutually exclusive');
+    expect(logged).toContain('turn multiSession off');
+    expect(logged).not.toContain("sessionScope: 'thread'");
+    expect(logged).not.toContain("needs sessionScope: 'thread'");
+  });
+
+  it('without multiSession, the groupAllPolicy advice still prescribes sessionScope: thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('mutually exclusive');
+  });
+
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });

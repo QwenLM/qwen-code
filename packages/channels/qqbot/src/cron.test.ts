@@ -80,17 +80,6 @@ vi.mock('@qwen-code/channel-base', () => ({
   sanitizeLogText: (text: string, _maxLen: number): string =>
     String(text).slice(0, 200),
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
-  // code-point boundaries, so a pair is never split.
-  truncateUtf16Units: (text: string, max: number): string => {
-    if (text.length <= max) return text;
-    let kept = '';
-    for (const ch of text) {
-      if (kept.length + ch.length > max) break;
-      kept += ch;
-    }
-    return kept;
-  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -565,6 +554,167 @@ describe('cronTextHandler', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain('Cron flush send error');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a route-blocked cron retry 1 re-schedules instead of dropping the text', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // The initial flush and retry 1 are blocked; retry 2 resolves a usable
+    // route, so the text must survive retry 1 and reach the wire.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls <= 2) return { block: 'transient' };
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-blocked', 'retry blocked text');
+    await flushSetImmediate();
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      {
+        buffer: string;
+        timer: unknown;
+        pendingRetry?: string;
+        retryCount?: number;
+      }
+    >;
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(cronBuffer.get('sess-retry-blocked')!.pendingRetry).toBe(
+      'retry blocked text',
+    );
+
+    // Retry 1 is blocked too: the retry's success body would drop the parked
+    // text silently, so it must be parked again for retry 2 instead.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(cronBuffer.has('sess-retry-blocked')).toBe(true);
+    expect(cronBuffer.get('sess-retry-blocked')!.pendingRetry).toBe(
+      'retry blocked text',
+    );
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'Cron flush retry failed',
+    );
+
+    // Retry 2's 10s backoff: its route resolves and the text reaches the wire.
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(cronBuffer.has('sess-retry-blocked')).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'retry blocked text' } },
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a permanently blocked cron retry 1 drops the text with a loss log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: routeCalls === 1 ? 'transient' : 'permanent' };
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-retry-perm', 'permanently blocked retry');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-retry-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush retry failed');
+    expect(logged).toContain('FALLBACK_FAILED');
+    expect(logged).toContain(
+      'outgoing route permanently blocked for test-chat',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a route-blocked cron re-retry drops the text with an exhaustion log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Every attempt is blocked transiently, so the final one is the re-retry.
+    pvt['resolveRoute'] = async () => ({ block: 'transient' });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-exhausted', 'exhaust me');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-exhausted')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush re-retry failed');
+    expect(logged).toContain(
+      'Cron flush retries exhausted, dropped 10 chars for session sess-exhausted',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a permanently blocked cron re-retry drops the text with a loss log', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async () => {
+      routeCalls++;
+      return { block: routeCalls === 3 ? 'permanent' : 'transient' };
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-reretry-perm', 're-retry permanently blocked');
+    await flushSetImmediate();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    expect(cronBuffer.has('sess-reretry-perm')).toBe(false);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Cron flush re-retry failed');
     expect(logged).toContain('FALLBACK_FAILED');
     expect(logged).toContain(
       'outgoing route permanently blocked for test-chat',

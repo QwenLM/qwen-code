@@ -550,8 +550,14 @@ export class QQChannel extends ChannelBase {
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
       config.sessionScope !== 'thread'
     ) {
+      // multiSession pins sessionScope to 'user' (enforced by the channel
+      // parser), so the scope advice below would tell the operator to set a
+      // combination the parser rejects on the next start. Name the conflict
+      // instead and leave the scope alone.
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context with each direct message kept private; 'chat_thread' routes groups the same but makes every direct message a shared session, and 'single' merges every group and direct message into one context. With 'user', group messages fragment per sender.\n`,
+        config.multiSession
+          ? `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}'. multiSession requires sessionScope 'user', so groupAllPolicy keyword/all and multiSession are mutually exclusive — groupAllPolicy keyword/all is not supported with multiSession enabled; change groupAllPolicy or turn multiSession off.\n`
+          : `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context with each direct message kept private; 'chat_thread' routes groups the same but makes every direct message a shared session, and 'single' merges every group and direct message into one context. With 'user', group messages fragment per sender.\n`,
       );
     }
 
@@ -730,7 +736,18 @@ export class QQChannel extends ChannelBase {
                     return;
                   }
                   this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
-                    .then(() => {
+                    .then((blocked) => {
+                      // A route-blocked send resolves without reaching the wire,
+                      // so throw it into the .catch() below instead of running
+                      // the success body and dropping toFlush.
+                      if (blocked !== undefined) {
+                        throw blocked === 'permanent'
+                          ? new DeliveryError(
+                              'FALLBACK_FAILED',
+                              `outgoing route permanently blocked for ${retryTarget.chatId}`,
+                            )
+                          : new Error('outgoing route unresolved');
+                      }
                       entry!.pendingRetry = '';
                       if (
                         !entry!.buffer &&
@@ -786,7 +803,19 @@ export class QQChannel extends ChannelBase {
                             retryTarget2.chatId,
                             toFlush,
                           )
-                            .then(() => {
+                            .then((blocked) => {
+                              // Same as the first retry: a route-blocked send
+                              // resolves without reaching the wire, so throw it
+                              // into the .catch() below rather than running the
+                              // success body and dropping toFlush.
+                              if (blocked !== undefined) {
+                                throw blocked === 'permanent'
+                                  ? new DeliveryError(
+                                      'FALLBACK_FAILED',
+                                      `outgoing route permanently blocked for ${retryTarget2.chatId}`,
+                                    )
+                                  : new Error('outgoing route unresolved');
+                              }
                               entry!.pendingRetry = '';
                               if (
                                 !entry!.buffer &&
@@ -1349,7 +1378,8 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Resolve API routing: handles disposed check, token refresh, chatId validation,
-   * sandbox detection, and C2C/group path selection. Returns null if any guard fails.
+   * sandbox detection, and C2C/group path selection. When a guard fails it
+   * returns `{ block }` naming whether a retry could help, instead of a route.
    */
   private async resolveRoute(
     chatId: string,
@@ -1470,8 +1500,13 @@ export class QQChannel extends ChannelBase {
       );
     }
     this._inCronFlow = 0;
-    for (const [, state] of this.streamState) {
+    for (const [sessionId, state] of this.streamState) {
       if (state.timer) clearTimeout(state.timer);
+      if (state.buffer) {
+        process.stderr.write(
+          `[QQ:${this.name}] dropping ${state.buffer.length} chars of buffered stream text on disconnect for ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+      }
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
@@ -2860,7 +2895,7 @@ export class QQChannel extends ChannelBase {
               chatId,
               replyText,
               this.resolveResponseReplyContext(sessionId),
-              this.getResponseSourceLabel(sessionId),
+              segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
             ),
           );
         }
@@ -4439,11 +4474,11 @@ export class QQChannel extends ChannelBase {
       }
       // TTL safety net for orphaned per-session anchors: every release path
       // cleans its own entry, but any missed release would otherwise leak
-      // the anchor (and its msgSeqMap counter) forever. The release helper
-      // guards on the streamState entry, so an expired anchor still held by
-      // a live stream is left alone — and a long stream's anchor, once
-      // expired, was already dropped by onResponseChunk's TTL check, so
-      // nothing here can double-release.
+      // the anchor (and its msgSeqMap counter) forever. Passing the entry's
+      // own msgId as the identity expectation always matches, so the anchor
+      // entry IS deleted here even when a live stream still holds it; the
+      // veto lives in reclaimMsgSeq/isMsgSeqStillInUse, which keeps only the
+      // msg_seq counter alive while a holder remains.
       // No dirty flag here: releaseSessionReplyAnchor already persists
       // internally when it actually drops the msgSeqMap counter — marking
       // dirty unconditionally would force a full serialization every 60s
