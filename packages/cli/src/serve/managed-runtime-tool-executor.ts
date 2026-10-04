@@ -37,6 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   AnyDeclarativeTool,
+  AnyToolInvocation,
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
@@ -802,6 +803,7 @@ export class ManagedToolExecutor {
     let payload: ManagedToolResultPayload;
     try {
       const params = structuredClone(entry.input);
+      let fileInvocation: AnyToolInvocation | undefined;
       if (
         directory &&
         entry.toolName !== ShellTool.Name &&
@@ -817,6 +819,11 @@ export class ManagedToolExecutor {
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
+        );
+        // Validation unescapes file_path. Check and record the path this
+        // invocation consumes without applying that normalization twice.
+        fileInvocation = sessionIdContext.run(sessionId, () =>
+          tool.build(params),
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
@@ -913,7 +920,7 @@ export class ManagedToolExecutor {
       }
       const invoke = () =>
         sessionIdContext.run(sessionId, () => {
-          const invocation = tool.build(params);
+          const invocation = fileInvocation ?? tool.build(params);
           return entry.version === 3 && entry.captureSink
             ? (invocation as ShellToolInvocation).execute(
                 entry.controller.signal,

@@ -1406,6 +1406,93 @@ describe('Managed context tool gate', () => {
     ).toBe('mine too');
   });
 
+  it.skipIf(process.platform === 'win32').each([
+    ['read_file', {}],
+    ['write_file', { content: 'new fixture' }],
+    ['edit', { old_string: 'original fixture', new_string: 'updated fixture' }],
+  ] as const)(
+    'refuses %s when the normalized path belongs to another Session',
+    async (toolName, args) => {
+      const root = workspace(['services/api', 'services/web']);
+      const original = path.join(root, 'services/web/note.txt');
+      const created = path.join(root, 'services/web/new.txt');
+      fs.writeFileSync(original, 'original fixture');
+      fs.symlinkSync('../web', path.join(root, 'services/api/shared notes'));
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      const filePath = String.raw`shared\ notes/${toolName === 'write_file' ? 'new' : 'note'}.txt`;
+      const answer = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName,
+          input: { file_path: filePath, ...args },
+        })
+      ).json();
+
+      expect(answer.result.executionStatus).toBe('error');
+      expect(answer.result.error.message).toBe(
+        `Path '${filePath}' is not within the Session working directory.`,
+      );
+      expect(JSON.stringify(answer)).not.toContain('original fixture');
+      expect(fs.readFileSync(original, 'utf8')).toBe('original fixture');
+      expect(fs.existsSync(created)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retains a literal backslash left by file-tool path normalization',
+    async () => {
+      const root = workspace(['services/api', 'services/web']);
+      fs.mkdirSync(path.join(root, String.raw`services/api/shared\ notes`));
+      fs.symlinkSync('../web', path.join(root, 'services/api/shared notes'));
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      const answer = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-1', ''),
+          toolName: 'write_file',
+          input: {
+            file_path: String.raw`shared\\ notes/new.txt`,
+            content: 'owned fixture',
+          },
+        })
+      ).json();
+
+      expect(answer.result.executionStatus).toBe('success');
+      expect(
+        fs.readFileSync(
+          path.join(root, String.raw`services/api/shared\ notes/new.txt`),
+          'utf8',
+        ),
+      ).toBe('owned fixture');
+      expect(fs.existsSync(path.join(root, 'services/web/new.txt'))).toBe(
+        false,
+      );
+    },
+  );
+
   it.each(['own', 'sibling'])(
     'resolves a dangling leaf before writing to the %s directory',
     async (owner) => {
