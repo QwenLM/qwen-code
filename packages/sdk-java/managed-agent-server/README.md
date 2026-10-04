@@ -99,8 +99,9 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in Workspace file
-Turns described in the G0 section below.
+process (the credentialed launch is spelled out in the Full WebShell
+dual-path development entry below). It supports durable no-tool Sessions and
+the opt-in Workspace file Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -206,9 +207,12 @@ Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
 authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
 conflict or uncertain creation outcome. A known existing binding only loads.
-An in-memory Hosted attachment is bound to one normalized Store endpoint,
-tenant, workspace, and Harness writer generation; an attach or cold-load race
-with a different identity fails closed.
+An in-memory Hosted attachment coalesces on `(tenantId, sessionId)`, so another
+tenant cannot reuse the in-memory Session; this slice does not additionally
+compare a normalized Store endpoint, workspace, or Harness writer generation
+on attach, and an attach or cold-load race carrying a different such identity
+is not rejected. That `managed_session_store_conflict` fence is target design
+for the integration slice, not shipped behavior.
 
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
@@ -294,17 +298,30 @@ The full WebShell can keep an ordinary Qwen daemon for its existing chat,
 workspace, settings, and terminal surfaces while routing only the Managed
 panel to this Spring service. The two servers must bind different ports:
 keep the ordinary daemon on 4170 (the vite proxy's default) and start the
-private Hosted Harness on a distinct one —
+private Hosted Harness on a distinct one. The profile refuses to start
+without credentials, so the launch reuses the same pair exported for Spring
+above — CLI-side the token travels as `QWEN_SERVER_TOKEN` and the capability
+digest as `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` — plus `--no-web`, which
+the profile requires and no environment variable supplies:
 
 ```bash
-qwen serve --profile hosted-harness --port 4171
+QWEN_SERVER_TOKEN="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \
+QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
+qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
 ```
 
-— and point Spring at it with the matching base URL:
+— and Spring must point at it with the matching base URL. The value is read
+once at JVM startup, so if `mvn spring-boot:run` is already up on the 4170
+value exported above, restart it with the override in place:
 
 ```bash
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
 ```
+
+`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+port on a collision, and 4171 is exactly where a daemon displaced from 4170
+lands. Confirm each server's bound port in its startup line before exporting
+the base URL above.
 
 With both up, run from the repository root:
 

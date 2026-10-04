@@ -239,4 +239,38 @@ describe('managed-agent-server e2e runner', () => {
     expect(namedScripts('see `scripts/nope.ts`')).toEqual(['scripts/nope.ts']);
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
   });
+
+  it('pins every fenced hosted-harness launch block in the server README to a startable form', () => {
+    // validateHostedHarnessProfile rejects a bare
+    // `qwen serve --profile hosted-harness`: a fenced, presented-as-runnable
+    // block must carry --no-web plus a token source and a digest source.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const fencedBlocks = [...readme.matchAll(/```bash\n([\s\S]*?)```/g)]
+      .map((match) => match[1])
+      .filter((block) => block.includes('--profile hosted-harness'));
+    expect(fencedBlocks.length).toBeGreaterThan(0);
+    for (const block of fencedBlocks) {
+      expect(block).toContain('--no-web');
+      expect(block).toContain('QWEN_SERVER_TOKEN');
+      expect(block).toContain('QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST');
+    }
+  });
+
+  it('pairs the 4171 base-url export with a startup-order note in the dual-path entry', () => {
+    // The base URL is read once at JVM startup, so the section that moves
+    // Spring to 4171 must say the value applies before (or via a restart
+    // of) `mvn spring-boot:run`, or the reader's running server stays on
+    // the 4170 value exported in Prerequisites.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const start = readme.indexOf(
+      '## Full WebShell dual-path development entry',
+    );
+    const end = readme.indexOf('## Embedded Runtime Broker');
+    expect(start).toBeGreaterThan(-1);
+    const slice = readme.slice(start, end === -1 ? undefined : end);
+    expect(slice).toContain(
+      "QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'",
+    );
+    expect(slice).toMatch(/read once at JVM startup|restart/i);
+  });
 });
