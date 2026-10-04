@@ -13,7 +13,7 @@
 Hosted Managed Session 不再把 Runtime 本地 JSONL 作为生产权威，而采用混合长期存储：
 
 - MySQL 保存私有日志头、writer generation 与 lease、幂等事务回执、已提交记录的精确字节、资源引用、恢复状态，以及不超过 64 KiB 的不可变资源正文。
-- OSS 保存超过 64 KiB 的不可变资源正文，例如较大消息、checkpoint、工具结果、文件历史和恢复产物。
+- OSS 保存超过 64 KiB 的不可变资源正文，例如 checkpoint、工具结果、文件历史和恢复产物。超限的消息正文不等待 OSS 路径：写入方将其按序切分为 inline 的 `managed-message-part` 资源，并由一份 `managed-message-chunks` 清单引用——与 Hook 消息快照已有的形态相同——长回答因此无需 OSS 即可提交。
 - TypeScript Harness 仍是 Session 语义权威：由它校验并生成 Managed 记录。Java 存储模块只负责物理提交和 fencing，不运行 Agent Loop，也不生成私有记录。
 - 如为兼容或诊断生成本地 JSONL，它只是可丢弃缓存/导出格式，不是第二权威；Harness Pod 本地盘丢失不能导致 Session 丢失。
 - 独立 CLI 和开发部署继续使用现有本地文件后端。Session 创建时只选择一个后端，不对两个权威做双写。
@@ -147,7 +147,7 @@ interface ManagedSessionResourceStore {
 - `LocalManagedSessionResourceStore` 继续作为本地资源适配器。
 - `HttpManagedSessionJournalStore` 与 `HttpManagedSessionResourceStore` 在 hosted 模式调用 Java 内部 API。
 
-远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
+远端 resource adapter 将不超过 64 KiB 的资源暂存在 Harness 中，直到所属 journal 事务把资源与引用原子写入 MySQL。较大资源在该事务之前发布到 OSS。两类记录不受此边界约束：Hook 消息快照与 reader-facing 消息正文在超过阈值时切分为 inline parts（`managed-hook-message-part` / `managed-message-part`）并由切分清单引用，因此永远不需要 OSS。两条路径返回相同的 `DurableRef`，reader 不从 ref 猜测物理位置。v1 使用固定阈值，避免形成按部署变化的行为矩阵；以后只有通过带 storage version 的兼容决策才能调整。
 
 远端提交一次接收一个完整 Managed 事务：通常是一至三条 event record 加一条 commit marker，并带上待提交的 inline resources。Java 保存 UTF-8 JSONL 精确字节及 SHA-256，不解析或重新序列化私有事件正文；它只校验外层 scope、大小、记录数量、sequence 范围、引用列表、lease 和摘要链。
 
@@ -334,23 +334,23 @@ MySQL 不可用时停止接受新私有提交并实施有界背压。在 durable
 
 ## 13. 验收矩阵
 
-| 场景                                     | 必需结果                                                                             |
-| ---------------------------------------- | ------------------------------------------------------------------------------------ |
-| 两个 Harness worker 同时取得同一 Session | 只有一个 generation 可提交；旧 worker 在任何字节可见前收到 conflict                  |
-| Commit 成功但 HTTP 响应丢失              | 原 command ID 与 digest 返回原回执，不重复 sequence 或内容                           |
-| 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                       |
-| Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                        |
-| 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验 |
-| SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                 |
-| Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                   |
-| 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                 |
-| 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                              |
-| owner 在提交 `await_runtime` 后崩溃      | 替代 owner 只启动一次同一 Broker execution，消费其回执并只产生一个公共终态事件       |
-| Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                           |
-| 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                 |
-| MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                           |
-| 本地 cache 损坏或缺失                    | 重建或忽略；以 durable head 与 resource digest 为准                                  |
-| 活动工作期间删除 Session                 | 封闭准入，execution 结算或阻塞，提交 tombstone，再安全回收资源                       |
+| 场景                                     | 必需结果                                                                                                                           |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 两个 Harness worker 同时取得同一 Session | 只有一个 generation 可提交；旧 worker 在任何字节可见前收到 conflict                                                                |
+| Commit 成功但 HTTP 响应丢失              | 原 command ID 与 digest 返回原回执，不重复 sequence 或内容                                                                         |
+| 相同幂等键但内容不同                     | conflict 并告警，两份 payload 都不能覆盖另一份                                                                                     |
+| Object 上传后、SQL 提交前崩溃            | Session 看不到该 Object；它是可安全回收的孤儿                                                                                      |
+| 资源为 64 KiB 或 64 KiB 加 1 字节        | 前者使用 `MYSQL_INLINE`，后者使用 `OSS_OBJECT`；两者使用相同 `DurableRef` 和摘要校验（切分的消息正文则以 inline parts 加清单提交） |
+| SQL 提交后、cache/SSE 前崩溃             | 恢复读到已提交事务；cache 和公共投影追赶但不重写事务                                                                               |
+| Harness Pod 与本地盘删除                 | 新 Harness 恢复 journal、checkpoint 和全部引用资源                                                                                 |
+| 资源缺失或摘要不符                       | `BLOCKED_RESOURCE`；不从空状态或未经证明的旧状态继续                                                                               |
+| 工具结果未知                             | `BLOCKED_EXECUTION`；不自动重复调用工具                                                                                            |
+| owner 在提交 `await_runtime` 后崩溃      | 替代 owner 只启动一次同一 Broker execution，消费其回执并只产生一个公共终态事件                                                     |
+| Workspace 快照/挂载缺失                  | 历史仍可读，执行状态为 `BLOCKED_WORKSPACE`                                                                                         |
+| 伪造 tenant 或 Session scope             | 返回 Object URL 或私有字节前拒绝请求                                                                                               |
+| MySQL 或 OSS 不可用                      | 有界背压和明确失败，不发出虚假 durable ACK                                                                                         |
+| 本地 cache 损坏或缺失                    | 重建或忽略；以 durable head 与 resource digest 为准                                                                                |
+| 活动工作期间删除 Session                 | 封闭准入，execution 结算或阻塞，提交 tombstone，再安全回收资源                                                                     |
 
 ## 14. 待确认的部署参数
 

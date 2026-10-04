@@ -13,7 +13,7 @@ Status: D0, D1a, and D1b are implemented in the current feature-branch working t
 For Hosted Managed Sessions, replace Runtime-local JSONL as the production authority with a hybrid durable store:
 
 - MySQL stores the private journal head, writer generation and lease, idempotent transaction receipts, exact committed record bytes, resource references, recovery status, and immutable resource bodies up to 64 KiB.
-- OSS stores immutable resource bodies larger than 64 KiB, such as large messages, checkpoints, tool outcomes, file-history data, and recovery artifacts.
+- OSS stores immutable resource bodies larger than 64 KiB, such as checkpoints, tool outcomes, file-history data, and recovery artifacts. Oversized message bodies do not wait for the OSS path: the writer splits them into ordered inline `managed-message-part` resources behind a `managed-message-chunks` manifest — the shape Hook message snapshots already used — so a long answer commits without OSS.
 - The TypeScript Harness remains the semantic Session authority: it validates and creates Managed records. The Java storage module is the physical commit and fencing service; it does not run the Agent loop or synthesize private records.
 - A local JSONL, if materialized for compatibility or diagnostics, is a disposable cache/export. It is never a second authority and losing the Harness Pod disk does not lose the Session.
 - Standalone CLI and development deployments retain the existing local-file backend. A Session selects one backend when it is created and never dual-writes two authorities.
@@ -147,7 +147,7 @@ Implementations:
 - `LocalManagedSessionResourceStore` remains the local resource adapter.
 - `HttpManagedSessionJournalStore` and `HttpManagedSessionResourceStore` use the internal Java API for hosted mode.
 
-The remote resource adapter keeps resources up to and including 64 KiB staged in the Harness until their owning journal transaction commits them atomically into MySQL. Larger resources are published to OSS before that transaction. Both paths return the same `DurableRef`; readers do not infer placement from the ref. The fixed v1 threshold avoids a per-deployment behavior matrix and can change only with a storage-versioned compatibility decision.
+The remote resource adapter keeps resources up to and including 64 KiB staged in the Harness until their owning journal transaction commits them atomically into MySQL. Larger resources are published to OSS before that transaction. Two record families are exempt from that boundary: Hook message snapshots and reader-facing message bodies are split into inline parts (`managed-hook-message-part` / `managed-message-part`) behind a chunk manifest when they exceed the threshold, so they never require OSS. Both paths return the same `DurableRef`; readers do not infer placement from the ref. The fixed v1 threshold avoids a per-deployment behavior matrix and can change only with a storage-versioned compatibility decision.
 
 The remote commit operation accepts one complete Managed transaction: normally one to three event records followed by its commit marker, plus any staged inline resources. Java stores the exact UTF-8 JSONL bytes and their SHA-256 digest; it does not parse or reserialize private event bodies. It validates the outer scope, size, record count, sequence range, reference list, lease, and digest chain.
 
@@ -334,23 +334,23 @@ Exit condition: the failure matrix below passes on the deployed MySQL and OSS pr
 
 ## 13. Acceptance Matrix
 
-| Scenario                                     | Required result                                                                                               |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Two Harness workers acquire the same Session | One generation can commit; the stale worker receives a conflict before any bytes become visible               |
-| Commit succeeds but HTTP response is lost    | Same command ID and digest returns the original receipt; no duplicate sequence or content                     |
-| Same idempotency key with different content  | Conflict and alert; neither payload overwrites the other                                                      |
-| Crash after object upload, before SQL commit | Session cannot see the object; it remains a safely collectible orphan                                         |
-| Resource is 64 KiB or 64 KiB plus one byte   | The first uses `MYSQL_INLINE`, the second uses `OSS_OBJECT`; both use the same `DurableRef` and digest checks |
-| Crash after SQL commit, before cache/SSE     | Recovery reads the committed transaction; cache and public projection catch up without rewriting it           |
-| Harness Pod and local disk are deleted       | New Harness restores journal, checkpoint, and all referenced resources                                        |
-| Resource missing or digest mismatch          | `BLOCKED_RESOURCE`; never continue from an empty or older unproven state                                      |
-| Tool result outcome is unknown               | `BLOCKED_EXECUTION`; never automatically repeat the tool call                                                 |
-| Owners crash after `await_runtime` commit    | Replacement starts the same Broker execution once, consumes its receipt, and emits one public terminal event  |
-| Workspace snapshot/mount is absent           | History remains readable, execution is `BLOCKED_WORKSPACE`                                                    |
-| Tenant or Session scope is forged            | Request is rejected before object URL or private bytes are returned                                           |
-| MySQL or OSS is unavailable                  | Bounded backpressure and explicit failure; no false durable acknowledgement                                   |
-| Local cache is corrupt or absent             | Rebuild or ignore it; durable head and resource digests determine truth                                       |
-| Session is deleted during active work        | Admission closes, executions settle or block, tombstone commits, then resources are reclaimed safely          |
+| Scenario                                     | Required result                                                                                                                                                                        |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two Harness workers acquire the same Session | One generation can commit; the stale worker receives a conflict before any bytes become visible                                                                                        |
+| Commit succeeds but HTTP response is lost    | Same command ID and digest returns the original receipt; no duplicate sequence or content                                                                                              |
+| Same idempotency key with different content  | Conflict and alert; neither payload overwrites the other                                                                                                                               |
+| Crash after object upload, before SQL commit | Session cannot see the object; it remains a safely collectible orphan                                                                                                                  |
+| Resource is 64 KiB or 64 KiB plus one byte   | The first uses `MYSQL_INLINE`, the second uses `OSS_OBJECT`; both use the same `DurableRef` and digest checks (a chunked message body instead commits as inline parts plus a manifest) |
+| Crash after SQL commit, before cache/SSE     | Recovery reads the committed transaction; cache and public projection catch up without rewriting it                                                                                    |
+| Harness Pod and local disk are deleted       | New Harness restores journal, checkpoint, and all referenced resources                                                                                                                 |
+| Resource missing or digest mismatch          | `BLOCKED_RESOURCE`; never continue from an empty or older unproven state                                                                                                               |
+| Tool result outcome is unknown               | `BLOCKED_EXECUTION`; never automatically repeat the tool call                                                                                                                          |
+| Owners crash after `await_runtime` commit    | Replacement starts the same Broker execution once, consumes its receipt, and emits one public terminal event                                                                           |
+| Workspace snapshot/mount is absent           | History remains readable, execution is `BLOCKED_WORKSPACE`                                                                                                                             |
+| Tenant or Session scope is forged            | Request is rejected before object URL or private bytes are returned                                                                                                                    |
+| MySQL or OSS is unavailable                  | Bounded backpressure and explicit failure; no false durable acknowledgement                                                                                                            |
+| Local cache is corrupt or absent             | Rebuild or ignore it; durable head and resource digests determine truth                                                                                                                |
+| Session is deleted during active work        | Admission closes, executions settle or block, tombstone commits, then resources are reclaimed safely                                                                                   |
 
 ## 14. Open Deployment Parameters
 

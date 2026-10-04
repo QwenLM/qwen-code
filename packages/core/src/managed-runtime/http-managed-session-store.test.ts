@@ -1391,6 +1391,106 @@ describe('HTTP Managed Session store', () => {
       ),
     ).rejects.toThrow(/OSS storage is not enabled/);
   });
+
+  it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const open = async (writerId: string, writerToken: string) => {
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId,
+        writerToken,
+        fetchFn: server.fetch,
+      });
+      const create =
+        writerId === 'harness-a'
+          ? {
+              definitionRef: await stores.resourceStore.publish(
+                'managed-session-definition',
+                Buffer.from('{}', 'utf8'),
+              ),
+              rootSnapshotRef: await stores.resourceStore.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}', 'utf8'),
+              ),
+              createdBy: 'test',
+            }
+          : undefined;
+      return openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: writerId,
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        ...(create === undefined ? {} : { create }),
+      });
+    };
+    const first = await open('harness-a', TOKEN_A);
+    const record = {
+      uuid: 'record-assistant-big',
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-09-22T00:00:00.000Z',
+      type: 'assistant' as const,
+      cwd: '/workspace',
+      version: 'test',
+      message: {
+        role: 'model' as const,
+        parts: [{ text: '长回答'.repeat(25_000) }],
+      },
+    };
+    await new ManagedSessionMessageProjection(
+      first.authority,
+      first.resources,
+    ).commit(
+      {
+        operation: 'message.commit',
+        commandId: 'message-big',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'c'.repeat(64),
+      },
+      { record },
+      { class: 'harness', activation: first.activation },
+    );
+    const uploaded = server.commits.at(-1)?.['resources'] as Array<{
+      resourceId: string;
+      kind: string;
+      bytesBase64?: string;
+    }>;
+    const manifests = uploaded.filter(
+      (resource) => resource.kind === 'managed-message-chunks',
+    );
+    const parts = uploaded.filter(
+      (resource) => resource.kind === 'managed-message-part',
+    );
+    expect(manifests).toHaveLength(1);
+    expect(parts.length).toBeGreaterThan(1);
+    // Every part travels with the transaction, each under the inline limit.
+    for (const part of parts) {
+      expect(
+        Buffer.from(String(part.bytesBase64), 'base64').byteLength,
+      ).toBeLessThanOrEqual(64 * 1024);
+    }
+    await first.close();
+
+    const second = await open('harness-b', TOKEN_B);
+    const projected = await new ManagedSessionMessageProjection(
+      second.authority,
+      second.resources,
+    ).project();
+    expect(projected).toEqual([record]);
+    await second.close();
+  });
 });
 
 class FakeManagedSessionStore {

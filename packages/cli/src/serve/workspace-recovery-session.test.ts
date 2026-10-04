@@ -13,7 +13,10 @@ import {
 import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { scanManagedSessionJournal } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -265,7 +268,10 @@ function fixture() {
   };
 }
 
-async function hostedModelFixture(settled = true) {
+async function hostedModelFixture(
+  settled = true,
+  turn?: (session: ManagedSession) => Promise<void>,
+) {
   const f = fixture();
   f.transactions.length = 0;
   const records: unknown[] = [];
@@ -334,6 +340,7 @@ async function hostedModelFixture(settled = true) {
           await complete(true, [{ totalTokenCount: 7 }]);
         },
       );
+      if (turn) await turn(session);
       if (settled)
         await session.sink.write({
           uuid: 'turn-result',
@@ -906,6 +913,44 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       'unfinished Harness work',
     );
+  });
+
+  it('verifies a settled turn whose assistant message is chunked past the inline limit', async () => {
+    const text = '长'.repeat(70_000);
+    const f = await hostedModelFixture(true, async (session) => {
+      await session.sink.write({
+        uuid: 'big-answer',
+        parentUuid: null,
+        sessionId: SESSION,
+        timestamp: '2026-10-02T00:00:01.000Z',
+        cwd: '/original/cwd',
+        version: 'hosted-harness/1',
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text }] },
+      });
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    // Manifest and parts were read and pinned through the reference closure.
+    const kinds = [...f.refs.values()].map((ref) => ref.kind);
+    expect(kinds).toContain('managed-message-chunks');
+    expect(kinds).toContain('managed-message-part');
+    const manifest = [...f.refs.values()].find(
+      (ref) => ref.kind === 'managed-message-chunks',
+    )!;
+    const parts = (
+      JSON.parse(f.resources.get(manifest.resourceId)!.toString('utf8')) as {
+        parts: ManagedSessionDurableRef[];
+      }
+    ).parts;
+    const reassembled = Buffer.concat(
+      parts.map((part) => f.resources.get(part.resourceId)!),
+    );
+    const record = JSON.parse(reassembled.toString('utf8')) as {
+      message?: { parts?: Array<{ text?: string }> };
+    };
+    expect(record.message?.parts?.[0]?.text).toBe(text);
   });
 
   it('distinguishes an absent head from a writer-created head without genesis', async () => {

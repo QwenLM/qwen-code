@@ -26,6 +26,10 @@ import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
+  MANAGED_MESSAGE_CHUNKS_KIND,
+  managedMessageChunkParts,
+} from './managed-message-chunks.js';
+import {
   HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
   type DurableToolResultResourceStore,
 } from './resource-tool-result-store.js';
@@ -290,6 +294,9 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
             parts: ManagedSessionDurableRef[];
           };
           pending.push(...collectRefs(manifest.parts));
+        } else if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
+          // A chunked message commits the parts its manifest names.
+          pending.push(...managedMessageChunkParts(ref.kind, staged.bytes));
         }
       }
     }

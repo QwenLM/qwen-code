@@ -40,6 +40,7 @@ import {
   parseToolResultEnvelope,
   parseToolResultManifestBytes,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
 import {
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
@@ -1002,7 +1003,8 @@ async function eventEnvelope(
     if (ref && typeof ref === 'object') {
       const message = JSON.parse(
         (
-          await session.managed.resources.read(
+          await readManagedMessageBody(
+            (bodyRef) => session.managed.resources.read(bodyRef),
             ref as unknown as ManagedSessionDurableRef,
           )
         ).toString('utf8'),

@@ -23,6 +23,7 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
@@ -32,7 +33,10 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  ManagedSessionRecordError,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
@@ -3894,6 +3898,84 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).get(`/session/${SESSION_ID}/status`),
     ).set('X-Qwen-Client-Id', created.body.clientId as string);
     expect(gone.status).toBe(404);
+  });
+
+  it('completes a turn whose answer exceeds the 64KB inline resource limit', async () => {
+    // Past the limit the durable message record commits as chunks; the turn
+    // used to fail after the whole answer had already streamed (#13326).
+    const text = '长'.repeat(70_000);
+    state.model.mockImplementationOnce(async () => ({
+      text,
+      model: 'test-model',
+    }));
+    // This suite swaps the HTTP store for the local one, which has no inline
+    // limit; enforce the real store's bound so the chunked path is pinned.
+    const maxInlineBytes =
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      if (bytes.byteLength > maxInlineBytes) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxInlineBytes}-byte inline limit; OSS storage is not enabled.`,
+        );
+      }
+      return publish.call(this, kind, bytes);
+    });
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', created.body.clientId as string);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
+      ]),
+    );
+    expect(
+      (transcript.body.events as Array<Record<string, unknown>>).filter(
+        (event) => event['type'] === 'turn_error',
+      ),
+    ).toEqual([]);
+    const answer = (
+      transcript.body.events as Array<{
+        type: string;
+        data?: {
+          update?: { sessionUpdate?: string; content?: { text?: string } };
+        };
+      }>
+    ).find(
+      (event) =>
+        event.type === 'session_update' &&
+        event.data?.update?.sessionUpdate === 'agent_message_chunk',
+    );
+    expect(answer?.data?.update?.content?.text).toBe(text);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   it('rejects unsupported prompt content before model or tool execution', async () => {
