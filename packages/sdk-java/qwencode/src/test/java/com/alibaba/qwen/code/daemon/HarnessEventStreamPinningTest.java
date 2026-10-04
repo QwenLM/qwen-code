@@ -12,7 +12,6 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -125,7 +124,7 @@ class HarnessEventStreamPinningTest {
             throws Exception {
         assumeTrue(virtualThreadsAvailable(),
                 "virtual threads unavailable on this JDK");
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
+        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors());
         int streamCount = carriers + 2;
         List<HarnessEventStream> streams = new ArrayList<>();
         List<Thread> readers = new ArrayList<>();

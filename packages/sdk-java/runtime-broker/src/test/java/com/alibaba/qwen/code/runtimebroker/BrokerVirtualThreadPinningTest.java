@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.net.URI;
 import java.time.Clock;
@@ -15,7 +14,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,7 +59,6 @@ class BrokerVirtualThreadPinningTest {
     @Timeout(120)
     void guardedBlockingRepositoryCallsMustNotStarveVirtualThreads()
             throws Exception {
-        assumeTrue(true, "this module runs on JDK 21+");
         Clock clock = Clock.fixed(START, ZoneOffset.UTC);
         sessions = new LatchedSessionRepository(
                 new InMemoryRuntimeSessionRepository());
@@ -73,7 +70,7 @@ class BrokerVirtualThreadPinningTest {
                 new InMemoryToolExecutionRepository(clock),
                 "broker-pinning", Duration.ofMinutes(1),
                 Duration.ofSeconds(1), clock, () -> "execution");
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
+        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors());
         int callerCount = carriers + 2;
         // One Session per caller, so each parks inside its own
         // SessionContext guard — sharing one Session would serialize the
@@ -145,7 +142,7 @@ class BrokerVirtualThreadPinningTest {
         LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate) {
             this.delegate = delegate;
             arrived = new CountDownLatch(
-                    ForkJoinPool.getCommonPoolParallelism() + 2);
+                    Integer.getInteger("jdk.virtualThreadScheduler.parallelism", Runtime.getRuntime().availableProcessors()) + 2);
             open = new CountDownLatch(1);
         }
 
