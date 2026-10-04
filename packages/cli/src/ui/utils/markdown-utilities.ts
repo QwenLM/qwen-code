@@ -56,18 +56,24 @@ const findNextFence = (
   while (lineStart < content.length) {
     const newlineIndex = content.indexOf('\n', lineStart);
     const lineEnd = newlineIndex === -1 ? content.length : newlineIndex;
-    const line = content.slice(lineStart, lineEnd);
-    const match = CODE_FENCE_RE.exec(line);
-    if (match) {
-      const delimiter = match[1]!;
-      const index = lineStart + line.indexOf(delimiter);
-      if (index >= from) {
-        return {
-          index,
-          char: delimiter[0] === '`' ? '`' : '~',
-          length: delimiter.length,
-        };
+    let delimiterStart = lineStart;
+    while (content[delimiterStart] === ' ') delimiterStart++;
+    if (
+      delimiterStart >= from &&
+      (content.startsWith('```', delimiterStart) ||
+        content.startsWith('~~~', delimiterStart))
+    ) {
+      const match = CODE_FENCE_RE.exec(content.slice(lineStart, lineEnd));
+      if (!match) {
+        lineStart = lineEnd + 1;
+        continue;
       }
+      const delimiter = match[1]!;
+      return {
+        index: delimiterStart,
+        char: delimiter[0] === '`' ? '`' : '~',
+        length: delimiter.length,
+      };
     }
     lineStart = lineEnd + 1;
   }
@@ -87,6 +93,7 @@ const findNextFence = (
 const getEnclosingFence = (
   content: string,
   indexToTest: number,
+  onClosed?: (startIndex: number, endIndex: number) => void,
 ): { startIndex: number; delimiter: string; infoString: string } | null => {
   let open: { char: '`' | '~'; len: number; index: number } | null = null;
   let searchPos = 0;
@@ -96,6 +103,7 @@ const getEnclosingFence = (
     if (!open) {
       open = { char: fence.char, len: fence.length, index: fence.index };
     } else if (fence.char === open.char && fence.length >= open.len) {
+      onClosed?.(open.index, fence.index);
       open = null;
     }
     searchPos = fence.index + fence.length;
@@ -109,20 +117,6 @@ const getEnclosingFence = (
     infoString: content.slice(open.index + open.len, fenceLineEnd),
   };
 };
-
-/**
- * Checks if a given character index is inside a fenced code block (``` or ~~~).
- * Shares its fence-matching rules with {@link getEnclosingFence}.
- */
-const isIndexInsideCodeBlock = (content: string, index: number): boolean =>
-  getEnclosingFence(content, index) !== null;
-
-/**
- * Finds the starting index of the code block (``` or ~~~) that encloses the
- * given index. Returns -1 if the index is not inside a code block.
- */
-const findEnclosingCodeBlockStart = (content: string, index: number): number =>
-  getEnclosingFence(content, index)?.startIndex ?? -1;
 
 /**
  * When `index` sits inside an open fenced code block, returns that block's
@@ -152,13 +146,26 @@ export const findLastSafeSplitPoint = (
     return content.length;
   }
 
-  const enclosingBlockStart = findEnclosingCodeBlockStart(content, searchEnd);
-  if (enclosingBlockStart !== -1) {
+  const closedBlocks: Array<{ start: number; end: number }> = [];
+  const enclosingFence = getEnclosingFence(content, searchEnd, (start, end) => {
+    closedBlocks.push({ start, end });
+  });
+  if (enclosingFence) {
     // The end of the content is contained in a code block. Split right before.
-    return hasLengthCap && enclosingBlockStart === 0
+    return hasLengthCap && enclosingFence.startIndex === 0
       ? searchEnd
-      : enclosingBlockStart;
+      : enclosingFence.startIndex;
   }
+
+  // Candidates move backwards, so each closed block is visited at most once
+  // rather than re-scanning all fences for every rejected newline.
+  let blockIndex = closedBlocks.length - 1;
+  const isInsideClosedBlock = (index: number): boolean => {
+    while (blockIndex >= 0 && index <= closedBlocks[blockIndex]!.start) {
+      blockIndex--;
+    }
+    return blockIndex >= 0 && index <= closedBlocks[blockIndex]!.end;
+  };
 
   // Search for the last double newline (\n\n) not in a code block.
   let searchStartIndex = searchEnd;
@@ -172,7 +179,7 @@ export const findLastSafeSplitPoint = (
     const potentialSplitPoint = dnlIndex + 2;
     if (
       potentialSplitPoint <= searchEnd &&
-      !isIndexInsideCodeBlock(content, potentialSplitPoint)
+      !isInsideClosedBlock(potentialSplitPoint)
     ) {
       return potentialSplitPoint;
     }
@@ -183,6 +190,7 @@ export const findLastSafeSplitPoint = (
   }
 
   if (hasLengthCap) {
+    blockIndex = closedBlocks.length - 1;
     searchStartIndex = searchEnd;
     while (searchStartIndex >= 0) {
       const nlIndex = content.lastIndexOf('\n', searchStartIndex);
@@ -193,7 +201,7 @@ export const findLastSafeSplitPoint = (
       const potentialSplitPoint = nlIndex + 1;
       if (
         potentialSplitPoint <= searchEnd &&
-        !isIndexInsideCodeBlock(content, potentialSplitPoint)
+        !isInsideClosedBlock(potentialSplitPoint)
       ) {
         return potentialSplitPoint;
       }
