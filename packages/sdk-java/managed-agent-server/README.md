@@ -1,11 +1,15 @@
 # Qwen Managed Agent Server
 
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
-no DataWorks dependency and no end-user authentication layer. A trusted
-upstream must send `X-Qwen-Tenant-Id`; the server uses that value on every
-database read and write. The HTTP server listens on `127.0.0.1` by default;
-set `QWEN_MANAGED_AGENT_SERVER_ADDRESS` when a trusted ingress needs to reach
-it. That ingress must authenticate the tenant before setting the header.
+no DataWorks dependency. The default loopback listen address keeps the
+header-asserted tenant model: a trusted upstream sends `X-Qwen-Tenant-Id`
+and the server uses that value on every database read and write. Leaving
+loopback requires authentication: set `QWEN_MANAGED_AGENT_SERVER_ADDRESS`
+**and** configure signed mode (`QWEN_MANAGED_AGENT_AUTH_MODE=signed` with
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY`) so the broker verifies each request's
+HMAC signature itself, or put an authenticated gateway in front. With the
+default `auto` mode a non-loopback address refuses to start. See "Broker
+authentication and writer credentials" below.
 
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
