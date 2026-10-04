@@ -83,6 +83,13 @@ reliable-close drain/stop protocol. A successor skips Hooks when the effects
 receipt is saved, otherwise reconstructs progress from the same H2 occurrences.
 Harness 404, lease expiry and worker disappearance cannot establish completion.
 
+Receipt recovery may skip the Harness lifecycle request entirely. Detach must
+therefore validate its operation authority against Session Store even when the
+live attachment has no local lifecycle state. Store authorization checks the
+current claim, original writer, saved effects and DRAINING fence; a rejected
+claim leaves the attachment and its prior authority intact. Ordinary detach
+still requires ordinary execution authorization.
+
 Final completion requires the live delivery claim, effects receipt, permanent
 fence, no live writer or unsettled execution, and verifiable original stop
 proofs. CLOSE commits CLOSED. DELETE commits O4 retirement, DELETED, operation

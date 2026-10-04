@@ -755,17 +755,12 @@ class ManagedAgentMySqlIT {
                     if ("appendLiveSessionEventIfAbsent".equals(
                             method.getName())) {
                         CompletableFuture.runAsync(() -> {
-                            String operation = inTransaction(transactions,
+                            deletion.set(inTransaction(transactions,
                                     () -> agents.beginOperation(tenant,
                                             session, OperationKind.DELETE,
                                             "sha256:" + "c".repeat(64),
                                             "delete", "digest-delete"))
-                                    .operation().operationId();
-                            deletion.set(inTransaction(transactions,
-                                    () -> agents.claimOperation(tenant,
-                                            session, operation, "worker",
-                                            Duration.ofMinutes(1)))
-                                    .orElseThrow());
+                                    .operation());
                         }).join();
                     }
                     try {
@@ -790,7 +785,10 @@ class ManagedAgentMySqlIT {
         assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class,
                 tenant, session)).isEqualTo("DELETING");
-        OperationRecord operation = deletion.get();
+        OperationRecord operation = inTransaction(transactions,
+                () -> agents.claimOperation(tenant, session,
+                        deletion.get().operationId(), "worker",
+                        Duration.ofMinutes(1))).orElseThrow();
         assertThatThrownBy(() -> inTransaction(transactions,
                 () -> agents.completeOperation(tenant, session,
                         operation.operationId(), "worker",

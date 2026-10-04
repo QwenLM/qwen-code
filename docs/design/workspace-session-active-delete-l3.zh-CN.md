@@ -67,6 +67,11 @@ plan 和子执行派发前均预检权限，并在 journal 提交事务中重新
 receipt 已保存时跳过 Hook，否则从相同 H2 occurrence 恢复进度。Harness 404、
 租约过期或 worker 消失均不能证明完成。
 
+receipt 恢复可能完全跳过 Harness lifecycle 请求。因此，即使存活 attachment
+没有本地 lifecycle 状态，detach 也必须向 Session Store 核验 operation 权限。
+Store 授权检查当前 claim、原 writer、已保存的 effects 与 DRAINING 围栏；
+claim 被拒绝时保留 attachment 及其原权限。普通 detach 仍须通过普通执行授权。
+
 最终完成要求有效 delivery claim、effects receipt、永久围栏、无有效 writer 或
 未结算执行，以及可核验的原停机证明。CLOSE 提交 CLOSED；DELETE 原子提交 O4
 退役、DELETED、operation 完成与终止事件。共享文件及其他会话的 holder 保留。

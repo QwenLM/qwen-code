@@ -83,6 +83,7 @@ const state = vi.hoisted(() => ({
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
+  setLifecycleAuthority: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
   model: vi.fn(
@@ -130,7 +131,7 @@ vi.mock(
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
-        setLifecycleAuthority: () => undefined,
+        setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
         publication: {
@@ -384,6 +385,7 @@ describe('Hosted Harness no-tool session', () => {
     state.assertWritable.mockResolvedValue(undefined);
     state.authorizeLifecycle.mockReset();
     state.authorizeLifecycle.mockResolvedValue(undefined);
+    state.setLifecycleAuthority.mockReset();
     state.authorizeOrdinary.mockReset();
     state.authorizeOrdinary.mockResolvedValue(undefined);
     state.model.mockReset();
@@ -446,6 +448,56 @@ describe('Hosted Harness no-tool session', () => {
       expect(state.model).not.toHaveBeenCalled();
     },
   );
+
+  it('authorizes detach after the coordinator recovers effects without a Harness lifecycle request', async () => {
+    const { server, authorize, requests } = await hookApp();
+    state.authorizeOrdinary.mockRejectedValue(new Error('DRAINING'));
+    const authority = { operationId: 'recovered-effects', claimGeneration: 2 };
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority })
+      .expect(204);
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(authority);
+    expect(state.authorizeLifecycle).toHaveBeenCalledExactlyOnceWith();
+    expect(state.authorizeOrdinary).not.toHaveBeenCalled();
+    expect(requests).toEqual([]);
+    expect(state.model).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({})
+      .expect(404);
+  });
+
+  it('retains the attachment and restores authority when a recovered detach claim is rejected', async () => {
+    const { server, authorize, requests } = await hookApp();
+    state.authorizeOrdinary.mockRejectedValue(new Error('DRAINING'));
+    state.authorizeLifecycle.mockRejectedValueOnce(new Error('stale claim'));
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'stale', claimGeneration: 1 } })
+      .expect(503);
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+    expect(requests).toEqual([]);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({})
+      .expect(409);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
+      .expect(204);
+    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(2);
+    expect(requests).toEqual([]);
+  });
+
+  it('rejects malformed detach authority without bypassing a persistent fence', async () => {
+    const { server, authorize, requests } = await hookApp();
+    state.authorizeOrdinary.mockRejectedValue(new Error('DRAINING'));
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'malformed', claimGeneration: 0 } })
+      .expect(400);
+    expect(state.authorizeLifecycle).not.toHaveBeenCalled();
+    expect(state.setLifecycleAuthority).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'valid', claimGeneration: 2 } })
+      .expect(204);
+    expect(requests).toEqual([]);
+  });
 
   it('uses the legacy close admission for an attached protocol zero Session with Hooks', async () => {
     const { server, authorize, requests } = await hookApp();

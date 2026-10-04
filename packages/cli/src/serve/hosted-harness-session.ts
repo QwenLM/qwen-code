@@ -2137,7 +2137,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       session &&
       req.method !== 'GET' &&
-      !['/lifecycle', '/heartbeat'].includes(req.path) &&
+      !['/lifecycle', '/detach', '/heartbeat'].includes(req.path) &&
       !session.lifecycle
     ) {
       try {
@@ -3672,21 +3672,39 @@ export function registerHostedHarnessSessionRoutes(
       session.hooksBusy
     )
       return error(res, 409, 'hosted_turn_active');
+    let authority: ManagedSessionLifecycleAuthority | undefined;
+    try {
+      authority = lifecycleAuthority(object(req.body)?.['authority']);
+    } catch {
+      return error(res, 400, 'invalid_hosted_lifecycle_authority');
+    }
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
-      if (session.lifecycle) {
+      if (session.lifecycle || authority) {
         if (req.method === 'DELETE')
           return error(res, 409, 'hosted_lifecycle_operation_active');
-        const authority = lifecycleAuthority(object(req.body)?.['authority']);
         if (
           !authority ||
-          authority.operationId !== session.lifecycle.operationId
+          (session.lifecycle &&
+            authority.operationId !== session.lifecycle.operationId)
         )
           return error(res, 409, 'hosted_lifecycle_operation_conflict');
-        session.lifecycle = authority;
+        const previousAuthority = session.lifecycle;
         session.stores!.setLifecycleAuthority(authority);
-        await session.stores!.authorizeLifecycle();
+        try {
+          await session.stores!.authorizeLifecycle();
+        } catch (cause) {
+          session.stores!.setLifecycleAuthority(previousAuthority);
+          throw cause;
+        }
+        session.lifecycle = authority;
+      } else if (req.method === 'POST') {
+        try {
+          await session.stores!.authorizeOrdinary();
+        } catch {
+          return error(res, 409, 'hosted_lifecycle_operation_active');
+        }
       }
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
