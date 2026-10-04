@@ -95,6 +95,7 @@ interface FakeSink extends ManagedShellCaptureSink {
   readonly finishes: Array<readonly [string, boolean]>;
   pid: number;
   started: boolean;
+  failed: boolean;
 }
 
 function fakeSink(): FakeSink {
@@ -105,6 +106,7 @@ function fakeSink(): FakeSink {
     finishes,
     pid: 0,
     started: false,
+    failed: false,
     async write(id: 'stdout' | 'stderr', chunk: Buffer) {
       writes.push([id, chunk.toString()]);
     },
@@ -113,6 +115,9 @@ function fakeSink(): FakeSink {
       sink.pid = pid;
     },
     setProcessResult(_result: unknown) {},
+    failCapture() {
+      sink.failed = true;
+    },
     async finish(id: 'stdout' | 'stderr', complete: boolean) {
       finishes.push([id, complete]);
     },
@@ -139,7 +144,7 @@ function fakeSink(): FakeSink {
       revision: 1,
     } as unknown as ToolResultExpectedIdentity,
   };
-  return sink as unknown as FakeSink;
+  return sink;
 }
 
 const IDENTITY = {
