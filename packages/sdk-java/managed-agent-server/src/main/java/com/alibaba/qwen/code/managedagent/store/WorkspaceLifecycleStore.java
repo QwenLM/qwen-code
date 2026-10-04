@@ -21,8 +21,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Repository
 public class WorkspaceLifecycleStore {
+    private static final ObjectMapper OCCURRENCE_JSON = new ObjectMapper();
+
     public static boolean legacyClose(JdbcTemplate jdbc, String tenant, String session) {
-        long now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).getTime();
+        long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
         return !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o"
                 + " JOIN managed_agent_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
                 + " JOIN qwen_runtime_harness_drain f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
@@ -341,7 +344,7 @@ public class WorkspaceLifecycleStore {
     private String occurrence(String event, String operationId) {
         try {
             return "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
-                    json.writeValueAsBytes(List.of(event, operationId))));
+                    OCCURRENCE_JSON.writeValueAsBytes(List.of(event, operationId))));
         } catch (java.io.IOException | NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);
         }

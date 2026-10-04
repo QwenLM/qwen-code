@@ -443,6 +443,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             var context = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), record, live.lease()));
             var existing = sessions.putIfAbsent(runtimeSessionId, context);
             if (existing != null) {
+                if (!existing.isDone() || existing.isCompletedExceptionally()) {
+                    throw conflict("workspace_close_identity_unverified", "Original Hook Session is not attested in this Broker");
+                }
                 SessionContext current = existing.join();
                 requireSameSession(current.session(), saved.getSession());
                 if (!current.binding().sameIdentity(original)) {

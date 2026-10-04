@@ -75,6 +75,9 @@ dispatch intent 和结果。SessionEnd 的全部子执行提交结果后才开�
 包括异步 Hook；只有 plan marker 结算不足。冷加载只恢复
 保存状态，不创建用户 Turn 或 startup Hook。复用可核验的原 Runtime，不用替代
 代际重放副作用。仅从未创建 Runtime 且授权有效时允许首次初始化。
+Plan 身份使用固定的紧凑 JSON 字节，不受应用 JSON 格式化配置影响。
+恢复遇到在途、失败或已取消的本地 Session 路由时直接拒绝，
+不等待普通 acquire，也不传播其结果。
 
 每次新副作用派发前核对当前 ACL、挂载和身份。撤销后仍可查询、结算已派发工作；
 未派发 Hook 保持 recovery_blocked，直至恢复权限。unknown 保留所有权，不能
@@ -126,6 +129,7 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。
+旧 claim 的有效性统一比较数据库 epoch 毫秒，不受 JVM、JDBC 与数据库会话时区影响。
 启用 L3 准入前升级全部 coordinator 和 Harness。缺少新协议能力时拒绝准入，
 不回退到旧 DELETE。存在未完成 L3 操作时不回滚到旧 coordinator。
 L2 CLOSED/ARCHIVED 删除继续独立于 Harness 可用性。

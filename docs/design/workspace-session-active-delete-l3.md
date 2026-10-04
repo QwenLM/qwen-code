@@ -96,6 +96,9 @@ Hooks; a settled plan marker alone is insufficient. Cold load restores saved sta
 Turn or startup Hook. Reuse a verifiable original Runtime; a replacement
 generation never replays effects. First initialization is permitted only when
 no Runtime has ever been created and authorization is valid.
+Plan identities use fixed compact JSON bytes, independent of application JSON
+formatting. Recovery rejects pending, failed or cancelled local Session routes
+without waiting for ordinary acquisition or propagating its outcome.
 
 Before each new side-effect dispatch, check current ACL, mount and identity.
 After revocation, lookup and settlement of already dispatched work continue;
@@ -164,6 +167,8 @@ original protocol and evidence, without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary
 execution remains fenced; the exception cannot authorize L3 or MCP execution.
+Legacy claim validity compares database epoch milliseconds on both sides,
+independent of JVM, JDBC and database session time zones.
 Upgrade all
 coordinators and Harnesses before enabling new L3 admission. A missing protocol
 capability rejects admission rather than falling back to legacy DELETE. Do not

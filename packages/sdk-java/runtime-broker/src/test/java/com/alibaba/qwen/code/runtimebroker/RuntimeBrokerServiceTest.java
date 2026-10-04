@@ -100,6 +100,58 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void hookRecoveryDoesNotWaitForAnOrdinaryAcquireOfTheSameRuntimeId() throws Exception {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            ((Map<?, ?>) field.get(fixture.service)).remove("runtime-a");
+            fixture.resolver.result = CompletableFuture.completedFuture(new RuntimeScope(
+                    "tenant", "other-workspace", "generation", "/other", "other-capability", "session"));
+            var pending = new CompletableFuture<Void>();
+            fixture.transport.acquireResult = pending;
+            var ordinary = fixture.service.acquire("harness-b", "runtime-a", "bootstrap");
+            int provisions = fixture.provisioner.calls.get();
+            int acquires = fixture.transport.acquireCalls.get();
+            try {
+                assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertEquals("workspace_close_identity_unverified",
+                        failure(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                                original.getBindingId(), original.getRuntimeGeneration())).getCode()));
+                assertFalse(ordinary.toCompletableFuture().isDone());
+                assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+                assertEquals(provisions, fixture.provisioner.calls.get());
+                assertEquals(acquires, fixture.transport.acquireCalls.get());
+            } finally {
+                pending.completeExceptionally(new RuntimeBrokerException(503, "ordinary_failure", "failed", true));
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void hookRecoveryRejectsFailedAndCancelledLocalRoutes() throws Exception {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            var routes = (Map<String, CompletableFuture<?>>) field.get(fixture.service);
+            var cancelled = new CompletableFuture<>();
+            cancelled.cancel(false);
+            int provisions = fixture.provisioner.calls.get();
+            int acquires = fixture.transport.acquireCalls.get();
+            for (var route : List.of(CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(503, "ordinary_failure", "failed", true)), cancelled)) {
+                routes.put("runtime-a", route);
+                assertEquals("workspace_close_identity_unverified", failure(fixture.service.acquireRecovery(
+                        "harness-a", "runtime-a", original.getBindingId(), original.getRuntimeGeneration())).getCode());
+            }
+            assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+            assertEquals(provisions, fixture.provisioner.calls.get());
+            assertEquals(acquires, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void concurrentAcquireOfOneSessionCallsRuntimeOnce() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Void> acquire = new CompletableFuture<>();

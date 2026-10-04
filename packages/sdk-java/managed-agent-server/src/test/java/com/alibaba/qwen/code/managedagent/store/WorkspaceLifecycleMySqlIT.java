@@ -8,15 +8,26 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
@@ -48,6 +59,56 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Override
     Fixture fixture() {
         return new Fixture(source);
+    }
+
+    @ParameterizedTest
+    @MethodSource("legacyCloseClockZones")
+    @ResourceLock("java.util.TimeZone")
+    void legacyCloseUsesTheDatabaseEpochAcrossTimeZones(String jvmZone, String databaseZone, String connectionZone) {
+        TimeZone previous = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone(jvmZone));
+            String url = source.getUrl();
+            source.setUrl(url + (url.contains("?") ? "&" : "?")
+                    + "connectionTimeZone=" + URLEncoder.encode(connectionZone, StandardCharsets.UTF_8)
+                    + "&sessionVariables=" + URLEncoder.encode("time_zone='" + databaseZone + "'", StandardCharsets.UTF_8));
+            var fixture = fixture();
+            var journal = new ManagedSessionStore(fixture.jdbc);
+            var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                    "w".repeat(32), new AcquireWriterRequest("workspace", "original", 60_000L)));
+            String id = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
+                    OperationKind.CLOSE, "owner", "a".repeat(64), "legacy", "digest", true).operation().operationId());
+            var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation("tenant", fixture.session,
+                    id, "worker", Duration.ofMinutes(1)).orElseThrow());
+            fixture.bindings.requestHarnessDrain("tenant", fixture.session);
+            var legacy = new AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration(), "legacy-close");
+            var ordinary = new AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration());
+            var execution = new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(source));
+            assertThat(operation.lifecycleProtocolVersion()).isZero();
+            assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
+                    .isTrue();
+            fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session, "w".repeat(32), legacy));
+            execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
+            assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
+                    "tenant", fixture.session, "w".repeat(32), ordinary))).isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+            fixture.jdbc.update("UPDATE managed_agent_operation SET lease_until = UNIX_TIMESTAMP() * 1000 - 1000 WHERE operation_id = ?", id);
+            assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
+                    .isFalse();
+            assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
+                    "tenant", fixture.session, "w".repeat(32), legacy))).isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+            assertThatThrownBy(() -> execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session)))
+                    .hasMessageContaining("unavailable");
+        } finally {
+            TimeZone.setDefault(previous);
+        }
+    }
+
+    static Stream<Arguments> legacyCloseClockZones() {
+        return Stream.of(new String[]{"Asia/Shanghai", "+00:00"}, new String[]{"UTC", "+08:00"})
+                .flatMap(zones -> List.of("LOCAL", "UTC", "+08:00", "Asia/Shanghai").stream()
+                        .map(connection -> Arguments.of(zones[0], zones[1], connection)));
     }
 
     @Test

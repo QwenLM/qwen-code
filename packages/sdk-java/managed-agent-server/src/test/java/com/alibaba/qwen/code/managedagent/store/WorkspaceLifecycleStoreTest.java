@@ -14,7 +14,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -67,6 +70,82 @@ class WorkspaceLifecycleStoreTest {
     static Stream<Arguments> invalidJournalRecords() {
         return Stream.of("{", "[]", "null", "{\"n\":1e999}", "{\"a\":1,\"a\":2}")
                 .flatMap(line -> Stream.of("ordinary", "authority", "settlement").map(mode -> Arguments.of(line, mode)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("hookReceiptPaths")
+    void hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind kind, boolean recover) throws Exception {
+        var fixture = fixture();
+        fixture.json.enable(SerializationFeature.INDENT_OUTPUT);
+        var journal = new ManagedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\",\"hookCatalog\":{}}".getBytes(StandardCharsets.UTF_8);
+        String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(definition));
+        var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
+        byte[] bytes = (header + "\n{}\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, digest, Base64.getEncoder().encodeToString(definition))));
+        fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
+        var operation = fixture.admit(kind);
+        var receipt = fixture.json.createObjectNode().put("protocolVersion", 1).put("operationId", operation.operationId())
+                .put("kind", kind.name().toLowerCase(java.util.Locale.ROOT));
+        receipt.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", fixture.session);
+        receipt.set("definitionRef", header.path("managedSession").path("definitionRef"));
+        var effects = receipt.putArray("effects");
+        for (String event : kind == OperationKind.CLOSE ? List.of("SessionEnd") : List.of("SessionEnd", "SessionDelete")) {
+            // These bytes are JSON.stringify([event, operationId]) on the Harness wire.
+            String id = "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
+                    ("[\"" + event + "\",\"" + operation.operationId() + "\"]").getBytes(StandardCharsets.UTF_8)));
+            var plan = fixture.json.createObjectNode();
+            plan.putObject("input").put("hook_event_name", event).put("session_id", fixture.session);
+            var planRef = fixture.resource(event + "-plan", "hook-data", plan);
+            var resultRef = fixture.resource(event + "-result", "hook-data", fixture.json.createObjectNode());
+            var record = fixture.json.createObjectNode().put("hookExecutionId", id).put("occurrenceId", operation.operationId())
+                    .put("runtimeSessionId", "original").put("registrationId", "registration").put("eventName", event)
+                    .put("ordinal", 0).put("hookId", "__plan__").put("cancelRequested", false);
+            record.putNull("onceKey");
+            record.set("planRef", planRef);
+            record.set("inputRef", planRef);
+            record.set("resultRef", resultRef);
+            var run = record.putObject("run").put("state", "settled").put("effectId", id).put("execution", "settled");
+            run.putObject("definition").put("definitionId", "catalog").put("definitionRevision", 1).put("definitionDigest", "b".repeat(64));
+            for (String key : List.of("reason", "executionCallId", "dispatchId", "deliveryId", "runtime", "delivery")) {
+                run.putNull(key);
+            }
+            ManagedHookRecords.requireExecution(record);
+            var ref = fixture.resource(event + "-record", "hook-execution", record);
+            fixture.jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at, first_sequence)"
+                    + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
+                    ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                    ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
+                    fixture.session, id, "a".repeat(64), ref.path("resourceId").asText());
+            effects.addObject().put("event", event).set("recordRef", ref);
+        }
+        if (recover) {
+            JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
+            assertThat(recovered).isNotNull();
+            assertThat(fixture.json.readTree(recovered.toString())).isEqualTo(receipt);
+        } else {
+            fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.saveEffects(operation, receipt));
+        }
+        assertThat(fixture.json.readTree(fixture.jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM managed_agent_operation",
+                String.class))).isEqualTo(receipt);
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain", String.class)).isEqualTo("DRAINING");
+        fixture.transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", fixture.session, "w".repeat(32),
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
+                WorkspaceLifecycleStore.authority(operation)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.verifyCompletion(operation));
+    }
+
+    static Stream<Arguments> hookReceiptPaths() {
+        return Stream.of(OperationKind.CLOSE, OperationKind.DELETE).flatMap(kind -> Stream.of(false, true).map(recover -> Arguments.of(kind, recover)));
     }
 
     @Test
@@ -260,6 +339,7 @@ class WorkspaceLifecycleStoreTest {
 
     static final class Fixture {
         final JdbcTemplate jdbc;
+        final ObjectMapper json = new ObjectMapper();
         final TransactionTemplate transactions;
         final ManagedAgentStore store;
         final WorkspaceLifecycleStore lifecycle;
@@ -280,7 +360,6 @@ class WorkspaceLifecycleStoreTest {
             Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
             jdbc = new JdbcTemplate(source);
             transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-            var json = new ObjectMapper();
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
@@ -296,6 +375,16 @@ class WorkspaceLifecycleStoreTest {
                     + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", "owner".getBytes(StandardCharsets.UTF_8));
             session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
                     null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+        }
+
+        ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
+            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
+                    + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
+                    + " VALUES (?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                    ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
+            return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }
 
         RuntimeScope scope() {
