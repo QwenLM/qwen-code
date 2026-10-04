@@ -170,6 +170,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -196,7 +204,7 @@ public class ManagedExtensionRecordStore {
      * and its transaction must hold only those events and then its commit
      * marker, as the authority writes it.
      */
-    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             ManagedSessionStoreModels.CommitTransactionRequest request,
             byte[] recordBytes, Function<String, StoredResource> resources) {
         long firstSequence = request.firstSequence();
@@ -206,6 +214,7 @@ public class ManagedExtensionRecordStore {
         String previousCommitDigest = request.previousCommitDigest();
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
+        JsonNode lastActivation = null;
         JsonNode[] records = new JsonNode[lines.length];
         int header = -1;
         for (int index = 0; index < lines.length; index++) {
@@ -283,7 +292,7 @@ public class ManagedExtensionRecordStore {
             long occurredAt = requireEvent(event,
                     firstSequence + index);
             requireOwnSession(event, tenantId, workspaceId, sessionId,
-                    "The event names another Session.");
+                    "Journal event scope conflicts");
             events.add(event);
             String kind = event.get("kind").textValue();
             try {
@@ -305,6 +314,9 @@ public class ManagedExtensionRecordStore {
                     + (index + 1)
                     + " repeats the event ID of another event in the"
                     + " transaction.");
+            if ("activation.changed".equals(kind)) {
+                lastActivation = event.get("payload");
+            }
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
@@ -381,7 +393,7 @@ public class ManagedExtensionRecordStore {
                     "The transaction's commitDigest does not match its"
                             + " commit marker.");
         }
-        return receipts;
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,

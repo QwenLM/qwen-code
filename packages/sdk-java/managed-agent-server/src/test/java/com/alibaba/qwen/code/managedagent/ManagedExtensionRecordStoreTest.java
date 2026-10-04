@@ -188,7 +188,7 @@ class ManagedExtensionRecordStoreTest {
                 + " {}").getBytes(StandardCharsets.UTF_8);
         Map<String, Refusal> events = Map.ofEntries(
                 Map.entry("another workspace", new Refusal(
-                        "names another Session", event -> ((ObjectNode) event
+                        "Journal event scope conflicts", event -> ((ObjectNode) event
                                 .get("sessionKey")).put("workspaceId",
                                         "other"))),
                 Map.entry("an extra Session key field", new Refusal(
