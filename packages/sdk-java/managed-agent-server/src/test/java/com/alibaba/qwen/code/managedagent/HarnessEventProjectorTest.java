@@ -66,6 +66,9 @@ class HarnessEventProjectorTest {
         // "source:<n>" matched the no-id fallback for SourceEvent.id = n.
         assertThat(called.data().get("itemId"))
                 .isNotEqualTo(fallback.data().get("itemId"));
+    }
+
+    @Test
     void projectsDeadlineExpiryAsAClassifiedFailure() {
         ProjectedEvent event = projector.project(new SourceEvent(4L,
                 "turn_error", Map.of("code", "hosted_turn_deadline_exceeded",
