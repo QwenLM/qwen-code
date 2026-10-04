@@ -6,8 +6,10 @@ import java.time.Instant;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -1372,6 +1374,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_execution_conflict",
                         "background process identity is already in use", exception);
             }
+            context.backgroundProcesses().add(candidate.getExecutionCallId());
         }
     }
 
@@ -1391,34 +1394,86 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 .thenCompose(context -> {
                     ToolExecutionRecord invocation = requireExecution(context, invocationId);
                     ToolExecutionRecord process = requireExecution(context, invocationId + ":process");
-                    if (process.isTerminal()) {
-                        return CompletableFuture.completedFuture(process);
-                    }
-                    Map<String, Object> operation = new LinkedHashMap<>();
-                    operation.put("kind", "shell-status");
-                    operation.put("sessionKey", Map.of(
-                            "tenantId", context.session().getScope().getTenantId(),
-                            "workspaceId", context.session().getScope().getWorkspaceId(),
-                            "sessionId", context.session().getHarnessSessionId()));
-                    operation.put("operationId", process.getExecutionCallId());
-                    operation.put("targetOperationId",
-                            referenceString(invocation.getReference(), "callId"));
-                    context.beginControl();
-                    return mapFailure(safeStage(() -> transport.control(
-                            context.lease(), context.session(), operation)),
-                            "runtime_shell_status_failed", "Shell status lookup failed")
-                        .thenApply(view -> {
-                            if (!(view instanceof Map<?, ?> answer)
-                                    || !"exited".equals(answer.get("state"))) {
-                                return process;
-                            }
-                            settleBackgroundProcess(process, (Map<String, Object>) view);
-                            ToolExecutionRecord current = executionRepository
-                                    .findByExecutionCallId(process.getExecutionCallId());
-                            return current == null ? process : current;
-                        })
-                        .whenComplete((ignored, error) -> context.endControl());
+                    return observeProcessRow(context, invocation, process);
                 });
+    }
+
+    private CompletionStage<ToolExecutionRecord> observeProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process) {
+        if (process.isTerminal()) {
+            return CompletableFuture.completedFuture(process);
+        }
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("kind", "shell-status");
+        operation.put("sessionKey", Map.of(
+                "tenantId", context.session().getScope().getTenantId(),
+                "workspaceId", context.session().getScope().getWorkspaceId(),
+                "sessionId", context.session().getHarnessSessionId()));
+        operation.put("operationId", process.getExecutionCallId());
+        operation.put("targetOperationId",
+                referenceString(invocation.getReference(), "callId"));
+        context.beginControl();
+        return mapFailure(safeStage(() -> transport.control(
+                context.lease(), context.session(), operation)),
+                "runtime_shell_status_failed", "Shell status lookup failed")
+            .thenApply(view -> {
+                if (!(view instanceof Map<?, ?> answer)
+                        || !"exited".equals(answer.get("state"))) {
+                    return process;
+                }
+                settleBackgroundProcess(process, (Map<String, Object>) view);
+                ToolExecutionRecord current = executionRepository
+                        .findByExecutionCallId(process.getExecutionCallId());
+                return current == null ? process : current;
+            })
+            .whenComplete((ignored, error) -> context.endControl());
+    }
+
+    /**
+     * Before a release computes its busy check, every background process
+     * row this Broker admitted for the Session asks its physical owner
+     * once: a proven exit settles the row here, and anything else simply
+     * keeps it — the busy answer then stands on what is actually still
+     * running. A failed lookup moves on, because busy remains the accurate
+     * answer for what could not be proven.
+     */
+    private CompletionStage<Void> settleUnprovenBackgroundRows(
+            SessionContext context) {
+        CompletionStage<Void> chain = CompletableFuture.completedFuture(null);
+        List<String> processIds;
+        synchronized (context) {
+            processIds = new ArrayList<>(context.backgroundProcesses());
+        }
+        for (String processId : processIds) {
+            ToolExecutionRecord row = executionRepository
+                    .findByExecutionCallId(processId);
+            if (row == null || row.isTerminal()) {
+                synchronized (context) {
+                    context.backgroundProcesses().remove(processId);
+                }
+                continue;
+            }
+            ToolExecutionRecord invocation;
+            try {
+                invocation = requireExecution(context,
+                        referenceString(row.getReference(), "processOf"));
+            } catch (RuntimeException notOurs) {
+                continue;
+            }
+            chain = chain.thenCompose(ignored -> observeProcessRow(
+                    context, invocation, row)
+                    .thenApply(current -> {
+                        if (current.isTerminal()) {
+                            synchronized (context) {
+                                context.backgroundProcesses().remove(processId);
+                            }
+                        }
+                        return (Void) null;
+                    })
+                    .exceptionally(failure -> null));
+        }
+        return chain;
     }
 
     private void settleBackgroundProcess(ToolExecutionRecord process,
@@ -1466,6 +1521,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return releaseUnusableSession(context);
         }
+        return settleUnprovenBackgroundRows(context)
+                .thenCompose(ignored -> releaseSessionAfterSweep(context));
+    }
+
+    private CompletionStage<Boolean> releaseSessionAfterSweep(
+            SessionContext context) {
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         synchronized (context) {
@@ -3759,6 +3820,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final RuntimeSession session;
         private final RuntimeBindingRecord binding;
         private final RuntimeLease lease;
+        // The background process rows this Broker admitted for the Session,
+        // until each settles — the release sweep asks exactly these owners.
+        private final Set<String> backgroundProcesses = new LinkedHashSet<>();
         private int activeControls;
         private CompletableFuture<Boolean> release;
 
@@ -3779,6 +3843,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
         RuntimeLease lease() {
             return lease;
+        }
+
+        Set<String> backgroundProcesses() {
+            return backgroundProcesses;
         }
 
         synchronized void beginControl() {
