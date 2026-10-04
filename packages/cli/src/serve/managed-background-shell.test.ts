@@ -246,6 +246,40 @@ function execute(
 }
 
 describe('managed v3 background Shell', () => {
+  it('slows the pipes while the bounded capture drains', async () => {
+    const ctx = rig();
+    const stdout = ctx.process.child.stdout!;
+    const pauseSpy = vi.spyOn(stdout, 'pause');
+    const resumeSpy = vi.spyOn(stdout, 'resume');
+    pauseSpy.mockClear();
+    resumeSpy.mockClear();
+
+    const deferred: Array<() => void> = [];
+    ctx.sink.write = async (id: 'stdout' | 'stderr', chunk: Buffer) => {
+      ctx.sink.writes.push([id, chunk.toString()]);
+      await new Promise<void>((resolve) => deferred.push(resolve));
+    };
+    await execute(ctx);
+
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    const oneMiB = Buffer.alloc(1024 * 1024, 0x61);
+    for (let count = 0; count < 17; count++) spec.onOutput('stdout', oneMiB);
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+    expect(deferred).toHaveLength(17);
+
+    for (let drained = 0; drained < 12; drained++) deferred.shift()!();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    // 5 MiB still in flight: above the resume watermark.
+    expect(resumeSpy).not.toHaveBeenCalled();
+    while (deferred.length > 0) deferred.shift()!();
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(resumeSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('settles the start result and holds the Runtime until the process exits', async () => {
     const ctx = rig();
     const view = await execute(ctx);

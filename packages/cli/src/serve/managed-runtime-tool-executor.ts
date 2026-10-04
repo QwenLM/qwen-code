@@ -133,6 +133,13 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
 const MANAGED_BACKGROUND_MAX_SHELLS = 8;
+// The bounded capture publishes asynchronously; the pipe feeding it must
+// slow down instead of queueing unboundedly. Sixteen MiB covers a store
+// writing several seconds slower than the process produces, and resume
+// re-arms well before the drain fully empties so a steady producer never
+// stalls against the floor.
+const MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES = 16 * 1024 * 1024;
+const MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES = 4 * 1024 * 1024;
 
 interface JournalEntry {
   readonly version: 2 | 3;
@@ -719,7 +726,19 @@ export class ManagedToolExecutor {
     const publisher = prepared.publisher ?? this.capturePublisher!;
     const unitName = `qwen-bg-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
     const shellConfig = getShellConfiguration();
-    let process: ManagedChildRunProcess;
+    let process: ManagedChildRunProcess | undefined;
+    let bufferedBytes = 0;
+    let paused = false;
+    const applyPause = (next: boolean) => {
+      paused = next;
+      const child = process?.child;
+      if (!child) return;
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream) continue;
+        if (next) stream.pause();
+        else stream.resume();
+      }
+    };
     try {
       process = await this.backgroundSupervisor.start({
         unitName,
@@ -727,7 +746,30 @@ export class ManagedToolExecutor {
         args: [...shellConfig.argsPrefix, command],
         env: backgroundEnv(),
         cwd: directory,
-        onOutput: (stream, chunk) => sink.write(stream, chunk),
+        onOutput: (stream, chunk) => {
+          bufferedBytes += chunk.byteLength;
+          const written = sink.write(stream, chunk);
+          void written.then(
+            () => {
+              bufferedBytes -= chunk.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+            () => {
+              bufferedBytes -= chunk.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+          );
+          if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
+            applyPause(true);
+        },
       });
     } catch (cause) {
       return settle({
@@ -743,6 +785,7 @@ export class ManagedToolExecutor {
       });
     }
     sink.setStarted(process.child.pid ?? 0);
+    if (paused) applyPause(true);
     this.backgroundRegistry.register({
       unitName,
       sessionId: reference.sessionId,
