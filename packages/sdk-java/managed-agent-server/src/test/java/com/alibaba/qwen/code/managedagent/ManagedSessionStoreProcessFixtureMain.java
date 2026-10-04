@@ -180,8 +180,25 @@ public final class ManagedSessionStoreProcessFixtureMain {
     }
 
     private static CommitTransactionRequest staleTurn() {
-        String records = "{\"subtype\":\"managed_session_event_v1\"}\n"
-                + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+        String records = "{\"subtype\":\"managed_session_event_v1\","
+                + "\"sessionId\":\"" + SESSION + "\",\"managedSession\":{"
+                + "\"v\":1,\"sequence\":1,\"eventId\":\"turn-event:1\","
+                + "\"sessionKey\":{\"tenantId\":\"" + TENANT
+                + "\",\"workspaceId\":\"" + WORKSPACE
+                + "\",\"sessionId\":\"" + SESSION
+                + "\"},\"kind\":\"lifecycle.changed\",\"occurredAt\":1000,"
+                + "\"payload\":{\"operationId\":\"op-open\",\"from\":null,"
+                + "\"to\":\"idle\",\"reason\":\"opened\","
+                + "\"pendingOwnersRef\":null}}}\n"
+                + "{\"subtype\":\"managed_session_commit_v1\","
+                + "\"sessionId\":\"" + SESSION + "\",\"managedSession\":{"
+                + "\"transactionId\":\"mysql-process-stale-transaction\","
+                + "\"commandId\":\"mysql-process-stale-command\",\"operation\":"
+                + "\"turn.submit\",\"contentDigest\":\"" + sha256(
+                        "stale-content")
+                + "\",\"firstSequence\":1,\"lastSequence\":1,"
+                + "\"eventCount\":1,\"eventsDigest\":\"" + "e".repeat(64)
+                + "\",\"previousCommitDigest\":null}}\n";
         return new CommitTransactionRequest(WORKSPACE, WRITER_A, 1, 1, 0,
                 "mysql-process-stale-transaction", "turn.submit",
                 "mysql-process-stale-command", sha256("stale-content"),

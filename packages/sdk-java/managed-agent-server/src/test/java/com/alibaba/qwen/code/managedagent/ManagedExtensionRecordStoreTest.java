@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.io.ByteArrayOutputStream;
@@ -49,6 +50,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedExtensionRecordStoreTest {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String TENANT = "tenant-extension";
     private static final String WORKSPACE = "workspace-extension";
 
@@ -97,6 +99,43 @@ class ManagedExtensionRecordStoreTest {
                     .listTasks(TENANT, sessionId, null, null, 10).tasks())
                     .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
                     .containsExactly(taskId);
+        }
+    }
+
+    @Test
+    void commitsTwoMonitorRecordsIntoOneSessionThroughTheDomainChain()
+            throws Exception {
+        // Two records of one domain, interleaved: the chain IDs follow the
+        // per-domain total of revisions, never one record's latest — a
+        // MAX(revision) in place of SUM would assign 3 to the fourth.
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode start = chain().get(0).required("monitorRun");
+        JsonNode next = chain().get(1).required("monitorRun");
+        ObjectNode otherStart = ((ObjectNode) start).deepCopy()
+                .put("monitorId", "monitor-other");
+        ObjectNode otherNext = ((ObjectNode) next).deepCopy()
+                .put("monitorId", "monitor-other");
+        journal.commitMonitor("interleaved-a1", start,
+                chain().get(0).required("occurredAt").longValue());
+        journal.commitMonitor("interleaved-a2", next,
+                chain().get(1).required("occurredAt").longValue());
+        journal.commitMonitor("interleaved-b1", otherStart,
+                chain().get(0).required("occurredAt").longValue());
+        journal.commitMonitor("interleaved-b2", otherNext,
+                chain().get(1).required("occurredAt").longValue());
+        assertThat(revisions(sessionId)).isEqualTo(4);
+        assertThat(records.listTasks(TENANT, sessionId, null, null, 10)
+                .tasks()).hasSize(2);
+        TaskProjection view = ManagedExtensionProjectionContractTest.view(
+                chain().get(1).required("view"));
+        for (String monitorId : List.of(
+                start.required("monitorId").textValue(), "monitor-other")) {
+            assertThat(records.findTask(TENANT, sessionId,
+                    ManagedExtensionProjection.taskId(
+                            ManagedExtensionProjection.recordKey(sessionId,
+                                    "monitor_run", monitorId)))
+                    .orElseThrow().projection()).isEqualTo(view);
         }
     }
 
@@ -177,6 +216,11 @@ class ManagedExtensionRecordStoreTest {
                         "event.subject has the unexpected field id",
                         event -> event.putObject("subject")
                                 .put("type", "turn").put("id", "turn-1"))),
+                Map.entry("a Stage H event with a well-formed subject",
+                        new Refusal(
+                        "event must be an object with exactly",
+                        event -> event.putObject("subject")
+                                .put("type", "turn").put("turnId", "turn-1"))),
                 Map.entry("a sequence past its place", new Refusal(
                         "event.sequence is out of range",
                         event -> event.put("sequence", event.get("sequence")
@@ -289,10 +333,13 @@ class ManagedExtensionRecordStoreTest {
      * Every event line carries the shared envelope and its kind's payload
      * and subject, every domain.committed line a body the authority could
      * read back, every line this Session's name at the top level, the
-     * header and the commit marker bodies the reader parses — the rules the
-     * authority's reopen scanner and commit gate check, refused at commit
-     * time so the journal never holds a line it could not reopen. Each
-     * case answers 200 before the mirror and 409 after it.
+     * header and the commit marker bodies the reader parses, and both
+     * content digests recomputed from the lines — the rules the authority's
+     * reopen scanner and commit gate check, refused at commit time so the
+     * journal never holds a line it could not reopen. The payload, subject,
+     * header- and marker-body and digest cases answer 200 before the
+     * mirror and 409 after it; the sequence, shape, byte-cap, domain and
+     * event-ID cases the store's own gate already refused.
      */
     @Test
     void refusesJournalLinesTheAuthorityRefusesOnReopen() throws Exception {
@@ -435,6 +482,77 @@ class ManagedExtensionRecordStoreTest {
                                 "checkpoint.committed", checkpointPayload(1),
                                 activationSubject())
                         + "\n"));
+        refuseLine("an activation.changed released without its boundary",
+                "payload.boundaryRef must be present when phase is released",
+                1, sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "activation.changed", activationPayload(
+                                        "released", false), null)
+                        + "\n"));
+        refuseLine("an activation.changed active with no lease",
+                "payload.leaseDurationMs must be present when phase is active",
+                1, sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "activation.changed", activationPayload(
+                                        "active", true), null)
+                        + "\n"));
+        refuseLine("a lifecycle.changed leaping to deleted",
+                "payload cannot transition from idle to deleted", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "lifecycle.changed",
+                                "{\"operationId\":\"op-1\",\"from\":\"idle\","
+                                        + "\"to\":\"deleted\",\"reason\":"
+                                        + "\"gone\",\"pendingOwnersRef\":null}",
+                                null)
+                        + "\n"));
+        refuseLine("a wake.requested before the first sequence",
+                "payload.requiredSequence must start at 1", 1,
+                sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "wake.requested",
+                                "{\"wakeId\":\"wake-1\",\"reason\":\"prompt\","
+                                        + "\"subject\":" + activationSubject()
+                                        + ",\"sourceEventId\":\"event-1\","
+                                        + "\"requiredSequence\":0}", null)
+                        + "\n"));
+        refuseLine("a cancel.requested carrying a control character",
+                "payload.reason must not contain control characters", 1,
+                sessionId -> {
+                    String line = ordinaryEvent(sessionId, 2, "turn:1",
+                            "cancel.requested",
+                            "{\"requestId\":\"cancel-1\",\"target\":null,"
+                                    + "\"reason\":\"no\\u0001\",\"requestedBy\":\"user\"}",
+                            null);
+                    return records -> records.substring(0,
+                            records.indexOf('\n') + 1) + line + "\n"
+                            + records.substring(records.indexOf('\n') + 1);
+                });
+        refuseLine("a model.attempt started with a usage ref",
+                "payload.usageRef must be null while the attempt is started",
+                1, sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "model.attempt",
+                                "{\"attemptId\":\"attempt-1\",\"routeRef\":"
+                                        + toolIntentRef()
+                                        + ",\"inputCheckpointRef\":null,"
+                                        + "\"state\":\"started\",\"usageRef\":"
+                                        + toolIntentRef() + "}",
+                                activationSubject())
+                        + "\n"));
+        refuseLine("a context.compacted folding back its own span",
+                "payload.toSequence must not precede payload.fromSequence",
+                1, sessionId -> records -> records.replaceFirst("\n", "\n"
+                        + ordinaryEvent(sessionId, 2, "turn:1",
+                                "context.compacted",
+                                "{\"compactionId\":\"compact-1\","
+                                        + "\"fromSequence\":2,"
+                                        + "\"toSequence\":1,\"summaryRef\":"
+                                        + toolIntentRef()
+                                        + ",\"replacedMessageIds\":[],"
+                                        + "\"tokenCountsRef\":null}",
+                                activationSubject())
+                        + "\n"));
         refuseLine("a commit marker without a body",
                 "commit must be an object", 0,
                 sessionId -> records -> records.substring(0,
@@ -454,6 +572,35 @@ class ManagedExtensionRecordStoreTest {
                 sessionId -> records -> records.replace(
                         "\"lastSequence\":1,\"eventCount\":1",
                         "\"lastSequence\":2,\"eventCount\":2"));
+        refuseLine("a commit marker without its previous digest",
+                "commit.previousCommitDigest is required", 0,
+                sessionId -> records -> records.replace(
+                        ",\"previousCommitDigest\":null", ""));
+        refuseLine("a commit marker declaring another command",
+                "commit marker does not agree with the transaction its"
+                        + " request declares", 0,
+                sessionId -> records -> records.replace(
+                        "\"commandId\":\"refused-line\"",
+                        "\"commandId\":\"another-command\""));
+        refuseLine("a commit marker digesting other events",
+                "commit marker does not agree with the transaction its"
+                        + " request declares", 0,
+                sessionId -> records -> records.replace(
+                        "\"eventsDigest\":\"__EVENTS_DIGEST__\"",
+                        "\"eventsDigest\":\"" + "f".repeat(64) + "\""));
+        refuseLine("a commit marker naming a previous chain",
+                "commit marker does not agree with the transaction its"
+                        + " request declares", 0,
+                sessionId -> records -> records.replace(
+                        "\"previousCommitDigest\":null",
+                        "\"previousCommitDigest\":\"" + "c".repeat(64)
+                                + "\""));
+        refuseLine("a commit marker shifted one sequence over",
+                "commit marker does not agree with the transaction its"
+                        + " request declares", 0,
+                sessionId -> records -> records.replace(
+                        "\"firstSequence\":1,\"lastSequence\":1",
+                        "\"firstSequence\":2,\"lastSequence\":2"));
         refuseLine("no event at all between its commit markers",
                 "holds only its events, then its commit marker", 0,
                 sessionId -> records -> {
@@ -482,18 +629,60 @@ class ManagedExtensionRecordStoreTest {
                     return first + second + records.substring(first.length());
                 });
 
-        // A faithful read-only domain record commits through the same loop,
-        // its envelope checked but nothing materialized.
+        // A faithful read-only domain record commits through the same
+        // loop, its reference backed by a resource the same transaction
+        // carries, its envelope checked but nothing materialized.
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
+        CommitResource goalBody = new CommitResource("goal-body",
+                "managed-goal_state", 1, 2, ExtensionRecordJournal.sha256(
+                        "{}"), "e30=");
         journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
                 "body-less", startBody(), 1_000, event -> {
                 }, records -> records.replaceFirst("\n", "\n"
                         + ordinaryEvent(sessionId, 2, "goal_state:1",
                                 "domain.committed", "{" + goalState + "}",
                                 null)
-                        + "\n"), 1));
+                        + "\n"), 1, List.of(goalBody)));
         assertThat(revisions(sessionId)).isEqualTo(1);
+        assertThat(rows("qwen_managed_session_resource_ref", sessionId))
+                .isEqualTo(2);
+
+        // The two content digests are recomputed from the transaction, so
+        // a request and its marker agreeing on a wrong value still refuse.
+        refuseDeclaredDigest("an eventsDigest that is not its event"
+                + " content", "eventsDigest", "e".repeat(64),
+                "eventsDigest does not match its event content");
+        refuseDeclaredDigest("a commitDigest that is not its commit's"
+                + " marker", "commitDigest", "d".repeat(64),
+                "commitDigest does not match its commit marker");
+    }
+
+    private void refuseDeclaredDigest(String label, String field, String lie,
+            String message) throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        CommitTransactionRequest base = journal.request(
+                ExtensionRecordJournal.OPERATION, "digest-lie", startBody(),
+                1_000, event -> {
+                }, records -> records);
+        ObjectNode tree = JSON.valueToTree(base);
+        tree.put(field, lie);
+        if ("eventsDigest".equals(field)) {
+            // Only the canonical recompute can spot this one: the marker
+            // and the request agree on the wrong value.
+            String records = new String(Base64.getDecoder().decode(
+                    base.recordBytesBase64()), StandardCharsets.UTF_8);
+            records = records.replaceAll("\"eventsDigest\":\"[0-9a-f]{64}\"",
+                    "\"eventsDigest\":\"" + lie + "\"");
+            tree.put("recordBytesBase64", Base64.getEncoder().encodeToString(
+                    records.getBytes(StandardCharsets.UTF_8)));
+            tree.put("recordDigest", ExtensionRecordJournal.sha256(records));
+        }
+        assertRefused(label, sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED, message,
+                () -> journal.commit(JSON.treeToValue(tree,
+                        CommitTransactionRequest.class)));
     }
 
     /** The shared ref shape the durable-ref fields carry in these tests. */
@@ -565,6 +754,21 @@ class ManagedExtensionRecordStoreTest {
                 + "\"activationId\":\"activation-1\",\"epoch\":1}";
     }
 
+    /** The activation.changed payload, breaking the rule {@code phase} pairs. */
+    private static String activationPayload(String phase,
+            boolean missingLease) {
+        return "{\"activationId\":\"activation-1\",\"epoch\":1,"
+                + "\"workerId\":\"worker-1\",\"subject\":" + activationSubject()
+                + ",\"phase\":\"" + phase + "\",\"leaseDurationMs\":"
+                + ("released".equals(phase) || missingLease ? "null"
+                        : "300000")
+                + ",\"expiresAt\":1000,\"installRef\":"
+                + ("released".equals(phase) ? "null" : toolIntentRef())
+                + ",\"boundaryRef\":"
+                + ("released".equals(phase) ? "null" : "null") + "}";
+    }
+
+
     @Test
     void refusesAStageHRecordInTheGenesis() throws Exception {
         String sessionId = UUID.randomUUID().toString();
@@ -619,6 +823,22 @@ class ManagedExtensionRecordStoreTest {
                 journal -> journal.engineLine()
                         + journal.headerLine().replace(TENANT,
                                 "another-tenant"));
+        refuseGenesis("a header naming another workspace",
+                "the genesis transaction belongs to a different session",
+                journal -> journal.engineLine()
+                        + journal.headerLine().replace(WORKSPACE,
+                                "workspace-elsewhere"));
+        refuseGenesis("a header naming another session in its key",
+                "the genesis transaction belongs to a different session",
+                journal -> journal.engineLine()
+                        + journal.headerLine().replace(
+                                "{\"tenantId\":\"" + TENANT
+                                        + "\",\"workspaceId\":\"" + WORKSPACE
+                                        + "\",\"sessionId\":\""
+                                        + journal.sessionId + "\"}",
+                                "{\"tenantId\":\"" + TENANT
+                                        + "\",\"workspaceId\":\"" + WORKSPACE
+                                        + "\",\"sessionId\":\"session-elsewhere\"}"));
         refuseGenesis("a header at format version 2",
                 "header.formatVersion is not supported by this reader",
                 journal -> journal.engineLine() + journal.headerLine()
@@ -702,7 +922,7 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
-    void announcesEachChangedViewOnThePublicSession() throws Exception {
+    void announcesEachChangedViewOnTheTaskEventOutbox() throws Exception {
         String sessionId = agents.createSession(TENANT, "announce-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();

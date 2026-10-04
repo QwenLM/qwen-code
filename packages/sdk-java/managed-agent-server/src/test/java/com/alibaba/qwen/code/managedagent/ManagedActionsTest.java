@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -81,7 +82,7 @@ class ManagedActionsTest {
     void rejectsMalformedActionJournalWithoutProjectingIt() throws Exception {
         for (String field :
                 java.util.List.of(
-                        "version", "revision", "unsafeRevision", "refVersion", "refLength")) {
+                        "version", "revision", "zeroRevision", "unsafeRevision", "refVersion", "refLength")) {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal action = new ActionJournal(journals, tenant, session, 100, 1000);
@@ -97,6 +98,27 @@ class ManagedActionsTest {
             switch (field) {
                 case "version" -> event.put("v", 1.9);
                 case "revision" -> payload.put("inputRevision", "1");
+                case "zeroRevision" -> {
+                    payload.put("inputRevision", 0);
+                    for (JsonNode resource : request.withArray("resources")) {
+                        if (!"managed-action-options".equals(
+                                resource.path("kind").textValue())) {
+                            continue;
+                        }
+                        byte[] original = Base64.getDecoder().decode(
+                                resource.path("bytesBase64").textValue());
+                        ObjectNode opts = (ObjectNode)
+                                json.readTree(original);
+                        opts.put("inputRevision", 0);
+                        byte[] changedOptions = json.writeValueAsBytes(opts);
+                        ((ObjectNode) resource)
+                                .put("bytesBase64", Base64.getEncoder()
+                                        .encodeToString(changedOptions))
+                                .put("byteLength", changedOptions.length)
+                                .put("digest", ExtensionRecordJournal
+                                        .sha256(changedOptions));
+                    }
+                }
                 case "unsafeRevision" -> payload.put("inputRevision", 9007199254740992L);
                 case "refVersion" ->
                         ((ObjectNode) payload.path("optionsRef")).put("schemaVersion", 2);
@@ -104,6 +126,25 @@ class ManagedActionsTest {
                 default -> throw new AssertionError(field);
             }
             String changed = record + "\n" + lines[1] + "\n";
+            if (!"version".equals(field) && !"revision".equals(field)
+                    && !"unsafeRevision".equals(field)) {
+                // The rule being witnessed sits behind the content digests,
+                // so the mutated line's canonical digest must be redeclared
+                // in the marker, the marker's in the request, and the
+                // commit's over the changed marker.
+                ObjectNode markerRecord = (ObjectNode)
+                        json.readTree(lines[1]);
+                String eventsDigest = ManagedSessionRecords.canonicalDigest(
+                        json.createArrayNode().add(
+                                record.path("managedSession")));
+                ((ObjectNode) markerRecord.get("managedSession"))
+                        .put("eventsDigest", eventsDigest);
+                request.put("eventsDigest", eventsDigest);
+                request.put("commitDigest",
+                        ManagedSessionRecords.canonicalDigest(
+                                markerRecord.get("managedSession")));
+                changed = record + "\n" + markerRecord + "\n";
+            }
             request.put(
                     "recordBytesBase64",
                     Base64.getEncoder()
@@ -117,7 +158,7 @@ class ManagedActionsTest {
             // journal; a malformed action reference still reaches its own
             // applier's refusal.
             String expected = switch (field) {
-                case "refVersion", "refLength" ->
+                case "zeroRevision", "refVersion", "refLength" ->
                         "managed_session_action_rejected";
                 default -> ManagedExtensionRecordStore.ERROR_REJECTED;
             };

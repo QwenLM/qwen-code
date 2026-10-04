@@ -4,6 +4,10 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidR
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +50,8 @@ public final class ManagedSessionRecords {
     public static final Map<String, List<String>> LIFECYCLE_TRANSITIONS;
     /** The per-kind payload contract of the authority's EVENT_SCHEMAS. */
     public static final Map<String, PayloadSchema> PAYLOAD_SCHEMAS;
-    private static final int MAX_TEXT_BYTES = 4096;
+    /** The free-text payload bound both `text` and `rawText` share. */
+    public static final int MAX_TEXT_BYTES = 4096;
     private static final Pattern READER_VERSION = Pattern.compile(
             "^managed-session/(0|[1-9][0-9]*)$");
 
@@ -61,7 +66,8 @@ public final class ManagedSessionRecords {
             subjects.put(kind, false);
         }
         for (String kind : List.of("model.attempt", "tool.intent",
-                "message.delta", "checkpoint.committed", "context.compacted")) {
+                "message.delta", "checkpoint.committed", "context.compacted",
+                "message.retracted")) {
             subjects.put(kind, true);
         }
         ACTIVATION_SUBJECT_KINDS = Map.copyOf(subjects);
@@ -146,6 +152,9 @@ public final class ManagedSessionRecords {
         schemas.put("message.delta", schema(
                 fields("messageId", "id", "turnId", "id", "role", "text",
                         "text", "rawText")));
+        schemas.put("message.retracted", schema(
+                fields("messageId", "id", "turnId", "id", "fromSequence",
+                        "sequence")));
         PAYLOAD_SCHEMAS = Map.copyOf(schemas);
     }
 
@@ -158,12 +167,14 @@ public final class ManagedSessionRecords {
     }
 
     private static PayloadSchema schema(Map<String, String> fields) {
-        return new PayloadSchema(fields, List.of());
+        return new PayloadSchema(
+                java.util.Collections.unmodifiableMap(fields), List.of());
     }
 
     private static PayloadSchema schema(Map<String, String> fields,
             List<String> optional) {
-        return new PayloadSchema(fields, optional);
+        return new PayloadSchema(
+                java.util.Collections.unmodifiableMap(fields), optional);
     }
 
     private ManagedSessionRecords() {
@@ -304,11 +315,12 @@ public final class ManagedSessionRecords {
 
     /**
      * The commit marker as the reader parses it, agreeing with the
-     * transaction its request declares.
+     * transaction its request declares on all nine fields, since the store
+     * keys its durable row and the replay idempotency by the request while
+     * the authority's reopen keys by the marker.
      */
-    static void requireCommitMarker(JsonNode node, long firstSequence,
-            long lastSequence, int eventCount, String eventsDigest,
-            String previousCommitDigest) {
+    static void requireCommitMarker(JsonNode node,
+            ManagedSessionStoreModels.CommitTransactionRequest request) {
         ManagedExtensionRecords.closedSubset(node, Set.of("transactionId",
                 "commandId", "operation", "contentDigest", "firstSequence",
                 "lastSequence", "eventCount", "eventsDigest",
@@ -322,7 +334,11 @@ public final class ManagedSessionRecords {
         ManagedExtensionRecords.digest(node.get("eventsDigest"),
                 "commit.eventsDigest");
         JsonNode previous = node.get("previousCommitDigest");
-        if (previous != null && !previous.isNull()) {
+        // Absent is not null: the reader refuses the missing member while
+        // an explicit JSON null is legal for a first commit after genesis.
+        require(previous != null,
+                "commit.previousCommitDigest is required");
+        if (!previous.isNull()) {
             ManagedExtensionRecords.digest(previous,
                     "commit.previousCommitDigest");
         }
@@ -338,12 +354,21 @@ public final class ManagedSessionRecords {
                 "commit.eventCount");
         require(markerLast - markerFirst + 1 == markerCount,
                 "commit sequence range must match commit.eventCount");
-        require(markerFirst == firstSequence && markerLast == lastSequence
-                && markerCount == eventCount
-                && eventsDigest.equals(node.get("eventsDigest").textValue())
-                && Objects.equals(previousCommitDigest,
-                        previous == null || previous.isNull() ? null
-                                : previous.textValue()),
+        require(request.transactionId().equals(
+                        node.get("transactionId").textValue())
+                && request.commandId().equals(
+                        node.get("commandId").textValue())
+                && request.operation().equals(
+                        node.get("operation").textValue())
+                && request.contentDigest().equals(
+                        node.get("contentDigest").textValue())
+                && markerFirst == request.firstSequence()
+                && markerLast == request.lastSequence()
+                && markerCount == request.eventCount()
+                && request.eventsDigest().equals(
+                        node.get("eventsDigest").textValue())
+                && Objects.equals(request.previousCommitDigest(),
+                        previous.isNull() ? null : previous.textValue()),
                 "commit marker does not agree with the transaction its"
                         + " request declares");
     }
@@ -507,12 +532,14 @@ public final class ManagedSessionRecords {
                 && !node.textValue().isEmpty(),
                 label + " must be a non-empty string");
         String value = node.textValue();
-        for (int index = 0; index < value.length(); index++) {
+        boolean controlled = false;
+        for (int index = 0; !controlled && index < value.length(); index++) {
             char character = value.charAt(index);
-            require(character > 0x1f && (character < 0x7f
-                    || character > 0x9f),
-                    label + " must not contain control characters");
+            controlled = character <= 0x1f || character >= 0x7f
+                    && character <= 0x9f;
         }
+        require(!controlled, () -> label + " must not contain control"
+                + " characters");
         require(value.getBytes(StandardCharsets.UTF_8).length
                 <= MAX_TEXT_BYTES,
                 label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
@@ -532,5 +559,120 @@ public final class ManagedSessionRecords {
         if (!condition) {
             throw new InvalidRecordException(message + ".");
         }
+    }
+
+    /** Builds the refusal message only on the line that produces one. */
+    private static void require(boolean condition,
+            java.util.function.Supplier<String> message) {
+        if (!condition) {
+            throw new InvalidRecordException(message.get() + ".");
+        }
+    }
+
+    /**
+     * The lowercase SHA-256 hex digest of the value in canonical JSON, byte
+     * identical to the authority's canonicalJson /
+     * canonicalManagedSessionJson: objects with keys sorted as UTF-16 text,
+     * arrays in order, strings as JSON.stringify writes them, numbers as
+     * ECMA-262 writes them. Used by the store to recompute the two content
+     * digests the reader recomputes rather than trusting the request.
+     * Pinned case by case in the shared store fixture (canonicalJsonCases).
+     */
+    public static String canonicalDigest(JsonNode value) {
+        StringBuilder out = new StringBuilder();
+        canonicalJson(value, out);
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(
+                    "SHA-256").digest(out.toString().getBytes(
+                            StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
+    }
+
+    private static void canonicalJson(JsonNode value, StringBuilder out) {
+        if (value == null || value.isNull()) {
+            out.append("null");
+        } else if (value.isTextual()) {
+            out.append(jsonString(value.textValue()));
+        } else if (value.isBoolean()) {
+            out.append(value.booleanValue() ? "true" : "false");
+        } else if (value.isNumber()) {
+            out.append(numberString(value.decimalValue()));
+        } else if (value.isArray()) {
+            out.append('[');
+            for (int index = 0; index < value.size(); index++) {
+                if (index > 0) {
+                    out.append(',');
+                }
+                canonicalJson(value.get(index), out);
+            }
+            out.append(']');
+        } else {
+            out.append('{');
+            List<String> keys = new ArrayList<>();
+            value.fieldNames().forEachRemaining(keys::add);
+            keys.sort(null);
+            for (int index = 0; index < keys.size(); index++) {
+                if (index > 0) {
+                    out.append(',');
+                }
+                out.append(jsonString(keys.get(index))).append(':');
+                canonicalJson(value.get(keys.get(index)), out);
+            }
+            out.append('}');
+        }
+    }
+
+    /** A string as JSON.stringify writes it: only the escapes JSON requires. */
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    private static String jsonString(String value) {
+        StringBuilder out = new StringBuilder(value.length() + 2);
+        out.append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char c = value.charAt(index);
+            switch (c) {
+                case '"' -> out.append("\\\"");
+                case '\\' -> out.append("\\\\");
+                case '\b' -> out.append("\\b");
+                case '\f' -> out.append("\\f");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c <= 0x1f) {
+                        out.append("\\u00").append(HEX[c >> 4])
+                                .append(HEX[c & 0xf]);
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.append('"').toString();
+    }
+
+    /**
+     * A number as ECMA-262 writes it: plain digits while the exponent of
+     * the first significant digit is between -6 and 20, the one-e form
+     * outside it. The digit sequence comes from the double's shortest
+     * round-trip form, which Java and V8 agree on.
+     */
+    private static String numberString(BigDecimal value) {
+        BigDecimal stripped = value.stripTrailingZeros();
+        if (stripped.signum() == 0) {
+            return "0";
+        }
+        // exponent of the first significant digit: plain -1's magnitude
+        int exponent = stripped.precision() - stripped.scale() - 1;
+        if (exponent >= -6 && exponent < 21) {
+            return stripped.toPlainString();
+        }
+        String digits = stripped.unscaledValue().abs().toString();
+        String mantissa = digits.length() == 1 ? digits
+                : digits.charAt(0) + "." + digits.substring(1);
+        return (stripped.signum() < 0 ? "-" : "") + mantissa + "e"
+                + (exponent >= 0 ? "+" : "") + exponent;
     }
 }

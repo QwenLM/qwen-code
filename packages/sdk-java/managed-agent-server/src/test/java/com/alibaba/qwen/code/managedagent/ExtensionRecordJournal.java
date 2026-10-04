@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
@@ -161,6 +162,15 @@ final class ExtensionRecordJournal {
                 editRecords, extraEvents, "monitor_run", List.of());
     }
 
+    /** The same request, carrying its own resources. */
+    CommitTransactionRequest request(String operation, String commandId,
+            byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents,
+            List<CommitResource> resources) {
+        return request(operation, commandId, body, occurredAt, editEvent,
+                editRecords, extraEvents, "monitor_run", resources);
+    }
+
     CommitTransactionRequest requestDomain(String commandId, String domain,
             JsonNode body, List<CommitResource> resources, long occurredAt) {
         return request("commitMcpRecord", commandId, bytes(body), occurredAt,
@@ -199,26 +209,48 @@ final class ExtensionRecordJournal {
                 .put("contentDigest", sha256(commandId))
                 .put("firstSequence", next)
                 .put("lastSequence", next + extraEvents)
-                .put("eventCount", 1 + extraEvents)
-                .put("eventsDigest", sha256("events-" + commandId));
+                .put("eventCount", 1 + extraEvents);
         if (lastCommitDigest == null) {
             marker.putNull("previousCommitDigest");
         } else {
             marker.put("previousCommitDigest", lastCommitDigest);
         }
+        marker.put("eventsDigest", "__EVENTS_DIGEST__");
         String records = editRecords.apply(line("managed_session_event_v1",
                 event) + line("managed_session_commit_v1", marker));
-        List<CommitResource> closure = new ArrayList<>(resources);
-        closure.add(new CommitResource(resourceId, "managed-" + domain, 1,
-                body.length, sha256(body), Base64.getEncoder().encodeToString(body)));
-        return new CommitTransactionRequest(workspaceId, WRITER,
-                writerGeneration, journalRevision, sequence, transactionId,
-                operation, commandId, sha256(commandId), next,
-                next + extraEvents, 1 + extraEvents,
-                sha256("events-" + commandId), lastCommitDigest,
-                sha256(transactionId), 0, null, 2 + extraEvents,
-                base64(records),
-                sha256(records), closure);
+        try {
+            String eventsDigest = eventsDigestOf(records);
+            records = records.replace("__EVENTS_DIGEST__", eventsDigest);
+            marker.put("eventsDigest", eventsDigest);
+            String commitDigest = ManagedSessionRecords.canonicalDigest(
+                    marker);
+            List<CommitResource> closure = new ArrayList<>(resources);
+            closure.add(new CommitResource(resourceId, "managed-" + domain, 1,
+                    body.length, sha256(body), Base64.getEncoder().encodeToString(body)));
+            return new CommitTransactionRequest(workspaceId, WRITER,
+                    writerGeneration, journalRevision, sequence, transactionId,
+                    operation, commandId, sha256(commandId), next,
+                    next + extraEvents, 1 + extraEvents,
+                    eventsDigest, lastCommitDigest, commitDigest, 0, null,
+                    2 + extraEvents, base64(records), sha256(records),
+                    closure);
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    /** The canonical digest of the event bodies of `records`. */
+    private static String eventsDigestOf(String records)
+            throws JsonProcessingException {
+        var events = JSON.createArrayNode();
+        for (String part : records.split("\n")) {
+            JsonNode line = JSON.readTree(part);
+            if ("managed_session_event_v1".equals(
+                    line.path("subtype").textValue())) {
+                events.add(line.path("managedSession"));
+            }
+        }
+        return ManagedSessionRecords.canonicalDigest(events);
     }
 
     /** Advances past a request the store committed. */

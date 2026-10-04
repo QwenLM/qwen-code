@@ -16,7 +16,8 @@
     "minimumWriterTokenLength": 32,
     "maximumWriterTokenLength": 512,
     "minimumLeaseDurationMs": 1000,
-    "maximumLeaseDurationMs": 300000
+    "maximumLeaseDurationMs": 300000,
+    "maxTextBytes": 4096
   },
   "eventKinds": [
     "input.accepted",
@@ -34,7 +35,43 @@
     "config.bound",
     "lifecycle.changed",
     "domain.committed",
-    "message.delta"
+    "message.delta",
+    "message.retracted"
+  ],
+  "domains": [
+    "config_install",
+    "workspace_initialization",
+    "skill_activation",
+    "mcp_configuration",
+    "mcp_operation",
+    "hook_registration",
+    "hook_execution",
+    "tool_stage",
+    "resource",
+    "publication",
+    "workspace_operation",
+    "history_rewind",
+    "history_copy",
+    "history_maintenance",
+    "channel_route",
+    "channel_delivery",
+    "schedule",
+    "automation_run",
+    "child_run",
+    "child_acceptance",
+    "memory_job",
+    "monitor_run",
+    "goal_state",
+    "todo_state",
+    "plan_mode",
+    "team_state",
+    "team_task",
+    "team_message",
+    "team_plan",
+    "session_message",
+    "session_metadata",
+    "file_history",
+    "session_source"
   ],
   "activationSubjectKinds": {
     "input.accepted": false,
@@ -44,6 +81,7 @@
     "message.committed": false,
     "tool.intent": true,
     "message.delta": true,
+    "message.retracted": true,
     "action.changed": false,
     "tool.receipt": false,
     "checkpoint.committed": true,
@@ -221,6 +259,14 @@
         "text": "rawText"
       },
       "optional": []
+    },
+    "message.retracted": {
+      "fields": {
+        "messageId": "id",
+        "turnId": "id",
+        "fromSequence": "sequence"
+      },
+      "optional": []
     }
   },
   "activationPhases": ["installing", "active", "released", "revoked"],
@@ -259,6 +305,124 @@
       "deleting"
     ]
   },
+  "canonicalJsonCases": [
+    {
+      "json": "{\"v\":0}",
+      "digest": "ec4f95abcb4e2e3dbe856c3eb2f81995eacb3823d40aa2e78ed4c5e1798f664d"
+    },
+    {
+      "json": "{\"v\":0}",
+      "digest": "ec4f95abcb4e2e3dbe856c3eb2f81995eacb3823d40aa2e78ed4c5e1798f664d"
+    },
+    {
+      "json": "{\"v\":1}",
+      "digest": "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91"
+    },
+    {
+      "json": "{\"v\":-1}",
+      "digest": "ee1008644d75e38156c87a8a35e19344e4b959bea6af1f050bff56c204b3dcae"
+    },
+    {
+      "json": "{\"v\":0.5}",
+      "digest": "9193de9a397800de1df2aafda7c08d2dcb4250bb56cb33b3263772b211151a64"
+    },
+    {
+      "json": "{\"v\":-0.5}",
+      "digest": "80ceee4bacf3239a2f2eddc7714428c40f09c60c662c694b4ee547ef9974dc96"
+    },
+    {
+      "json": "{\"v\":0.1}",
+      "digest": "8ec9c466832e74cab1700269790aa649b06fb67989ecf3ac8e6e3c2e5cde2b3a"
+    },
+    {
+      "json": "{\"v\":0.30000000000000004}",
+      "digest": "a02d5e22a1821d2ae6d9bfbd6f9f85a2622dd7f07dd0400b34204e8874ae2387"
+    },
+    {
+      "json": "{\"v\":123.456}",
+      "digest": "886e309b5d2bcd3f5577d01b92691bb7a9ebd31ede2ec41871a3a194044160ae"
+    },
+    {
+      "json": "{\"v\":999999.5}",
+      "digest": "559b28b3e9a42880b317ed2ea4a2383f96c5efc95e1d8adff6b9c16ad0b30141"
+    },
+    {
+      "json": "{\"v\":0.000001}",
+      "digest": "3aa9586a53796d5603f503d4de60992e055fc4e3fb594c0de84bdc7616df2dd9"
+    },
+    {
+      "json": "{\"v\":5e-7}",
+      "digest": "d3fca3e044c95f57ee98bad7e56404073c1c918e22916fe91a3f2301b1b548d7"
+    },
+    {
+      "json": "{\"v\":1e-7}",
+      "digest": "3a28f15de586a90e5f896f27e39cd7d7e4022dcccc3a795c373d64a52661987f"
+    },
+    {
+      "json": "{\"v\":4.9e-7}",
+      "digest": "991a60d63e8a3fc23fb81d563c049ed4b336d4fb4746016e4a5530d438d4d58c"
+    },
+    {
+      "json": "{\"v\":100000000000000000000}",
+      "digest": "8e85c1241e1aebc42bf95fcc16c0fef8b6d1de48d57f31096b9a7be664c2cebb"
+    },
+    {
+      "json": "{\"v\":1e+21}",
+      "digest": "9e24d139b060bd89f98e510a1e34d48fade6aeb668a016e6fb2e296762a3aefa"
+    },
+    {
+      "json": "{\"v\":5e+21}",
+      "digest": "bcc431eca9c8f06c0a73102946206e9939b57ab3ad9735d4bbf90ab5a2a92971"
+    },
+    {
+      "json": "{\"v\":-1e+21}",
+      "digest": "e2c8234e1548bc80ba238ba3913aeb55c4c324df829c9c0641b7966a8a9b1067"
+    },
+    {
+      "json": "{\"v\":8640000000000000}",
+      "digest": "1ba1c4c1afe5355675eb88dfda0e93af2f20355843ef7e8777f3bcfa431501bc"
+    },
+    {
+      "json": "{\"v\":9007199254740991}",
+      "digest": "210e9afd5b97d46616c53c7bc51eb7349d44183691bb0866ae2ef6a2b798823f"
+    },
+    {
+      "json": "{\"v\":9007199254740990}",
+      "digest": "7c8602e74df617fa28332e4814482a65700942310c15de4308b3f8b9b89d7125"
+    },
+    {
+      "json": "{\"v\":\"plain\"}",
+      "digest": "7a3c7faa493849d8009913e46a83e91bc8b9151aa16689dbfe377c1e4ee8bae7"
+    },
+    {
+      "json": "{\"v\":\"温度 warm ✓😀\"}",
+      "digest": "335111ca093ba5770cf3e0fe1113b35bfbef7a6227a4422cb719735732874590"
+    },
+    {
+      "json": "{\"v\":\"escapes \\\\ \\\" quote\"}",
+      "digest": "3ea301929d75573fb543e5023e1682f37c3a1182d81f7db10004041f5dac6986"
+    },
+    {
+      "json": "{\"v\":\"controls \\b\\f\\n\\r\\t\"}",
+      "digest": "9bb9d440092b41ff21b1adf06157a9dd48943916d7ff78762e0cc00c3d05d28b"
+    },
+    {
+      "json": "{\"v\":\"\\u0001\\u000f\\u001f middle\"}",
+      "digest": "b44e23912d233f547687cf05e2de3f07ac3ef6fbfeb9188557934ecfd85cfdff"
+    },
+    {
+      "json": "{\"v\":\"DEL follows \"}",
+      "digest": "91be0e542851a2892beb068b1e4c8ab4fa146ddc0f247602ea770c8eb3af26db"
+    },
+    {
+      "json": "{\"v\":[1,[\"n\",null],{\"b\":[true,false]}]}",
+      "digest": "a53d0937433496f3f79c8784b3102a8ce1d60bd13fda7deba5cfe72edfd57c50"
+    },
+    {
+      "json": "{\"v\":{\"\":\"control key\",\"温度\":\"non-ascii key\",\"a\":[\"nested\",[1]]}}",
+      "digest": "35d88e7c5747d705820702c0b174c4ecb868c4db693c3b83bf25bfb8c5eda535"
+    }
+  ],
   "sessionKey": {
     "tenantId": "tenant-fixture",
     "workspaceId": "workspace-fixture",

@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -331,26 +332,39 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_writer_conflict"));
 
+        ObjectNode turnEvent = objectMapper.createObjectNode()
+                .put("v", 1).put("sequence", 1)
+                .put("eventId", "turn-event:1")
+                .put("kind", "lifecycle.changed").put("occurredAt", 1000);
+        turnEvent.putObject("sessionKey").put("tenantId", TENANT)
+                .put("workspaceId", WORKSPACE).put("sessionId", SESSION);
+        turnEvent.putObject("payload").put("operationId", "op-open")
+                .putNull("from").put("to", "idle").put("reason", "opened")
+                .putNull("pendingOwnersRef");
+        String turnEventsDigest = ManagedSessionRecords.canonicalDigest(
+                objectMapper.createArrayNode().add(turnEvent));
+        ObjectNode turnMarker = objectMapper.createObjectNode()
+                .put("transactionId", "transaction-turn")
+                .put("commandId", "command-turn")
+                .put("operation", "turn.submit")
+                .put("contentDigest", sha256("turn-content"))
+                .put("firstSequence", 1).put("lastSequence", 1)
+                .put("eventCount", 1)
+                .put("eventsDigest", turnEventsDigest);
+        turnMarker.putNull("previousCommitDigest");
         String turnBytes = "{\"subtype\":\"managed_session_event_v1\","
                 + "\"sessionId\":\"" + SESSION + "\","
-                + "\"managedSession\":{\"v\":1,\"sequence\":1,"
-                + "\"eventId\":\"turn-event:1\",\"sessionKey\":"
-                + "{\"tenantId\":\"" + TENANT + "\",\"workspaceId\":\""
-                + WORKSPACE + "\",\"sessionId\":\"" + SESSION + "\"},"
-                + "\"kind\":\"lifecycle.changed\",\"occurredAt\":1000,"
-                + "\"payload\":{\"operationId\":\"op-open\",\"from\":null,"
-                + "\"to\":\"idle\",\"reason\":\"opened\","
-                + "\"pendingOwnersRef\":null}}}\n"
+                + "\"managedSession\":"
+                + objectMapper.writeValueAsString(turnEvent) + "}\n"
                 + "{\"subtype\":\"managed_session_commit_v1\","
                 + "\"sessionId\":\"" + SESSION + "\","
-                + "\"managedSession\":{\"transactionId\":"
-                + "\"transaction-turn\",\"commandId\":\"command-turn\","
-                + "\"operation\":\"turn.submit\",\"contentDigest\":\""
-                + sha256("turn-content")
-                + "\",\"firstSequence\":1,\"lastSequence\":1,"
-                + "\"eventCount\":1,\"eventsDigest\":\"" + "e".repeat(64)
-                + "\",\"previousCommitDigest\":null}}\n";
+                + "\"managedSession\":"
+                + objectMapper.writeValueAsString(turnMarker) + "}\n";
         ObjectNode turn = transactionRequest(turnBytes, WRITER_A, 1);
+        turn.put("eventsDigest", turnEventsDigest);
+        String turnCommitDigest = ManagedSessionRecords.canonicalDigest(
+                turnMarker);
+        turn.put("commitDigest", turnCommitDigest);
         byte[] checkpointBytes = "checkpoint-state"
                 .getBytes(StandardCharsets.UTF_8);
         turn.put("latestCheckpointResourceId", "resource-checkpoint");
@@ -429,7 +443,7 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.journalRevision").value(2))
                 .andExpect(jsonPath("$.committedSequence").value(1))
                 .andExpect(jsonPath("$.lastCommitDigest")
-                        .value("c".repeat(64)))
+                        .value(turnCommitDigest))
                 .andExpect(jsonPath("$.latestCheckpointResourceId")
                         .value("resource-checkpoint"))
                 .andExpect(jsonPath("$.recoveryStatus").value("READY"));
@@ -443,14 +457,36 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_not_found"));
 
-        ObjectNode oversized = transactionRequest(turnBytes, WRITER_B, 2)
+        ObjectNode bigEvent = ((ObjectNode) turnEvent.deepCopy()).set(
+                "sequence", objectMapper.getNodeFactory().numberNode(2));
+        bigEvent.put("eventId", "turn-event:2");
+        String bigEventsDigest = ManagedSessionRecords.canonicalDigest(
+                objectMapper.createArrayNode().add(bigEvent));
+        ObjectNode bigMarker = turnMarker.deepCopy()
+                .put("transactionId", "transaction-oversized")
+                .put("commandId", "command-oversized")
+                .put("firstSequence", 2).put("lastSequence", 2)
+                .put("eventsDigest", bigEventsDigest)
+                .put("previousCommitDigest", turnCommitDigest);
+        String bigBytes = "{\"subtype\":\"managed_session_event_v1\","
+                + "\"sessionId\":\"" + SESSION + "\","
+                + "\"managedSession\":"
+                + objectMapper.writeValueAsString(bigEvent) + "}\n"
+                + "{\"subtype\":\"managed_session_commit_v1\","
+                + "\"sessionId\":\"" + SESSION + "\","
+                + "\"managedSession\":"
+                + objectMapper.writeValueAsString(bigMarker) + "}\n";
+        ObjectNode oversized = transactionRequest(bigBytes, WRITER_B, 2)
                 .put("transactionId", "transaction-oversized")
                 .put("commandId", "command-oversized")
                 .put("expectedJournalRevision", 2)
                 .put("expectedCommittedSequence", 1)
                 .put("firstSequence", 2)
                 .put("lastSequence", 2)
-                .put("previousCommitDigest", "c".repeat(64));
+                .put("eventsDigest", bigEventsDigest)
+                .put("commitDigest", ManagedSessionRecords.canonicalDigest(
+                        bigMarker))
+                .put("previousCommitDigest", turnCommitDigest);
         oversized.withArray("resources").addObject()
                 .put("resourceId", "resource-oversized")
                 .put("kind", "managed-context")

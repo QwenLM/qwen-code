@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -181,18 +183,27 @@ public class ManagedExtensionRecordStore {
      * 1 record reference of it, an unknown record subtype is tolerated only
      * before the Managed header, and the header and the commit marker parse
      * as the reader parses them, the marker agreeing with the transaction
-     * the request declares. The {@code <domain>:<count>} event IDs come
-     * from the authority's commit gate, not its reader, so they are checked
-     * exactly: only the ID the chain assigns next, or a planted one would
-     * make the authority refuse its own legitimate later revision. A Stage H
-     * event must hold its declared place among the transaction's
-     * {@code eventCount} events, and its transaction must hold only those
-     * events and then its commit marker, as the authority writes it.
+     * the request declares on all nine of its fields. The request's two
+     * content digests are then recomputed from the lines, in the canonical
+     * JSON the reader recomputes them in — the events digest over the
+     * parsed events and the commit digest over the marker body — so a line
+     * the reader could not verify is never stored. The
+     * {@code <domain>:<count>} event IDs come from the authority's commit
+     * gate, not its reader, so they are checked exactly: only the ID the
+     * chain assigns next, or a planted one would make the authority refuse
+     * its own legitimate later revision. A Stage H event must hold its
+     * declared place among the transaction's {@code eventCount} events,
+     * and its transaction must hold only those events and then its commit
+     * marker, as the authority writes it.
      */
     List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
-            long firstSequence, long lastSequence, int eventCount,
-            String eventsDigest, String previousCommitDigest,
+            ManagedSessionStoreModels.CommitTransactionRequest request,
             byte[] recordBytes, Function<String, StoredResource> resources) {
+        long firstSequence = request.firstSequence();
+        long lastSequence = request.lastSequence();
+        int eventCount = request.eventCount();
+        String eventsDigest = request.eventsDigest();
+        String previousCommitDigest = request.previousCommitDigest();
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         JsonNode[] records = new JsonNode[lines.length];
@@ -225,9 +236,11 @@ public class ManagedExtensionRecordStore {
             }
         }
         List<JsonNode> receipts = new ArrayList<>();
+        List<JsonNode> events = new ArrayList<>();
         Set<String> transactionEventIds = new HashSet<>();
         int stageH = 0;
         boolean shaped = true;
+        JsonNode markerBody = null;
         String lastSubtype = null;
         for (int index = 0; index < records.length; index++) {
             JsonNode record = records[index];
@@ -248,12 +261,11 @@ public class ManagedExtensionRecordStore {
                             ManagedSessionStoreModels.MAX_COMMIT_MARKER_BYTES);
                     try {
                         ManagedSessionRecords.requireCommitMarker(
-                                record.get("managedSession"), firstSequence,
-                                lastSequence, eventCount, eventsDigest,
-                                previousCommitDigest);
+                                record.get("managedSession"), request);
                     } catch (InvalidRecordException error) {
                         throw rejected(error.getMessage());
                     }
+                    markerBody = record.get("managedSession");
                 } else {
                     // The scanner tolerates a foreign engine's records only
                     // before the genesis transaction's Managed header.
@@ -261,14 +273,10 @@ public class ManagedExtensionRecordStore {
                             "Record line " + (index + 1) + " has the unknown"
                                     + " subtype " + subtype
                                     + " after the Managed header.");
-                    requireLineBytes(lines[index], index,
-                            ManagedSessionStoreModels.MAX_EVENT_BYTES);
                 }
                 shaped &= index >= eventCount;
                 continue;
             }
-            requireLineBytes(lines[index], index,
-                    ManagedSessionStoreModels.MAX_EVENT_BYTES);
             require(index < eventCount, "Record line " + (index + 1)
                     + " is not one of the transaction's events.");
             JsonNode event = record.path("managedSession");
@@ -276,6 +284,7 @@ public class ManagedExtensionRecordStore {
                     firstSequence + index);
             requireOwnSession(event, tenantId, workspaceId, sessionId,
                     "The event names another Session.");
+            events.add(event);
             String kind = event.get("kind").textValue();
             try {
                 ManagedSessionRecords.requireEventPayload(kind,
@@ -356,6 +365,22 @@ public class ManagedExtensionRecordStore {
         require(header >= 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
+        if (markerBody != null) {
+            // The reader recomputes both content digests from the
+            // transaction itself: the request must carry their true values,
+            // not merely ones the marker repeats.
+            ArrayNode eventsArray = JsonNodeFactory.instance.arrayNode();
+            events.forEach(eventsArray::add);
+            require(eventsDigest.equals(
+                    ManagedSessionRecords.canonicalDigest(eventsArray)),
+                    "The transaction's eventsDigest does not match its"
+                            + " event content.");
+            require(request.commitDigest() != null
+                    && request.commitDigest().equals(
+                            ManagedSessionRecords.canonicalDigest(markerBody)),
+                    "The transaction's commitDigest does not match its"
+                            + " commit marker.");
+        }
         return receipts;
     }
 

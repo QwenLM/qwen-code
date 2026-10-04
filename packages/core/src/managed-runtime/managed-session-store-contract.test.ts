@@ -19,11 +19,13 @@ import {
   MANAGED_SESSION_ACTION_SOURCES,
   MANAGED_SESSION_ACTION_STATES,
   MANAGED_SESSION_ACTIVATION_PHASES,
+  MANAGED_SESSION_DOMAINS,
   MANAGED_SESSION_EVENT_KINDS,
   MANAGED_SESSION_LIFECYCLE_STATES,
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MODEL_ATTEMPT_STATES,
 } from './managed-session-records.js';
+import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 
 interface ContractFixture {
   contractVersion: number;
@@ -44,8 +46,10 @@ interface ContractFixture {
     maximumWriterTokenLength: number;
     minimumLeaseDurationMs: number;
     maximumLeaseDurationMs: number;
+    maxTextBytes: number;
   };
   eventKinds: string[];
+  domains: string[];
   activationSubjectKinds: Record<string, boolean>;
   eventPayloadSchemas: Record<
     string,
@@ -57,6 +61,7 @@ interface ContractFixture {
   actionStates: string[];
   lifecycleStates: string[];
   lifecycleTransitions: Record<string, string[]>;
+  canonicalJsonCases: Array<{ json: string; digest: string }>;
   sessionKey: {
     tenantId: string;
     workspaceId: string;
@@ -125,12 +130,17 @@ describe('Managed Session store shared contract', () => {
     expect(MANAGED_SESSION_LIMITS.maxCommitMarkerBytes).toBe(
       fixture.limits.maxCommitMarkerBytes,
     );
+    // The free-text payload bound, covering both `text` and `rawText`.
+    expect(MANAGED_SESSION_LIMITS.maxTextBytes).toBe(
+      fixture.limits.maxTextBytes,
+    );
 
     // The Java store mirrors the event vocabulary and payload contract out
     // of this fixture, so the authority's tables must match it exactly — a
     // kind or field added on one side only fails here and in
     // ManagedSessionStoreContractFixtureTest.
     expect([...MANAGED_SESSION_EVENT_KINDS]).toStrictEqual(fixture.eventKinds);
+    expect([...MANAGED_SESSION_DOMAINS]).toStrictEqual(fixture.domains);
     expect(ACTIVATION_SUBJECT_KINDS).toStrictEqual(
       fixture.activationSubjectKinds,
     );
@@ -163,6 +173,12 @@ describe('Managed Session store shared contract', () => {
     expect(JSON.parse(JSON.stringify(LIFECYCLE_TRANSITIONS))).toStrictEqual(
       fixture.lifecycleTransitions,
     );
+
+    // The one canonical-JSON implementation both content digests come
+    // from; the Java mirror recomputes the same digests case by case.
+    for (const caze of fixture.canonicalJsonCases) {
+      expect(managedToolDigest(JSON.parse(caze.json))).toBe(caze.digest);
+    }
 
     for (const resource of fixture.resources) {
       const bytes = Buffer.from(resource.utf8, 'utf8');

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -64,12 +65,16 @@ class ManagedSessionStoreContractFixtureTest {
                 limits.required("minimumLeaseDurationMs").longValue());
         assertEquals(ManagedSessionStoreModels.MAX_LEASE_MILLIS,
                 limits.required("maximumLeaseDurationMs").longValue());
+        assertEquals(ManagedSessionRecords.MAX_TEXT_BYTES,
+                limits.required("maxTextBytes").intValue());
 
         // The line contract the store mirrors out of this fixture: the
         // shared event kinds, their payload schemas, the kinds that require
         // a subject, and the vocabularies the payload rules use.
         assertEquals(JSON.valueToTree(ManagedExtensionRecords.EVENT_KINDS),
                 contract.required("eventKinds"));
+        assertEquals(JSON.valueToTree(ManagedExtensionRecords.DOMAINS),
+                contract.required("domains"));
         assertEquals(JSON.valueToTree(
                 ManagedSessionRecords.ACTIVATION_SUBJECT_KINDS),
                 contract.required("activationSubjectKinds"));
@@ -100,6 +105,16 @@ class ManagedSessionStoreContractFixtureTest {
                     item -> optional.add(item.textValue()));
             assertEquals(optional, schema.optional(), kind);
         });
+
+        // The canonical JSON behind both content digests, byte-identical
+        // across the languages for the lifelike value classes.
+        for (JsonNode caze : contract.required("canonicalJsonCases")) {
+            JsonNode value = ManagedExtensionRecordStore.parse(
+                    caze.required("json").textValue());
+            assertEquals(caze.required("digest").textValue(),
+                    ManagedSessionRecords.canonicalDigest(value),
+                    caze.toString());
+        }
     }
 
     @Test

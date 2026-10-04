@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
@@ -202,13 +203,13 @@ class ToolPublicationStoreTest {
      * with the declared fields the transaction commits under.
      */
     private static String markerLine(String transactionId, String operation,
-            String commandId, long first, long last, String eventsDigest,
-            String previousCommitDigest) {
+            String commandId, String contentDigest, long first, long last,
+            String eventsDigest, String previousCommitDigest) {
         ObjectNode marker = JSON.createObjectNode()
                 .put("transactionId", transactionId)
                 .put("commandId", commandId)
                 .put("operation", operation)
-                .put("contentDigest", digest(commandId))
+                .put("contentDigest", contentDigest)
                 .put("firstSequence", first)
                 .put("lastSequence", last)
                 .put("eventCount", last - first + 1)
@@ -603,12 +604,14 @@ class ToolPublicationStoreTest {
         receiptPayload.putArray("resources");
         String eventsLines = event(sequence + 1, "tool.receipt", receiptPayload);
         String records = eventsLines + markerLine("transaction-large",
-                "recordToolResult", "execution-1", sequence + 1, sequence + 1,
-                digest(eventsLines), commitDigest);
+                "recordToolResult", "execution-1",
+                admission.path("digest").asText(), sequence + 1, sequence + 1,
+                canonicalEventDigest(eventsLines), commitDigest);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-large", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
-                digest(eventsLines), commitDigest, digest(records), 1, null, 2,
+                canonicalEventDigest(eventsLines), commitDigest,
+                canonicalMarkerDigest(records), 1, null, 2,
                 Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)),
                 digest(records), List.of(new ManagedSessionStoreModels.CommitResource(
                         admission.path("resourceId").asText(), "managed-tool-outcome", 1,
@@ -619,7 +622,7 @@ class ToolPublicationStoreTest {
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "different-transaction", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
-                digest(records), commitDigest, digest(records), 1, null, 2,
+                canonicalEventDigest(eventsLines), commitDigest, digest(records), 1, null, 2,
                 Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)),
                 digest(records), commit.resources());
         assertThatThrownBy(() -> admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, changedReplay))
@@ -815,12 +818,15 @@ class ToolPublicationStoreTest {
         String eventsLines = event(sequence + 1, "tool.receipt", receiptPayload);
         long receiptSequence = sequence + 1;
         String recordBytes = eventsLines + markerLine("transaction-receipt",
-                "recordToolResult", "execution-1", receiptSequence,
-                receiptSequence, digest(eventsLines), commitDigest);
+                "recordToolResult", "execution-1",
+                admission.path("digest").asText(), receiptSequence,
+                receiptSequence, canonicalEventDigest(eventsLines),
+                commitDigest);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 revision, sequence, "transaction-receipt", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), receiptSequence, receiptSequence, 1,
-                digest(eventsLines), commitDigest, digest(recordBytes), 1, null, 2,
+                canonicalEventDigest(eventsLines), commitDigest,
+                canonicalMarkerDigest(recordBytes), 1, null, 2,
                 Base64.getEncoder().encodeToString(recordBytes.getBytes(StandardCharsets.UTF_8)),
                 digest(recordBytes), List.of(
                         new ManagedSessionStoreModels.CommitResource(admission.path("resourceId").asText(),
@@ -2059,8 +2065,10 @@ class ToolPublicationStoreTest {
                 receiptPayload);
         long receiptSequence = sequence + 1;
         String recordBytes = eventsLines + markerLine("transaction-receipt",
-                "recordToolResult", "execution-1", receiptSequence,
-                receiptSequence, digest(eventsLines), commitDigest);
+                "recordToolResult", "execution-1",
+                admission.path("digest").asText(), receiptSequence,
+                receiptSequence, canonicalEventDigest(eventsLines),
+                commitDigest);
         var commit =
                 new ManagedSessionStoreModels.CommitTransactionRequest(
                         "workspace-1",
@@ -2075,9 +2083,9 @@ class ToolPublicationStoreTest {
                         receiptSequence,
                         receiptSequence,
                         1,
-                        digest(eventsLines),
+                        canonicalEventDigest(eventsLines),
                         commitDigest,
-                        digest(recordBytes),
+                        canonicalMarkerDigest(recordBytes),
                         1,
                         null,
                         2,
@@ -2606,25 +2614,56 @@ class ToolPublicationStoreTest {
         };
     }
 
+    /** The canonical digest of the event bodies of `eventsLines`. */
+    private static String canonicalEventDigest(String eventsLines) {
+        var events = JSON.createArrayNode();
+        for (String part : eventsLines.split("\n")) {
+            JsonNode line = json(part);
+            if ("managed_session_event_v1".equals(
+                    line.path("subtype").textValue())) {
+                events.add(line.path("managedSession"));
+            }
+        }
+        return ManagedSessionRecords.canonicalDigest(events);
+    }
+
+    /** The canonical digest of the commit marker of `records`. */
+    private static String canonicalMarkerDigest(String records) {
+        int at = records.lastIndexOf("{\"subtype\":\"managed_session_commit_v1\"");
+        return ManagedSessionRecords.canonicalDigest(
+                json(records.substring(at, records.length() - 1))
+                        .path("managedSession"));
+    }
+
+    private static JsonNode json(String text) {
+        try {
+            return JSON.readTree(text);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private void append(String operation, String eventsLines, int events,
             List<ManagedSessionStoreModels.CommitResource> resources, String checkpointId) {
-        String nextDigest = events == 0 ? null : digest(eventsLines);
+        String nextDigest = events == 0 ? null : canonicalEventDigest(eventsLines);
         long first = events == 0 ? 0 : sequence + 1;
         long last = first + events - (events == 0 ? 0 : 1);
+        String commandId = "command-" + revision;
         String records = events > 0 ? eventsLines
                 + markerLine("transaction-" + revision, operation,
-                        "command-" + revision, first, last, nextDigest,
+                        commandId, digest(commandId), first, last, nextDigest,
                         commitDigest)
                 : eventsLines;
+        String newCommitDigest = events == 0 ? null : canonicalMarkerDigest(records);
         var request = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
-                revision, sequence, "transaction-" + revision, operation, "command-" + revision, digest(records),
-                first, last, events, nextDigest, commitDigest, nextDigest,
+                revision, sequence, "transaction-" + revision, operation, commandId, digest(commandId),
+                first, last, events, nextDigest, commitDigest, newCommitDigest,
                 events == 0 ? 0 : 1, checkpointId, events == 0 ? 2 : events + 1,
                 Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), digest(records), resources);
         new TransactionTemplate(manager).executeWithoutResult(status -> sessions.commit("tenant-1", "session-1", WRITER_TOKEN, request));
         revision++;
         sequence += events;
-        commitDigest = nextDigest;
+        commitDigest = newCommitDigest;
     }
 
     private static ObjectNode ref(String id, String kind, JsonNode body) {

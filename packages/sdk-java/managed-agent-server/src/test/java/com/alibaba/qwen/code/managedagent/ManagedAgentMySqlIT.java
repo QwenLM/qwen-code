@@ -256,9 +256,26 @@ class ManagedAgentMySqlIT {
                         genesis)).replayed()).isTrue();
 
         String turnRecords =
-                "{\"subtype\":\"managed_session_event_v1\"}\n"
-                        + "{\"subtype\":"
-                        + "\"managed_session_commit_v1\"}\n";
+                "{\"subtype\":\"managed_session_event_v1\",\"sessionId\":\""
+                        + sessionId + "\",\"managedSession\":{\"v\":1,"
+                        + "\"sequence\":1,\"eventId\":\"turn-event:1\","
+                        + "\"sessionKey\":{\"tenantId\":\"" + storeTenant
+                        + "\",\"workspaceId\":\"" + workspaceId
+                        + "\",\"sessionId\":\"" + sessionId + "\"},"
+                        + "\"kind\":\"lifecycle.changed\",\"occurredAt\":1000,"
+                        + "\"payload\":{\"operationId\":\"op-open\","
+                        + "\"from\":null,\"to\":\"idle\",\"reason\":\"opened\","
+                        + "\"pendingOwnersRef\":null}}}\n"
+                        + "{\"subtype\":\"managed_session_commit_v1\","
+                        + "\"sessionId\":\"" + sessionId + "\","
+                        + "\"managedSession\":{\"transactionId\":"
+                        + "\"mysql-turn-transaction\",\"commandId\":"
+                        + "\"mysql-turn-command\",\"operation\":\"turn.submit\","
+                        + "\"contentDigest\":\"" + sha256("turn-content")
+                        + "\",\"firstSequence\":1,\"lastSequence\":1,"
+                        + "\"eventCount\":1,\"eventsDigest\":\""
+                        + "e".repeat(64)
+                        + "\",\"previousCommitDigest\":null}}\n";
         CommitTransactionRequest staleCommit =
                 new CommitTransactionRequest(workspaceId, "writer-a", 1,
                         1, 0, "mysql-turn-transaction", "turn.submit",

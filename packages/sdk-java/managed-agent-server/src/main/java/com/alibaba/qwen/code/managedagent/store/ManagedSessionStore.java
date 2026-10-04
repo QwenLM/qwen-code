@@ -357,10 +357,7 @@ public class ManagedSessionStore {
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
         var receiptEvents = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
-                request.firstSequence(), request.lastSequence(),
-                request.eventCount(), request.eventsDigest(),
-                request.previousCommitDigest(),
-                validated.recordBytes(), resourceId -> storedResource(
+                request, validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
                         resourceId));
         if (actions != null) {

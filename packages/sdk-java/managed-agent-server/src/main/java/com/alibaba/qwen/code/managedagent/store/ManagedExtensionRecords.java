@@ -39,7 +39,8 @@ public final class ManagedExtensionRecords {
             "message.committed", "tool.intent", "action.changed",
             "tool.receipt", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
-            "lifecycle.changed", "domain.committed", "message.delta");
+            "lifecycle.changed", "domain.committed", "message.delta",
+            "message.retracted");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
@@ -637,12 +638,23 @@ public final class ManagedExtensionRecords {
         }
     }
 
+    /**
+     * The per-line validators run for every event line of every commit:
+     * build the message only when a check actually refuses.
+     */
+    private static void require(boolean condition,
+            java.util.function.Supplier<String> message) {
+        if (!condition) {
+            throw new InvalidRecordException(message.get() + ".");
+        }
+    }
+
     static void closed(JsonNode node, Set<String> keys,
             String label) {
         require(node != null && node.isObject() && node.size() == keys.size(),
-                label + " must be an object with exactly " + keys);
+                () -> label + " must be an object with exactly " + keys);
         node.fieldNames().forEachRemaining(name -> require(keys.contains(name),
-                label + " must be an object with exactly " + keys));
+                () -> label + " must be an object with exactly " + keys));
     }
 
     /**
@@ -652,34 +664,38 @@ public final class ManagedExtensionRecords {
     static void closedSubset(JsonNode node, Set<String> keys,
             String label) {
         require(node != null && node.isObject(),
-                label + " must be an object");
+                () -> label + " must be an object");
         node.fieldNames().forEachRemaining(name -> require(keys.contains(name),
-                label + " has the unexpected field " + name
+                () -> label + " has the unexpected field " + name
                         + "; its fields must be among " + keys));
     }
 
     static String id(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
-                .isEmpty(), label + " must be a non-empty string");
+                .isEmpty(), () -> label + " must be a non-empty string");
         String value = node.textValue();
-        for (int index = 0; index < value.length(); index++) {
+        require(value.getBytes(StandardCharsets.UTF_8).length <= MAX_ID_BYTES,
+                () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
+        boolean controlled = false;
+        boolean malformed = false;
+        for (int index = 0; !controlled && !malformed
+                && index < value.length(); index++) {
             char character = value.charAt(index);
-            require(character > 0x1f && (character < 0x7f || character > 0x9f),
-                    label + " must not contain control characters");
+            controlled = character <= 0x1f || character >= 0x7f
+                    && character <= 0x9f;
             if (Character.isHighSurrogate(character)) {
+                malformed = index + 1 >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(index + 1));
                 index++;
-                require(index < value.length()
-                        && Character.isLowSurrogate(value.charAt(index)),
-                        label + " must be well-formed text");
             } else {
-                require(!Character.isLowSurrogate(character),
-                        label + " must be well-formed text");
+                malformed = Character.isLowSurrogate(character);
             }
         }
-        require(value.getBytes(StandardCharsets.UTF_8).length <= MAX_ID_BYTES,
-                label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
+        require(!controlled,
+                () -> label + " must not contain control characters");
+        require(!malformed, () -> label + " must be well-formed text");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
-                label + " must use NFC normalization");
+                () -> label + " must use NFC normalization");
         return value;
     }
 
