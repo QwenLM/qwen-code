@@ -258,6 +258,64 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void everyMappedPublicRouteIsCoveredByTheSharedSurfacePredicate() {
+        // A controller method added outside the predicate's prefixes would
+        // silently skip both the tenant filter and the signature filter.
+        Set<String> uncovered = new TreeSet<>();
+        handlerMapping.getHandlerMethods().keySet().forEach(info -> {
+            for (String pattern : info.getPatternValues()) {
+                if (pattern.startsWith("/internal/")
+                        || pattern.startsWith("/error")) {
+                    continue;
+                }
+                if (!com.alibaba.qwen.code.managedagent.api.PublicSurface
+                        .covers(pattern)) {
+                    uncovered.add(pattern);
+                }
+            }
+        });
+        assertThat(uncovered)
+                .as("every public controller route must satisfy PublicSurface.covers")
+                .isEmpty();
+    }
+
+    @Test
+    void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
+        // ManagedActionStore.requireOwner admits any tenant caller on a
+        // Session with neither a recorded creator nor a create command.
+        // Enumerate the responder operations structurally so a reworded or
+        // newly added responder cannot escape the qualification.
+        Set<String> responderPaths = Set.of(
+                "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
+                "/api/agent/web-shell/v1/actions/respond");
+        int responders = 0;
+        for (Operation operation : CONTRACT.operations()) {
+            boolean responder = responderPaths.contains(operation.path());
+            JsonNode node = operation.node();
+            String description = node.path("description").asText();
+            String forbidden = node.path("responses").path("403")
+                    .path("description").asText();
+            if (responder) {
+                responders++;
+                assertThat(description + "\n" + forbidden)
+                        .as(operation.operationId())
+                        .contains("no recorded creator and no recorded"
+                                + " create command");
+            }
+            // action_forbidden is documented only where requireOwner can
+            // fire, and a 403 sibling description overrides the shared
+            // Forbidden component, so it must name its other code.
+            assertThat((description + forbidden).contains("action_forbidden"))
+                    .as(operation.operationId()).isEqualTo(responder);
+            if (!forbidden.isEmpty()) {
+                assertThat(forbidden).as(operation.operationId())
+                        .contains("actor_scope_mismatch");
+            }
+        }
+        assertThat(responders).isEqualTo(2);
+    }
+
+    @Test
     void transcriptContractPromisesTheFullTailPastTheSnapshot() {
         // The cursor-less transcript serves every event after the Snapshot;
         // a server-side paging change that leaves this published sentence
@@ -1129,6 +1187,55 @@ class ManagedAgentApiContractTest {
                         .principal(actor(otherTenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, taskId));
+
+        // The served task bodies say exactly what the shared fixture views
+        // say, down to the settled task's start and settle times.
+        JsonNode finalView = chain.get(chain.size() - 1).required("view");
+        assertThat(rest.at("/data/0/state").asText()).isEqualTo(
+                finalView.required("state").textValue());
+        assertThat(rest.at("/data/0/created_at").asLong()).isEqualTo(
+                finalView.required("createdAt").longValue());
+        assertThat(rest.at("/data/0/started_at").asLong()).isEqualTo(
+                finalView.required("startedAt").longValue());
+        assertThat(rest.at("/data/0/settled_at").asLong()).isEqualTo(
+                finalView.required("settledAt").longValue());
+        assertThat(rest.at("/data/0").hasNonNull("runtime_state")).isFalse();
+        assertThat(rest.at("/data/0").hasNonNull("definition_revision"))
+                .isFalse();
+        JsonNode detail = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        rest.at("/data/0/id").asText())
+                                .header(TENANT, tenant), null));
+        assertThat(detail.at("/state").asText()).isEqualTo(
+                finalView.required("state").textValue());
+        assertThat(detail.at("/settled_at").asLong()).isEqualTo(
+                finalView.required("settledAt").longValue());
+
+        // A Session with no Stage H record lists no task at all, the only
+        // response today's production offers, and the detail of another
+        // Session's task is the documented 404, not an error.
+        String emptySession = json(mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-empty-tasks")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\"}"))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("id")
+                .asText();
+        JsonNode emptyPage = json(exchange(drift, "listSessionTasks", 200,
+                get("/v1/agents/sessions/{id}/tasks", emptySession)
+                        .header(TENANT, tenant), null));
+        assertThat(emptyPage.get("data").size()).isZero();
+        assertThat(emptyPage.get("has_more").asBoolean()).isFalse();
+        exchange(drift, "getSessionTask", 404,
+                get("/v1/agents/sessions/{id}/tasks/{task}", emptySession,
+                        rest.at("/data/0/id").asText())
+                                .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellTask", 404,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(emptySession,
+                                rest.at("/data/0/id").asText()));
     }
 
     /**

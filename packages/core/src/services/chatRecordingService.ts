@@ -271,19 +271,23 @@ export type ChatRecordProvenance =
   | 'real_user'
   | 'assistant_output'
   | 'tool_result'
+  | 'execution_output'
   | 'goal_control'
   | 'goal_runtime'
   | 'system';
 
-export type RecordToolResultOptions =
+export type RecordToolResultOptions = {
+  subtype?: 'code_mode_tool_result';
+} & (
   | {
       goalContext?: GoalTurnPermit;
       provenance?: 'tool_result';
     }
   | {
       goalContext: GoalTurnPermit;
-      provenance: 'goal_runtime';
-    };
+      provenance: 'goal_runtime' | 'execution_output';
+    }
+);
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -382,6 +386,7 @@ export interface ChatRecord {
     | 'goal_state'
     | 'goal_runtime'
     | 'goal_turn_end'
+    | 'code_mode_tool_result'
     | 'realtime_message'
     | 'turn_result'
     | 'managed_session_header_v1'
@@ -2820,6 +2825,7 @@ export class ChatRecordingService {
 
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
+        ...(options?.subtype ? { subtype: options.subtype } : {}),
         ...(options?.goalContext
           ? { goalContext: copyGoalContext(options.goalContext) }
           : {}),

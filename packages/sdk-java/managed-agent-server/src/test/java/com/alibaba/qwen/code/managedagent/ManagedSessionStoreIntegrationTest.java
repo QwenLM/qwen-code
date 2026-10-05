@@ -76,6 +76,8 @@ class ManagedSessionStoreIntegrationTest {
         // pinned by http-managed-session-store.test.ts.
         JsonNode written = ManagedExtensionProjectionContractTest.contract(
                 "managed-extension-journal-v1.fixtures.json");
+        assertThat(written.required("contractVersion").intValue())
+                .isEqualTo(1);
         JsonNode key = written.required("sessionKey");
         String tenant = key.required("tenantId").textValue();
         String session = key.required("sessionId").textValue();
@@ -103,13 +105,28 @@ class ManagedSessionStoreIntegrationTest {
         }
         JsonNode tasks = written.required("tasks");
         assertThat(tasks).isNotEmpty();
+        List<String> taskFields = new ArrayList<>(
+                ManagedExtensionProjectionContractTest.PROJECTION_FIELDS);
+        // The journal task node carries the projection plus the identity
+        // fields read here, and exactly those, so a new projected column
+        // cannot reach this contract without the replay comparing it.
+        taskFields.addAll(List.of("kind", "sessionId", "taskId"));
+        taskFields.sort(null);
         for (JsonNode task : tasks) {
             TaskRow row = records.findTask(tenant, session,
                     task.required("taskId").textValue()).orElseThrow();
             assertThat(row.kind()).isEqualTo(task.required("kind")
                     .textValue());
+            List<String> names = new ArrayList<>();
+            task.fieldNames().forEachRemaining(names::add);
+            names.sort(null);
+            assertThat(names).isEqualTo(taskFields);
+            ObjectNode projectionOnly = ((ObjectNode) task).deepCopy()
+                    .retain(ManagedExtensionProjectionContractTest
+                            .PROJECTION_FIELDS);
             assertThat(row.projection()).isEqualTo(
-                    ManagedExtensionProjectionContractTest.view(task));
+                    ManagedExtensionProjectionContractTest.view(
+                            projectionOnly));
         }
         assertThat(records.listTasks(tenant, session, null, null, 100)
                 .tasks()).hasSize(tasks.size());
