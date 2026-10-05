@@ -2664,6 +2664,10 @@ const r = spawnSync(real, args, {
 process.exit(r.status === null ? 1 : r.status);
 `,
         );
+        // Pin the shim's module scope: a "type":"module" package.json
+        // anywhere above tmpdir() would make node load this extensionless
+        // shim as ESM, where require is undefined.
+        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         chmodSync(join(shimDir, 'git'), 0o755);
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
 

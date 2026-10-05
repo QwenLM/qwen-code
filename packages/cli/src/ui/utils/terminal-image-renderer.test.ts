@@ -690,6 +690,13 @@ describe('terminalImageRenderer', () => {
     async () => {
       const binDir = path.join(tempDir, 'bin');
       await fs.mkdir(binDir);
+      // Pin the shim's module scope: a "type":"module" package.json anywhere
+      // above tmpdir() would make node load this extensionless shim as ESM,
+      // where require and __dirname are undefined and the fake chafa dies.
+      await fs.writeFile(
+        path.join(binDir, 'package.json'),
+        '{"type":"commonjs"}',
+      );
       const chafaPath = path.join(binDir, 'chafa');
       await fs.writeFile(
         chafaPath,
