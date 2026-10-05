@@ -62,6 +62,7 @@ import {
   SUBMITTED_PROMPT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  USER_CANCEL_ABORT_REASON,
   type BridgeBranchedSession,
   type BridgeRestoredSession,
   type HttpAcpBridge,
@@ -2813,7 +2814,9 @@ export class AcpDispatcher {
             // Abort our local in-flight prompt controller too — cancelSession
             // tells the agent to wind down, but the HTTP-side `sendPrompt`
             // await must also be released so the session FIFO unblocks.
-            conn.sessions.get(sessionId)?.promptAbort?.abort();
+            conn.sessions
+              .get(sessionId)
+              ?.promptAbort?.abort(USER_CANCEL_ABORT_REASON);
             await this.bridge.cancelSession(
               sessionId,
               // Forward client-supplied cancel fields (reason/context) while
