@@ -50,6 +50,67 @@ describe('contextLengthError', () => {
     expect(info.actualTokens).toBeUndefined();
   });
 
+  // #13415: a local llama.cpp server names its REAL context ceiling in wording
+  // none of the patterns above covered, so the reactive compaction path in
+  // llm-chat never fired and the session looped on the same 400 forever.
+  describe('llama.cpp context overflow wording (#13415)', () => {
+    const LLAMA_CPP_OVERFLOW =
+      'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it';
+
+    it.each([
+      // The raw server message.
+      LLAMA_CPP_OVERFLOW,
+      // The form the reporter actually saw: the CLI renders a caught request
+      // failure as `[API Error: <status> <message>]`.
+      `[API Error: 400 ${LLAMA_CPP_OVERFLOW}]`,
+      // Same wording without the surrounding brackets.
+      `API Error: 400 ${LLAMA_CPP_OVERFLOW}`,
+    ])('detects overflow and parses both token counts: %s', (message) => {
+      const info = getContextLengthExceededInfo(new Error(message));
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: { message: LLAMA_CPP_OVERFLOW },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+
+    it('detects the wording through a wrapping cause chain', () => {
+      const error = new Error('request failed', {
+        cause: new Error(LLAMA_CPP_OVERFLOW),
+      });
+
+      expect(isContextLengthExceededError(error)).toBe(true);
+    });
+  });
+
+  it('still does not treat a bare HTML 413 page as context overflow', () => {
+    // Widening the token-wording detector for #13415 must not re-absorb the
+    // #10380 proxy rejection: a 413 stays model-request-scoped so upload/file
+    // endpoints never see it as a context overflow.
+    const info = getContextLengthExceededInfo(
+      Object.assign(
+        new Error(
+          '413 POST https://gateway.internal/v1/chat/completions: Request Entity Too Large\n' +
+            '<html>\n<head><title>413 Request Entity Too Large</title></head>\n' +
+            '<body><center><h1>413 Request Entity Too Large</h1></center></body>\n</html>',
+        ),
+        { status: 413 },
+      ),
+    );
+
+    expect(info.isExceeded).toBe(false);
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),
