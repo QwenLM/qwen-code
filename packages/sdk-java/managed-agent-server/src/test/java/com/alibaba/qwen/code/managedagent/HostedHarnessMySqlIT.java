@@ -471,7 +471,7 @@ class HostedHarnessMySqlIT {
 
     private List<JsonNode> readEvents(HostedHarnessClient client, HarnessSessionRef session,
             long after, String epoch, int count) throws IOException {
-        // Stream.close cannot interrupt the client's synchronized blocking read.
+        // Stream.close queues on the stream lock and cannot interrupt the client's blocking read.
         var deadline = watchdog.schedule(this::killChild, 10, TimeUnit.SECONDS);
         try (HarnessEventStream stream = client.streamEvents(StreamHarnessEvents.builder()
                 .session(session).lastEventId(after).eventEpoch(epoch).build())) {
